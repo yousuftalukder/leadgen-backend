@@ -12,16 +12,22 @@ const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // Upgraded Runner: Catches Apify errors and returns them cleanly
-async function runActor(actorId, input, warningsArray) {
+async function runActor(actorId, input, warningsArray, methodName) {
     try {
-        console.log(`[Apify] Triggering ${actorId} with input:`, JSON.stringify(input));
+        console.log(`[Apify] Triggering ${actorId} for ${methodName}...`);
         const run = await apify.actor(actorId).call(input);
         const { items } = await apify.dataset(run.defaultDatasetId).listItems();
-        console.log(`[Apify] ${actorId} returned ${items ? items.length : 0} items.`);
+        
+        const count = items ? items.length : 0;
+        console.log(`[Apify] ${methodName} returned ${count} raw items.`);
+        
+        // X-Ray Debugger: Send the raw count straight to the frontend popup!
+        if (warningsArray) warningsArray.push(`X-RAY (${methodName}): Apify successfully scraped ${count} raw posts from Instagram.`);
+        
         return items || [];
     } catch (err) {
         console.error(`[Apify CRITICAL ERROR] ${actorId}:`, err.message);
-        if (warningsArray) warningsArray.push(`Apify Error (${actorId}): ${err.message}`);
+        if (warningsArray) warningsArray.push(`🚨 Apify Error (${methodName}): ${err.message}`);
         return [];
     }
 }
@@ -37,9 +43,6 @@ function extractPosts(items) {
     return posts;
 }
 
-// =========================================================================
-// ROUTE 1: STAGE 1 DISCOVERY (POST INDEX ONLY)
-// =========================================================================
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
     try {
@@ -62,23 +65,19 @@ app.post('/api/run-campaign', async (req, res) => {
         const activeCampaignId = newCmp.id;
 
         let rawDiscoveredPosts = [];
-        
-        // Setup 7-Day Cutoff Logic
-        const sevenDaysAgo = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000));
 
-        // METHOD 1: Locations (Limit bumped to 100 to catch more food posts under selfies)
+        // =========================================================================
+        // METHOD 1: Locations
+        // =========================================================================
         if (selected_methods.includes('method_1') && location) {
             const cities = location.split(',').map(c => c.trim()).filter(Boolean);
             const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
             
             for (const city of cities) {
-                const items = await runActor('apify/instagram-scraper', { search: `${city} city`, searchType: 'place', resultsLimit: 100 }, warnings);
+                const items = await runActor('apify/instagram-scraper', { search: city, searchType: 'place', resultsLimit: 60 }, warnings, `Method 1 (${city})`);
                 const posts = extractPosts(items);
                 
                 posts.forEach(i => {
-                    const postDate = new Date(i.timestamp || i.takenAt);
-                    if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
-
                     const handle = i.ownerUsername || i.username || i.owner?.username;
                     const caption = (i.caption || i.text || '').toLowerCase();
                     
@@ -96,20 +95,20 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
-        // METHOD 3: Hashtag Feed (With Dynamic Limit Scaling!)
+        // =========================================================================
+        // METHOD 3: Hashtag Feed (FIXED: Using Direct URLs)
+        // =========================================================================
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             
-            // Dynamic limit ensures every hashtag gets exactly 40 posts checked
+            // Build absolute URLs so Apify cannot fail
+            const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
             const dynamicLimit = cleanHashtags.length * 40; 
             
-            const items = await runActor('apify/instagram-hashtag-scraper', { hashtags: cleanHashtags, resultsLimit: dynamicLimit }, warnings);
+            const items = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: dynamicLimit }, warnings, 'Method 3 (Hashtags)');
             const posts = extractPosts(items);
             
             posts.forEach(i => {
-                const postDate = new Date(i.timestamp || i.takenAt);
-                if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
-
                 const handle = i.ownerUsername || i.username || i.owner?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
@@ -124,16 +123,16 @@ app.post('/api/run-campaign', async (req, res) => {
             });
         }
 
+        // =========================================================================
         // METHOD 3.1: Global Phrase (Plain Text Global Query)
+        // =========================================================================
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
-                const items = await runActor('apify/instagram-api-scraper', { query: kw, limit: 40 }, warnings);
+                // Using the main scraper for phrases to keep it highly stable
+                const items = await runActor('apify/instagram-scraper', { search: kw, searchType: 'hashtag', resultsLimit: 30 }, warnings, `Method 3.1 (${kw})`);
                 const posts = extractPosts(items);
                 
                 posts.forEach(i => {
-                    const postDate = new Date(i.timestamp || i.takenAt);
-                    if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
-
                     const handle = i.user?.username || i.ownerUsername || i.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
@@ -186,7 +185,7 @@ app.post('/api/run-campaign', async (req, res) => {
 
         await supabase.from('campaigns').update({ total_leads_found: newLeadsSaved }).eq('id', activeCampaignId);
         
-        // Return warnings to the frontend so you aren't flying blind
+        // Return X-RAY info to the frontend
         res.status(200).json({ success: true, newUniqueLeads: newLeadsSaved, warnings });
 
     } catch (err) {
@@ -195,7 +194,7 @@ app.post('/api/run-campaign', async (req, res) => {
 });
 
 // =========================================================================
-// ROUTE 2: STAGE 2 ENRICHMENT (METHOD 2: PROFILE BIOS)
+// ROUTE 2: STAGE 2 ENRICHMENT
 // =========================================================================
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
@@ -207,7 +206,6 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const { campaignId } = req.body;
         if (!campaignId) return res.status(400).json({ error: 'Campaign ID required' });
 
-        // Database-Level Duplicate Check: Grab handles that ARE NOT enriched yet
         const { data: linkData, error: linkErr } = await supabase.from('campaign_leads')
             .select('leads(id, username, is_enriched)')
             .eq('campaign_id', campaignId);
@@ -219,10 +217,8 @@ app.post('/api/enrich-campaign', async (req, res) => {
             .filter(l => l && l.is_enriched !== true)
             .map(l => l.username);
 
-        // If everyone from this campaign is already in the DB and enriched from last week, skip Apify!
-        if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched in your database!' });
+        if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched!' });
 
-        console.log(`[Stage 2] Running Method 2 on ${handlesToEnrich.length} profiles...`);
         const items = await runActor('apify/instagram-profile-scraper', { usernames: handlesToEnrich });
 
         let updatedCount = 0;
