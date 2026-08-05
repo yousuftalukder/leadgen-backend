@@ -61,23 +61,18 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // =========================================================================
-        // METHOD 1: Locations (FIXED: Requires Direct URLs)
-        // =========================================================================
+        // METHOD 1: Locations
         if (selected_methods.includes('method_1') && location) {
             const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
             const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
             
             if (directUrls.length > 0) {
                 const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
-                
-                // Using the official scraper with a 1000 limit for the Location URL
                 const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 1000 }, warnings, `Method 1 (Locations)`);
                 
                 posts.forEach(i => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     const caption = (i.caption || i.text || '').toLowerCase();
-                    
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
                         rawDiscoveredPosts.push({
                             username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
@@ -87,13 +82,11 @@ app.post('/api/run-campaign', async (req, res) => {
                     }
                 });
             } else {
-                warnings.push("⚠️ METHOD 1 SKIPPED: Please paste full Instagram Location URLs (e.g., https://instagram.com/explore/locations/...) instead of typing a city name.");
+                warnings.push("⚠️ METHOD 1 SKIPPED: Missing valid Location URL.");
             }
         }
 
-        // =========================================================================
-        // METHOD 3: Hashtag Feed (Direct URLs)
-        // =========================================================================
+        // METHOD 3: Hashtags
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
@@ -112,9 +105,7 @@ app.post('/api/run-campaign', async (req, res) => {
             });
         }
 
-        // =========================================================================
         // METHOD 3.1: Global Phrase
-        // =========================================================================
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
                 const posts = await runActor('apify/instagram-scraper', { search: kw, resultsLimit: 1000 }, warnings, `Method 3.1 (${kw})`);
@@ -144,26 +135,50 @@ app.post('/api/run-campaign', async (req, res) => {
         const uniquePosts = Array.from(uniquePostMap.values());
         let newLeadsSaved = 0;
 
+        // FOOLPROOF DATABASE SAVE LOGIC (Replaces Upsert)
         for (const post of uniquePosts) {
-            const { data: savedLead, error: leadErr } = await supabase.from('leads').upsert({
-                username: post.username, profile_url: `https://instagram.com/${post.username}`, is_enriched: false 
-            }, { onConflict: 'username' }).select().single();
+            let savedLeadId = null;
 
-            if (leadErr) {
-                console.error(`[DB Error] Lead Insert Failed for @${post.username}:`, leadErr.message);
-                warnings.push(`DB Alert: Failed to save @${post.username}`);
-                continue; 
+            // Step 1: Check if lead exists
+            const { data: existingLead, error: checkErr } = await supabase.from('leads').select('id').eq('username', post.username).single();
+            
+            if (existingLead) {
+                savedLeadId = existingLead.id;
+            } else {
+                // Step 2: If not, insert safely
+                const { data: newLead, error: insertErr } = await supabase.from('leads').insert([{
+                    username: post.username,
+                    profile_url: `https://instagram.com/${post.username}`,
+                    is_enriched: false
+                }]).select('id').single();
+
+                if (insertErr) {
+                    console.error(`[DB Error] Lead Insert Failed for @${post.username}:`, insertErr.message);
+                    warnings.push(`DB Alert: Failed to save lead @${post.username} (${insertErr.message})`);
+                    continue; // Skip to next post if insert fails
+                }
+                savedLeadId = newLead.id;
             }
 
-            if (savedLead) {
+            // Step 3: Link to Campaign
+            if (savedLeadId) {
                 const { error: linkErr } = await supabase.from('campaign_leads').insert([{
-                    campaign_id: activeCampaignId, lead_id: savedLead.id, user_id: user.id,
-                    top_post_url: post.post_url, top_post_views: post.post_views,
-                    post_likes: post.post_likes, post_comments: post.post_comments,
+                    campaign_id: activeCampaignId,
+                    lead_id: savedLeadId,
+                    user_id: user.id,
+                    top_post_url: post.post_url,
+                    top_post_views: post.post_views,
+                    post_likes: post.post_likes,
+                    post_comments: post.post_comments,
                     post_timestamp: new Date(post.post_timestamp).toISOString()
                 }]);
                 
-                if (!linkErr) newLeadsSaved++;
+                if (linkErr) {
+                    console.error(`[DB Error] Campaign Link Failed for @${post.username}:`, linkErr.message);
+                    warnings.push(`DB Alert: Failed to link @${post.username} to campaign.`);
+                } else {
+                    newLeadsSaved++;
+                }
             }
         }
 
@@ -176,9 +191,6 @@ app.post('/api/run-campaign', async (req, res) => {
     }
 });
 
-// =========================================================================
-// ROUTE 2: STAGE 2 ENRICHMENT
-// =========================================================================
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -223,9 +235,6 @@ app.post('/api/enrich-campaign', async (req, res) => {
     }
 });
 
-// =========================================================================
-// ROUTE 3: MASTER HISTORY
-// =========================================================================
 app.get('/api/client-history', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
