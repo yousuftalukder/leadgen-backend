@@ -11,18 +11,20 @@ app.use(express.json());
 const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// Helper: Safely extracts posts
+// Helper: Safely extracts posts from flat feeds OR nested Location/Hashtag wrappers
 function extractPosts(items) {
     let posts = [];
     (items || []).forEach(item => {
+        // Direct post objects
         if (item.ownerUsername || item.shortCode || item.caption) posts.push(item);
+        // Nested wrapper objects
         if (item.topPosts && Array.isArray(item.topPosts)) posts.push(...item.topPosts);
         if (item.latestPosts && Array.isArray(item.latestPosts)) posts.push(...item.latestPosts);
     });
     return posts;
 }
 
-// Upgraded Runner: Logs the TRUE extracted post count
+// Upgraded Runner: Logs the TRUE extracted post count and uses ONLY the official actor
 async function runActor(actorId, input, warningsArray, methodName) {
     try {
         console.log(`[Apify] Triggering ${actorId} for ${methodName}...`);
@@ -33,7 +35,7 @@ async function runActor(actorId, input, warningsArray, methodName) {
         
         if (warningsArray) warningsArray.push(`X-RAY (${methodName}): Extracted ${extracted.length} real posts.`);
         
-        return extracted; // Return the clean posts directly!
+        return extracted; 
     } catch (err) {
         console.error(`[Apify ERROR] ${actorId}:`, err.message);
         if (warningsArray) warningsArray.push(`🚨 Error (${methodName}): ${err.message}`);
@@ -42,7 +44,7 @@ async function runActor(actorId, input, warningsArray, methodName) {
 }
 
 // =========================================================================
-// ROUTE 1: STAGE 1 DISCOVERY (POST INDEX ONLY)
+// ROUTE 1: STAGE 1 DISCOVERY
 // =========================================================================
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
@@ -68,17 +70,18 @@ app.post('/api/run-campaign', async (req, res) => {
         let rawDiscoveredPosts = [];
 
         // =========================================================================
-        // METHOD 1: Locations (Using API Scraper for true location text search)
+        // METHOD 1: Locations (Limit bumped to 1000 for deep filtering)
         // =========================================================================
         if (selected_methods.includes('method_1') && location) {
             const cities = location.split(',').map(c => c.trim()).filter(Boolean);
             const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
             
             for (const city of cities) {
-                const posts = await runActor('apify/instagram-api-scraper', { query: city, limit: 60 }, warnings, `Method 1 (${city})`);
+                const posts = await runActor('apify/instagram-scraper', { search: city, searchType: 'place', resultsLimit: 1000 }, warnings, `Method 1 (${city})`);
                 
                 posts.forEach(i => {
-                    const handle = i.user?.username || i.ownerUsername || i.username;
+                    // Aggressive Username Mapping to prevent null DB saves
+                    const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     const caption = (i.caption || i.text || '').toLowerCase();
                     
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
@@ -96,17 +99,16 @@ app.post('/api/run-campaign', async (req, res) => {
         }
 
         // =========================================================================
-        // METHOD 3: Hashtag Feed (Direct URLs - Working Perfectly!)
+        // METHOD 3: Hashtag Feed (Direct URLs w/ 1000 Limit)
         // =========================================================================
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
-            const dynamicLimit = cleanHashtags.length * 40; 
             
-            const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: dynamicLimit }, warnings, 'Method 3 (Hashtags)');
+            const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 1000 }, warnings, 'Method 3 (Hashtags)');
             
             posts.forEach(i => {
-                const handle = i.ownerUsername || i.username || i.owner?.username;
+                const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
                         username: handle,
@@ -121,14 +123,14 @@ app.post('/api/run-campaign', async (req, res) => {
         }
 
         // =========================================================================
-        // METHOD 3.1: Global Phrase (Using API Scraper for Text Phrases)
+        // METHOD 3.1: Global Phrase (Standard Keyword Search w/ 1000 Limit)
         // =========================================================================
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
-                const posts = await runActor('apify/instagram-api-scraper', { query: kw, limit: 30 }, warnings, `Method 3.1 (${kw})`);
+                const posts = await runActor('apify/instagram-scraper', { search: kw, resultsLimit: 1000 }, warnings, `Method 3.1 (${kw})`);
                 
                 posts.forEach(i => {
-                    const handle = i.user?.username || i.ownerUsername || i.username;
+                    const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
                             username: handle,
@@ -143,7 +145,7 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
-        // Deduplicate
+        // Deduplicate locally before hitting DB
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -155,7 +157,7 @@ app.post('/api/run-campaign', async (req, res) => {
         const uniquePosts = Array.from(uniquePostMap.values());
         let newLeadsSaved = 0;
 
-        // Save Stage 1 Base Data to Supabase
+        // Save Stage 1 Base Data to Supabase (With Strict DB Error Logging)
         for (const post of uniquePosts) {
             const { data: savedLead, error: leadErr } = await supabase.from('leads').upsert({
                 username: post.username,
@@ -163,7 +165,13 @@ app.post('/api/run-campaign', async (req, res) => {
                 is_enriched: false 
             }, { onConflict: 'username' }).select().single();
 
-            if (!leadErr && savedLead) {
+            if (leadErr) {
+                console.error(`[DB Error] Lead Insert Failed for @${post.username}:`, leadErr.message);
+                warnings.push(`DB Alert: Failed to save @${post.username}`);
+                continue; 
+            }
+
+            if (savedLead) {
                 const { error: linkErr } = await supabase.from('campaign_leads').insert([{
                     campaign_id: activeCampaignId,
                     lead_id: savedLead.id,
@@ -174,7 +182,12 @@ app.post('/api/run-campaign', async (req, res) => {
                     post_comments: post.post_comments,
                     post_timestamp: new Date(post.post_timestamp).toISOString()
                 }]);
-                if (!linkErr) newLeadsSaved++;
+                
+                if (linkErr) {
+                    console.error(`[DB Error] Campaign Link Failed for @${post.username}:`, linkErr.message);
+                } else {
+                    newLeadsSaved++;
+                }
             }
         }
 
