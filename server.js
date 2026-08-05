@@ -17,7 +17,7 @@ async function runActor(actorId, input, warningsArray) {
         console.log(`[Apify] Triggering ${actorId} with input:`, JSON.stringify(input));
         const run = await apify.actor(actorId).call(input);
         const { items } = await apify.dataset(run.defaultDatasetId).listItems();
-        console.log(`[Apify] ${actorId} returned ${items ? items.length : 0} parent items.`);
+        console.log(`[Apify] ${actorId} returned ${items ? items.length : 0} items.`);
         return items || [];
     } catch (err) {
         console.error(`[Apify CRITICAL ERROR] ${actorId}:`, err.message);
@@ -26,20 +26,14 @@ async function runActor(actorId, input, warningsArray) {
     }
 }
 
-// Helper Function: Safely extracts nested posts from Apify's Place/Hashtag objects
-function extractPostsFromApifyItem(item) {
+// Safety Net: Extracts posts whether Apify returns a flat feed or a nested object
+function extractPosts(items) {
     let posts = [];
-    // If the item itself is a direct post
-    if (item.ownerUsername || item.shortCode || item.caption) {
-        posts.push(item);
-    }
-    // If the item is a Location/Hashtag object, dig into the nested arrays
-    if (item.topPosts && Array.isArray(item.topPosts)) {
-        posts.push(...item.topPosts);
-    }
-    if (item.latestPosts && Array.isArray(item.latestPosts)) {
-        posts.push(...item.latestPosts);
-    }
+    items.forEach(item => {
+        if (item.ownerUsername || item.shortCode || item.caption) posts.push(item);
+        if (item.topPosts && Array.isArray(item.topPosts)) posts.push(...item.topPosts);
+        if (item.latestPosts && Array.isArray(item.latestPosts)) posts.push(...item.latestPosts);
+    });
     return posts;
 }
 
@@ -68,84 +62,89 @@ app.post('/api/run-campaign', async (req, res) => {
         const activeCampaignId = newCmp.id;
 
         let rawDiscoveredPosts = [];
+        
+        // Setup 7-Day Cutoff Logic
+        const sevenDaysAgo = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000));
 
-        // METHOD 1: Locations Feed
+        // METHOD 1: Locations (Limit bumped to 100 to catch more food posts under selfies)
         if (selected_methods.includes('method_1') && location) {
             const cities = location.split(',').map(c => c.trim()).filter(Boolean);
             const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
             
             for (const city of cities) {
-                const items = await runActor('apify/instagram-scraper', { search: city, searchType: 'place', resultsLimit: 30 }, warnings);
+                const items = await runActor('apify/instagram-scraper', { search: `${city} city`, searchType: 'place', resultsLimit: 100 }, warnings);
+                const posts = extractPosts(items);
                 
-                items.forEach(item => {
-                    const extractedPosts = extractPostsFromApifyItem(item);
+                posts.forEach(i => {
+                    const postDate = new Date(i.timestamp || i.takenAt);
+                    if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
+
+                    const handle = i.ownerUsername || i.username || i.owner?.username;
+                    const caption = (i.caption || i.text || '').toLowerCase();
                     
-                    extractedPosts.forEach(i => {
-                        const handle = i.ownerUsername || i.username || i.owner?.username;
-                        const caption = (i.caption || i.text || '').toLowerCase();
-                        
-                        if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
-                            rawDiscoveredPosts.push({
-                                username: handle,
-                                post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                                post_likes: i.likesCount || 0,
-                                post_comments: i.commentsCount || 0,
-                                post_timestamp: i.timestamp || new Date().toISOString(),
-                                post_url: i.url || `https://instagram.com/p/${i.shortCode}`
-                            });
-                        }
-                    });
+                    if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
+                        rawDiscoveredPosts.push({
+                            username: handle,
+                            post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            post_likes: i.likesCount || 0,
+                            post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
+                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                        });
+                    }
                 });
             }
         }
 
-        // METHOD 3: Hashtag Feed (Using directUrls to force strict post extraction)
+        // METHOD 3: Hashtag Feed (With Dynamic Limit Scaling!)
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
-            const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
             
-            const items = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 30 }, warnings);
+            // Dynamic limit ensures every hashtag gets exactly 40 posts checked
+            const dynamicLimit = cleanHashtags.length * 40; 
             
-            items.forEach(item => {
-                const extractedPosts = extractPostsFromApifyItem(item);
+            const items = await runActor('apify/instagram-hashtag-scraper', { hashtags: cleanHashtags, resultsLimit: dynamicLimit }, warnings);
+            const posts = extractPosts(items);
+            
+            posts.forEach(i => {
+                const postDate = new Date(i.timestamp || i.takenAt);
+                if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
+
+                const handle = i.ownerUsername || i.username || i.owner?.username;
+                if (handle) {
+                    rawDiscoveredPosts.push({
+                        username: handle,
+                        post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        post_likes: i.likesCount || 0,
+                        post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
+                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                    });
+                }
+            });
+        }
+
+        // METHOD 3.1: Global Phrase (Plain Text Global Query)
+        if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
+            for (const kw of method3_1_keywords) {
+                const items = await runActor('apify/instagram-api-scraper', { query: kw, limit: 40 }, warnings);
+                const posts = extractPosts(items);
                 
-                extractedPosts.forEach(i => {
-                    const handle = i.ownerUsername || i.username || i.owner?.username;
+                posts.forEach(i => {
+                    const postDate = new Date(i.timestamp || i.takenAt);
+                    if (postDate < sevenDaysAgo) return; // SKIP 7+ Day Old Data
+
+                    const handle = i.user?.username || i.ownerUsername || i.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
                             username: handle,
                             post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
                             post_likes: i.likesCount || 0,
                             post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || new Date().toISOString(),
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
                             post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
-                });
-            });
-        }
-
-        // METHOD 3.1: Global Phrase (Using the API scraper for plain-text search)
-        if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
-            for (const kw of method3_1_keywords) {
-                const items = await runActor('apify/instagram-api-scraper', { search: kw, limit: 30 }, warnings);
-                
-                items.forEach(item => {
-                    const extractedPosts = extractPostsFromApifyItem(item);
-                    
-                    extractedPosts.forEach(i => {
-                        const handle = i.user?.username || i.ownerUsername || i.username;
-                        if (handle) {
-                            rawDiscoveredPosts.push({
-                                username: handle,
-                                post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                                post_likes: i.likesCount || 0,
-                                post_comments: i.commentsCount || 0,
-                                post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
-                                post_url: i.url || `https://instagram.com/p/${i.shortCode}`
-                            });
-                        }
-                    });
                 });
             }
         }
@@ -208,6 +207,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const { campaignId } = req.body;
         if (!campaignId) return res.status(400).json({ error: 'Campaign ID required' });
 
+        // Database-Level Duplicate Check: Grab handles that ARE NOT enriched yet
         const { data: linkData, error: linkErr } = await supabase.from('campaign_leads')
             .select('leads(id, username, is_enriched)')
             .eq('campaign_id', campaignId);
@@ -219,7 +219,8 @@ app.post('/api/enrich-campaign', async (req, res) => {
             .filter(l => l && l.is_enriched !== true)
             .map(l => l.username);
 
-        if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched!' });
+        // If everyone from this campaign is already in the DB and enriched from last week, skip Apify!
+        if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched in your database!' });
 
         console.log(`[Stage 2] Running Method 2 on ${handlesToEnrich.length} profiles...`);
         const items = await runActor('apify/instagram-profile-scraper', { usernames: handlesToEnrich });
