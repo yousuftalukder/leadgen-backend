@@ -11,6 +11,7 @@ app.use(express.json());
 const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
+// Helper: Extracts post objects from flat arrays or nested wrappers
 function extractPosts(items) {
     let posts = [];
     (items || []).forEach(item => {
@@ -21,6 +22,7 @@ function extractPosts(items) {
     return posts;
 }
 
+// Actor Execution Wrapper with Error Handling and Diagnostics
 async function runActor(actorId, input, warningsArray, methodName) {
     try {
         console.log(`[Apify] Triggering ${actorId} for ${methodName}...`);
@@ -38,6 +40,9 @@ async function runActor(actorId, input, warningsArray, methodName) {
     }
 }
 
+// =========================================================================
+// ROUTE 1: STAGE 1 DISCOVERY (POST INDEX ONLY)
+// =========================================================================
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
     try {
@@ -61,7 +66,7 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // METHOD 1: Locations
+        // METHOD 1: Location Feed
         if (selected_methods.includes('method_1') && location) {
             const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
             const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
@@ -75,18 +80,21 @@ app.post('/api/run-campaign', async (req, res) => {
                     const caption = (i.caption || i.text || '').toLowerCase();
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, 
+                            post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            post_likes: i.likesCount || 0, 
+                            post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
             } else {
-                warnings.push("⚠️ METHOD 1 SKIPPED: Missing valid Location URL.");
+                warnings.push("⚠️ METHOD 1 SKIPPED: Location requires a full URL (e.g., https://instagram.com/explore/locations/...).");
             }
         }
 
-        // METHOD 3: Hashtags
+        // METHOD 3: Hashtag Feed
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
@@ -97,9 +105,12 @@ app.post('/api/run-campaign', async (req, res) => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                        post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                        username: handle, 
+                        post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        post_likes: i.likesCount || 0, 
+                        post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
                 }
             });
@@ -114,16 +125,19 @@ app.post('/api/run-campaign', async (req, res) => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, 
+                            post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            post_likes: i.likesCount || 0, 
+                            post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
             }
         }
 
-        // Deduplicate locally
+        // Local Deduplication
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -135,47 +149,53 @@ app.post('/api/run-campaign', async (req, res) => {
         const uniquePosts = Array.from(uniquePostMap.values());
         let newLeadsSaved = 0;
 
-        // FOOLPROOF DATABASE SAVE LOGIC (Replaces Upsert)
+        // Safe Database Insertion Loop
         for (const post of uniquePosts) {
             let savedLeadId = null;
 
-            // Step 1: Check if lead exists
-            const { data: existingLead, error: checkErr } = await supabase.from('leads').select('id').eq('username', post.username).single();
+            // Check if lead already exists using maybeSingle()
+            const { data: existingLead } = await supabase
+                .from('leads')
+                .select('id')
+                .eq('username', post.username)
+                .maybeSingle(); 
             
             if (existingLead) {
                 savedLeadId = existingLead.id;
             } else {
-                // Step 2: If not, insert safely
-                const { data: newLead, error: insertErr } = await supabase.from('leads').insert([{
-                    username: post.username,
-                    profile_url: `https://instagram.com/${post.username}`,
-                    is_enriched: false
-                }]).select('id').single();
+                const { data: newLead, error: insertErr } = await supabase
+                    .from('leads')
+                    .insert([{
+                        username: post.username,
+                        profile_url: `https://instagram.com/${post.username}`,
+                        is_enriched: false
+                    }])
+                    .select('id')
+                    .maybeSingle();
 
                 if (insertErr) {
                     console.error(`[DB Error] Lead Insert Failed for @${post.username}:`, insertErr.message);
-                    warnings.push(`DB Alert: Failed to save lead @${post.username} (${insertErr.message})`);
-                    continue; // Skip to next post if insert fails
+                    warnings.push(`DB Alert: Failed to save lead @${post.username}`);
+                    continue; 
                 }
-                savedLeadId = newLead.id;
+                savedLeadId = newLead?.id;
             }
 
-            // Step 3: Link to Campaign
             if (savedLeadId) {
                 const { error: linkErr } = await supabase.from('campaign_leads').insert([{
                     campaign_id: activeCampaignId,
                     lead_id: savedLeadId,
                     user_id: user.id,
                     top_post_url: post.post_url,
-                    top_post_views: post.post_views,
-                    post_likes: post.post_likes,
-                    post_comments: post.post_comments,
+                    top_post_views: post.post_views || 0,
+                    post_likes: post.post_likes || 0,
+                    post_comments: post.post_comments || 0,
                     post_timestamp: new Date(post.post_timestamp).toISOString()
                 }]);
                 
                 if (linkErr) {
-                    console.error(`[DB Error] Campaign Link Failed for @${post.username}:`, linkErr.message);
-                    warnings.push(`DB Alert: Failed to link @${post.username} to campaign.`);
+                    console.error(`[DB Error] Link Failed for @${post.username}:`, linkErr.message);
+                    warnings.push(`DB Alert: Link failed for @${post.username}`);
                 } else {
                     newLeadsSaved++;
                 }
@@ -191,6 +211,9 @@ app.post('/api/run-campaign', async (req, res) => {
     }
 });
 
+// =========================================================================
+// ROUTE 2: STAGE 2 ENRICHMENT (METHOD 2)
+// =========================================================================
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -207,10 +230,16 @@ app.post('/api/enrich-campaign', async (req, res) => {
             
         if (linkErr) throw linkErr;
 
-        const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username);
+        const handlesToEnrich = linkData
+            .map(d => d.leads)
+            .filter(l => l && l.is_enriched !== true)
+            .map(l => l.username);
 
-        if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched!' });
+        if (handlesToEnrich.length === 0) {
+            return res.status(200).json({ success: true, message: 'All leads in this campaign are already enriched!', enrichedCount: 0 });
+        }
 
+        console.log(`[Stage 2] Running Method 2 on ${handlesToEnrich.length} profiles...`);
         const run = await apify.actor('apify/instagram-profile-scraper').call({ usernames: handlesToEnrich });
         const { items: enrichedProfiles } = await apify.dataset(run.defaultDatasetId).listItems();
 
@@ -220,8 +249,10 @@ app.post('/api/enrich-campaign', async (req, res) => {
             if (!username) continue;
 
             const { error: updateErr } = await supabase.from('leads').update({
-                full_name: p.fullName || null, email: p.biographyEmail || p.email || p.inputEmail || null,
-                phone: p.businessPhoneNumber || p.phone || null, followers_count: p.followersCount || 0,
+                full_name: p.fullName || null,
+                email: p.biographyEmail || p.email || p.inputEmail || null,
+                phone: p.businessPhoneNumber || p.phone || null,
+                followers_count: p.followersCount || 0,
                 is_enriched: true
             }).eq('username', username);
 
@@ -235,6 +266,9 @@ app.post('/api/enrich-campaign', async (req, res) => {
     }
 });
 
+// =========================================================================
+// ROUTE 3: MASTER HISTORY FETCH
+// =========================================================================
 app.get('/api/client-history', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
