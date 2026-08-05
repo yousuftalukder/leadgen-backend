@@ -11,20 +11,16 @@ app.use(express.json());
 const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// Helper: Safely extracts posts from flat feeds OR nested Location/Hashtag wrappers
 function extractPosts(items) {
     let posts = [];
     (items || []).forEach(item => {
-        // Direct post objects
         if (item.ownerUsername || item.shortCode || item.caption) posts.push(item);
-        // Nested wrapper objects
         if (item.topPosts && Array.isArray(item.topPosts)) posts.push(...item.topPosts);
         if (item.latestPosts && Array.isArray(item.latestPosts)) posts.push(...item.latestPosts);
     });
     return posts;
 }
 
-// Upgraded Runner: Logs the TRUE extracted post count and uses ONLY the official actor
 async function runActor(actorId, input, warningsArray, methodName) {
     try {
         console.log(`[Apify] Triggering ${actorId} for ${methodName}...`);
@@ -32,7 +28,6 @@ async function runActor(actorId, input, warningsArray, methodName) {
         const { items } = await apify.dataset(run.defaultDatasetId).listItems();
         
         const extracted = extractPosts(items || []);
-        
         if (warningsArray) warningsArray.push(`X-RAY (${methodName}): Extracted ${extracted.length} real posts.`);
         
         return extracted; 
@@ -43,9 +38,6 @@ async function runActor(actorId, input, warningsArray, methodName) {
     }
 }
 
-// =========================================================================
-// ROUTE 1: STAGE 1 DISCOVERY
-// =========================================================================
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
     try {
@@ -70,36 +62,37 @@ app.post('/api/run-campaign', async (req, res) => {
         let rawDiscoveredPosts = [];
 
         // =========================================================================
-        // METHOD 1: Locations (Limit bumped to 1000 for deep filtering)
+        // METHOD 1: Locations (FIXED: Requires Direct URLs)
         // =========================================================================
         if (selected_methods.includes('method_1') && location) {
-            const cities = location.split(',').map(c => c.trim()).filter(Boolean);
-            const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
+            const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
+            const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
             
-            for (const city of cities) {
-                const posts = await runActor('apify/instagram-scraper', { search: city, searchType: 'place', resultsLimit: 1000 }, warnings, `Method 1 (${city})`);
+            if (directUrls.length > 0) {
+                const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
+                
+                // Using the official scraper with a 1000 limit for the Location URL
+                const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 1000 }, warnings, `Method 1 (Locations)`);
                 
                 posts.forEach(i => {
-                    // Aggressive Username Mapping to prevent null DB saves
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     const caption = (i.caption || i.text || '').toLowerCase();
                     
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
                         rawDiscoveredPosts.push({
-                            username: handle,
-                            post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                            post_likes: i.likesCount || 0,
-                            post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
-                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
+            } else {
+                warnings.push("⚠️ METHOD 1 SKIPPED: Please paste full Instagram Location URLs (e.g., https://instagram.com/explore/locations/...) instead of typing a city name.");
             }
         }
 
         // =========================================================================
-        // METHOD 3: Hashtag Feed (Direct URLs w/ 1000 Limit)
+        // METHOD 3: Hashtag Feed (Direct URLs)
         // =========================================================================
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
@@ -111,19 +104,16 @@ app.post('/api/run-campaign', async (req, res) => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle,
-                        post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                        post_likes: i.likesCount || 0,
-                        post_comments: i.commentsCount || 0,
-                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
-                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                        username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
                 }
             });
         }
 
         // =========================================================================
-        // METHOD 3.1: Global Phrase (Standard Keyword Search w/ 1000 Limit)
+        // METHOD 3.1: Global Phrase
         // =========================================================================
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
@@ -133,19 +123,16 @@ app.post('/api/run-campaign', async (req, res) => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
-                            username: handle,
-                            post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                            post_likes: i.likesCount || 0,
-                            post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
-                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
             }
         }
 
-        // Deduplicate locally before hitting DB
+        // Deduplicate locally
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -157,12 +144,9 @@ app.post('/api/run-campaign', async (req, res) => {
         const uniquePosts = Array.from(uniquePostMap.values());
         let newLeadsSaved = 0;
 
-        // Save Stage 1 Base Data to Supabase (With Strict DB Error Logging)
         for (const post of uniquePosts) {
             const { data: savedLead, error: leadErr } = await supabase.from('leads').upsert({
-                username: post.username,
-                profile_url: `https://instagram.com/${post.username}`,
-                is_enriched: false 
+                username: post.username, profile_url: `https://instagram.com/${post.username}`, is_enriched: false 
             }, { onConflict: 'username' }).select().single();
 
             if (leadErr) {
@@ -173,21 +157,13 @@ app.post('/api/run-campaign', async (req, res) => {
 
             if (savedLead) {
                 const { error: linkErr } = await supabase.from('campaign_leads').insert([{
-                    campaign_id: activeCampaignId,
-                    lead_id: savedLead.id,
-                    user_id: user.id,
-                    top_post_url: post.post_url,
-                    top_post_views: post.post_views,
-                    post_likes: post.post_likes,
-                    post_comments: post.post_comments,
+                    campaign_id: activeCampaignId, lead_id: savedLead.id, user_id: user.id,
+                    top_post_url: post.post_url, top_post_views: post.post_views,
+                    post_likes: post.post_likes, post_comments: post.post_comments,
                     post_timestamp: new Date(post.post_timestamp).toISOString()
                 }]);
                 
-                if (linkErr) {
-                    console.error(`[DB Error] Campaign Link Failed for @${post.username}:`, linkErr.message);
-                } else {
-                    newLeadsSaved++;
-                }
+                if (!linkErr) newLeadsSaved++;
             }
         }
 
@@ -201,7 +177,7 @@ app.post('/api/run-campaign', async (req, res) => {
 });
 
 // =========================================================================
-// ROUTE 2: STAGE 2 ENRICHMENT (METHOD 2: PROFILE BIOS)
+// ROUTE 2: STAGE 2 ENRICHMENT
 // =========================================================================
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
@@ -219,14 +195,10 @@ app.post('/api/enrich-campaign', async (req, res) => {
             
         if (linkErr) throw linkErr;
 
-        const handlesToEnrich = linkData
-            .map(d => d.leads)
-            .filter(l => l && l.is_enriched !== true)
-            .map(l => l.username);
+        const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username);
 
         if (handlesToEnrich.length === 0) return res.status(200).json({ message: 'All leads in this campaign are already enriched!' });
 
-        console.log(`[Stage 2] Running Method 2 on ${handlesToEnrich.length} profiles...`);
         const run = await apify.actor('apify/instagram-profile-scraper').call({ usernames: handlesToEnrich });
         const { items: enrichedProfiles } = await apify.dataset(run.defaultDatasetId).listItems();
 
@@ -236,10 +208,8 @@ app.post('/api/enrich-campaign', async (req, res) => {
             if (!username) continue;
 
             const { error: updateErr } = await supabase.from('leads').update({
-                full_name: p.fullName || null,
-                email: p.biographyEmail || p.email || p.inputEmail || null,
-                phone: p.businessPhoneNumber || p.phone || null,
-                followers_count: p.followersCount || 0,
+                full_name: p.fullName || null, email: p.biographyEmail || p.email || p.inputEmail || null,
+                phone: p.businessPhoneNumber || p.phone || null, followers_count: p.followersCount || 0,
                 is_enriched: true
             }).eq('username', username);
 
@@ -254,7 +224,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
 });
 
 // =========================================================================
-// ROUTE 3: MASTER HISTORY & DATA TABLE FETCH
+// ROUTE 3: MASTER HISTORY
 // =========================================================================
 app.get('/api/client-history', async (req, res) => {
     try {
