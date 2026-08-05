@@ -253,11 +253,19 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
+        // Fetch current campaign total count first to avoid raw syntax issues
+        const { data: currentCmp } = await supabase.from('campaigns')
+            .select('total_leads_found')
+            .eq('id', activeCampaignId)
+            .single();
+
+        const currentCount = currentCmp?.total_leads_found || 0;
+
         // Update Campaign State, Total Count, and Pagination Cursor
         await supabase.from('campaigns').update({
             end_cursor: lastEndCursor,
             is_exhausted: !hasNextPageGlobal && rawPosts.length > 0,
-            total_leads_found: supabase.raw('total_leads_found + ?', [newLeadsSaved])
+            total_leads_found: currentCount + newLeadsSaved
         }).eq('id', activeCampaignId);
 
         res.status(200).json({
