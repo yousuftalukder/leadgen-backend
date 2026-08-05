@@ -11,22 +11,43 @@ app.use(express.json());
 const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-async function runActor(actorId, input) {
+// Upgraded Runner: Catches Apify errors and returns them cleanly
+async function runActor(actorId, input, warningsArray) {
     try {
-        console.log(`[Apify] Triggering ${actorId}...`);
+        console.log(`[Apify] Triggering ${actorId} with input:`, JSON.stringify(input));
         const run = await apify.actor(actorId).call(input);
         const { items } = await apify.dataset(run.defaultDatasetId).listItems();
+        console.log(`[Apify] ${actorId} returned ${items ? items.length : 0} parent items.`);
         return items || [];
     } catch (err) {
-        console.error(`[Apify Error] ${actorId}:`, err.message);
+        console.error(`[Apify CRITICAL ERROR] ${actorId}:`, err.message);
+        if (warningsArray) warningsArray.push(`Apify Error (${actorId}): ${err.message}`);
         return [];
     }
+}
+
+// Helper Function: Safely extracts nested posts from Apify's Place/Hashtag objects
+function extractPostsFromApifyItem(item) {
+    let posts = [];
+    // If the item itself is a direct post
+    if (item.ownerUsername || item.shortCode || item.caption) {
+        posts.push(item);
+    }
+    // If the item is a Location/Hashtag object, dig into the nested arrays
+    if (item.topPosts && Array.isArray(item.topPosts)) {
+        posts.push(...item.topPosts);
+    }
+    if (item.latestPosts && Array.isArray(item.latestPosts)) {
+        posts.push(...item.latestPosts);
+    }
+    return posts;
 }
 
 // =========================================================================
 // ROUTE 1: STAGE 1 DISCOVERY (POST INDEX ONLY)
 // =========================================================================
 app.post('/api/run-campaign', async (req, res) => {
+    let warnings = []; 
     try {
         const authHeader = req.headers.authorization;
         const token = authHeader?.replace('Bearer ', '');
@@ -35,7 +56,6 @@ app.post('/api/run-campaign', async (req, res) => {
 
         const { campaignName, location, method1_keywords = [], hashtags = [], method3_1_keywords = [], selected_methods = [] } = req.body;
 
-        // Create new Campaign
         const { data: newCmp, error: cmpErr } = await supabase.from('campaigns').insert([{
             user_id: user.id,
             name: campaignName || 'Discovery Campaign',
@@ -49,16 +69,49 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // METHOD 1
+        // METHOD 1: Locations Feed
         if (selected_methods.includes('method_1') && location) {
             const cities = location.split(',').map(c => c.trim()).filter(Boolean);
             const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
+            
             for (const city of cities) {
-                const items = await runActor('apify/instagram-scraper', { search: `${city} city`, searchType: 'place', resultsLimit: 30 });
-                items.forEach(i => {
+                const items = await runActor('apify/instagram-scraper', { search: city, searchType: 'place', resultsLimit: 30 }, warnings);
+                
+                items.forEach(item => {
+                    const extractedPosts = extractPostsFromApifyItem(item);
+                    
+                    extractedPosts.forEach(i => {
+                        const handle = i.ownerUsername || i.username || i.owner?.username;
+                        const caption = (i.caption || i.text || '').toLowerCase();
+                        
+                        if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
+                            rawDiscoveredPosts.push({
+                                username: handle,
+                                post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                                post_likes: i.likesCount || 0,
+                                post_comments: i.commentsCount || 0,
+                                post_timestamp: i.timestamp || new Date().toISOString(),
+                                post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            });
+                        }
+                    });
+                });
+            }
+        }
+
+        // METHOD 3: Hashtag Feed (Using directUrls to force strict post extraction)
+        if (selected_methods.includes('method_3') && hashtags.length) {
+            const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
+            const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
+            
+            const items = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 30 }, warnings);
+            
+            items.forEach(item => {
+                const extractedPosts = extractPostsFromApifyItem(item);
+                
+                extractedPosts.forEach(i => {
                     const handle = i.ownerUsername || i.username || i.owner?.username;
-                    const caption = (i.caption || '').toLowerCase();
-                    if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
+                    if (handle) {
                         rawDiscoveredPosts.push({
                             username: handle,
                             post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
@@ -69,45 +122,35 @@ app.post('/api/run-campaign', async (req, res) => {
                         });
                     }
                 });
-            }
-        }
-
-        // METHOD 3
-        if (selected_methods.includes('method_3') && hashtags.length) {
-            const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
-            const items = await runActor('apify/instagram-hashtag-scraper', { hashtags: cleanHashtags, resultsLimit: 50 });
-            items.forEach(i => {
-                const handle = i.ownerUsername || i.username || i.owner?.username;
-                if (handle) rawDiscoveredPosts.push({
-                    username: handle,
-                    post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                    post_likes: i.likesCount || 0,
-                    post_comments: i.commentsCount || 0,
-                    post_timestamp: i.timestamp || new Date().toISOString(),
-                    post_url: i.url || `https://instagram.com/p/${i.shortCode}`
-                });
             });
         }
 
-        // METHOD 3.1
+        // METHOD 3.1: Global Phrase (Using the API scraper for plain-text search)
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
-                const items = await runActor('apify/instagram-api-scraper', { query: kw, limit: 40 });
-                items.forEach(i => {
-                    const handle = i.user?.username || i.username || i.ownerUsername;
-                    if (handle) rawDiscoveredPosts.push({
-                        username: handle,
-                        post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
-                        post_likes: i.likesCount || 0,
-                        post_comments: i.commentsCount || 0,
-                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
-                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                const items = await runActor('apify/instagram-api-scraper', { search: kw, limit: 30 }, warnings);
+                
+                items.forEach(item => {
+                    const extractedPosts = extractPostsFromApifyItem(item);
+                    
+                    extractedPosts.forEach(i => {
+                        const handle = i.user?.username || i.ownerUsername || i.username;
+                        if (handle) {
+                            rawDiscoveredPosts.push({
+                                username: handle,
+                                post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                                post_likes: i.likesCount || 0,
+                                post_comments: i.commentsCount || 0,
+                                post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(),
+                                post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            });
+                        }
                     });
                 });
             }
         }
 
-        // Deduplicate
+        // Deduplicate the massive list so you only get unique humans
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -119,12 +162,12 @@ app.post('/api/run-campaign', async (req, res) => {
         const uniquePosts = Array.from(uniquePostMap.values());
         let newLeadsSaved = 0;
 
-        // Save Stage 1 Base Data
+        // Save Stage 1 Base Data to Supabase
         for (const post of uniquePosts) {
             const { data: savedLead, error: leadErr } = await supabase.from('leads').upsert({
                 username: post.username,
                 profile_url: `https://instagram.com/${post.username}`,
-                is_enriched: false // Flag to show it hasn't gone through Method 2 yet
+                is_enriched: false 
             }, { onConflict: 'username' }).select().single();
 
             if (!leadErr && savedLead) {
@@ -143,10 +186,12 @@ app.post('/api/run-campaign', async (req, res) => {
         }
 
         await supabase.from('campaigns').update({ total_leads_found: newLeadsSaved }).eq('id', activeCampaignId);
-        res.status(200).json({ success: true, newUniqueLeads: newLeadsSaved });
+        
+        // Return warnings to the frontend so you aren't flying blind
+        res.status(200).json({ success: true, newUniqueLeads: newLeadsSaved, warnings });
 
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: err.message, warnings });
     }
 });
 
@@ -163,7 +208,6 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const { campaignId } = req.body;
         if (!campaignId) return res.status(400).json({ error: 'Campaign ID required' });
 
-        // 1. Fetch unenriched leads for this campaign
         const { data: linkData, error: linkErr } = await supabase.from('campaign_leads')
             .select('leads(id, username, is_enriched)')
             .eq('campaign_id', campaignId);
