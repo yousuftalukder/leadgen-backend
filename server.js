@@ -104,6 +104,30 @@ app.delete('/api/campaign/:id', async (req, res) => {
     }
 });
 
+// Search Leads Globally Across All Campaigns
+app.get('/api/search-leads', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
+
+        const query = req.query.q ? req.query.q.toLowerCase().trim().replace('@', '') : '';
+        if (!query) return res.status(400).json({ error: 'Query required' });
+
+        const { data: leads, error } = await supabase
+            .from('leads')
+            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, campaigns(name))')
+            .or(`username.ilike.%${query}%,full_name.ilike.%${query}%,email.ilike.%${query}%`)
+            .limit(50);
+
+        if (error) throw error;
+        res.status(200).json({ leads });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // =========================================================================
 // STAGE 1 DISCOVERY PIPELINE
 // =========================================================================
@@ -135,14 +159,19 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // METHOD 1: Location URL Feed (Full Feed - Photos + Reels)
+        // METHOD 1: Location URL Feed
         if (selected_methods.includes('method_1') && location) {
             const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
             const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
             
             if (directUrls.length > 0) {
                 const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
-                const posts = await runActor('apify/instagram-scraper', { directUrls, resultsLimit: 1000 }, warnings, `Method 1 (Locations)`);
+                const posts = await runActor('apify/instagram-scraper', { 
+                    directUrls, 
+                    resultsLimit: 1000,
+                    scrollWaitSecs: 5,
+                    pageTimeoutSecs: 60
+                }, warnings, `Method 1 (Locations)`);
                 
                 posts.forEach(i => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
@@ -161,13 +190,17 @@ app.post('/api/run-campaign', async (req, res) => {
             } else { warnings.push("⚠️ METHOD 1 SKIPPED: Location requires direct Instagram URL."); }
         }
 
-        // METHOD 3: Hashtag Feed (Full Feed - Photos, Carousels + Reels)
+        // METHOD 3: Hashtag Feed
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
             
-            // No resultsType specified -> fetches all post types from top + recent grid
-            const posts = await runActor('apify/instagram-scraper', { directUrls, resultsLimit: 1000 }, warnings, 'Method 3 (Hashtags)');
+            const posts = await runActor('apify/instagram-scraper', { 
+                directUrls, 
+                resultsLimit: 1000,
+                scrollWaitSecs: 5,
+                pageTimeoutSecs: 60
+            }, warnings, 'Method 3 (Hashtags)');
             
             posts.forEach(i => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
@@ -204,12 +237,18 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
-        // METHOD 4: Competitor Tagged Feed (All Tagged Posts)
+        // METHOD 4: Competitor Tagged Feed (Deep Scroll Integration)
         if (selected_methods.includes('method_4') && competitor_handles.length) {
             const cleanHandles = competitor_handles.map(h => h.replace('@', '').trim()).filter(Boolean);
             const taggedUrls = cleanHandles.map(handle => `https://www.instagram.com/${handle}/tagged/`);
             
-            const posts = await runActor('apify/instagram-scraper', { directUrls: taggedUrls, resultsLimit: 1000 }, warnings, 'Method 4 (Competitor Tagged)');
+            const posts = await runActor('apify/instagram-scraper', { 
+                directUrls: taggedUrls, 
+                resultsLimit: 1000,
+                scrollWaitSecs: 5,   // Forces Apify to wait for dynamic infinite scroll
+                pageTimeoutSecs: 60  // Prevents early timeout on network latency
+            }, warnings, 'Method 4 (Competitor Tagged)');
+            
             posts.forEach(i => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
@@ -253,7 +292,7 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
-        // Deduplicate locally across all methods before writing to DB
+        // Deduplicate locally across all active methods
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -374,28 +413,3 @@ app.get('/api/client-history', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Engine active on port ${PORT}`));
-
-// SEARCH LEADS GLOBALLY ACROSS ALL CAMPAIGNS
-app.get('/api/search-leads', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        const token = authHeader?.replace('Bearer ', '');
-        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
-        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
-
-        const query = req.query.q ? req.query.q.toLowerCase().trim().replace('@', '') : '';
-        if (!query) return res.status(400).json({ error: 'Query required' });
-
-        // Search leads table for matching username, full_name, or email
-        const { data: leads, error } = await supabase
-            .from('leads')
-            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, campaigns(name))')
-            .or(`username.ilike.%${query}%,full_name.ilike.%${query}%,email.ilike.%${query}%`)
-            .limit(50);
-
-        if (error) throw error;
-        res.status(200).json({ leads });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
