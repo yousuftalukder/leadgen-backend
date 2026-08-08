@@ -8,10 +8,8 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Dynamic Token State (In-Memory Override)
+// Dynamic In-Memory API Key Management
 let ACTIVE_APIFY_TOKEN = process.env.APIFY_API_TOKEN;
-let apify = new ApifyClient({ token: ACTIVE_APIFY_TOKEN });
-
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 function getApifyClient() {
@@ -46,26 +44,17 @@ async function runActor(actorId, input, warningsArray, methodName) {
     }
 }
 
-// =========================================================================
-// SYSTEM CONTROL & MANAGEMENT ENDPOINTS
-// =========================================================================
-
-// Check Actor Connectivity & Key Status
+// SYSTEM MANAGEMENT ENDPOINTS
 app.get('/api/actor-status', async (req, res) => {
     try {
         const client = getApifyClient();
         const user = await client.user().get();
-        res.status(200).json({ 
-            active: true, 
-            username: user.username,
-            limits: user.limits 
-        });
+        res.status(200).json({ active: true, username: user.username });
     } catch (err) {
-        res.status(200).json({ active: false, error: "Invalid/Expired Apify Key" });
+        res.status(200).json({ active: false, error: "Invalid/Expired Key" });
     }
 });
 
-// Update Apify Key Dynamically
 app.post('/api/update-apify-key', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -76,23 +65,34 @@ app.post('/api/update-apify-key', async (req, res) => {
         const { newApiKey } = req.body;
         if (!newApiKey) return res.status(400).json({ error: 'Key required' });
 
-        // Test the key before saving
         const testClient = new ApifyClient({ token: newApiKey });
         await testClient.user().get();
 
         ACTIVE_APIFY_TOKEN = newApiKey;
-        console.log('[System] Apify API Key updated successfully in runtime memory.');
-
-        res.status(200).json({ success: true, message: 'Apify Key updated and verified!' });
+        res.status(200).json({ success: true, message: 'Apify Key updated!' });
     } catch (err) {
-        res.status(400).json({ error: 'Failed to verify new API Key: ' + err.message });
+        res.status(400).json({ error: 'Key verification failed: ' + err.message });
     }
 });
 
-// =========================================================================
-// CAMPAIGN RUNNER & DATA ENDPOINTS
-// =========================================================================
+app.delete('/api/campaign/:id', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
 
+        const campaignId = req.params.id;
+        const { error: delErr } = await supabase.from('campaigns').delete().eq('id', campaignId).eq('user_id', user.id);
+        
+        if (delErr) throw delErr;
+        res.status(200).json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// STAGE 1 DISCOVERY PIPELINE
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
     try {
@@ -101,7 +101,11 @@ app.post('/api/run-campaign', async (req, res) => {
         const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
         if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
 
-        const { campaignName, location, method1_keywords = [], hashtags = [], method3_1_keywords = [], selected_methods = [] } = req.body;
+        const { 
+            campaignName, location, method1_keywords = [], hashtags = [], 
+            method3_1_keywords = [], competitor_handles = [], method6_keywords = [], 
+            selected_methods = [] 
+        } = req.body;
 
         const { data: newCmp, error: cmpErr } = await supabase.from('campaigns').insert([{
             user_id: user.id,
@@ -116,14 +120,14 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // METHOD 1: Locations
+        // METHOD 1: Location URL Feed
         if (selected_methods.includes('method_1') && location) {
             const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
             const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
             
             if (directUrls.length > 0) {
                 const lowerKeywords = method1_keywords.map(k => k.toLowerCase().trim());
-                const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 1000 }, warnings, `Method 1 (Locations)`);
+                const posts = await runActor('apify/instagram-scraper', { directUrls, resultsLimit: 1000 }, warnings, `Method 1 (Locations)`);
                 
                 posts.forEach(i => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
@@ -136,15 +140,15 @@ app.post('/api/run-campaign', async (req, res) => {
                         });
                     }
                 });
-            } else { warnings.push("⚠️ METHOD 1 SKIPPED: Location requires a full URL."); }
+            } else { warnings.push("⚠️ METHOD 1 SKIPPED: Location requires direct Instagram URL."); }
         }
 
-        // METHOD 3: Hashtags
+        // METHOD 3: Hashtag Feed
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
             
-            const posts = await runActor('apify/instagram-scraper', { directUrls: directUrls, resultsLimit: 1000 }, warnings, 'Method 3 (Hashtags)');
+            const posts = await runActor('apify/instagram-scraper', { directUrls, resultsLimit: 1000 }, warnings, 'Method 3 (Hashtags)');
             
             posts.forEach(i => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
@@ -158,11 +162,10 @@ app.post('/api/run-campaign', async (req, res) => {
             });
         }
 
-        // METHOD 3.1: Global Phrase
+        // METHOD 3.1: Global Phrase Search
         if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
             for (const kw of method3_1_keywords) {
                 const posts = await runActor('apify/instagram-api-scraper', { query: kw, limit: 1000 }, warnings, `Method 3.1 (${kw})`);
-                
                 posts.forEach(i => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
@@ -173,6 +176,48 @@ app.post('/api/run-campaign', async (req, res) => {
                         });
                     }
                 });
+            }
+        }
+
+        // METHOD 4: Competitor Tagged Feed
+        if (selected_methods.includes('method_4') && competitor_handles.length) {
+            const cleanHandles = competitor_handles.map(h => h.replace('@', '').trim()).filter(Boolean);
+            const taggedUrls = cleanHandles.map(handle => `https://www.instagram.com/${handle}/tagged/`);
+            
+            const posts = await runActor('apify/instagram-scraper', { directUrls: taggedUrls, resultsLimit: 1000 }, warnings, 'Method 4 (Competitor Tagged)');
+            posts.forEach(i => {
+                const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
+                if (handle) {
+                    rawDiscoveredPosts.push({
+                        username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                    });
+                }
+            });
+        }
+
+        // METHOD 6: TopSearch B2B Accounts
+        if (selected_methods.includes('method_6') && method6_keywords.length) {
+            for (const kw of method6_keywords) {
+                const client = getApifyClient();
+                try {
+                    const run = await client.actor('apify/instagram-search-scraper').call({ searchQueries: [kw], searchType: 'user' });
+                    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+                    
+                    (items || []).forEach(item => {
+                        const handle = item.username || item.ownerUsername;
+                        if (handle) {
+                            rawDiscoveredPosts.push({
+                                username: handle, post_views: 0, post_likes: 0, post_comments: 0,
+                                post_timestamp: new Date().toISOString(), post_url: `https://instagram.com/${handle}`
+                            });
+                        }
+                    });
+                    warnings.push(`X-RAY (Method 6): Found ${items?.length || 0} account profiles for "${kw}".`);
+                } catch (e) {
+                    warnings.push(`🚨 Error (Method 6): ${e.message}`);
+                }
             }
         }
 
@@ -223,6 +268,7 @@ app.post('/api/run-campaign', async (req, res) => {
     }
 });
 
+// STAGE 2 ENRICHMENT
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -264,6 +310,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
     }
 });
 
+// MASTER HISTORY
 app.get('/api/client-history', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
