@@ -245,8 +245,8 @@ app.post('/api/run-campaign', async (req, res) => {
             const posts = await runActor('apify/instagram-scraper', { 
                 directUrls: taggedUrls, 
                 resultsLimit: 1000,
-                scrollWaitSecs: 5,   // Forces Apify to wait for dynamic infinite scroll
-                pageTimeoutSecs: 60  // Prevents early timeout on network latency
+                scrollWaitSecs: 5,
+                pageTimeoutSecs: 60
             }, warnings, 'Method 4 (Competitor Tagged)');
             
             posts.forEach(i => {
@@ -344,7 +344,7 @@ app.post('/api/run-campaign', async (req, res) => {
 });
 
 // =========================================================================
-// STAGE 2 ENRICHMENT PIPELINE (METHOD 2 - TIMEOUT PROTECTED)
+// STAGE 2 ENRICHMENT PIPELINE (METHOD 2 - TIMEOUT & BATCH PROTECTED)
 // =========================================================================
 
 app.post('/api/enrich-campaign', async (req, res) => {
@@ -360,7 +360,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const { data: linkData, error: linkErr } = await supabase.from('campaign_leads').select('leads(id, username, is_enriched)').eq('campaign_id', campaignId);
         if (linkErr) throw linkErr;
 
-        // BATCHING FIX: Takes maximum 25 unenriched leads per request to stay under Render 30s timeout
+        // BATCHING FIX: Caps array to 25 handles per request to stay under Render's 30s timeout
         const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username).slice(0, 25);
         if (handlesToEnrich.length === 0) return res.status(200).json({ success: true, message: 'All leads enriched!', enrichedCount: 0 });
 
@@ -372,14 +372,19 @@ app.post('/api/enrich-campaign', async (req, res) => {
 
         let updatedCount = 0;
         for (const p of (enrichedProfiles || [])) {
-            const username = (p.username || p.ownerUsername || '').toLowerCase();
+            const username = (p.username || p.ownerUsername || '').toLowerCase().trim();
             if (!username) continue;
 
+            const email = p.biographyEmail || p.email || p.inputEmail || p.businessEmail || null;
+            const phone = p.businessPhoneNumber || p.phone || p.phoneNumber || null;
+            const fullName = p.fullName || p.full_name || p.name || null;
+            const followers = p.followersCount !== undefined ? p.followersCount : (p.followers || 0);
+
             const { error: updateErr } = await supabase.from('leads').update({
-                full_name: p.fullName || null, 
-                email: p.biographyEmail || p.email || p.inputEmail || null,
-                phone: p.businessPhoneNumber || p.phone || null, 
-                followers_count: p.followersCount || 0,
+                full_name: fullName, 
+                email: email,
+                phone: phone, 
+                followers_count: followers,
                 is_enriched: true
             }).eq('username', username);
 
