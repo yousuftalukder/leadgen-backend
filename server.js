@@ -16,7 +16,7 @@ function getApifyClient() {
     return new ApifyClient({ token: ACTIVE_APIFY_TOKEN });
 }
 
-// Universal View Extractor across all post types (Images, Carousels, Reels)
+// Universal View Extractor across all post types (Photos, Carousels, Reels)
 function getViews(i) {
     return i.videoPlayCount || i.playCount || i.videoViewCount || i.viewCount || i.reelsCount || 0;
 }
@@ -49,7 +49,11 @@ async function runActor(actorId, input, warningsArray, methodName) {
     }
 }
 
-// SYSTEM MANAGEMENT ENDPOINTS
+// =========================================================================
+// SYSTEM CONTROL & MANAGEMENT ENDPOINTS
+// =========================================================================
+
+// Check Actor Connectivity & Key Status
 app.get('/api/actor-status', async (req, res) => {
     try {
         const client = getApifyClient();
@@ -60,6 +64,7 @@ app.get('/api/actor-status', async (req, res) => {
     }
 });
 
+// Update Apify Key Dynamically from UI
 app.post('/api/update-apify-key', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -74,12 +79,14 @@ app.post('/api/update-apify-key', async (req, res) => {
         await testClient.user().get();
 
         ACTIVE_APIFY_TOKEN = newApiKey;
-        res.status(200).json({ success: true, message: 'Apify Key updated!' });
+        console.log('[System] Apify API Key updated successfully in runtime memory.');
+        res.status(200).json({ success: true, message: 'Apify Key updated and verified!' });
     } catch (err) {
         res.status(400).json({ error: 'Key verification failed: ' + err.message });
     }
 });
 
+// Delete Campaign Endpoint
 app.delete('/api/campaign/:id', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -97,7 +104,10 @@ app.delete('/api/campaign/:id', async (req, res) => {
     }
 });
 
+// =========================================================================
 // STAGE 1 DISCOVERY PIPELINE
+// =========================================================================
+
 app.post('/api/run-campaign', async (req, res) => {
     let warnings = []; 
     try {
@@ -125,7 +135,7 @@ app.post('/api/run-campaign', async (req, res) => {
 
         let rawDiscoveredPosts = [];
 
-        // METHOD 1: Location URL Feed
+        // METHOD 1: Location URL Feed (Full Feed - Photos + Reels)
         if (selected_methods.includes('method_1') && location) {
             const locInputs = location.split(',').map(c => c.trim()).filter(Boolean);
             const directUrls = locInputs.filter(loc => loc.includes('instagram.com/explore/locations'));
@@ -139,29 +149,36 @@ app.post('/api/run-campaign', async (req, res) => {
                     const caption = (i.caption || i.text || '').toLowerCase();
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: getViews(i),
-                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, 
+                            post_views: getViews(i),
+                            post_likes: i.likesCount || 0, 
+                            post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
             } else { warnings.push("⚠️ METHOD 1 SKIPPED: Location requires direct Instagram URL."); }
         }
 
-        // METHOD 3: Hashtag Feed
+        // METHOD 3: Hashtag Feed (Full Feed - Photos, Carousels + Reels)
         if (selected_methods.includes('method_3') && hashtags.length) {
             const cleanHashtags = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean);
             const directUrls = cleanHashtags.map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
             
+            // No resultsType specified -> fetches all post types from top + recent grid
             const posts = await runActor('apify/instagram-scraper', { directUrls, resultsLimit: 1000 }, warnings, 'Method 3 (Hashtags)');
             
             posts.forEach(i => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle, post_views: getViews(i),
-                        post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                        username: handle, 
+                        post_views: getViews(i),
+                        post_likes: i.likesCount || 0, 
+                        post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
                 }
             });
@@ -175,16 +192,19 @@ app.post('/api/run-campaign', async (req, res) => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: getViews(i),
-                            post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                            username: handle, 
+                            post_views: getViews(i),
+                            post_likes: i.likesCount || 0, 
+                            post_comments: i.commentsCount || 0,
+                            post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                            post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
                     }
                 });
             }
         }
 
-        // METHOD 4: Competitor Tagged Feed
+        // METHOD 4: Competitor Tagged Feed (All Tagged Posts)
         if (selected_methods.includes('method_4') && competitor_handles.length) {
             const cleanHandles = competitor_handles.map(h => h.replace('@', '').trim()).filter(Boolean);
             const taggedUrls = cleanHandles.map(handle => `https://www.instagram.com/${handle}/tagged/`);
@@ -194,9 +214,12 @@ app.post('/api/run-campaign', async (req, res) => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle, post_views: getViews(i),
-                        post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
-                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
+                        username: handle, 
+                        post_views: getViews(i),
+                        post_likes: i.likesCount || 0, 
+                        post_comments: i.commentsCount || 0,
+                        post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), 
+                        post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
                 }
             });
@@ -214,8 +237,12 @@ app.post('/api/run-campaign', async (req, res) => {
                         const handle = item.username || item.ownerUsername;
                         if (handle) {
                             rawDiscoveredPosts.push({
-                                username: handle, post_views: 0, post_likes: 0, post_comments: 0,
-                                post_timestamp: new Date().toISOString(), post_url: `https://instagram.com/${handle}`
+                                username: handle, 
+                                post_views: 0, 
+                                post_likes: 0, 
+                                post_comments: 0,
+                                post_timestamp: new Date().toISOString(), 
+                                post_url: `https://instagram.com/${handle}`
                             });
                         }
                     });
@@ -226,7 +253,7 @@ app.post('/api/run-campaign', async (req, res) => {
             }
         }
 
-        // Deduplicate locally
+        // Deduplicate locally across all methods before writing to DB
         const uniquePostMap = new Map();
         rawDiscoveredPosts.forEach(post => {
             const u = post.username.toLowerCase().trim().replace('@', '');
@@ -255,9 +282,13 @@ app.post('/api/run-campaign', async (req, res) => {
 
             if (savedLeadId) {
                 const { error: linkErr } = await supabase.from('campaign_leads').insert([{
-                    campaign_id: activeCampaignId, lead_id: savedLeadId, user_id: user.id,
-                    top_post_url: post.post_url, top_post_views: post.post_views || 0,
-                    post_likes: post.post_likes || 0, post_comments: post.post_comments || 0,
+                    campaign_id: activeCampaignId, 
+                    lead_id: savedLeadId, 
+                    user_id: user.id,
+                    top_post_url: post.post_url, 
+                    top_post_views: post.post_views || 0,
+                    post_likes: post.post_likes || 0, 
+                    post_comments: post.post_comments || 0,
                     post_timestamp: new Date(post.post_timestamp).toISOString()
                 }]);
                 
@@ -273,7 +304,10 @@ app.post('/api/run-campaign', async (req, res) => {
     }
 });
 
-// STAGE 2 ENRICHMENT
+// =========================================================================
+// STAGE 2 ENRICHMENT PIPELINE (METHOD 2)
+// =========================================================================
+
 app.post('/api/enrich-campaign', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -300,8 +334,10 @@ app.post('/api/enrich-campaign', async (req, res) => {
             if (!username) continue;
 
             const { error: updateErr } = await supabase.from('leads').update({
-                full_name: p.fullName || null, email: p.biographyEmail || p.email || p.inputEmail || null,
-                phone: p.businessPhoneNumber || p.phone || null, followers_count: p.followersCount || 0,
+                full_name: p.fullName || null, 
+                email: p.biographyEmail || p.email || p.inputEmail || null,
+                phone: p.businessPhoneNumber || p.phone || null, 
+                followers_count: p.followersCount || 0,
                 is_enriched: true
             }).eq('username', username);
 
@@ -315,7 +351,10 @@ app.post('/api/enrich-campaign', async (req, res) => {
     }
 });
 
-// MASTER HISTORY
+// =========================================================================
+// MASTER HISTORY & VAULT FETCH
+// =========================================================================
+
 app.get('/api/client-history', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
