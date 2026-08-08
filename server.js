@@ -374,3 +374,28 @@ app.get('/api/client-history', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Engine active on port ${PORT}`));
+
+// SEARCH LEADS GLOBALLY ACROSS ALL CAMPAIGNS
+app.get('/api/search-leads', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
+
+        const query = req.query.q ? req.query.q.toLowerCase().trim().replace('@', '') : '';
+        if (!query) return res.status(400).json({ error: 'Query required' });
+
+        // Search leads table for matching username, full_name, or email
+        const { data: leads, error } = await supabase
+            .from('leads')
+            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, campaigns(name))')
+            .or(`username.ilike.%${query}%,full_name.ilike.%${query}%,email.ilike.%${query}%`)
+            .limit(50);
+
+        if (error) throw error;
+        res.status(200).json({ leads });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
