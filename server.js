@@ -344,7 +344,7 @@ app.post('/api/run-campaign', async (req, res) => {
 });
 
 // =========================================================================
-// STAGE 2 ENRICHMENT PIPELINE (METHOD 2)
+// STAGE 2 ENRICHMENT PIPELINE (METHOD 2 - TIMEOUT PROTECTED)
 // =========================================================================
 
 app.post('/api/enrich-campaign', async (req, res) => {
@@ -360,11 +360,14 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const { data: linkData, error: linkErr } = await supabase.from('campaign_leads').select('leads(id, username, is_enriched)').eq('campaign_id', campaignId);
         if (linkErr) throw linkErr;
 
-        const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username);
+        // BATCHING FIX: Takes maximum 25 unenriched leads per request to stay under Render 30s timeout
+        const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username).slice(0, 25);
         if (handlesToEnrich.length === 0) return res.status(200).json({ success: true, message: 'All leads enriched!', enrichedCount: 0 });
 
         const client = getApifyClient();
-        const run = await client.actor('apify/instagram-profile-scraper').call({ usernames: handlesToEnrich });
+        
+        // TIMEOUT FIX: Added { waitSecs: 25 } execution barrier
+        const run = await client.actor('apify/instagram-profile-scraper').call({ usernames: handlesToEnrich }, { waitSecs: 25 });
         const { items: enrichedProfiles } = await client.dataset(run.defaultDatasetId).listItems();
 
         let updatedCount = 0;
@@ -386,6 +389,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
         res.status(200).json({ success: true, enrichedCount: updatedCount });
 
     } catch (err) {
+        console.error('[Enrich Error]:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
