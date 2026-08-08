@@ -16,6 +16,11 @@ function getApifyClient() {
     return new ApifyClient({ token: ACTIVE_APIFY_TOKEN });
 }
 
+// Universal View Extractor across all post types (Images, Carousels, Reels)
+function getViews(i) {
+    return i.videoPlayCount || i.playCount || i.videoViewCount || i.viewCount || i.reelsCount || 0;
+}
+
 function extractPosts(items) {
     let posts = [];
     (items || []).forEach(item => {
@@ -134,7 +139,7 @@ app.post('/api/run-campaign', async (req, res) => {
                     const caption = (i.caption || i.text || '').toLowerCase();
                     if (handle && (lowerKeywords.length === 0 || lowerKeywords.some(kw => caption.includes(kw)))) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            username: handle, post_views: getViews(i),
                             post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
                             post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
@@ -154,7 +159,7 @@ app.post('/api/run-campaign', async (req, res) => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        username: handle, post_views: getViews(i),
                         post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
                         post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
@@ -170,7 +175,7 @@ app.post('/api/run-campaign', async (req, res) => {
                     const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                     if (handle) {
                         rawDiscoveredPosts.push({
-                            username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                            username: handle, post_views: getViews(i),
                             post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
                             post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                         });
@@ -189,7 +194,7 @@ app.post('/api/run-campaign', async (req, res) => {
                 const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
                 if (handle) {
                     rawDiscoveredPosts.push({
-                        username: handle, post_views: i.videoViewCount || i.playCount || i.viewCount || 0,
+                        username: handle, post_views: getViews(i),
                         post_likes: i.likesCount || 0, post_comments: i.commentsCount || 0,
                         post_timestamp: i.timestamp || i.takenAt || new Date().toISOString(), post_url: i.url || `https://instagram.com/p/${i.shortCode}`
                     });
@@ -318,7 +323,7 @@ app.get('/api/client-history', async (req, res) => {
         const { data: { user } } = await supabase.auth.getUser(token);
         
         const { data: campaigns } = await supabase.from('campaigns')
-            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, leads(*))')
+            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, leads(*))')
             .eq('user_id', user.id)
             .order('created_at', { ascending: false });
 
