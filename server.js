@@ -442,11 +442,10 @@ app.post('/api/generate-ig-report', async (req, res) => {
         if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
 
         const { target, compareRivals, rival1, rival2 } = req.body;
-        
-        // Uses the independent REPORT_APIFY_TOKEN
         const client = getReportApifyClient();
 
         async function auditHandle(handle) {
+            if (!handle) return null;
             const cleanHandle = handle.replace('@', '').trim();
             if (!cleanHandle) return null;
 
@@ -462,7 +461,7 @@ app.post('/api/generate-ig-report', async (req, res) => {
             const { items: rawPosts } = await client.dataset(postRun.defaultDatasetId).listItems();
             const posts = extractPosts(rawPosts || []);
 
-            if (posts.length === 0) {
+            if (!posts || posts.length === 0) {
                 return { handle: cleanHandle, followers, engagementRate: '0.0', viralityScore: '0.0', postsPerWeek: '0.0', grade: 'C', topPosts: [] };
             }
 
@@ -499,8 +498,9 @@ app.post('/api/generate-ig-report', async (req, res) => {
         }
 
         const mainAudit = await auditHandle(target);
-        let rivalAudits = [];
+        if (!mainAudit) return res.status(400).json({ error: 'Invalid target handle' });
 
+        let rivalAudits = [];
         if (compareRivals) {
             if (rival1) { const r1 = await auditHandle(rival1); if (r1) rivalAudits.push(r1); }
             if (rival2) { const r2 = await auditHandle(rival2); if (r2) rivalAudits.push(r2); }
@@ -511,7 +511,7 @@ app.post('/api/generate-ig-report', async (req, res) => {
             recommendations.push(`Increase audience interaction by ending captions with direct questions and using multi-slide Carousels.`);
         }
         if (parseFloat(mainAudit.viralityScore) < 0.8) {
-            recommendations.push(`Reel play counts are trailing follower totals. Transition 50% of static image posts into short 7-15 second trending Reels to hit Instagram's Explore algorithm.`);
+            recommendations.push(`Reel play counts are trailing follower totals. Transition static image posts into short 7-15 second trending Reels to hit Instagram's Explore algorithm.`);
         }
         if (parseFloat(mainAudit.postsPerWeek) < 3.0) {
             recommendations.push(`Posting consistency is low (${mainAudit.postsPerWeek} posts/week). Target a baseline of 4-5 weekly posts to prevent algorithmic drop-off.`);
@@ -535,6 +535,7 @@ app.post('/api/generate-ig-report', async (req, res) => {
         res.status(200).json({ success: true, report: fullReportPayload });
 
     } catch (err) {
+        console.error('[IG Report Error]:', err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
