@@ -8,18 +8,35 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Dynamic In-Memory API Key Management for Both Independent Engines
-let LEADGEN_APIFY_TOKEN = process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN;
-let REPORT_APIFY_TOKEN = process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN;
-
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-function getLeadgenApifyClient() {
-    return new ApifyClient({ token: LEADGEN_APIFY_TOKEN });
+// =========================================================================
+// DATABASE-BACKED PERSISTENT API KEY MANAGEMENT
+// =========================================================================
+
+async function getPersistentToken(engineName) {
+    try {
+        const { data, error } = await supabase
+            .from('system_settings')
+            .select('value')
+            .eq('key', `${engineName}_apify_token`)
+            .maybeSingle();
+        
+        if (data && data.value) return data.value;
+    } catch (err) {
+        console.error(`[DB Key Fetch Error for ${engineName}]:`, err.message);
+    }
+    return process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN;
 }
 
-function getReportApifyClient() {
-    return new ApifyClient({ token: REPORT_APIFY_TOKEN });
+async function getLeadgenApifyClient() {
+    const token = await getPersistentToken('leadgen');
+    return new ApifyClient({ token });
+}
+
+async function getReportApifyClient() {
+    const token = await getPersistentToken('report');
+    return new ApifyClient({ token });
 }
 
 // Universal View Extractor across all post types (Photos, Carousels, Reels)
@@ -40,7 +57,7 @@ function extractPosts(items) {
 async function runActor(actorId, input, warningsArray, methodName) {
     try {
         console.log(`[Apify] Triggering ${actorId} for ${methodName}...`);
-        const client = getLeadgenApifyClient();
+        const client = await getLeadgenApifyClient();
         const run = await client.actor(actorId).call(input);
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
         
@@ -63,7 +80,7 @@ async function runActor(actorId, input, warningsArray, methodName) {
 app.get('/api/actor-status', async (req, res) => {
     try {
         const engine = req.query.engine || 'leadgen';
-        const client = engine === 'report' ? getReportApifyClient() : getLeadgenApifyClient();
+        const client = engine === 'report' ? await getReportApifyClient() : await getLeadgenApifyClient();
         
         const user = await client.user().get();
         res.status(200).json({ active: true, username: user.username, engine });
@@ -72,7 +89,7 @@ app.get('/api/actor-status', async (req, res) => {
     }
 });
 
-// Update Apify Key Dynamically from UI (Supports Both Engines Independently)
+// Update Apify Key Persistently in Supabase
 app.post('/api/update-apify-key', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -86,17 +103,19 @@ app.post('/api/update-apify-key', async (req, res) => {
         const testClient = new ApifyClient({ token: newApiKey });
         const apifyUser = await testClient.user().get();
 
-        if (engine === 'report') {
-            REPORT_APIFY_TOKEN = newApiKey;
-            console.log(`[System] IG Performance Audit Token updated to Apify User: ${apifyUser.username}`);
-        } else {
-            LEADGEN_APIFY_TOKEN = newApiKey;
-            console.log(`[System] Lead Finder Token updated to Apify User: ${apifyUser.username}`);
-        }
+        const settingKey = engine === 'report' ? 'report_apify_token' : 'leadgen_apify_token';
+
+        const { error: dbErr } = await supabase
+            .from('system_settings')
+            .upsert({ key: settingKey, value: newApiKey, updated_at: new Date().toISOString() });
+
+        if (dbErr) throw dbErr;
+
+        console.log(`[System] ${engine.toUpperCase()} Apify Token permanently updated to user: ${apifyUser.username}`);
 
         res.status(200).json({ 
             success: true, 
-            message: 'Apify Key updated and verified!', 
+            message: 'Apify Key updated, verified, and saved to database!', 
             username: apifyUser.username,
             engine: engine || 'leadgen' 
         });
@@ -286,7 +305,7 @@ app.post('/api/run-campaign', async (req, res) => {
         // METHOD 6: TopSearch B2B Accounts
         if (selected_methods.includes('method_6') && method6_keywords.length) {
             for (const kw of method6_keywords) {
-                const client = getLeadgenApifyClient();
+                const client = await getLeadgenApifyClient();
                 try {
                     const run = await client.actor('apify/instagram-search-scraper').call({ searchQueries: [kw], searchType: 'user' });
                     const { items } = await client.dataset(run.defaultDatasetId).listItems();
@@ -382,7 +401,7 @@ app.post('/api/enrich-campaign', async (req, res) => {
         const handlesToEnrich = linkData.map(d => d.leads).filter(l => l && l.is_enriched !== true).map(l => l.username).slice(0, 25);
         if (handlesToEnrich.length === 0) return res.status(200).json({ success: true, message: 'All leads enriched!', enrichedCount: 0 });
 
-        const client = getLeadgenApifyClient();
+        const client = await getLeadgenApifyClient();
         
         const run = await client.actor('apify/instagram-profile-scraper').call({ usernames: handlesToEnrich }, { waitSecs: 25 });
         const { items: enrichedProfiles } = await client.dataset(run.defaultDatasetId).listItems();
@@ -449,7 +468,7 @@ app.post('/api/generate-ig-report', async (req, res) => {
         if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
 
         const { target, compareRivals, rival1, rival2 } = req.body;
-        const client = getReportApifyClient();
+        const client = await getReportApifyClient();
 
         async function auditHandle(handle) {
             if (!handle) return null;
