@@ -656,3 +656,41 @@ app.get('/api/reports-history', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// Separate runtime token variables in server.js
+let LEADGEN_APIFY_TOKEN = process.env.APIFY_API_KEY;
+let REPORT_APIFY_TOKEN = process.env.APIFY_API_KEY;
+
+// Updated Key Ingestion Endpoint
+app.post('/api/update-apify-key', async (req, res) => {
+    try {
+        const { newApiKey, engine } = req.body;
+        
+        if (engine === 'report') {
+            REPORT_APIFY_TOKEN = newApiKey;
+            console.log('✅ Updated IG Performance Audit Apify Token');
+        } else {
+            LEADGEN_APIFY_TOKEN = newApiKey;
+            console.log('✅ Updated Lead Finder Apify Token');
+        }
+
+        res.status(200).json({ success: true, engine: engine || 'leadgen' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Update Report Route to explicitly use REPORT_APIFY_TOKEN
+app.post('/api/generate-ig-report', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
+
+        const { target, compareRivals, rival1, rival2 } = req.body;
+        
+        // Always uses the independent REPORT_APIFY_TOKEN
+        const client = new ApifyClient({ token: REPORT_APIFY_TOKEN });
+
+        // ... rest of report generation logic remains identical
