@@ -100,10 +100,13 @@ app.post('/api/update-apify-key', async (req, res) => {
         const { newApiKey, engine } = req.body;
         if (!newApiKey) return res.status(400).json({ error: 'Key required' });
 
+        // SAFE FALLBACK: Prevents crash if index.html doesn't send engine parameter
+        const activeEngine = engine || 'leadgen';
+
         const testClient = new ApifyClient({ token: newApiKey });
         const apifyUser = await testClient.user().get();
 
-        const settingKey = engine === 'report' ? 'report_apify_token' : 'leadgen_apify_token';
+        const settingKey = activeEngine === 'report' ? 'report_apify_token' : 'leadgen_apify_token';
 
         const { error: dbErr } = await supabase
             .from('system_settings')
@@ -111,13 +114,13 @@ app.post('/api/update-apify-key', async (req, res) => {
 
         if (dbErr) throw dbErr;
 
-        console.log(`[System] ${engine.toUpperCase()} Apify Token permanently updated to user: ${apifyUser.username}`);
+        console.log(`[System] ${activeEngine.toUpperCase()} Apify Token updated to user: ${apifyUser.username}`);
 
         res.status(200).json({ 
             success: true, 
             message: 'Apify Key updated, verified, and saved to database!', 
             username: apifyUser.username,
-            engine: engine || 'leadgen' 
+            engine: activeEngine 
         });
     } catch (err) {
         res.status(400).json({ error: 'Key verification failed: ' + err.message });
