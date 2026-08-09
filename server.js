@@ -59,12 +59,14 @@ async function runActor(actorId, input, warningsArray, methodName) {
 // SYSTEM CONTROL & MANAGEMENT ENDPOINTS
 // =========================================================================
 
-// Check Actor Connectivity & Key Status
+// Engine-Aware Actor Connectivity & Username Status Check
 app.get('/api/actor-status', async (req, res) => {
     try {
-        const client = getLeadgenApifyClient();
+        const engine = req.query.engine || 'leadgen';
+        const client = engine === 'report' ? getReportApifyClient() : getLeadgenApifyClient();
+        
         const user = await client.user().get();
-        res.status(200).json({ active: true, username: user.username });
+        res.status(200).json({ active: true, username: user.username, engine });
     } catch (err) {
         res.status(200).json({ active: false, error: "Invalid/Expired Key" });
     }
@@ -82,17 +84,22 @@ app.post('/api/update-apify-key', async (req, res) => {
         if (!newApiKey) return res.status(400).json({ error: 'Key required' });
 
         const testClient = new ApifyClient({ token: newApiKey });
-        await testClient.user().get();
+        const apifyUser = await testClient.user().get();
 
         if (engine === 'report') {
             REPORT_APIFY_TOKEN = newApiKey;
-            console.log('[System] IG Performance Audit Apify Token updated in runtime memory.');
+            console.log(`[System] IG Performance Audit Token updated to Apify User: ${apifyUser.username}`);
         } else {
             LEADGEN_APIFY_TOKEN = newApiKey;
-            console.log('[System] Lead Finder Apify Token updated in runtime memory.');
+            console.log(`[System] Lead Finder Token updated to Apify User: ${apifyUser.username}`);
         }
 
-        res.status(200).json({ success: true, message: 'Apify Key updated and verified!', engine: engine || 'leadgen' });
+        res.status(200).json({ 
+            success: true, 
+            message: 'Apify Key updated and verified!', 
+            username: apifyUser.username,
+            engine: engine || 'leadgen' 
+        });
     } catch (err) {
         res.status(400).json({ error: 'Key verification failed: ' + err.message });
     }
