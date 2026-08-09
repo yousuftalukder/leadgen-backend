@@ -418,6 +418,109 @@ app.get('/api/client-history', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+// =========================================================================
+// INSTAGRAM REPORT GENERATOR ENDPOINT
+// =========================================================================
+
+app.post('/api/generate-ig-report', async (req, res) => {
+    try {
+        const { apiKey, target, compareRivals, rival1, rival2 } = req.body;
+        const activeToken = apiKey || ACTIVE_APIFY_TOKEN;
+        const client = new ApifyClient({ token: activeToken });
+
+        async function auditHandle(handle) {
+            const cleanHandle = handle.replace('@', '').trim();
+            if (!cleanHandle) return null;
+
+            // 1. Fetch Profile Header Data
+            const profileRun = await client.actor('apify/instagram-profile-scraper').call({ usernames: [cleanHandle] });
+            const { items: profiles } = await client.dataset(profileRun.defaultDatasetId).listItems();
+            const prof = profiles[0] || {};
+
+            const followers = prof.followersCount || prof.followers || 0;
+
+            // 2. Fetch Sample Recent Posts
+            const postRun = await client.actor('apify/instagram-scraper').call({
+                directUrls: [`https://www.instagram.com/${cleanHandle}/`],
+                resultsLimit: 30
+            });
+            const { items: rawPosts } = await client.dataset(postRun.defaultDatasetId).listItems();
+            const posts = extractPosts(rawPosts || []);
+
+            if (posts.length === 0) {
+                return { handle: cleanHandle, followers, engagementRate: '0.0', viralityScore: '0.0', postsPerWeek: '0.0', grade: 'C', topPosts: [] };
+            }
+
+            // Calculate Engagement, Virality & Velocity
+            let totalLikes = 0, totalComments = 0, totalViews = 0;
+            posts.forEach(p => {
+                totalLikes += p.likesCount || 0;
+                totalComments += p.commentsCount || 0;
+                totalViews += getViews(p);
+            });
+
+            const avgInteractions = (totalLikes + totalComments) / posts.length;
+            const engagementRate = followers > 0 ? ((avgInteractions / followers) * 100).toFixed(2) : '0.0';
+
+            const avgViews = totalViews / posts.length;
+            const viralityScore = followers > 0 ? (avgViews / followers).toFixed(2) : '0.0';
+
+            // Calculate Posting Velocity (Posts per Week)
+            const timestamps = posts.map(p => new Date(p.timestamp || p.takenAt || Date.now()).getTime()).sort((a,b) => a - b);
+            const daysSpan = Math.max(1, (timestamps[timestamps.length - 1] - timestamps[0]) / (1000 * 3600 * 24));
+            const postsPerWeek = ((posts.length / daysSpan) * 7).toFixed(1);
+
+            // Grade Calculation
+            let grade = 'B';
+            if (parseFloat(engagementRate) > 3.0 && parseFloat(viralityScore) > 1.0) grade = 'A+';
+            else if (parseFloat(engagementRate) > 1.5) grade = 'A';
+            else if (parseFloat(engagementRate) < 0.8) grade = 'C';
+
+            // Sort Top 3 Posts
+            const topPosts = posts.sort((a,b) => (b.likesCount || 0) - (a.likesCount || 0)).slice(0, 3).map(p => ({
+                likes: p.likesCount || 0,
+                comments: p.commentsCount || 0,
+                views: getViews(p),
+                type: p.type || (p.videoPlayCount ? 'Reel' : 'Post'),
+                caption: p.caption || ''
+            }));
+
+            return { handle: cleanHandle, followers, engagementRate, viralityScore, postsPerWeek, grade, topPosts };
+        }
+
+        const mainAudit = await auditHandle(target);
+        let rivalAudits = [];
+
+        if (compareRivals) {
+            if (rival1) { const r1 = await auditHandle(rival1); if (r1) rivalAudits.push(r1); }
+            if (rival2) { const r2 = await auditHandle(rival2); if (r2) rivalAudits.push(r2); }
+        }
+
+        // Generate Recommendations
+        let recommendations = [];
+        if (parseFloat(mainAudit.engagementRate) < 1.5) {
+            recommendations.push(`Increase audience interaction by ending captions with direct questions and using multi-slide Carousels.`);
+        }
+        if (parseFloat(mainAudit.viralityScore) < 0.8) {
+            recommendations.push(`Reel play counts are trailing follower totals. Transition 50% of static image posts into short 7-15 second trending Reels to hit Instagram's Explore algorithm.`);
+        }
+        if (parseFloat(mainAudit.postsPerWeek) < 3.0) {
+            recommendations.push(`Posting consistency is low (${mainAudit.postsPerWeek} posts/week). Target a baseline of 4-5 weekly posts to prevent algorithmic drop-off.`);
+        }
+        if (recommendations.length === 0) {
+            recommendations.push(`Strong overall account health! Maintain current Reel frequency and scale high-performing content formats.`);
+        }
+
+        res.status(200).json({
+            success: true,
+            report: { main: mainAudit, rivals: rivalAudits, recommendations }
+        });
+
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+    
 });
 
 const PORT = process.env.PORT || 10000;
