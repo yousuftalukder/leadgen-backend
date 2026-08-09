@@ -525,3 +525,134 @@ app.post('/api/generate-ig-report', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Engine active on port ${PORT}`));
+
+// =========================================================================
+// INSTAGRAM REPORT GENERATOR ENDPOINT (USES BACKEND ACTIVE KEY BY DEFAULT)
+// =========================================================================
+
+app.post('/api/generate-ig-report', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
+
+        const { apiKey, target, compareRivals, rival1, rival2 } = req.body;
+        
+        // Use custom override key if provided, otherwise fallback to runtime active key
+        const activeToken = apiKey ? apiKey : ACTIVE_APIFY_TOKEN;
+        const client = new ApifyClient({ token: activeToken });
+
+        async function auditHandle(handle) {
+            const cleanHandle = handle.replace('@', '').trim();
+            if (!cleanHandle) return null;
+
+            const profileRun = await client.actor('apify/instagram-profile-scraper').call({ usernames: [cleanHandle] });
+            const { items: profiles } = await client.dataset(profileRun.defaultDatasetId).listItems();
+            const prof = profiles[0] || {};
+            const followers = prof.followersCount || prof.followers || 0;
+
+            const postRun = await client.actor('apify/instagram-scraper').call({
+                directUrls: [`https://www.instagram.com/${cleanHandle}/`],
+                resultsLimit: 30
+            });
+            const { items: rawPosts } = await client.dataset(postRun.defaultDatasetId).listItems();
+            const posts = extractPosts(rawPosts || []);
+
+            if (posts.length === 0) {
+                return { handle: cleanHandle, followers, engagementRate: '0.0', viralityScore: '0.0', postsPerWeek: '0.0', grade: 'C', topPosts: [] };
+            }
+
+            let totalLikes = 0, totalComments = 0, totalViews = 0;
+            posts.forEach(p => {
+                totalLikes += p.likesCount || 0;
+                totalComments += p.commentsCount || 0;
+                totalViews += getViews(p);
+            });
+
+            const avgInteractions = (totalLikes + totalComments) / posts.length;
+            const engagementRate = followers > 0 ? ((avgInteractions / followers) * 100).toFixed(2) : '0.0';
+            const avgViews = totalViews / posts.length;
+            const viralityScore = followers > 0 ? (avgViews / followers).toFixed(2) : '0.0';
+
+            const timestamps = posts.map(p => new Date(p.timestamp || p.takenAt || Date.now()).getTime()).sort((a,b) => a - b);
+            const daysSpan = Math.max(1, (timestamps[timestamps.length - 1] - timestamps[0]) / (1000 * 3600 * 24));
+            const postsPerWeek = ((posts.length / daysSpan) * 7).toFixed(1);
+
+            let grade = 'B';
+            if (parseFloat(engagementRate) > 3.0 && parseFloat(viralityScore) > 1.0) grade = 'A+';
+            else if (parseFloat(engagementRate) > 1.5) grade = 'A';
+            else if (parseFloat(engagementRate) < 0.8) grade = 'C';
+
+            const topPosts = posts.sort((a,b) => (b.likesCount || 0) - (a.likesCount || 0)).slice(0, 3).map(p => ({
+                likes: p.likesCount || 0,
+                comments: p.commentsCount || 0,
+                views: getViews(p),
+                type: p.type || (p.videoPlayCount ? 'Reel' : 'Post'),
+                caption: p.caption || ''
+            }));
+
+            return { handle: cleanHandle, followers, engagementRate, viralityScore, postsPerWeek, grade, topPosts };
+        }
+
+        const mainAudit = await auditHandle(target);
+        let rivalAudits = [];
+
+        if (compareRivals) {
+            if (rival1) { const r1 = await auditHandle(rival1); if (r1) rivalAudits.push(r1); }
+            if (rival2) { const r2 = await auditHandle(rival2); if (r2) rivalAudits.push(r2); }
+        }
+
+        let recommendations = [];
+        if (parseFloat(mainAudit.engagementRate) < 1.5) {
+            recommendations.push(`Increase audience interaction by ending captions with direct questions and using multi-slide Carousels.`);
+        }
+        if (parseFloat(mainAudit.viralityScore) < 0.8) {
+            recommendations.push(`Reel play counts are trailing follower totals. Transition 50% of static image posts into short 7-15 second trending Reels to hit Instagram's Explore algorithm.`);
+        }
+        if (parseFloat(mainAudit.postsPerWeek) < 3.0) {
+            recommendations.push(`Posting consistency is low (${mainAudit.postsPerWeek} posts/week). Target a baseline of 4-5 weekly posts to prevent algorithmic drop-off.`);
+        }
+        if (recommendations.length === 0) {
+            recommendations.push(`Strong overall account health! Maintain current Reel frequency and scale high-performing content formats.`);
+        }
+
+        const fullReportPayload = { main: mainAudit, rivals: rivalAudits, recommendations };
+
+        // Save report entry into Supabase Vault
+        await supabase.from('reports').insert([{
+            user_id: user.id,
+            platform: 'instagram',
+            target_handle: mainAudit.handle,
+            grade: mainAudit.grade,
+            engagement_rate: parseFloat(mainAudit.engagementRate),
+            report_json: fullReportPayload
+        }]);
+
+        res.status(200).json({ success: true, report: fullReportPayload });
+
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Fetch Dedicated Reports Vault History
+app.get('/api/reports-history', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.replace('Bearer ', '');
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' });
+
+        const { data: reports, error } = await supabase
+            .from('reports')
+            .select('*')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.status(200).json({ reports });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
