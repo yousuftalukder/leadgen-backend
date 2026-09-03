@@ -1236,44 +1236,83 @@ app.post('/api/generate-ig-report', async (req, res) => {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
         const { target, compareRivals, rival1, rival2, postsLimit } = req.body;
 
-        const { client } = await getWorkingClient('report', ctx.user.id);
+        const cleanTarget = String(target || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
+        if (!cleanTarget) return res.status(400).json({ success: false, error: 'Target handle required' });
+
+        const rivals = compareRivals
+            ? [...new Set([rival1, rival2]
+                .map(h => String(h || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase())
+                .filter(Boolean)
+                .filter(h => h !== cleanTarget))]
+            : [];
+
         const limit = Math.min(parseInt(postsLimit || DEFAULT_POSTS_PER_ACC, 10), MAX_POSTS_PER_ACC);
+        const accounts = rivals.length + 1;
+        const estimate = estimateCredits(accounts, limit);
 
-        const main = await auditHandle(client, ctx.user.id, target, limit);
-        if (!main) return res.status(400).json({ error: 'Invalid target handle' });
+        // NOTE: intentionally does NOT create a competitor_sets row and does NOT
+        // tag posts with a set_id. Saved, re-runnable cohorts and trend tracking
+        // stay exclusive to /api/deep-audit (Competitor Intel).
+        const job = await createJob(ctx.user.id, 'ig_report', 'report',
+            { target: cleanTarget, rivals, postsPerAccount: limit }, estimate);
 
-        const rivals = [];
-        if (compareRivals) {
-            for (const r of [rival1, rival2]) {
-                if (!r) continue;
-                const a = await auditHandle(client, ctx.user.id, r, limit);
-                if (a) rivals.push(a);
+        runJob(job.id, async (progress) => {
+            const { client } = await getWorkingClient('report', ctx.user.id);
+            const step = Math.floor(80 / accounts);
+
+            await progress(5, `Auditing target @${cleanTarget}`);
+            const main = await auditHandle(client, ctx.user.id, cleanTarget, limit);
+            if (!main) throw new Error('Target profile could not be scraped.');
+
+            const rivalAudits = [];
+            for (let i = 0; i < rivals.length; i++) {
+                await progress(5 + step * (i + 1), `Auditing rival @${rivals[i]} (${i + 1}/${rivals.length})`);
+                try {
+                    const a = await auditHandle(client, ctx.user.id, rivals[i], limit);
+                    if (a) rivalAudits.push(a);
+                } catch (e) {
+                    console.error('[rival failed]', rivals[i], e.message);
+                }
             }
-        }
 
-        const benchmark = rivals.length ? buildBenchmark(main, rivals) : null;
-        const recommendations = ruleRecommendations(main);
-        const ai = await geminiNarrative({ target: main, rivals, benchmark });
+            await progress(88, 'Building benchmark');
+            const benchmark = rivalAudits.length ? buildBenchmark(main, rivalAudits) : null;
+            const recommendations = ruleRecommendations(main);
 
-        const payload = { main, rivals, recommendations, benchmark, ai };
+            await progress(92, 'Generating AI narrative');
+            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
 
-        const { data: saved } = await supabase.from('reports').insert([{
-            user_id: ctx.user.id,
-            platform: 'instagram',
-            report_type: rivals.length ? 'compare' : 'single',
-            target_handle: main.handle,
-            competitor_handles: rivals.map(r => r.handle),
-            grade: main.grade,
-            score: main.score,
-            engagement_rate: parseFloat(main.engagementRate),
-            posts_analyzed: main.postsAnalyzed + rivals.reduce((s, r) => s + r.postsAnalyzed, 0),
-            snapshot_date: new Date().toISOString().slice(0, 10),
-            ai_summary: ai?.executive_summary || null,
-            ai_json: ai || null,
-            report_json: payload
-        }]).select('id').maybeSingle();
+            const payload = { main, rivals: rivalAudits, recommendations, benchmark, ai };
+            const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
 
-        res.status(200).json({ success: true, reportId: saved?.id || null, report: payload });
+            await progress(96, 'Saving report');
+            const { data: saved } = await supabase.from('reports').insert([{
+                user_id: ctx.user.id,
+                platform: 'instagram',
+                report_type: rivalAudits.length ? 'compare' : 'single',
+                target_handle: main.handle,
+                competitor_handles: rivalAudits.map(r => r.handle),
+                grade: main.grade,
+                score: main.score,
+                engagement_rate: parseFloat(main.engagementRate),
+                posts_analyzed: postsAnalyzed,
+                snapshot_date: new Date().toISOString().slice(0, 10),
+                credits_estimate: estimate,
+                ai_summary: ai?.executive_summary || null,
+                ai_json: ai || null,
+                report_json: payload
+            }]).select('id').maybeSingle();
+
+            return { reportId: saved?.id || null, postsAnalyzed, report: payload };
+        });
+
+        res.status(202).json({
+            success: true,
+            jobId: job.id,
+            accounts,
+            postsPerAccount: limit,
+            estimatedUsd: estimate
+        });
     } catch (err) {
         console.error('[IG Report Error]:', err.message);
         res.status(500).json({ success: false, error: err.message });
