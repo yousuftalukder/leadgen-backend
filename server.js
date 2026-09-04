@@ -42,7 +42,134 @@ const express = require('express');
 const cors = require('cors');
 const { ApifyClient } = require('apify-client');
 const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto');
 require('dotenv').config();
+
+// ===========================================================================
+// OBSERVABILITY
+// Structured JSON logs, in-process counters, a bounded error ring buffer and
+// an optional webhook for the handful of events that are actually worth
+// waking someone up for. No new dependency: everything here is node builtins.
+// ===========================================================================
+const BOOT_TS   = Date.now();
+const APP_VERSION = process.env.APP_VERSION || 'phase2';
+const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
+const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
+const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
+
+const ALERT_WEBHOOK   = (process.env.ALERT_WEBHOOK_URL || '').trim();
+const ALERT_THROTTLE_MIN = parseInt(process.env.ALERT_THROTTLE_MINUTES || '15', 10);
+const RUN_COST_ALERT_USD = parseFloat(process.env.APIFY_RUN_COST_ALERT_USD || '0.75');
+
+const METRICS = {
+    http:   { total: 0, errors: 0, slow: 0, byStatus: {} },
+    apify:  { runs: 0, failures: 0, emptyRuns: 0, usd: 0, items: 0 },
+    gemini: { calls: 0, ok: 0, failed: 0, retries: 0 },
+    jobs:   { started: 0, resumed: 0, done: 0, failed: 0, paused: 0, interrupted: 0 },
+    keys:   { invalid: 0, exhausted: 0, transient: 0, noCreditEvents: 0 }
+};
+
+const RECENT_EVENTS = [];          // last 100 warn/error lines, for /api/admin/metrics
+const _alertSent = new Map();
+
+function log(level, event, fields = {}) {
+    if ((LOG_LEVELS[level] || 20) < LOG_LEVEL) return;
+    const line = { t: new Date().toISOString(), level, event, ...fields };
+    const text = JSON.stringify(line);
+    if (level === 'error') console.error(text);
+    else if (level === 'warn') console.warn(text);
+    else console.log(text);
+    if (level === 'warn' || level === 'error') {
+        RECENT_EVENTS.push(line);
+        if (RECENT_EVENTS.length > 100) RECENT_EVENTS.shift();
+    }
+}
+const logger = {
+    debug: (e, f) => log('debug', e, f),
+    info:  (e, f) => log('info',  e, f),
+    warn:  (e, f) => log('warn',  e, f),
+    error: (e, f) => log('error', e, f)
+};
+
+/**
+ * Fire an alert at most once per throttle window per key. Slack-shaped body,
+ * which also works for Discord (/slack), Google Chat and most generic hooks.
+ */
+async function alertOnce(key, text, fields = {}) {
+    logger.warn('alert', { alert: key, text, ...fields });
+    if (!ALERT_WEBHOOK) return;
+    const now = Date.now();
+    const last = _alertSent.get(key) || 0;
+    if (now - last < ALERT_THROTTLE_MIN * 60000) return;
+    _alertSent.set(key, now);
+    try {
+        await fetch(ALERT_WEBHOOK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: `[edgelead] ${text}` +
+                      (Object.keys(fields).length ? `\n\`\`\`${JSON.stringify(fields, null, 1)}\`\`\`` : '')
+            })
+        });
+    } catch (e) { logger.error('alert_webhook_failed', { message: e.message }); }
+}
+
+process.on('unhandledRejection', (err) => {
+    logger.error('unhandled_rejection', { message: err?.message, stack: (err?.stack || '').slice(0, 800) });
+    alertOnce('unhandled_rejection', 'Unhandled promise rejection: ' + (err?.message || 'unknown'));
+});
+process.on('uncaughtException', (err) => {
+    logger.error('uncaught_exception', { message: err?.message, stack: (err?.stack || '').slice(0, 800) });
+    alertOnce('uncaught_exception', 'Uncaught exception: ' + (err?.message || 'unknown'));
+});
+
+// ===========================================================================
+// SECRETS AT REST
+// Apify tokens are other people's money. The service role key bypasses RLS, so
+// a leaked database dump used to hand over every customer's Apify account.
+// Tokens are now sealed with AES-256-GCM before they touch the database and
+// only ever opened in memory, immediately before an Apify call.
+//
+// Set APP_ENCRYPTION_KEY to a 64-char hex string (openssl rand -hex 32).
+// If it is unset the code still runs and stores plaintext, exactly as before,
+// so a missing env var degrades rather than breaks. It shouts about it at boot.
+// ===========================================================================
+const ENC_PREFIX = 'encv1:';
+
+const ENC_KEY = (() => {
+    const raw = (process.env.APP_ENCRYPTION_KEY || '').trim();
+    if (!raw) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
+    // Any other string is accepted and stretched, so a passphrase works too.
+    return crypto.createHash('sha256').update(raw).digest();
+})();
+
+function isEncrypted(v) { return typeof v === 'string' && v.startsWith(ENC_PREFIX); }
+
+function encryptSecret(plain) {
+    if (!plain || !ENC_KEY || isEncrypted(plain)) return plain;
+    const iv = crypto.randomBytes(12);
+    const c = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
+    const ct = Buffer.concat([c.update(String(plain), 'utf8'), c.final()]);
+    return ENC_PREFIX + [iv, c.getAuthTag(), ct].map(b => b.toString('base64')).join(':');
+}
+
+function decryptSecret(stored) {
+    if (!stored) return stored;
+    if (!isEncrypted(stored)) return stored;          // legacy plaintext row
+    if (!ENC_KEY) throw new Error('APP_ENCRYPTION_KEY is missing but encrypted keys exist in the database.');
+    const [, ivB, tagB, ctB] = String(stored).split(':');
+    const d = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, Buffer.from(ivB, 'base64'));
+    d.setAuthTag(Buffer.from(tagB, 'base64'));
+    return Buffer.concat([d.update(Buffer.from(ctB, 'base64')), d.final()]).toString('utf8');
+}
+
+/** Never print a whole token. */
+function maskSecret(v) {
+    const s = String(v || '');
+    if (s.length < 12) return '****';
+    return s.slice(0, 8) + '...' + s.slice(-4);
+}
 
 const app = express();
 
@@ -89,6 +216,27 @@ const bearerId = req => (req.headers.authorization || '').slice(-32) || null;
 const spendLimit = rateLimit({ windowMs: 60000, max: 6,   key: bearerId });
 const readLimit  = rateLimit({ windowMs: 60000, max: 240, key: bearerId });
 app.use('/api/', readLimit);
+
+// Request accounting. Method and path only — request bodies carry Apify tokens
+// and must never reach a log line.
+app.use((req, res, next) => {
+    const t0 = Date.now();
+    res.on('finish', () => {
+        const ms = Date.now() - t0;
+        const bucket = Math.floor(res.statusCode / 100) + 'xx';
+        METRICS.http.total += 1;
+        METRICS.http.byStatus[bucket] = (METRICS.http.byStatus[bucket] || 0) + 1;
+        if (res.statusCode >= 500) {
+            METRICS.http.errors += 1;
+            logger.error('http_error', { method: req.method, path: req.path, status: res.statusCode, ms });
+            alertOnce('http_5xx:' + req.path, `5xx on ${req.method} ${req.path}`, { status: res.statusCode });
+        } else if (ms > SLOW_REQUEST_MS) {
+            METRICS.http.slow += 1;
+            logger.warn('slow_request', { method: req.method, path: req.path, status: res.statusCode, ms });
+        }
+    });
+    next();
+});
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -250,8 +398,41 @@ async function getEnginePrimary(engine) {
     try {
         const { data } = await supabase.from('system_settings')
             .select('value').eq('key', primaryKeyName(engine)).maybeSingle();
-        return data?.value || null;
-    } catch { return null; }
+        if (!data?.value) return null;
+        return decryptSecret(data.value);
+    } catch (e) {
+        logger.error('engine_primary_read_failed', { engine, message: e.message });
+        return null;
+    }
+}
+
+async function setEnginePrimary(engine, token) {
+    const { error } = await supabase.from('system_settings').upsert({
+        key: primaryKeyName(engine),
+        value: encryptSecret(token),
+        updated_at: new Date().toISOString()
+    }, { onConflict: 'key' });
+    if (error) throw error;
+}
+
+/**
+ * A user marked byo_key_only never falls back to the engine primary or the
+ * shared pool. Their runs spend their own credit or they do not run at all.
+ * Cached briefly because this is on the hot path of every key resolution.
+ */
+const _byoCache = new Map();
+async function isByoOnly(userId) {
+    if (!userId) return false;
+    const hit = _byoCache.get(userId);
+    if (hit && Date.now() - hit.t < 60000) return hit.v;
+    let v = false;
+    try {
+        const { data } = await supabase.from('app_users')
+            .select('byo_key_only').eq('id', userId).maybeSingle();
+        v = !!data?.byo_key_only;
+    } catch { v = false; }
+    _byoCache.set(userId, { v, t: Date.now() });
+    return v;
 }
 
 /** Ordered list of candidate tokens to try for this engine + user. */
@@ -265,7 +446,14 @@ async function buildTokenCandidates(engine, userId) {
         out.push({ token, source, id: id || null });
     };
 
-    // 1. The user's own keys (they bring their own credits once granted access)
+    const open = (row, source) => {
+        try { push(decryptSecret(row.token), source, row.id); }
+        catch (e) { logger.error('key_decrypt_failed', { keyId: row.id, message: e.message }); }
+    };
+
+    // 1. The user's own keys. Scoped by owner_user_id, so a personal key is
+    //    only ever tried for the person who added it — it is never lent to
+    //    another account and never enters the shared pool.
     if (userId) {
         const { data: mine } = await supabase.from('apify_keys')
             .select('id, token, engine, status, last_used_at')
@@ -273,25 +461,101 @@ async function buildTokenCandidates(engine, userId) {
             .eq('status', 'active')
             .in('engine', [engine, 'any'])
             .order('last_used_at', { ascending: true, nullsFirst: true });
-        (mine || []).forEach(k => push(k.token, 'user_pool', k.id));
+        (mine || []).forEach(k => open(k, 'user_pool'));
+    }
+
+    // Bring-your-own-key accounts stop here. No shared credit, ever.
+    if (await isByoOnly(userId)) {
+        if (!out.length) logger.warn('byo_no_key', { userId, engine });
+        return out;
     }
 
     // 2. The engine primary key — always present, never deleted
     push(await getEnginePrimary(engine), 'engine_primary');
 
-    // 3. Global rotation pool
+    // 3. Global rotation pool (admin-owned keys only: owner_user_id is null)
     const { data: pool } = await supabase.from('apify_keys')
         .select('id, token, engine, status, last_used_at')
         .is('owner_user_id', null)
         .eq('status', 'active')
         .in('engine', [engine, 'any'])
         .order('last_used_at', { ascending: true, nullsFirst: true });
-    (pool || []).forEach(k => push(k.token, 'global_pool', k.id));
+    (pool || []).forEach(k => open(k, 'global_pool'));
 
     // 4. Env fallback
     push(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN, 'env');
 
     return out;
+}
+
+// --- Writing a key -----------------------------------------------------------
+// token_hash is the identity of a key now. The old unique index sat on the raw
+// token with onConflict:'token', which meant anyone who pasted a token already
+// in the table silently rewrote that row — including its owner. Same token, new
+// owner, no error. Ownership is checked explicitly here instead.
+class KeyConflictError extends Error {
+    constructor(message) { super(message); this.name = 'KeyConflictError'; this.code = 'KEY_CONFLICT'; }
+}
+
+async function findKeyRowByToken(token) {
+    const { data } = await supabase.from('apify_keys')
+        .select('*').eq('token_hash', tokenHash(token)).maybeSingle();
+    return data || null;
+}
+
+/**
+ * Insert or update one key row. Refuses to touch a row owned by somebody else
+ * unless the caller is an admin.
+ */
+async function saveKeyRow(token, {
+    ownerUserId = null, engine = 'any', label = null, apifyUsername = null,
+    status = 'active', requester = null
+} = {}) {
+    const existing = await findKeyRowByToken(token);
+
+    const patch = {
+        owner_user_id:   ownerUserId,
+        engine, label,
+        apify_username:  apifyUsername,
+        token:           encryptSecret(token),
+        token_hash:      tokenHash(token),
+        status,
+        fail_count:      0,
+        last_checked_at: new Date().toISOString()
+    };
+
+    if (!existing) {
+        const { data, error } = await supabase.from('apify_keys')
+            .insert([patch]).select('id, engine, label, apify_username, status').single();
+        if (error) throw error;
+        logger.info('key_added', { keyId: data.id, engine, owner: ownerUserId || 'global' });
+        return data;
+    }
+
+    const isAdmin = requester?.role === 'admin';
+    const isMine  = existing.owner_user_id && requester?.id && existing.owner_user_id === requester.id;
+
+    if (!isAdmin && !isMine) {
+        logger.warn('key_claim_refused', {
+            keyId: existing.id, by: requester?.id || null,
+            existingOwner: existing.owner_user_id || 'global'
+        });
+        throw new KeyConflictError(
+            existing.owner_user_id
+                ? 'That Apify key is already registered to another account on this system.'
+                : 'That Apify key is already in the shared pool. Ask an administrator.'
+        );
+    }
+
+    // A non-admin re-saving their own key must not be able to move it.
+    if (!isAdmin) patch.owner_user_id = existing.owner_user_id;
+
+    const { data, error } = await supabase.from('apify_keys')
+        .update(patch).eq('id', existing.id)
+        .select('id, engine, label, apify_username, status').single();
+    if (error) throw error;
+    logger.info('key_updated', { keyId: existing.id, engine });
+    return data;
 }
 
 async function markKey(id, patch) {
@@ -419,9 +683,28 @@ async function getWorkingClient(engine, userId, opts = {}) {
             } else {
                 await markKey(c.id, { last_checked_at: new Date().toISOString() });
             }
-            console.error(`[key ${c.source} -> ${kind}]`, err.message);
+            METRICS.keys[kind] = (METRICS.keys[kind] || 0) + 1;
+            logger.warn('key_failed', { source: c.source, keyId: c.id, kind, message: err.message });
+            if (kind === 'invalid') {
+                alertOnce('key_invalid:' + (c.id || c.source),
+                    `Apify key rejected as invalid (${c.source}). It will stay disabled until someone rechecks it.`,
+                    { engine, source: c.source });
+            }
         }
     }
+
+    METRICS.keys.noCreditEvents += 1;
+    const byoOnly = await isByoOnly(userId);
+    if (byoOnly && !candidates.length) {
+        throw new NoCreditError(
+            'This account is set to use its own Apify key only, and no working key is saved. ' +
+            'Use "Update key" in the header to add one.'
+        );
+    }
+    alertOnce('no_credit:' + engine,
+        `No Apify key can cover a ${engine} run`,
+        { engine, skipped: skipped.length, lastError: lastErr?.message || null });
+    logger.error('no_credit', { engine, userId, skipped, lastError: lastErr?.message || null });
 
     const detail = skipped.length
         ? ` ${skipped.length} key(s) are out of credit for this cycle.`
@@ -581,10 +864,19 @@ async function callActor(client, actorId, input, opts = {}) {
     if (opts.waitSecs) runOpts.waitSecs = opts.waitSecs;
     if (opts.maxItems) runOpts.maxItems = opts.maxItems;
 
+    const t0 = Date.now();
     let run;
     try {
         run = await client.actor(actorId).call(payload, runOpts);
     } catch (err) {
+        if (!/expected property|did not match|validation/i.test(err.message || '')) {
+            METRICS.apify.failures += 1;
+            logger.error('actor_failed', {
+                actorId, jobId: opts.jobId || null,
+                key: client?.__el?.apifyUsername || null,
+                ms: Date.now() - t0, message: err.message
+            });
+        }
         // Older apify-client builds validate run options strictly. If the
         // options are what it rejected, fall back to a bare call rather than
         // failing the whole job.
@@ -601,8 +893,47 @@ async function callActor(client, actorId, input, opts = {}) {
     const rows = items || [];
 
     const usd = await recordUsage(client, { actorId, run, items: rows.length, jobId: opts.jobId });
-    console.log(`[Apify] ${actorId} :: ${rows.length} items :: $${usd.toFixed(4)} :: ` +
-                `${client?.__el?.apifyUsername || 'unknown'}`);
+
+    METRICS.apify.runs  += 1;
+    METRICS.apify.usd   += usd;
+    METRICS.apify.items += rows.length;
+
+    logger.info('actor_run', {
+        actorId,
+        items: rows.length,
+        usd: +usd.toFixed(4),
+        estimateUsd: estimate ? +estimate.toFixed(4) : 0,
+        ms: Date.now() - t0,
+        runId: run?.id || null,
+        jobId: opts.jobId || null,
+        key: client?.__el?.apifyUsername || 'unknown',
+        remaining: +Math.max(0, clientRemaining(client)).toFixed(4)
+    });
+
+    // A single run costing more than the alert threshold is either a runaway
+    // actor or a wrong cost constant. Both are worth knowing about the same day
+    // rather than at the end of the month.
+    if (usd > RUN_COST_ALERT_USD) {
+        alertOnce('expensive_run:' + actorId,
+            `One Apify run cost $${usd.toFixed(2)} (threshold $${RUN_COST_ALERT_USD.toFixed(2)})`,
+            { actorId, items: rows.length, runId: run?.id || null, key: client?.__el?.apifyUsername });
+    }
+    // Paying for zero rows is the signature of an actor whose input shape or
+    // name changed under us. It used to be completely silent.
+    if (rows.length === 0) {
+        METRICS.apify.emptyRuns += 1;
+        alertOnce('empty_run:' + actorId,
+            `Apify actor ${actorId} returned 0 items but charged $${usd.toFixed(4)}. Check the actor id and input shape.`,
+            { actorId, runId: run?.id || null });
+    }
+    // Estimates drive every budget decision. If reality drifts far from the
+    // estimate the constants in env are wrong, not the code.
+    if (estimate > 0 && usd > estimate * 2 && usd > 0.05) {
+        logger.warn('cost_estimate_drift', { actorId, estimateUsd: +estimate.toFixed(4), actualUsd: +usd.toFixed(4) });
+        alertOnce('estimate_drift:' + actorId,
+            `Apify run cost $${usd.toFixed(3)} against an estimate of $${estimate.toFixed(3)}. The COST_PER_1K_* constants need correcting.`,
+            { actorId });
+    }
 
     return { run, items: rows, usd };
 }
@@ -927,6 +1258,7 @@ function ruleRecommendations(a) {
  */
 async function geminiCall(prompt, { temperature = 0.5, maxOutputTokens = 4096, tag = 'gemini', retries = 3 } = {}) {
     if (!GEMINI_API_KEY) return null;
+    METRICS.gemini.calls += 1;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
     const body = JSON.stringify({
@@ -944,21 +1276,29 @@ async function geminiCall(prompt, { temperature = 0.5, maxOutputTokens = 4096, t
 
             if (r.status === 429 || r.status >= 500) {
                 const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
-                console.warn(`[${tag}] ${r.status}, retrying in ${waitMs}ms (${attempt + 1}/${retries})`);
+                METRICS.gemini.retries += 1;
+                logger.warn('gemini_retry', { tag, status: r.status, attempt: attempt + 1, waitMs });
                 await new Promise(res => setTimeout(res, waitMs));
                 continue;
             }
 
-            if (!r.ok) { console.error(`[${tag}]`, r.status, (await r.text()).slice(0, 400)); return null; }
+            if (!r.ok) {
+                METRICS.gemini.failed += 1;
+                logger.error('gemini_failed', { tag, status: r.status, body: (await r.text()).slice(0, 300) });
+                alertOnce('gemini_failed', `Gemini returned ${r.status}. Reports will ship without their narrative layer.`, { tag });
+                return null;
+            }
 
             const data = await r.json();
             const text = data?.candidates?.[0]?.content?.parts?.map(x => x.text).join('') || '';
-            if (!text) return null;
-            return JSON.parse(text.replace(/```json|```/g, '').trim());
+            if (!text) { METRICS.gemini.failed += 1; return null; }
+            const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+            METRICS.gemini.ok += 1;
+            return parsed;
         } catch (err) {
             const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
-            console.error(`[${tag} error]`, err.message);
-            if (attempt === retries - 1) return null;
+            logger.error('gemini_error', { tag, attempt: attempt + 1, message: err.message });
+            if (attempt === retries - 1) { METRICS.gemini.failed += 1; return null; }
             await new Promise(res => setTimeout(res, waitMs));
         }
     }
@@ -1090,6 +1430,11 @@ function runJob(jobId, worker, opts = {}) {
                 }
             };
 
+            const jobT0 = Date.now();
+            if (opts.resume) METRICS.jobs.resumed += 1; else METRICS.jobs.started += 1;
+            logger.info(opts.resume ? 'job_resumed' : 'job_started',
+                { jobId, completedUnits: units.length });
+
             await updateJob(jobId,
                 { status: 'running', progress: opts.resume ? undefined : 1, error: null },
                 opts.resume ? `Resuming, ${units.length} unit(s) already complete` : 'Job started');
@@ -1099,6 +1444,9 @@ function runJob(jobId, worker, opts = {}) {
                 ck
             );
 
+            METRICS.jobs.done += 1;
+            logger.info('job_done', { jobId, ms: Date.now() - jobT0, units: units.length });
+
             await updateJob(jobId, {
                 status: 'done', progress: 100,
                 result, result_report_id: result?.reportId || null,
@@ -1106,14 +1454,18 @@ function runJob(jobId, worker, opts = {}) {
             }, 'Job complete');
         } catch (err) {
             if (err && err.code === 'NO_CREDIT') {
-                console.warn('[Job paused: no credit]', jobId, err.message);
+                METRICS.jobs.paused += 1;
+                logger.warn('job_paused_no_credit', { jobId, message: err.message });
                 await updateJob(jobId, {
                     status: 'paused_no_credit',
                     error: err.message
                 }, 'Paused: ' + err.message);
                 return;
             }
-            console.error('[Job failed]', jobId, err.message);
+            METRICS.jobs.failed += 1;
+            logger.error('job_failed', { jobId, message: err.message, stack: (err.stack || '').slice(0, 600) });
+            alertOnce('job_failed:' + (err.message || '').slice(0, 40),
+                `A job failed: ${err.message}`, { jobId });
             await updateJob(jobId, {
                 status: 'failed', error: err.message,
                 finished_at: new Date().toISOString()
@@ -1152,8 +1504,12 @@ async function sweepStaleJobs() {
                           : 'Nothing was charged. Resume to start again.')
             }, 'Interrupted by a server restart');
         }
-        if (data?.length) console.log(`[sweepStaleJobs] parked ${data.length} orphaned job(s)`);
-    } catch (e) { console.error('[sweepStaleJobs]', e.message); }
+        if (data?.length) {
+            METRICS.jobs.interrupted += data.length;
+            logger.warn('jobs_interrupted', { count: data.length, ids: data.map(j => j.id) });
+            alertOnce('jobs_interrupted', `${data.length} job(s) were orphaned by a restart and parked as resumable.`);
+        }
+    } catch (e) { logger.error('sweep_failed', { message: e.message }); }
 }
 
 function estimateCredits(accounts, postsPerAccount) {
@@ -1671,7 +2027,94 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             };
         });
 
-app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({
+    ok: true,
+    ts: new Date().toISOString(),
+    version: APP_VERSION,
+    uptimeSecs: Math.round((Date.now() - BOOT_TS) / 1000),
+    encryptionAtRest: !!ENC_KEY,
+    budgetMode: BUDGET_MODE
+}));
+
+/**
+ * Everything you need to answer "is it quietly burning money or quietly
+ * broken". Admin only: it exposes spend and key health.
+ */
+app.get('/api/admin/metrics', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+        const month = String(req.query.month || cycleMonth());
+
+        const [{ data: jobRows }, { data: usageRows }, { data: keyRows }] = await Promise.all([
+            supabase.from('jobs').select('status').limit(2000),
+            supabase.from('apify_usage_events')
+                .select('engine, usage_usd, apify_username, items, actor_id')
+                .eq('cycle_month', month).limit(5000),
+            supabase.from('apify_keys').select('status, engine, owner_user_id, apify_username')
+        ]);
+
+        const jobsByStatus = {};
+        (jobRows || []).forEach(j => { jobsByStatus[j.status] = (jobsByStatus[j.status] || 0) + 1; });
+
+        const spendByEngine = {}, spendByKey = {}, runsByActor = {};
+        let totalSpend = 0, totalItems = 0;
+        (usageRows || []).forEach(u => {
+            const usd = Number(u.usage_usd || 0);
+            totalSpend += usd;
+            totalItems += Number(u.items || 0);
+            spendByEngine[u.engine || 'unknown'] = +((spendByEngine[u.engine || 'unknown'] || 0) + usd).toFixed(4);
+            spendByKey[u.apify_username || 'unknown'] = +((spendByKey[u.apify_username || 'unknown'] || 0) + usd).toFixed(4);
+            const a = runsByActor[u.actor_id || 'unknown'] || { runs: 0, usd: 0, items: 0 };
+            a.runs += 1; a.usd = +(a.usd + usd).toFixed(4); a.items += Number(u.items || 0);
+            runsByActor[u.actor_id || 'unknown'] = a;
+        });
+
+        const keysByStatus = {};
+        (keyRows || []).forEach(k => { keysByStatus[k.status] = (keysByStatus[k.status] || 0) + 1; });
+
+        // Real cost per 1k rows this cycle. This is the number the estimate
+        // constants in env are supposed to approximate — compare them.
+        const actualPer1k = totalItems ? +((totalSpend / totalItems) * 1000).toFixed(3) : null;
+
+        res.json({
+            ts: new Date().toISOString(),
+            version: APP_VERSION,
+            uptimeSecs: Math.round((Date.now() - BOOT_TS) / 1000),
+            cycle: month,
+            config: {
+                budgetMode: BUDGET_MODE,
+                creditPerKeyUsd: APIFY_CYCLE_CREDIT,
+                encryptionAtRest: !!ENC_KEY,
+                alertWebhook: !!ALERT_WEBHOOK,
+                geminiModel: GEMINI_MODEL,
+                memoryMb: APIFY_MEMORY_MB,
+                timeoutSecs: APIFY_TIMEOUT_SECS,
+                estimateConstants: {
+                    COST_PER_1K_POSTS,
+                    COST_PER_1K_PROFILE,
+                    COST_PER_1K_FB_POSTS
+                }
+            },
+            counters: {
+                ...METRICS,
+                apify: { ...METRICS.apify, usd: +METRICS.apify.usd.toFixed(4) }
+            },
+            spend: {
+                totalUsd: +totalSpend.toFixed(4),
+                totalItems,
+                actualCostPer1kItems: actualPer1k,
+                byEngine: spendByEngine,
+                byKey: spendByKey,
+                byActor: runsByActor
+            },
+            jobs: jobsByStatus,
+            keys: { byStatus: keysByStatus, total: (keyRows || []).length },
+            recentEvents: RECENT_EVENTS.slice(-40)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.get('/api/me', async (req, res) => {
     const ctx = await auth(req, res); if (!ctx) return;
@@ -1708,6 +2151,8 @@ app.post('/api/update-apify-key', async (req, res) => {
 
         const apifyUser = await new ApifyClient({ token: newApiKey }).user().get();
 
+        const requester = { id: ctx.user.id, role: ctx.profile.role };
+
         if (ctx.profile.role === 'admin') {
             // Demote the outgoing primary into the global pool instead of
             // discarding it. Apify credit renews monthly, so a key that is dry
@@ -1716,37 +2161,29 @@ app.post('/api/update-apify-key', async (req, res) => {
             const previous = await getEnginePrimary(activeEngine);
             if (previous && previous !== newApiKey) {
                 try {
-                    await supabase.from('apify_keys').upsert({
-                        owner_user_id: null,
+                    await saveKeyRow(previous, {
+                        ownerUserId: null,
                         engine: activeEngine,
-                        token: previous,
                         label: `demoted primary (${activeEngine})`,
                         status: 'exhausted',
-                        fail_count: 0,
-                        last_checked_at: new Date().toISOString()
-                    }, { onConflict: 'token' });
-                } catch (e) { console.error('[demote primary]', e.message); }
+                        requester
+                    });
+                } catch (e) { logger.warn('demote_primary_failed', { message: e.message }); }
             }
 
-            const { error: dbErr } = await supabase.from('system_settings').upsert({
-                key: primaryKeyName(activeEngine),
-                value: newApiKey,
-                updated_at: new Date().toISOString()
-            }, { onConflict: 'key' });
-            if (dbErr) throw dbErr;
+            await setEnginePrimary(activeEngine, newApiKey);
         } else {
-            // Non-admins set their own personal key for that engine
-            await supabase.from('apify_keys').upsert({
-                owner_user_id: ctx.user.id,
+            // Non-admins set their own personal key for that engine. saveKeyRow
+            // refuses if that token is already registered to somebody else.
+            await saveKeyRow(newApiKey, {
+                ownerUserId: ctx.user.id,
                 engine: activeEngine,
-                token: newApiKey,
                 label: 'personal',
-                apify_username: apifyUser.username,
-                status: 'active',
-                fail_count: 0,
-                last_checked_at: new Date().toISOString()
-            }, { onConflict: 'token' });
+                apifyUsername: apifyUser.username,
+                requester
+            });
         }
+        _byoCache.delete(ctx.user.id);
 
         res.status(200).json({
             success: true,
@@ -1756,6 +2193,7 @@ app.post('/api/update-apify-key', async (req, res) => {
             scope: ctx.profile.role === 'admin' ? 'engine_primary' : 'personal'
         });
     } catch (err) {
+        if (err.code === 'KEY_CONFLICT') return res.status(409).json({ error: err.message });
         res.status(400).json({ error: 'Key verification failed: ' + err.message });
     }
 });
@@ -1779,7 +2217,7 @@ app.get('/api/apify-keys', async (req, res) => {
         const primaries = {};
         for (const e of ENGINES) {
             const v = await getEnginePrimary(e);
-            primaries[e] = v ? { configured: true, masked: v.slice(0, 10) + '...' } : { configured: false };
+            primaries[e] = v ? { configured: true, masked: maskSecret(v) } : { configured: false };
         }
 
         res.json({ keys: data, primaries });
@@ -1796,20 +2234,19 @@ app.post('/api/apify-keys', async (req, res) => {
         const apifyUser = await new ApifyClient({ token }).user().get();
         const owner = (isGlobal && ctx.profile.role === 'admin') ? null : ctx.user.id;
 
-        const { data, error } = await supabase.from('apify_keys').upsert({
-            owner_user_id: owner,
+        const data = await saveKeyRow(token, {
+            ownerUserId: owner,
             engine: eng,
             label: label || apifyUser.username,
-            token,
-            apify_username: apifyUser.username,
-            status: 'active',
-            fail_count: 0,
-            last_checked_at: new Date().toISOString()
-        }, { onConflict: 'token' }).select('id, engine, label, apify_username, status').single();
+            apifyUsername: apifyUser.username,
+            requester: { id: ctx.user.id, role: ctx.profile.role }
+        });
 
-        if (error) throw error;
         res.json({ success: true, key: data });
-    } catch (err) { res.status(400).json({ error: 'Key rejected: ' + err.message }); }
+    } catch (err) {
+        if (err.code === 'KEY_CONFLICT') return res.status(409).json({ error: err.message });
+        res.status(400).json({ error: 'Key rejected: ' + err.message });
+    }
 });
 
 app.post('/api/apify-keys/:id/recheck', async (req, res) => {
@@ -1821,7 +2258,7 @@ app.post('/api/apify-keys/:id/recheck', async (req, res) => {
         if (!key) return res.status(404).json({ error: 'Key not found' });
 
         try {
-            const u = await new ApifyClient({ token: key.token }).user().get();
+            const u = await new ApifyClient({ token: decryptSecret(key.token) }).user().get();
             await markKey(key.id, { status: 'active', fail_count: 0, apify_username: u.username, last_checked_at: new Date().toISOString() });
             res.json({ success: true, status: 'active', username: u.username });
         } catch (e) {
@@ -1863,7 +2300,7 @@ app.get('/api/admin/users', async (req, res) => {
 app.post('/api/admin/users', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
-        const { email, password, fullName, role, engines } = req.body;
+        const { email, password, fullName, role, engines, byoKeyOnly } = req.body;
         if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
         const { data: created, error: createErr } = await supabase.auth.admin.createUser({
@@ -1877,7 +2314,8 @@ app.post('/api/admin/users', async (req, res) => {
             email: email.toLowerCase(),
             full_name: fullName || null,
             role: role === 'admin' ? 'admin' : 'user',
-            is_active: true
+            is_active: true,
+            byo_key_only: byoKeyOnly === true
         });
 
         for (const e of (engines || []).filter(x => ENGINES.includes(x))) {
@@ -1892,12 +2330,13 @@ app.post('/api/admin/users', async (req, res) => {
 app.patch('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
-        const { role, isActive, engines, password } = req.body;
+        const { role, isActive, engines, password, byoKeyOnly } = req.body;
         const target = req.params.id;
 
         const patch = { updated_at: new Date().toISOString() };
         if (role) patch.role = role === 'admin' ? 'admin' : 'user';
         if (typeof isActive === 'boolean') patch.is_active = isActive;
+        if (typeof byoKeyOnly === 'boolean') { patch.byo_key_only = byoKeyOnly; _byoCache.delete(target); }
         await supabase.from('app_users').update(patch).eq('id', target);
 
         if (password) await supabase.auth.admin.updateUserById(target, { password });
@@ -2535,7 +2974,7 @@ app.get('/api/posts', async (req, res) => {
 // ===========================================================================
 // ===========================================================================
 
-const crypto = require('crypto');
+// (crypto is required once at the top of the file)
 
 // ---------------------------------------------------------------------------
 // IDENTITY HANDLING
@@ -5504,17 +5943,121 @@ app.get('/api/fb/page-posts', async (req, res) => {
 });
 
 // ===========================================================================
+// BOOT
+// ===========================================================================
+
+/**
+ * One-pass migration. Any token still sitting in the database as plaintext is
+ * sealed, and token_hash is filled in for rows created before it existed.
+ * Idempotent, so it is safe on every boot and a no-op once everything is done.
+ */
+async function migrateSecretsAtRest() {
+    if (!ENC_KEY) {
+        logger.warn('encryption_disabled', {
+            note: 'APP_ENCRYPTION_KEY is not set. Apify tokens are stored in plaintext. ' +
+                  'Generate one with: openssl rand -hex 32'
+        });
+        return { encrypted: 0, hashed: 0, skipped: true };
+    }
+
+    let encrypted = 0, hashed = 0;
+
+    try {
+        const { data: rows } = await supabase.from('apify_keys').select('id, token, token_hash');
+        for (const row of rows || []) {
+            const patch = {};
+            let plain = null;
+            try { plain = decryptSecret(row.token); }
+            catch (e) { logger.error('migrate_decrypt_failed', { keyId: row.id, message: e.message }); continue; }
+
+            if (!isEncrypted(row.token)) { patch.token = encryptSecret(plain); encrypted += 1; }
+            if (!row.token_hash)         { patch.token_hash = tokenHash(plain); hashed += 1; }
+            if (Object.keys(patch).length) await supabase.from('apify_keys').update(patch).eq('id', row.id);
+        }
+    } catch (e) {
+        logger.error('migrate_keys_failed', { message: e.message });
+    }
+
+    try {
+        for (const engine of ENGINES) {
+            const name = primaryKeyName(engine);
+            const { data } = await supabase.from('system_settings')
+                .select('value').eq('key', name).maybeSingle();
+            if (data?.value && !isEncrypted(data.value)) {
+                await supabase.from('system_settings').upsert({
+                    key: name, value: encryptSecret(data.value), updated_at: new Date().toISOString()
+                }, { onConflict: 'key' });
+                encrypted += 1;
+            }
+        }
+    } catch (e) {
+        logger.error('migrate_primaries_failed', { message: e.message });
+    }
+
+    if (encrypted || hashed) logger.info('secrets_migrated', { encrypted, hashed });
+    return { encrypted, hashed, skipped: false };
+}
+
+/** A boot-time sanity check. Anything printed here is a deployment mistake. */
+function preflight() {
+    const problems = [];
+    if (!process.env.SUPABASE_URL) problems.push('SUPABASE_URL is not set');
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY is not set');
+    if (!ENC_KEY) problems.push('APP_ENCRYPTION_KEY is not set — Apify tokens will be stored in plaintext');
+    if (!GEMINI_API_KEY) problems.push('GEMINI_API_KEY is not set — reports will ship without their narrative layer');
+    if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
+    if (!ALERT_WEBHOOK) problems.push('ALERT_WEBHOOK_URL is not set — failures will only appear in the logs');
+    if (FB_DEFAULT_POSTS > 60) problems.push(`FB_DEFAULT_POSTS_PER_GROUP=${FB_DEFAULT_POSTS} is expensive on a $${APIFY_CYCLE_CREDIT} cycle budget`);
+    problems.forEach(p => logger.warn('preflight', { problem: p }));
+    return problems;
+}
+
 const PORT = process.env.PORT || 10000;
 
-app.listen(PORT, async () => {
-    console.log(`Edgelead master engine active on port ${PORT}`);
-    console.log(`[config] budget=${BUDGET_MODE} credit=$${APIFY_CYCLE_CREDIT}/key/cycle ` +
-                `memory=${APIFY_MEMORY_MB}MB timeout=${APIFY_TIMEOUT_SECS}s ` +
-                `proxy=${APIFY_PROXY_GROUP || 'actor default'} model=${GEMINI_MODEL}`);
+async function start() {
+    preflight();
 
-    // Jobs run in-process. Render's free tier sleeps on idle and restarts on
-    // every deploy, so anything still marked running at boot is orphaned.
-    await sweepStaleJobs();
-    setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
-    setInterval(reviveStaleKeys, 3600000).unref?.();
-});
+    const server = app.listen(PORT, async () => {
+        logger.info('boot', {
+            port: PORT,
+            version: APP_VERSION,
+            budgetMode: BUDGET_MODE,
+            creditPerKeyUsd: APIFY_CYCLE_CREDIT,
+            memoryMb: APIFY_MEMORY_MB,
+            timeoutSecs: APIFY_TIMEOUT_SECS,
+            proxy: APIFY_PROXY_GROUP || 'actor default',
+            geminiModel: GEMINI_MODEL,
+            encryptionAtRest: !!ENC_KEY,
+            alerts: !!ALERT_WEBHOOK
+        });
+
+        await migrateSecretsAtRest();
+
+        // Jobs run in-process. Render's free tier sleeps on idle and restarts on
+        // every deploy, so anything still marked running at boot is orphaned.
+        await sweepStaleJobs();
+        setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
+        setInterval(reviveStaleKeys, 3600000).unref?.();
+    });
+
+    return server;
+}
+
+if (require.main === module) start();
+
+// Exported so the test suite can exercise the pure logic without booting a
+// server or touching Supabase. Nothing here changes runtime behaviour.
+module.exports = {
+    app, start,
+    // secrets
+    encryptSecret, decryptSecret, isEncrypted, maskSecret, tokenHash,
+    // budget + keys
+    classifyKeyError, cycleMonth, clientRemaining, estimateCredits, fbEstimateCredits,
+    // analysis helpers
+    median, computeRoomValue, bucketCaption, lengthBand, openingPattern, topicTags,
+    categorize, urgencyOf, classifyIntent, mineDemand, parseGroupRef, parsePageRef,
+    parseRules, localParts, domainOf, fbReactions, fbMediaType, normaliseReactionBreakdown,
+    computePageScore, profileCompleteness, timeHeatmap, leaderboard,
+    // observability
+    METRICS, RECENT_EVENTS, logger, preflight, migrateSecretsAtRest
+};
