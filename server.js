@@ -52,6 +52,44 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || '*')
 app.use(cors({ origin: ALLOWED.includes('*') ? '*' : ALLOWED }));
 app.use(express.json({ limit: '2mb' }));
 
+// ---------------------------------------------------------------------------
+// RATE LIMITING  (in-memory, no extra dependency)
+// Per-IP for unauthenticated surface, per-user for job starts. A single user
+// should never be able to drain the shared key pool by hammering an endpoint.
+// ---------------------------------------------------------------------------
+const _buckets = new Map();
+
+function rateLimit({ windowMs = 60000, max = 60, key = null } = {}) {
+    return (req, res, next) => {
+        const id = (key ? key(req) : null) || req.ip || 'anon';
+        const now = Date.now();
+        let b = _buckets.get(id);
+        if (!b || now > b.reset) { b = { count: 0, reset: now + windowMs }; _buckets.set(id, b); }
+        b.count += 1;
+        if (b.count > max) {
+            res.set('Retry-After', String(Math.ceil((b.reset - now) / 1000)));
+            return res.status(429).json({
+                error: 'Too many requests. Wait a moment and try again.',
+                retryAfterSecs: Math.ceil((b.reset - now) / 1000)
+            });
+        }
+        next();
+    };
+}
+
+// Keep the map from growing without bound on a long-lived process.
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _buckets) if (now > v.reset) _buckets.delete(k);
+}, 300000).unref?.();
+
+const bearerId = req => (req.headers.authorization || '').slice(-32) || null;
+
+// Anything that spends money is gated harder than plain reads.
+const spendLimit = rateLimit({ windowMs: 60000, max: 6,   key: bearerId });
+const readLimit  = rateLimit({ windowMs: 60000, max: 240, key: bearerId });
+app.use('/api/', readLimit);
+
 const supabase = createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -63,7 +101,7 @@ const supabase = createClient(
 // ---------------------------------------------------------------------------
 const MASTER_ADMIN_EMAIL     = (process.env.MASTER_ADMIN_EMAIL || '').toLowerCase().trim();
 const GEMINI_API_KEY         = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL           = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL           = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_COMPETITORS        = parseInt(process.env.MAX_COMPETITORS || '10', 10);
 const DEFAULT_POSTS_PER_ACC  = parseInt(process.env.DEFAULT_POSTS_PER_ACCOUNT || '30', 10);
 const MAX_POSTS_PER_ACC      = parseInt(process.env.MAX_POSTS_PER_ACCOUNT || '100', 10);
@@ -87,6 +125,30 @@ const FB_SHARE_WEIGHT      = parseFloat(process.env.FB_SHARE_WEIGHT   || '4');
 // Rough Apify pricing used for the pre-run estimate only.
 const COST_PER_1K_POSTS   = parseFloat(process.env.COST_PER_1K_POSTS   || '2.30');
 const COST_PER_1K_PROFILE = parseFloat(process.env.COST_PER_1K_PROFILE || '2.30');
+
+// --- Apify run shaping ------------------------------------------------------
+// Compute units are billed as RAM(GB) x hours, so memory is a direct cost lever.
+// Leaving this unset used to inherit the actor default, which is often 4-8 GB.
+const APIFY_MEMORY_MB    = parseInt(process.env.APIFY_MEMORY_MBYTES   || '2048', 10);
+const APIFY_TIMEOUT_SECS = parseInt(process.env.APIFY_RUN_TIMEOUT_SECS || '900', 10);
+// '' keeps the actor's own proxy default. Set to DATACENTER to avoid paying
+// residential proxy rates ($8/GB on the free plan) where the target allows it.
+const APIFY_PROXY_GROUP  = (process.env.APIFY_PROXY_GROUP || '').trim().toUpperCase();
+
+// --- Budget ledger ----------------------------------------------------------
+const APIFY_CYCLE_CREDIT = parseFloat(process.env.APIFY_MONTHLY_CREDIT_USD || '5');
+// 'off'   - track only
+// 'warn'  - track, expose remaining, never block
+// 'block' - refuse to start a unit the current key cannot afford (recommended)
+const BUDGET_MODE        = (process.env.BUDGET_MODE || 'block').toLowerCase();
+const BUDGET_RESERVE     = parseFloat(process.env.BUDGET_RESERVE_USD || '0.05');
+
+// --- Job engine -------------------------------------------------------------
+const JOB_STALE_MINUTES  = parseInt(process.env.JOB_STALE_MINUTES || '15', 10);
+const MAX_ACTIVE_JOBS    = parseInt(process.env.MAX_ACTIVE_JOBS_PER_USER || '2', 10);
+// An 'exhausted' key is not dead, it is out of credit for this cycle. Retry it
+// after this many hours so monthly credit renewal is picked up automatically.
+const KEY_REVIVE_HOURS   = parseInt(process.env.KEY_REVIVE_HOURS || '12', 10);
 
 // ===========================================================================
 // AUTH + TENANCY
@@ -194,6 +256,7 @@ async function getEnginePrimary(engine) {
 
 /** Ordered list of candidate tokens to try for this engine + user. */
 async function buildTokenCandidates(engine, userId) {
+    await reviveStaleKeys();
     const out = [];
     const seen = new Set();
     const push = (token, source, id) => {
@@ -237,36 +300,136 @@ async function markKey(id, patch) {
 }
 
 /**
+ * Apify free credit renews every billing cycle, so a key marked 'exhausted' is
+ * only temporarily broke. Bring those back after KEY_REVIVE_HOURS. Keys marked
+ * 'invalid' failed authentication and are left alone - only a manual recheck
+ * revives those.
+ */
+async function reviveStaleKeys() {
+    const cutoff = new Date(Date.now() - KEY_REVIVE_HOURS * 3600000).toISOString();
+    try {
+        await supabase.from('apify_keys')
+            .update({ status: 'active', fail_count: 0 })
+            .eq('status', 'exhausted')
+            .lt('last_checked_at', cutoff);
+    } catch (e) { console.error('[reviveStaleKeys]', e.message); }
+}
+
+/** Stable, non-reversible id for a token so usage can be tracked without
+ *  storing the secret a second time. */
+function tokenHash(token) {
+    return require('crypto').createHash('sha256').update(String(token || '')).digest('hex').slice(0, 32);
+}
+
+function cycleMonth(d = new Date()) {
+    return d.toISOString().slice(0, 7); // YYYY-MM
+}
+
+/** Thrown when every candidate key is dry. Distinct from a normal failure so
+ *  the job engine can checkpoint and pause instead of dying. */
+class NoCreditError extends Error {
+    constructor(message, detail = {}) {
+        super(message);
+        this.name = 'NoCreditError';
+        this.code = 'NO_CREDIT';
+        Object.assign(this, detail);
+    }
+}
+
+/**
  * Returns { client, candidate } for the first token that authenticates.
  * Dead / exhausted keys are flagged in the pool so they stop being retried.
  */
-async function getWorkingClient(engine, userId) {
+/** Classify a key failure so a flaky network does not permanently kill a
+ *  perfectly good key. Only real auth rejections mark a key invalid. */
+function classifyKeyError(err) {
+    const msg = (err?.message || '').toLowerCase();
+    const status = err?.statusCode || err?.status || 0;
+    if (status === 401 || status === 403 ||
+        msg.includes('unauthor') || msg.includes('forbidden') ||
+        msg.includes('invalid token') || msg.includes('authentication')) return 'invalid';
+    if (status === 402 || msg.includes('credit') || msg.includes('limit exceeded') ||
+        msg.includes('usage limit') || msg.includes('quota')) return 'exhausted';
+    return 'transient';   // timeout, ECONNRESET, 5xx - do not punish the key
+}
+
+/**
+ * Returns { client, candidate } for the first token that authenticates AND has
+ * enough remaining cycle budget for `needUsd`.
+ *
+ * The client is tagged with __el so every downstream actor call can attribute
+ * its spend back to the exact key that paid for it.
+ */
+async function getWorkingClient(engine, userId, opts = {}) {
+    const needUsd = Number(opts.needUsd || 0);
+    const jobId   = opts.jobId || null;
+
     const candidates = await buildTokenCandidates(engine, userId);
-    if (!candidates.length) throw new Error('No Apify key configured for this engine.');
+    if (!candidates.length) {
+        throw new NoCreditError('No Apify key configured for this engine. Use "Update key" in the header to add one.');
+    }
 
     let lastErr = null;
+    const skipped = [];
+
     for (const c of candidates) {
+        const hash = tokenHash(c.token);
+
+        // Budget gate BEFORE spending anything. This is what turns a mid-run
+        // blowup into a clean, resumable pause.
+        if (BUDGET_MODE === 'block' && needUsd > 0) {
+            const spent = await cycleUsage(hash);
+            const remaining = APIFY_CYCLE_CREDIT - spent - BUDGET_RESERVE;
+            if (remaining < needUsd) {
+                skipped.push({ source: c.source, remaining: +remaining.toFixed(4) });
+                await markKey(c.id, { status: 'exhausted', last_checked_at: new Date().toISOString() });
+                continue;
+            }
+        }
+
         try {
             const client = new ApifyClient({ token: c.token });
             const u = await client.user().get();
+
             await markKey(c.id, {
                 last_used_at: new Date().toISOString(),
                 last_checked_at: new Date().toISOString(),
                 apify_username: u.username,
+                status: 'active',
                 fail_count: 0
             });
-            return { client, candidate: c, apifyUsername: u.username };
+
+            const spent = await cycleUsage(hash);
+            client.__el = {
+                keyId: c.id || null,
+                source: c.source,
+                tokenHash: hash,
+                apifyUsername: u.username,
+                engine, userId, jobId,
+                spentThisCycle: spent,
+                remaining: +(APIFY_CYCLE_CREDIT - spent).toFixed(4)
+            };
+
+            return { client, candidate: c, apifyUsername: u.username, budget: client.__el };
         } catch (err) {
             lastErr = err;
-            const msg = (err.message || '').toLowerCase();
-            const dead = msg.includes('token') || msg.includes('unauthor') || msg.includes('forbidden');
-            await markKey(c.id, {
-                status: dead ? 'invalid' : 'exhausted',
-                last_checked_at: new Date().toISOString()
-            });
+            const kind = classifyKeyError(err);
+            if (kind !== 'transient') {
+                await markKey(c.id, { status: kind, last_checked_at: new Date().toISOString() });
+            } else {
+                await markKey(c.id, { last_checked_at: new Date().toISOString() });
+            }
+            console.error(`[key ${c.source} -> ${kind}]`, err.message);
         }
     }
-    throw new Error('All Apify keys failed: ' + (lastErr?.message || 'unknown'));
+
+    const detail = skipped.length
+        ? ` ${skipped.length} key(s) are out of credit for this cycle.`
+        : '';
+    throw new NoCreditError(
+        `No Apify key can cover this run.${detail} Add or update a key, then resume.`,
+        { skipped, lastError: lastErr?.message || null }
+    );
 }
 
 // Legacy helpers kept so nothing else in the file has to change shape.
@@ -322,15 +485,137 @@ function tsOf(p) {
     return isNaN(d.getTime()) ? null : d;
 }
 
+// ===========================================================================
+// USAGE LEDGER
+// Every actor run reports what it actually cost. Recording that is what turns
+// key rotation from reactive (wait for a failure) into predictive (know the
+// budget before spending it).
+// ===========================================================================
+
+/** Total USD spent by one key in the current billing cycle. */
+async function cycleUsage(hash, month = cycleMonth()) {
+    if (!hash) return 0;
+    try {
+        const { data } = await supabase
+            .from('apify_usage_events')
+            .select('usage_usd')
+            .eq('token_hash', hash)
+            .eq('cycle_month', month);
+        return (data || []).reduce((sum, r) => sum + Number(r.usage_usd || 0), 0);
+    } catch (e) {
+        console.error('[cycleUsage]', e.message);
+        return 0;   // fail open: never block a run because the ledger is down
+    }
+}
+
+async function recordUsage(client, { actorId, run, items = 0, jobId = null }) {
+    const el = client?.__el;
+    if (!el) return 0;
+
+    const usd =
+        Number(run?.usageTotalUsd) ||
+        Number(run?.usage?.USD) ||
+        0;
+
+    try {
+        await supabase.from('apify_usage_events').insert([{
+            user_id:        el.userId || null,
+            key_id:         el.keyId || null,
+            token_hash:     el.tokenHash,
+            apify_username: el.apifyUsername || null,
+            engine:         el.engine || null,
+            job_id:         jobId || el.jobId || null,
+            actor_id:       actorId,
+            run_id:         run?.id || null,
+            usage_usd:      usd,
+            compute_units:  Number(run?.stats?.computeUnits) || null,
+            items,
+            cycle_month:    cycleMonth()
+        }]);
+    } catch (e) { console.error('[recordUsage]', e.message); }
+
+    el.spentThisCycle = Number(el.spentThisCycle || 0) + usd;
+    el.remaining = +(APIFY_CYCLE_CREDIT - el.spentThisCycle).toFixed(4);
+    return usd;
+}
+
+/** Remaining cycle budget for the key currently bound to this client. */
+function clientRemaining(client) {
+    const el = client?.__el;
+    if (!el) return Infinity;
+    return APIFY_CYCLE_CREDIT - Number(el.spentThisCycle || 0) - BUDGET_RESERVE;
+}
+
+/**
+ * Single entry point for every Apify actor run.
+ *
+ *   - pins memory (compute units are RAM x hours, so this is a cost lever)
+ *   - pins a wall-clock timeout so a stuck run cannot burn credit forever
+ *   - optionally forces a cheaper proxy group
+ *   - records real spend to the ledger
+ *   - refuses to start when the bound key cannot afford the estimate
+ */
+async function callActor(client, actorId, input, opts = {}) {
+    const estimate = Number(opts.estimateUsd || 0);
+
+    if (BUDGET_MODE === 'block' && estimate > 0 && clientRemaining(client) < estimate) {
+        throw new NoCreditError(
+            `Key ${client?.__el?.apifyUsername || ''} has about ` +
+            `$${Math.max(0, clientRemaining(client)).toFixed(2)} left this cycle, ` +
+            `this step needs about $${estimate.toFixed(2)}.`
+        );
+    }
+
+    const payload = { ...input };
+    if (APIFY_PROXY_GROUP && !payload.proxyConfiguration) {
+        payload.proxyConfiguration = {
+            useApifyProxy: true,
+            apifyProxyGroups: [APIFY_PROXY_GROUP]
+        };
+    }
+
+    const runOpts = {
+        memory:  opts.memoryMb   || APIFY_MEMORY_MB,
+        timeout: opts.timeoutSecs || APIFY_TIMEOUT_SECS
+    };
+    if (opts.waitSecs) runOpts.waitSecs = opts.waitSecs;
+    if (opts.maxItems) runOpts.maxItems = opts.maxItems;
+
+    let run;
+    try {
+        run = await client.actor(actorId).call(payload, runOpts);
+    } catch (err) {
+        // Older apify-client builds validate run options strictly. If the
+        // options are what it rejected, fall back to a bare call rather than
+        // failing the whole job.
+        const m = (err.message || '').toLowerCase();
+        if (m.includes('expected property') || m.includes('did not match') || m.includes('validation')) {
+            console.warn('[callActor] run options rejected, retrying bare:', err.message);
+            run = await client.actor(actorId).call(payload);
+        } else {
+            throw err;
+        }
+    }
+
+    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+    const rows = items || [];
+
+    const usd = await recordUsage(client, { actorId, run, items: rows.length, jobId: opts.jobId });
+    console.log(`[Apify] ${actorId} :: ${rows.length} items :: $${usd.toFixed(4)} :: ` +
+                `${client?.__el?.apifyUsername || 'unknown'}`);
+
+    return { run, items: rows, usd };
+}
+
 async function runActor(actorId, input, warningsArray, methodName, client) {
     try {
         console.log(`[Apify] ${actorId} :: ${methodName}`);
-        const run = await client.actor(actorId).call(input);
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+        const { items } = await callActor(client, actorId, input);
         const extracted = extractPosts(items || []);
         if (warningsArray) warningsArray.push(`X-RAY (${methodName}): Extracted ${extracted.length} real posts.`);
         return extracted;
     } catch (err) {
+        if (err.code === 'NO_CREDIT') throw err;      // must bubble up to pause the job
         console.error(`[Apify ERROR] ${actorId}:`, err.message);
         if (warningsArray) warningsArray.push(`Error (${methodName}): ${err.message}`);
         return [];
@@ -632,6 +917,54 @@ function ruleRecommendations(a) {
 // GEMINI NARRATIVE LAYER
 // ===========================================================================
 
+/**
+ * Single Gemini entry point with backoff.
+ *
+ * Volume is never the problem here - one report makes one or two calls, far
+ * under any free-tier daily cap. The real failure mode is a burst 429 when a
+ * job fires several calls back to back, which previously returned null and
+ * silently dropped the whole narrative layer.
+ */
+async function geminiCall(prompt, { temperature = 0.5, maxOutputTokens = 4096, tag = 'gemini', retries = 3 } = {}) {
+    if (!GEMINI_API_KEY) return null;
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const body = JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature, maxOutputTokens, responseMimeType: 'application/json' }
+    });
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const r = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body
+            });
+
+            if (r.status === 429 || r.status >= 500) {
+                const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+                console.warn(`[${tag}] ${r.status}, retrying in ${waitMs}ms (${attempt + 1}/${retries})`);
+                await new Promise(res => setTimeout(res, waitMs));
+                continue;
+            }
+
+            if (!r.ok) { console.error(`[${tag}]`, r.status, (await r.text()).slice(0, 400)); return null; }
+
+            const data = await r.json();
+            const text = data?.candidates?.[0]?.content?.parts?.map(x => x.text).join('') || '';
+            if (!text) return null;
+            return JSON.parse(text.replace(/```json|```/g, '').trim());
+        } catch (err) {
+            const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+            console.error(`[${tag} error]`, err.message);
+            if (attempt === retries - 1) return null;
+            await new Promise(res => setTimeout(res, waitMs));
+        }
+    }
+    return null;
+}
+
 async function geminiNarrative(payload) {
     if (!GEMINI_API_KEY) return null;
 
@@ -655,32 +988,7 @@ No markdown, no commentary outside the JSON.
 DATA:
 ${JSON.stringify(payload).slice(0, 60000)}`;
 
-    try {
-        const r = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        temperature: 0.4,
-                        maxOutputTokens: 4096,
-                        responseMimeType: 'application/json'
-                    }
-                })
-            }
-        );
-
-        if (!r.ok) { console.error('[Gemini]', r.status, await r.text()); return null; }
-        const data = await r.json();
-        const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
-        const cleaned = text.replace(/```json|```/g, '').trim();
-        return JSON.parse(cleaned);
-    } catch (err) {
-        console.error('[Gemini error]', err.message);
-        return null;
-    }
+    return geminiCall(prompt, { temperature: 0.4, maxOutputTokens: 4096, tag: 'Gemini IG' });
 }
 
 // ===========================================================================
@@ -691,10 +999,51 @@ async function createJob(userId, type, engine, input, creditsEstimate) {
     const { data, error } = await supabase.from('jobs').insert([{
         user_id: userId, type, engine, input,
         credits_estimate: creditsEstimate || null,
-        status: 'queued', progress: 0, log: []
+        status: 'queued', progress: 0, log: [],
+        completed_units: []
     }]).select().single();
     if (error) throw error;
     return data;
+}
+
+/** Refuse to queue a fifth thing while four are already spending money. */
+async function assertJobSlot(userId) {
+    const { count } = await supabase.from('jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .in('status', ['queued', 'running']);
+    if ((count || 0) >= MAX_ACTIVE_JOBS) {
+        const err = new Error(
+            `You already have ${count} job(s) running. Wait for them to finish before starting another.`
+        );
+        err.statusCode = 429;
+        throw err;
+    }
+}
+
+/**
+ * Record a finished unit AND the analysis it produced.
+ *
+ * Storing the computed result, not just the unit name, is what makes resume
+ * actually free. The scraped rows are already in `posts` / `fb_posts`, but the
+ * audit object also needs profile-level numbers that are not reconstructable
+ * from the post rows alone. Persisting it here means a resumed job never has to
+ * re-scrape, and therefore never pays twice.
+ */
+async function savePartial(jobId, unit, value) {
+    if (!jobId || !unit) return;
+    try {
+        const { data } = await supabase.from('jobs')
+            .select('completed_units, partials').eq('id', jobId).maybeSingle();
+        const done = Array.isArray(data?.completed_units) ? data.completed_units : [];
+        const partials = (data?.partials && typeof data.partials === 'object') ? data.partials : {};
+        const key = String(unit);
+        if (!done.includes(key)) done.push(key);
+        if (value !== undefined) partials[key] = value;
+        await supabase.from('jobs')
+            .update({ completed_units: done, partials, updated_at: new Date().toISOString() })
+            .eq('id', jobId);
+    } catch (e) { console.error('[savePartial]', e.message); }
 }
 
 async function updateJob(jobId, patch, logLine) {
@@ -708,20 +1057,62 @@ async function updateJob(jobId, patch, logLine) {
     await supabase.from('jobs').update(body).eq('id', jobId);
 }
 
-/** Fire-and-forget runner. Never awaited by the request handler. */
-function runJob(jobId, worker) {
+/**
+ * Fire-and-forget runner. Never awaited by the request handler.
+ *
+ * The worker receives (progress, ck) where ck is the checkpoint helper:
+ *   ck.isDone(unit)  - was this unit already scraped in an earlier attempt?
+ *   ck.done(unit)    - record a unit as finished and paid for
+ *   ck.units         - the raw completed list
+ *
+ * When every key runs dry the job does NOT fail. It parks in
+ * 'paused_no_credit' with its checkpoint intact, so updating a key and calling
+ * /api/job/:id/resume picks up exactly where it stopped and never pays twice
+ * for work already in the database.
+ */
+function runJob(jobId, worker, opts = {}) {
     (async () => {
         try {
-            await updateJob(jobId, { status: 'running', progress: 1 }, 'Job started');
+            const { data: row } = await supabase.from('jobs')
+                .select('completed_units, partials').eq('id', jobId).maybeSingle();
+            const units = Array.isArray(row?.completed_units) ? row.completed_units.slice() : [];
+            const partials = (row?.partials && typeof row.partials === 'object') ? { ...row.partials } : {};
+
+            const ck = {
+                units, partials,
+                isDone: u => units.includes(String(u)),
+                get:    u => partials[String(u)],
+                done: async (u, value) => {
+                    const key = String(u);
+                    if (!units.includes(key)) units.push(key);
+                    if (value !== undefined) partials[key] = value;
+                    await savePartial(jobId, key, value);
+                }
+            };
+
+            await updateJob(jobId,
+                { status: 'running', progress: opts.resume ? undefined : 1, error: null },
+                opts.resume ? `Resuming, ${units.length} unit(s) already complete` : 'Job started');
+
             const result = await worker(
-                (progress, step) => updateJob(jobId, { progress, current_step: step }, step)
+                (progress, step) => updateJob(jobId, { progress, current_step: step }, step),
+                ck
             );
+
             await updateJob(jobId, {
                 status: 'done', progress: 100,
                 result, result_report_id: result?.reportId || null,
                 finished_at: new Date().toISOString()
             }, 'Job complete');
         } catch (err) {
+            if (err && err.code === 'NO_CREDIT') {
+                console.warn('[Job paused: no credit]', jobId, err.message);
+                await updateJob(jobId, {
+                    status: 'paused_no_credit',
+                    error: err.message
+                }, 'Paused: ' + err.message);
+                return;
+            }
             console.error('[Job failed]', jobId, err.message);
             await updateJob(jobId, {
                 status: 'failed', error: err.message,
@@ -729,6 +1120,40 @@ function runJob(jobId, worker) {
             }, 'Failed: ' + err.message);
         }
     })();
+}
+
+// ---------------------------------------------------------------------------
+// WORKER REGISTRY
+// Jobs run in-process. Render spins the free tier down on idle and restarts on
+// every deploy, so a worker has to be rebuildable from jobs.input alone in
+// order for resume to survive a restart.
+// ---------------------------------------------------------------------------
+const JOB_WORKERS = {};
+function registerWorker(type, factory) { JOB_WORKERS[type] = factory; }
+
+/**
+ * Anything left 'running' with no heartbeat is orphaned by a restart. Park it
+ * so the UI stops spinning and the user can resume it by hand.
+ */
+async function sweepStaleJobs() {
+    const cutoff = new Date(Date.now() - JOB_STALE_MINUTES * 60000).toISOString();
+    try {
+        const { data } = await supabase.from('jobs')
+            .select('id, type, completed_units')
+            .in('status', ['running', 'queued'])
+            .lt('updated_at', cutoff);
+
+        for (const j of (data || [])) {
+            const n = Array.isArray(j.completed_units) ? j.completed_units.length : 0;
+            await updateJob(j.id, {
+                status: 'interrupted',
+                error: 'The server restarted while this job was running. ' +
+                       (n ? `${n} unit(s) were already saved — resume to finish the rest.`
+                          : 'Nothing was charged. Resume to start again.')
+            }, 'Interrupted by a server restart');
+        }
+        if (data?.length) console.log(`[sweepStaleJobs] parked ${data.length} orphaned job(s)`);
+    } catch (e) { console.error('[sweepStaleJobs]', e.message); }
 }
 
 function estimateCredits(accounts, postsPerAccount) {
@@ -744,17 +1169,19 @@ async function auditHandle(client, userId, handle, postsLimit, meta = {}) {
     const h = String(handle || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
     if (!h) return null;
 
-    const profileRun = await client.actor('apify/instagram-profile-scraper').call({ usernames: [h] });
-    const { items: profiles } = await client.dataset(profileRun.defaultDatasetId).listItems();
+    const limit = Math.min(postsLimit || DEFAULT_POSTS_PER_ACC, MAX_POSTS_PER_ACC);
+
+    const { items: profiles } = await callActor(client, 'apify/instagram-profile-scraper',
+        { usernames: [h] },
+        { estimateUsd: COST_PER_1K_PROFILE / 1000, jobId: meta.jobId });
     const prof = profiles[0] || {};
 
-    const postRun = await client.actor('apify/instagram-scraper').call({
+    const { items: rawPosts } = await callActor(client, 'apify/instagram-scraper', {
         directUrls: [`https://www.instagram.com/${h}/`],
         resultsType: 'posts',
-        resultsLimit: Math.min(postsLimit || DEFAULT_POSTS_PER_ACC, MAX_POSTS_PER_ACC),
+        resultsLimit: limit,
         addParentData: false
-    });
-    const { items: rawPosts } = await client.dataset(postRun.defaultDatasetId).listItems();
+    }, { estimateUsd: (limit / 1000) * COST_PER_1K_POSTS, maxItems: limit, jobId: meta.jobId });
     const posts = extractPosts(rawPosts || []);
 
     await savePosts(userId, h, posts, meta);
@@ -764,6 +1191,485 @@ async function auditHandle(client, userId, handle, postsLimit, meta = {}) {
 // ===========================================================================
 // SYSTEM / KEY MANAGEMENT ENDPOINTS
 // ===========================================================================
+
+// ===========================================================================
+// JOB WORKERS
+// Registered at module scope and rebuildable from jobs.input alone, which
+// is what lets /api/job/:id/resume pick a paused job back up after a key
+// change or a server restart.
+// ===========================================================================
+
+registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
+
+    const cleanTarget  = String(input.target || '');
+    const rivals       = Array.isArray(input.rivals) ? input.rivals : [];
+    const limit        = input.postsPerAccount || DEFAULT_POSTS_PER_ACC;
+    const accounts     = rivals.length + 1;
+    const estimate     = estimateCredits(accounts, limit);
+    const perAccount   = estimateCredits(1, limit);
+
+            const step = Math.floor(80 / accounts);
+            const warnings = [];
+
+            // The key is resolved per account, not once for the whole job. When
+            // the current key runs dry mid-run the next account simply picks up
+            // the next key in the chain, and the user never notices.
+            const grab = () => getWorkingClient('report', userId, { needUsd: perAccount, jobId })
+                .then(r => r.client);
+
+            let main = ck.get(cleanTarget);
+            if (main) {
+                await progress(5, `@${cleanTarget} already analysed — reusing saved data`);
+            } else {
+                await progress(5, `Auditing target @${cleanTarget}`);
+                main = await auditHandle(await grab(), userId, cleanTarget, limit, { jobId });
+                if (!main) throw new Error('Target profile could not be scraped.');
+                await ck.done(cleanTarget, main);
+            }
+
+            const rivalAudits = [];
+            for (let i = 0; i < rivals.length; i++) {
+                const cached = ck.get(rivals[i]);
+                if (cached) { rivalAudits.push(cached); continue; }
+
+                await progress(5 + step * (i + 1), `Auditing rival @${rivals[i]} (${i + 1}/${rivals.length})`);
+                try {
+                    const a = await auditHandle(await grab(), userId, rivals[i], limit, { jobId });
+                    if (a) { rivalAudits.push(a); await ck.done(rivals[i], a); }
+                } catch (e) {
+                    if (e.code === 'NO_CREDIT') throw e;   // pause cleanly, keep the checkpoint
+                    console.error('[rival failed]', rivals[i], e.message);
+                    warnings.push(`@${rivals[i]} could not be analysed: ${e.message}`);
+                }
+            }
+
+            await progress(88, 'Building benchmark');
+            const benchmark = rivalAudits.length ? buildBenchmark(main, rivalAudits) : null;
+            const recommendations = ruleRecommendations(main);
+
+            await progress(92, 'Generating AI narrative');
+            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+
+            const payload = { main, rivals: rivalAudits, recommendations, benchmark, ai, warnings };
+            const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
+
+            await progress(96, 'Saving report');
+            const { data: saved } = await supabase.from('reports').insert([{
+                user_id: userId,
+                platform: 'instagram',
+                report_type: rivalAudits.length ? 'compare' : 'single',
+                target_handle: main.handle,
+                competitor_handles: rivalAudits.map(r => r.handle),
+                grade: main.grade,
+                score: main.score,
+                engagement_rate: parseFloat(main.engagementRate),
+                posts_analyzed: postsAnalyzed,
+                snapshot_date: new Date().toISOString().slice(0, 10),
+                credits_estimate: estimate,
+                ai_summary: ai?.executive_summary || null,
+                ai_json: ai || null,
+                report_json: payload
+            }]).select('id').maybeSingle();
+
+            return { reportId: saved?.id || null, postsAnalyzed, report: payload };
+        });
+
+registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
+
+    const cleanTarget  = String(input.target || '');
+    const rivals       = Array.isArray(input.competitors) ? input.competitors : [];
+    const limit        = input.postsPerAccount || DEFAULT_POSTS_PER_ACC;
+    const activeSetId  = input.setId || null;
+    const accounts     = rivals.length + 1;
+    const estimate     = estimateCredits(accounts, limit);
+    const perAccount   = estimateCredits(1, limit);
+
+            const meta = { setId: activeSetId, jobId };
+            const step = Math.floor(80 / accounts);
+            const warnings = [];
+
+            const grab = () => getWorkingClient('report', userId, { needUsd: perAccount, jobId })
+                .then(r => r.client);
+
+            let main = ck.get(cleanTarget);
+            if (main) {
+                await progress(5, `@${cleanTarget} already analysed — reusing saved data`);
+            } else {
+                await progress(5, `Auditing target @${cleanTarget}`);
+                main = await auditHandle(await grab(), userId, cleanTarget, limit, meta);
+                if (!main) throw new Error('Target profile could not be scraped.');
+                await ck.done(cleanTarget, main);
+            }
+
+            const rivalAudits = [];
+            for (let i = 0; i < rivals.length; i++) {
+                const cached = ck.get(rivals[i]);
+                if (cached) { rivalAudits.push(cached); continue; }
+
+                await progress(5 + step * (i + 1), `Auditing competitor @${rivals[i]} (${i + 1}/${rivals.length})`);
+                try {
+                    const a = await auditHandle(await grab(), userId, rivals[i], limit, meta);
+                    if (a) { rivalAudits.push(a); await ck.done(rivals[i], a); }
+                } catch (e) {
+                    if (e.code === 'NO_CREDIT') throw e;
+                    console.error('[competitor failed]', rivals[i], e.message);
+                    warnings.push(`@${rivals[i]} could not be analysed: ${e.message}`);
+                }
+            }
+
+            await progress(88, 'Building benchmark');
+            const benchmark = buildBenchmark(main, rivalAudits);
+            const recommendations = ruleRecommendations(main);
+
+            await progress(92, 'Generating AI strategy');
+            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+
+            const payload = { main, rivals: rivalAudits, benchmark, recommendations, ai, warnings };
+            const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
+
+            await progress(96, 'Saving report');
+            const { data: saved } = await supabase.from('reports').insert([{
+                user_id: userId,
+                platform: 'instagram',
+                report_type: rivalAudits.length ? 'competitor' : 'single',
+                set_id: activeSetId,
+                target_handle: main.handle,
+                competitor_handles: rivalAudits.map(r => r.handle),
+                grade: main.grade,
+                score: main.score,
+                engagement_rate: parseFloat(main.engagementRate),
+                posts_analyzed: postsAnalyzed,
+                snapshot_date: new Date().toISOString().slice(0, 10),
+                credits_estimate: estimate,
+                ai_summary: ai?.executive_summary || null,
+                ai_json: ai || null,
+                report_json: payload
+            }]).select('id').maybeSingle();
+
+            if (activeSetId) {
+                await supabase.from('competitor_sets')
+                    .update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
+            }
+
+            return { reportId: saved?.id || null, setId: activeSetId, postsAnalyzed, report: payload };
+        });
+
+registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, ck) => {
+
+    const refs = (input.groups || []).map(id => ({
+        groupId: String(id),
+        url: `https://www.facebook.com/groups/${id}/`,
+        rowId: null,
+        name: String(id)
+    }));
+    const auditMode      = input.mode === 'individual' ? 'individual' : 'combined';
+    const limit          = input.postsPerGroup || FB_DEFAULT_POSTS;
+    const window         = input.days || FB_DEFAULT_DAYS;
+    const sampleComments = !!input.sampleComments;
+    const activeSetId    = input.setId || null;
+    const niche          = input.niche || null;
+    const location       = input.location || null;
+    const since          = input.since || null;
+    const estimate       = fbEstimateCredits(refs.length, limit, sampleComments);
+    const perGroup       = fbEstimateCredits(1, limit, sampleComments);
+
+            const step = Math.floor(65 / refs.length);
+            const audits = [];
+            const allDemand = [];
+            let totalPosts = 0;
+
+            for (let i = 0; i < refs.length; i++) {
+                // Already scraped and paid for on an earlier attempt.
+                const cached = ck.get(refs[i].groupId);
+                if (cached) {
+                    audits.push(cached);
+                    totalPosts += cached.postsAnalyzed || 0;
+                    await progress(5 + step * (i + 1),
+                        `${cached.name} already measured — reusing saved data`);
+                    continue;
+                }
+
+                await progress(5 + step * i, `Scraping ${refs[i].name || refs[i].groupId} (${i + 1}/${refs.length})`);
+                try {
+                    // Fresh key per group. This is the single most important
+                    // change for a $5 budget: one group exhausting a key no
+                    // longer kills the whole run.
+                    const { client } = await getWorkingClient('fb_community', userId,
+                        { needUsd: perGroup, jobId });
+
+                    const { meta, rows, demand } = await fbProcessGroup(client, userId, refs[i], {
+                        limit, days: window, sampleComments, niche, location,
+                        source: 'audit', since, jobId
+                    });
+
+                    if (!rows.length) {
+                        await progress(5 + step * (i + 1), `${meta.name}: no public posts returned — likely private`);
+                        const empty = computeGroupAudit(meta, [], []);
+                        audits.push(empty);
+                        await ck.done(refs[i].groupId, empty);   // the run was billed either way
+                        continue;
+                    }
+
+                    await fbSavePosts(rows);
+                    await fbSaveDemand(demand);
+                    allDemand.push(...demand);
+                    totalPosts += rows.length;
+
+                    const audit = computeGroupAudit(meta, rows, demand);
+                    audits.push(audit);
+
+                    await supabase.from('fb_groups').update({
+                        posts_per_day: audit.postsPerDay,
+                        median_comments: audit.medianComments,
+                        unique_poster_ratio: audit.uniquePosterRatio,
+                        room_value_score: audit.roomValue,
+                        score_breakdown: audit.roomValueBreakdown,
+                        last_scraped_at: new Date().toISOString()
+                    }).eq('user_id', userId).eq('group_id', meta.group_id);
+
+                    await ck.done(refs[i].groupId, audit);
+
+                    await progress(5 + step * (i + 1),
+                        `${meta.name}: ${rows.length} posts, ${demand.length} demand signals, Room Value ${audit.roomValue}`);
+                } catch (e) {
+                    if (e.code === 'NO_CREDIT') {
+                        // Everything measured so far is checkpointed. Park the
+                        // job rather than throwing the partial work away.
+                        await progress(5 + step * i,
+                            `Out of Apify credit after ${audits.length}/${refs.length} rooms. Update a key and resume.`);
+                        throw e;
+                    }
+                    await progress(5 + step * (i + 1), `Failed on ${refs[i].groupId}: ${e.message}`);
+                }
+            }
+
+            // Demand rows for groups reused from a checkpoint are already in
+            // fb_demand_signals rather than in allDemand, so count from the
+            // audits instead of from this run's in-memory array.
+            const totalDemand = audits.reduce((sum, a) => sum + (a.demandSignals || 0), 0);
+
+            if (!audits.some(a => a.postsAnalyzed > 0)) {
+                throw new Error('No public posts returned from any selected group. Public groups only in v1 — private groups need a logged-in session and we will not do that.');
+            }
+
+            // ---------- INDIVIDUAL MODE: one report per room ----------
+            if (auditMode === 'individual') {
+                const reports = [];
+                const aiStep = Math.floor(25 / audits.length);
+
+                for (let i = 0; i < audits.length; i++) {
+                    const a = audits[i];
+                    if (!a.postsAnalyzed) continue;
+                    await progress(72 + aiStep * i, `Writing report for ${a.name}`);
+
+                    const ai = await fbNarrative({ mode: 'single', group: a });
+                    const payload = { mode: 'individual', group: a, benchmark: null, ai };
+
+                    const { data: saved } = await supabase.from('reports').insert([{
+                        user_id: userId,
+                        platform: 'facebook',
+                        report_type: 'fb_group',
+                        audit_mode: 'individual',
+                        set_id: activeSetId,
+                        target_handle: a.name,
+                        fb_group_ids: [a.groupId],
+                        fb_group_names: [a.name],
+                        location_label: location || null,
+                        niche: niche || null,
+                        grade: a.roomValue >= 70 ? 'A' : a.roomValue >= 50 ? 'B' : a.roomValue >= 30 ? 'C' : 'D',
+                        score: a.roomValue,
+                        engagement_rate: a.medianComments,
+                        posts_analyzed: a.postsAnalyzed,
+                        snapshot_date: new Date().toISOString().slice(0, 10),
+                        credits_estimate: fbEstimateCredits(1, limit, sampleComments),
+                        ai_summary: ai?.executive_summary || null,
+                        ai_json: ai || null,
+                        report_json: payload
+                    }]).select('id').maybeSingle();
+
+                    if (saved?.id) {
+                        await supabase.from('fb_posts').update({ report_id: saved.id })
+                            .eq('user_id', userId).eq('group_id', a.groupId).is('report_id', null);
+                        await supabase.from('fb_demand_signals').update({ report_id: saved.id })
+                            .eq('user_id', userId).eq('group_id', a.groupId).is('report_id', null);
+                    }
+                    reports.push({ reportId: saved?.id || null, groupId: a.groupId, name: a.name, roomValue: a.roomValue, postsAnalyzed: a.postsAnalyzed, demandSignals: a.demandSignals });
+                }
+
+                if (activeSetId) await supabase.from('fb_group_sets').update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
+
+                return {
+                    mode: 'individual', setId: activeSetId,
+                    reports, postsAnalyzed: totalPosts, demandSignals: totalDemand,
+                    reportId: reports[0]?.reportId || null,
+                    report: { mode: 'individual', groups: audits, reports }
+                };
+            }
+
+            // ---------- COMBINED MODE: one comparative report ----------
+            await progress(74, 'Ranking rooms against each other');
+            const benchmark = buildCommunityBenchmark(audits);
+
+            await progress(84, 'Writing the community strategy');
+            const ai = await fbNarrative({ mode: 'combined', groups: audits, benchmark });
+
+            const payload = { mode: 'combined', groups: audits, benchmark, ai };
+            const live = audits.filter(a => a.postsAnalyzed > 0);
+
+            await progress(94, 'Saving report');
+            const { data: saved } = await supabase.from('reports').insert([{
+                user_id: userId,
+                platform: 'facebook',
+                report_type: 'fb_community',
+                audit_mode: 'combined',
+                set_id: activeSetId,
+                target_handle: benchmark?.bestRoom?.name || live[0]?.name || 'Community audit',
+                fb_group_ids: live.map(a => a.groupId),
+                fb_group_names: live.map(a => a.name),
+                location_label: location || null,
+                niche: niche || null,
+                grade: (benchmark?.avgRoomValue || 0) >= 70 ? 'A' : (benchmark?.avgRoomValue || 0) >= 50 ? 'B' : (benchmark?.avgRoomValue || 0) >= 30 ? 'C' : 'D',
+                score: benchmark?.avgRoomValue || 0,
+                engagement_rate: live.length ? +(live.reduce((s, a) => s + a.medianComments, 0) / live.length).toFixed(2) : 0,
+                posts_analyzed: totalPosts,
+                snapshot_date: new Date().toISOString().slice(0, 10),
+                credits_estimate: estimate,
+                ai_summary: ai?.executive_summary || null,
+                ai_json: ai || null,
+                report_json: payload
+            }]).select('id').maybeSingle();
+
+            if (saved?.id) {
+                const ids = live.map(a => a.groupId);
+                await supabase.from('fb_posts').update({ report_id: saved.id })
+                    .eq('user_id', userId).in('group_id', ids).is('report_id', null);
+                await supabase.from('fb_demand_signals').update({ report_id: saved.id })
+                    .eq('user_id', userId).in('group_id', ids).is('report_id', null);
+            }
+            if (activeSetId) await supabase.from('fb_group_sets').update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
+
+            return {
+                mode: 'combined', reportId: saved?.id || null, setId: activeSetId,
+                postsAnalyzed: totalPosts, demandSignals: totalDemand, report: payload
+            };
+        });
+
+registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) => {
+
+    const targetRef      = parsePageRef(input.target);
+    const rivalRef       = input.rival ? parsePageRef(input.rival) : null;
+    const limit          = input.postsPerPage || FB_PAGE_DEFAULT_POSTS;
+    const window         = input.days || FB_PAGE_DEFAULT_DAYS;
+    const includeReviews = !!input.includeReviews;
+    const activeSetId    = input.setId || null;
+    const brief          = input.brief || null;
+    const since          = input.since || null;
+    const estimate       = fbPageEstimateCredits(rivalRef ? 2 : 1, limit, includeReviews);
+    const perPage        = fbPageEstimateCredits(1, limit, includeReviews);
+
+            const grab = () => getWorkingClient('fb_page', userId, { needUsd: perPage, jobId })
+                .then(r => r.client);
+
+            let main = ck.get(targetRef.pageId);
+            if (main) {
+                await progress(6, `${main.name} already analysed — reusing saved data`);
+            } else {
+                await progress(6, `Reading the Page profile for ${targetRef.pageId}`);
+                const r = await fbAuditPage(await grab(), userId, targetRef, {
+                    limit, days: window, includeReviews, since, jobId
+                });
+                main = r.audit;
+                if (!main) throw new Error('The target Page could not be read.');
+                await ck.done(targetRef.pageId, main);
+            }
+
+            await progress(rivalRef ? 42 : 62,
+                `${main.name}: ${main.postsAnalyzed} posts analysed, page score ${main.score}`);
+
+            let rivalAudit = null;
+            if (rivalRef) {
+                rivalAudit = ck.get(rivalRef.pageId) || null;
+                if (rivalAudit) {
+                    await progress(70, `${rivalAudit.name} already analysed — reusing saved data`);
+                } else {
+                    await progress(48, `Reading the rival Page ${rivalRef.pageId}`);
+                    try {
+                        const r = await fbAuditPage(await grab(), userId, rivalRef, {
+                            limit, days: window, includeReviews, since, jobId
+                        });
+                        rivalAudit = r.audit;
+                        await ck.done(rivalRef.pageId, rivalAudit);
+                        await progress(70, `${rivalAudit.name}: ${rivalAudit.postsAnalyzed} posts analysed, page score ${rivalAudit.score}`);
+                    } catch (e) {
+                        if (e.code === 'NO_CREDIT') throw e;
+                        await progress(70, `Rival failed: ${e.message}. Continuing with a single-page report.`);
+                    }
+                }
+            }
+
+            if (!main.postsAnalyzed && !(rivalAudit && rivalAudit.postsAnalyzed)) {
+                throw new Error('No public posts were returned. Public Pages only — confirm the URL points at a Facebook Page rather than a personal profile or a group.');
+            }
+
+            await progress(78, 'Building the head-to-head comparison');
+            const benchmark = buildPageBenchmark(main, rivalAudit);
+
+            await progress(82, 'Assembling recommendations');
+            const recommendations = fbPageRecommendations(main, benchmark);
+
+            await progress(88, 'Writing the AI strategy layer');
+            const ai = await fbPageNarrative({
+                target: main, rival: rivalAudit, benchmark,
+                brief: brief ? String(brief).slice(0, 600) : null
+            });
+
+            const payload = {
+                mode: rivalAudit ? 'versus' : 'single',
+                generatedAt: new Date().toISOString(),
+                windowDays: window,
+                target: main, rival: rivalAudit, benchmark, recommendations, ai,
+                brief: brief || null
+            };
+
+            const postsAnalyzed = main.postsAnalyzed + (rivalAudit?.postsAnalyzed || 0);
+
+            await progress(95, 'Saving report to the vault');
+            const { data: saved } = await supabase.from('reports').insert([{
+                user_id: userId,
+                platform: 'facebook',
+                report_type: 'fb_page',
+                audit_mode: rivalAudit ? 'versus' : 'single',
+                set_id: activeSetId,
+                target_handle: main.name || main.pageId,
+                competitor_handles: rivalAudit ? [rivalAudit.name || rivalAudit.pageId] : [],
+                fb_page_ids: rivalAudit ? [main.pageId, rivalAudit.pageId] : [main.pageId],
+                fb_page_names: rivalAudit ? [main.name, rivalAudit.name] : [main.name],
+                grade: main.grade,
+                score: main.score,
+                engagement_rate: main.engagementRate,
+                posts_analyzed: postsAnalyzed,
+                snapshot_date: new Date().toISOString().slice(0, 10),
+                credits_estimate: estimate,
+                ai_summary: ai?.executive_summary || null,
+                ai_json: ai || null,
+                report_json: payload
+            }]).select('id').maybeSingle();
+
+            if (saved?.id) {
+                const ids = rivalAudit ? [main.pageId, rivalAudit.pageId] : [main.pageId];
+                await supabase.from('fb_page_posts').update({ report_id: saved.id })
+                    .eq('user_id', userId).in('page_id', ids).is('report_id', null);
+            }
+            if (activeSetId) {
+                await supabase.from('fb_page_sets')
+                    .update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
+            }
+
+            return {
+                reportId: saved?.id || null, setId: activeSetId,
+                mode: payload.mode, postsAnalyzed, report: payload
+            };
+        });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
@@ -803,7 +1709,25 @@ app.post('/api/update-apify-key', async (req, res) => {
         const apifyUser = await new ApifyClient({ token: newApiKey }).user().get();
 
         if (ctx.profile.role === 'admin') {
-            // Admin updates the shared engine primary
+            // Demote the outgoing primary into the global pool instead of
+            // discarding it. Apify credit renews monthly, so a key that is dry
+            // today is worth $5 again in a few weeks — throwing it away leaks
+            // budget every single rotation.
+            const previous = await getEnginePrimary(activeEngine);
+            if (previous && previous !== newApiKey) {
+                try {
+                    await supabase.from('apify_keys').upsert({
+                        owner_user_id: null,
+                        engine: activeEngine,
+                        token: previous,
+                        label: `demoted primary (${activeEngine})`,
+                        status: 'exhausted',
+                        fail_count: 0,
+                        last_checked_at: new Date().toISOString()
+                    }, { onConflict: 'token' });
+                } catch (e) { console.error('[demote primary]', e.message); }
+            }
+
             const { error: dbErr } = await supabase.from('system_settings').upsert({
                 key: primaryKeyName(activeEngine),
                 value: newApiKey,
@@ -868,7 +1792,7 @@ app.post('/api/apify-keys', async (req, res) => {
         const { token, engine, label, global: isGlobal } = req.body;
         if (!token) return res.status(400).json({ error: 'Token required' });
 
-        const eng = ['leadgen', 'report', 'fb_community', 'any'].includes(engine) ? engine : 'any';
+        const eng = [...ENGINES, 'any'].includes(engine) ? engine : 'any';
         const apifyUser = await new ApifyClient({ token }).user().get();
         const owner = (isGlobal && ctx.profile.role === 'admin') ? null : ctx.user.id;
 
@@ -1003,7 +1927,7 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 // STAGE 1 :: DISCOVERY PIPELINE  (unchanged response shape)
 // ===========================================================================
 
-app.post('/api/run-campaign', async (req, res) => {
+app.post('/api/run-campaign', spendLimit, async (req, res) => {
     let warnings = [];
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
@@ -1094,9 +2018,8 @@ app.post('/api/run-campaign', async (req, res) => {
         if (selected_methods.includes('method_6') && method6_keywords.length) {
             for (const kw of method6_keywords) {
                 try {
-                    const run = await client.actor('apify/instagram-search-scraper')
-                        .call({ searchQueries: [kw], searchType: 'user' });
-                    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+                    const { items } = await callActor(client, 'apify/instagram-search-scraper',
+                        { searchQueries: [kw], searchType: 'user' });
                     (items || []).forEach(item => {
                         const handle = item.username || item.ownerUsername;
                         if (handle) rawDiscoveredPosts.push({
@@ -1167,7 +2090,7 @@ app.post('/api/run-campaign', async (req, res) => {
 // STAGE 2 :: ENRICHMENT
 // ===========================================================================
 
-app.post('/api/enrich-campaign', async (req, res) => {
+app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
         const user = ctx.user;
@@ -1188,9 +2111,9 @@ app.post('/api/enrich-campaign', async (req, res) => {
             return res.status(200).json({ success: true, message: 'All leads enriched!', enrichedCount: 0 });
 
         const { client } = await getWorkingClient('leadgen', user.id);
-        const run = await client.actor('apify/instagram-profile-scraper')
-            .call({ usernames: handles }, { waitSecs: 25 });
-        const { items: profiles } = await client.dataset(run.defaultDatasetId).listItems();
+        const { items: profiles } = await callActor(client, 'apify/instagram-profile-scraper',
+            { usernames: handles },
+            { waitSecs: 25, estimateUsd: (handles.length / 1000) * COST_PER_1K_PROFILE });
 
         let updated = 0;
         for (const p of (profiles || [])) {
@@ -1270,9 +2193,10 @@ app.delete('/api/campaign/:id', async (req, res) => {
 // REPORT ENGINE :: LEGACY ENDPOINT (existing ig-report.html keeps working)
 // ===========================================================================
 
-app.post('/api/generate-ig-report', async (req, res) => {
+app.post('/api/generate-ig-report', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
         const { target, compareRivals, rival1, rival2, postsLimit } = req.body;
 
         const cleanTarget = String(target || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
@@ -1295,55 +2219,7 @@ app.post('/api/generate-ig-report', async (req, res) => {
         const job = await createJob(ctx.user.id, 'ig_report', 'report',
             { target: cleanTarget, rivals, postsPerAccount: limit }, estimate);
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('report', ctx.user.id);
-            const step = Math.floor(80 / accounts);
-
-            await progress(5, `Auditing target @${cleanTarget}`);
-            const main = await auditHandle(client, ctx.user.id, cleanTarget, limit);
-            if (!main) throw new Error('Target profile could not be scraped.');
-
-            const rivalAudits = [];
-            for (let i = 0; i < rivals.length; i++) {
-                await progress(5 + step * (i + 1), `Auditing rival @${rivals[i]} (${i + 1}/${rivals.length})`);
-                try {
-                    const a = await auditHandle(client, ctx.user.id, rivals[i], limit);
-                    if (a) rivalAudits.push(a);
-                } catch (e) {
-                    console.error('[rival failed]', rivals[i], e.message);
-                }
-            }
-
-            await progress(88, 'Building benchmark');
-            const benchmark = rivalAudits.length ? buildBenchmark(main, rivalAudits) : null;
-            const recommendations = ruleRecommendations(main);
-
-            await progress(92, 'Generating AI narrative');
-            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
-
-            const payload = { main, rivals: rivalAudits, recommendations, benchmark, ai };
-            const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
-
-            await progress(96, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
-                user_id: ctx.user.id,
-                platform: 'instagram',
-                report_type: rivalAudits.length ? 'compare' : 'single',
-                target_handle: main.handle,
-                competitor_handles: rivalAudits.map(r => r.handle),
-                grade: main.grade,
-                score: main.score,
-                engagement_rate: parseFloat(main.engagementRate),
-                posts_analyzed: postsAnalyzed,
-                snapshot_date: new Date().toISOString().slice(0, 10),
-                credits_estimate: estimate,
-                ai_summary: ai?.executive_summary || null,
-                ai_json: ai || null,
-                report_json: payload
-            }]).select('id').maybeSingle();
-
-            return { reportId: saved?.id || null, postsAnalyzed, report: payload };
-        });
+        runJob(job.id, JOB_WORKERS['ig_report'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({
             success: true,
@@ -1374,9 +2250,10 @@ app.get('/api/estimate-credits', async (req, res) => {
     });
 });
 
-app.post('/api/deep-audit', async (req, res) => {
+app.post('/api/deep-audit', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
 
         const {
             target,
@@ -1418,62 +2295,7 @@ app.post('/api/deep-audit', async (req, res) => {
             estimate
         );
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('report', ctx.user.id);
-            const meta = { setId: activeSetId };
-            const step = Math.floor(80 / accounts);
-
-            await progress(5, `Auditing target @${cleanTarget}`);
-            const main = await auditHandle(client, ctx.user.id, cleanTarget, limit, meta);
-            if (!main) throw new Error('Target profile could not be scraped.');
-
-            const rivalAudits = [];
-            for (let i = 0; i < rivals.length; i++) {
-                await progress(5 + step * (i + 1), `Auditing competitor @${rivals[i]} (${i + 1}/${rivals.length})`);
-                try {
-                    const a = await auditHandle(client, ctx.user.id, rivals[i], limit, meta);
-                    if (a) rivalAudits.push(a);
-                } catch (e) {
-                    console.error('[competitor failed]', rivals[i], e.message);
-                }
-            }
-
-            await progress(88, 'Building benchmark');
-            const benchmark = buildBenchmark(main, rivalAudits);
-            const recommendations = ruleRecommendations(main);
-
-            await progress(92, 'Generating AI strategy');
-            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
-
-            const payload = { main, rivals: rivalAudits, benchmark, recommendations, ai };
-            const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
-
-            await progress(96, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
-                user_id: ctx.user.id,
-                platform: 'instagram',
-                report_type: rivalAudits.length ? 'competitor' : 'single',
-                set_id: activeSetId,
-                target_handle: main.handle,
-                competitor_handles: rivalAudits.map(r => r.handle),
-                grade: main.grade,
-                score: main.score,
-                engagement_rate: parseFloat(main.engagementRate),
-                posts_analyzed: postsAnalyzed,
-                snapshot_date: new Date().toISOString().slice(0, 10),
-                credits_estimate: estimate,
-                ai_summary: ai?.executive_summary || null,
-                ai_json: ai || null,
-                report_json: payload
-            }]).select('id').maybeSingle();
-
-            if (activeSetId) {
-                await supabase.from('competitor_sets')
-                    .update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
-            }
-
-            return { reportId: saved?.id || null, setId: activeSetId, postsAnalyzed, report: payload };
-        });
+        runJob(job.id, JOB_WORKERS['deep_audit'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({
             success: true,
@@ -1491,6 +2313,101 @@ app.post('/api/deep-audit', async (req, res) => {
 // ===========================================================================
 // JOBS
 // ===========================================================================
+
+/**
+ * Resume a job that paused for credit or was interrupted by a restart.
+ *
+ * Units already in `completed_units` are skipped and their saved analysis is
+ * reused, so nothing that has already been paid for is scraped a second time.
+ */
+app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+
+        const { data: job } = await supabase.from('jobs')
+            .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
+        if (!job) return res.status(404).json({ error: 'Job not found.' });
+
+        if (!['paused_no_credit', 'interrupted', 'failed'].includes(job.status)) {
+            return res.status(409).json({
+                error: `This job is ${job.status} and cannot be resumed.`
+            });
+        }
+
+        const factory = JOB_WORKERS[job.type];
+        if (!factory) {
+            return res.status(400).json({
+                error: `"${job.type}" jobs cannot be resumed. Start a new run instead.`
+            });
+        }
+
+        // Confirm there is now a key that can actually pay, so the user gets an
+        // immediate answer instead of watching the job pause again.
+        const perUnit = Number(job.credits_estimate || 0) /
+                        Math.max(1, (job.input?.groups?.length || job.input?.competitors?.length || 1));
+        try {
+            await getWorkingClient(job.engine, ctx.user.id, { needUsd: perUnit, jobId: job.id });
+        } catch (e) {
+            return res.status(402).json({
+                error: e.message,
+                code: 'NO_CREDIT',
+                completed: (job.completed_units || []).length
+            });
+        }
+
+        await assertJobSlot(ctx.user.id);
+        runJob(job.id, factory(ctx.user.id, job.input, job.id), { resume: true });
+
+        res.status(202).json({
+            success: true,
+            jobId: job.id,
+            resumedFrom: (job.completed_units || []).length,
+            note: 'Already-completed units will be reused, not re-scraped.'
+        });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ error: err.message });
+    }
+});
+
+/**
+ * What the user actually wants to see before pressing Run: how much of the
+ * cycle credit is left on each key they can draw from.
+ */
+app.get('/api/budget', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const engine = ENGINES.includes(req.query.engine) ? req.query.engine : 'leadgen';
+
+        const candidates = await buildTokenCandidates(engine, ctx.user.id);
+        const month = cycleMonth();
+        const keys = [];
+        let total = 0;
+
+        for (const c of candidates) {
+            const hash = tokenHash(c.token);
+            const spent = await cycleUsage(hash, month);
+            const remaining = Math.max(0, APIFY_CYCLE_CREDIT - spent);
+            total += remaining;
+            keys.push({
+                source: c.source,
+                label: c.source === 'user_pool' ? 'Your key'
+                     : c.source === 'engine_primary' ? 'Shared primary'
+                     : c.source === 'global_pool' ? 'Shared pool'
+                     : 'Server fallback',
+                spentUsd: +spent.toFixed(4),
+                remainingUsd: +remaining.toFixed(4)
+            });
+        }
+
+        res.json({
+            engine, cycleMonth: month,
+            creditPerKeyUsd: APIFY_CYCLE_CREDIT,
+            keys,
+            totalRemainingUsd: +total.toFixed(4),
+            mode: BUDGET_MODE
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get('/api/job/:id', async (req, res) => {
     try {
@@ -2005,9 +2922,15 @@ async function fbScrapeGroup(client, groupRef, opts = {}) {
     const { groupId, url } = groupRef;
     const limit = Math.min(opts.limit || FB_DEFAULT_POSTS, FB_MAX_POSTS);
     const days = opts.days || FB_DEFAULT_DAYS;
-    const onlyPostsNewerThan = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-    const run = await client.actor(FB_GROUP_POSTS_ACTOR).call({
+    // The window boundary is frozen at job creation and passed in. Recomputing
+    // it from Date.now() would mean a job paused Monday and resumed Thursday
+    // measures its groups over different periods, which silently corrupts every
+    // cross-group comparison in the benchmark.
+    const onlyPostsNewerThan = opts.since ||
+        new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+    const { items } = await callActor(client, FB_GROUP_POSTS_ACTOR, {
         startUrls: [{ url }],
         resultsLimit: limit,
         maxPosts: limit,
@@ -2015,9 +2938,12 @@ async function fbScrapeGroup(client, groupRef, opts = {}) {
         commentsMode: 'RANKED_THREADED',
         maxComments: opts.sampleComments ? 10 : 0,
         scrapeComments: !!opts.sampleComments
+    }, {
+        maxItems: limit,
+        jobId: opts.jobId,
+        estimateUsd: fbEstimateCredits(1, limit, opts.sampleComments)
     });
 
-    const { items } = await client.dataset(run.defaultDatasetId).listItems();
     return { raw: items || [], groupId, url };
 }
 
@@ -2369,27 +3295,7 @@ function buildCommunityBenchmark(audits) {
 // ===========================================================================
 
 async function geminiJSON(prompt, maxTokens = 4096, temperature = 0.5) {
-    if (!GEMINI_API_KEY) return null;
-    try {
-        const r = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                    generationConfig: { temperature, maxOutputTokens: maxTokens, responseMimeType: 'application/json' }
-                })
-            }
-        );
-        if (!r.ok) { console.error('[Gemini FB]', r.status, await r.text()); return null; }
-        const data = await r.json();
-        const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
-        return JSON.parse(text.replace(/```json|```/g, '').trim());
-    } catch (err) {
-        console.error('[Gemini FB error]', err.message);
-        return null;
-    }
+    return geminiCall(prompt, { temperature, maxOutputTokens: maxTokens, tag: 'Gemini FB' });
 }
 
 async function fbNarrative(payload) {
@@ -2622,9 +3528,10 @@ app.get('/api/fb/estimate-credits', async (req, res) => {
  * product. Discovery does a shallow scrape (enough posts to measure liveness)
  * rather than the full audit pull.
  */
-app.post('/api/fb/discover-groups', async (req, res) => {
+app.post('/api/fb/discover-groups', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
 
         const {
             location = '', niche = '', keywords = [],
@@ -2665,11 +3572,10 @@ app.post('/api/fb/discover-groups', async (req, res) => {
                 const found = new Map();
                 for (const q of queries) {
                     try {
-                        const run = await client.actor(FB_SEARCH_ACTOR).call({
+                        const { items } = await callActor(client, FB_SEARCH_ACTOR, {
                             search: q, searchType: 'groups', query: q,
                             resultsLimit: 25, maxResults: 25
-                        });
-                        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+                        }, { maxItems: 25 });
                         (items || []).forEach(it => {
                             const ref = parseGroupRef(it.url || it.groupUrl || it.link || it.id);
                             if (!ref) return;
@@ -2870,9 +3776,10 @@ app.delete('/api/fb/group-sets/:id', async (req, res) => {
 // effort"; individual runs answer "how do I win in this one room".
 // ===========================================================================
 
-app.post('/api/fb/audit-community', async (req, res) => {
+app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
 
         const {
             groupIds = [], groupUrls = [], mode = 'combined',
@@ -2932,160 +3839,18 @@ app.post('/api/fb/audit-community', async (req, res) => {
             activeSetId = set?.id || null;
         }
 
+        // Freeze the window boundary now. A job paused today and resumed next
+        // week must measure every room over the same period or the benchmark
+        // silently compares unlike things.
+        const since = new Date(Date.now() - window * 86400000).toISOString().slice(0, 10);
+
         const job = await createJob(ctx.user.id, 'fb_community_audit', 'fb_community', {
             groups: refs.map(r => r.groupId), mode: auditMode,
-            days: window, postsPerGroup: limit, sampleComments, setId: activeSetId
+            days: window, postsPerGroup: limit, sampleComments, setId: activeSetId,
+            niche: niche || null, location: location || null, since
         }, estimate);
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('fb_community', ctx.user.id);
-            const step = Math.floor(65 / refs.length);
-            const audits = [];
-            const allDemand = [];
-            let totalPosts = 0;
-
-            for (let i = 0; i < refs.length; i++) {
-                await progress(5 + step * i, `Scraping ${refs[i].name || refs[i].groupId} (${i + 1}/${refs.length})`);
-                try {
-                    const { meta, rows, demand } = await fbProcessGroup(client, ctx.user.id, refs[i], {
-                        limit, days: window, sampleComments, niche, location, source: 'audit'
-                    });
-
-                    if (!rows.length) {
-                        await progress(5 + step * (i + 1), `${meta.name}: no public posts returned — likely private`);
-                        audits.push(computeGroupAudit(meta, [], []));
-                        continue;
-                    }
-
-                    await fbSavePosts(rows);
-                    await fbSaveDemand(demand);
-                    allDemand.push(...demand);
-                    totalPosts += rows.length;
-
-                    const audit = computeGroupAudit(meta, rows, demand);
-                    audits.push(audit);
-
-                    await supabase.from('fb_groups').update({
-                        posts_per_day: audit.postsPerDay,
-                        median_comments: audit.medianComments,
-                        unique_poster_ratio: audit.uniquePosterRatio,
-                        room_value_score: audit.roomValue,
-                        score_breakdown: audit.roomValueBreakdown,
-                        last_scraped_at: new Date().toISOString()
-                    }).eq('user_id', ctx.user.id).eq('group_id', meta.group_id);
-
-                    await progress(5 + step * (i + 1),
-                        `${meta.name}: ${rows.length} posts, ${demand.length} demand signals, Room Value ${audit.roomValue}`);
-                } catch (e) {
-                    await progress(5 + step * (i + 1), `Failed on ${refs[i].groupId}: ${e.message}`);
-                }
-            }
-
-            if (!audits.some(a => a.postsAnalyzed > 0)) {
-                throw new Error('No public posts returned from any selected group. Public groups only in v1 — private groups need a logged-in session and we will not do that.');
-            }
-
-            // ---------- INDIVIDUAL MODE: one report per room ----------
-            if (auditMode === 'individual') {
-                const reports = [];
-                const aiStep = Math.floor(25 / audits.length);
-
-                for (let i = 0; i < audits.length; i++) {
-                    const a = audits[i];
-                    if (!a.postsAnalyzed) continue;
-                    await progress(72 + aiStep * i, `Writing report for ${a.name}`);
-
-                    const ai = await fbNarrative({ mode: 'single', group: a });
-                    const payload = { mode: 'individual', group: a, benchmark: null, ai };
-
-                    const { data: saved } = await supabase.from('reports').insert([{
-                        user_id: ctx.user.id,
-                        platform: 'facebook',
-                        report_type: 'fb_group',
-                        audit_mode: 'individual',
-                        set_id: activeSetId,
-                        target_handle: a.name,
-                        fb_group_ids: [a.groupId],
-                        fb_group_names: [a.name],
-                        location_label: location || null,
-                        niche: niche || null,
-                        grade: a.roomValue >= 70 ? 'A' : a.roomValue >= 50 ? 'B' : a.roomValue >= 30 ? 'C' : 'D',
-                        score: a.roomValue,
-                        engagement_rate: a.medianComments,
-                        posts_analyzed: a.postsAnalyzed,
-                        snapshot_date: new Date().toISOString().slice(0, 10),
-                        credits_estimate: fbEstimateCredits(1, limit, sampleComments),
-                        ai_summary: ai?.executive_summary || null,
-                        ai_json: ai || null,
-                        report_json: payload
-                    }]).select('id').maybeSingle();
-
-                    if (saved?.id) {
-                        await supabase.from('fb_posts').update({ report_id: saved.id })
-                            .eq('user_id', ctx.user.id).eq('group_id', a.groupId).is('report_id', null);
-                        await supabase.from('fb_demand_signals').update({ report_id: saved.id })
-                            .eq('user_id', ctx.user.id).eq('group_id', a.groupId).is('report_id', null);
-                    }
-                    reports.push({ reportId: saved?.id || null, groupId: a.groupId, name: a.name, roomValue: a.roomValue, postsAnalyzed: a.postsAnalyzed, demandSignals: a.demandSignals });
-                }
-
-                if (activeSetId) await supabase.from('fb_group_sets').update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
-
-                return {
-                    mode: 'individual', setId: activeSetId,
-                    reports, postsAnalyzed: totalPosts, demandSignals: allDemand.length,
-                    reportId: reports[0]?.reportId || null,
-                    report: { mode: 'individual', groups: audits, reports }
-                };
-            }
-
-            // ---------- COMBINED MODE: one comparative report ----------
-            await progress(74, 'Ranking rooms against each other');
-            const benchmark = buildCommunityBenchmark(audits);
-
-            await progress(84, 'Writing the community strategy');
-            const ai = await fbNarrative({ mode: 'combined', groups: audits, benchmark });
-
-            const payload = { mode: 'combined', groups: audits, benchmark, ai };
-            const live = audits.filter(a => a.postsAnalyzed > 0);
-
-            await progress(94, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
-                user_id: ctx.user.id,
-                platform: 'facebook',
-                report_type: 'fb_community',
-                audit_mode: 'combined',
-                set_id: activeSetId,
-                target_handle: benchmark?.bestRoom?.name || live[0]?.name || 'Community audit',
-                fb_group_ids: live.map(a => a.groupId),
-                fb_group_names: live.map(a => a.name),
-                location_label: location || null,
-                niche: niche || null,
-                grade: (benchmark?.avgRoomValue || 0) >= 70 ? 'A' : (benchmark?.avgRoomValue || 0) >= 50 ? 'B' : (benchmark?.avgRoomValue || 0) >= 30 ? 'C' : 'D',
-                score: benchmark?.avgRoomValue || 0,
-                engagement_rate: live.length ? +(live.reduce((s, a) => s + a.medianComments, 0) / live.length).toFixed(2) : 0,
-                posts_analyzed: totalPosts,
-                snapshot_date: new Date().toISOString().slice(0, 10),
-                credits_estimate: estimate,
-                ai_summary: ai?.executive_summary || null,
-                ai_json: ai || null,
-                report_json: payload
-            }]).select('id').maybeSingle();
-
-            if (saved?.id) {
-                const ids = live.map(a => a.groupId);
-                await supabase.from('fb_posts').update({ report_id: saved.id })
-                    .eq('user_id', ctx.user.id).in('group_id', ids).is('report_id', null);
-                await supabase.from('fb_demand_signals').update({ report_id: saved.id })
-                    .eq('user_id', ctx.user.id).in('group_id', ids).is('report_id', null);
-            }
-            if (activeSetId) await supabase.from('fb_group_sets').update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
-
-            return {
-                mode: 'combined', reportId: saved?.id || null, setId: activeSetId,
-                postsAnalyzed: totalPosts, demandSignals: allDemand.length, report: payload
-            };
-        });
+        runJob(job.id, JOB_WORKERS['fb_community_audit'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({
             success: true, jobId: job.id, mode: auditMode, setId: activeSetId,
@@ -3263,7 +4028,7 @@ app.get('/api/fb/demand-export', async (req, res) => {
 // FB API :: ENGINE 3 — POST ADVISOR
 // ===========================================================================
 
-app.post('/api/fb/suggest-posts', async (req, res) => {
+app.post('/api/fb/suggest-posts', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
         const { reportId, groupId, count = 5, brief } = req.body;
@@ -3360,6 +4125,7 @@ app.delete('/api/fb/suggestions/:id', async (req, res) => {
 app.post('/api/fb/suggestions/:id/verify', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
 
         const { data: sug } = await supabase.from('fb_suggestions').select('*')
             .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
@@ -4348,15 +5114,15 @@ ${JSON.stringify(payload).slice(0, 60000)}`;
 // ---------------------------------------------------------------------------
 async function fbScrapePageProfile(client, ref) {
     try {
-        const run = await client.actor(FB_PAGE_DETAILS_ACTOR).call({
+        const { items } = await callActor(client, FB_PAGE_DETAILS_ACTOR, {
             startUrls: [{ url: ref.url }],
             resultsLimit: 1,
             scrapeAbout: true,
             scrapePosts: false
-        });
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+        }, { maxItems: 1, estimateUsd: COST_PER_FB_PAGE_PROFILE });
         return items || [];
     } catch (err) {
+        if (err.code === 'NO_CREDIT') throw err;
         console.error('[fbScrapePageProfile]', ref.pageId, err.message);
         return [];
     }
@@ -4365,28 +5131,31 @@ async function fbScrapePageProfile(client, ref) {
 async function fbScrapePagePosts(client, ref, opts = {}) {
     const limit = Math.min(opts.limit || FB_PAGE_DEFAULT_POSTS, FB_PAGE_MAX_POSTS);
     const days  = Math.min(opts.days || FB_PAGE_DEFAULT_DAYS, FB_PAGE_MAX_DAYS);
-    const onlyPostsNewerThan = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    const onlyPostsNewerThan = opts.since ||
+        new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-    const run = await client.actor(FB_PAGE_POSTS_ACTOR).call({
+    const { items } = await callActor(client, FB_PAGE_POSTS_ACTOR, {
         startUrls: [{ url: ref.url }],
         resultsLimit: limit,
         maxPosts: limit,
         onlyPostsNewerThan,
         scrapeComments: false,
         maxComments: 0
+    }, {
+        maxItems: limit,
+        jobId: opts.jobId,
+        estimateUsd: (limit / 1000) * COST_PER_1K_FB_PAGE_POSTS
     });
-    const { items } = await client.dataset(run.defaultDatasetId).listItems();
     return items || [];
 }
 
 async function fbScrapePageReviews(client, ref, limit = 30) {
     try {
-        const run = await client.actor(FB_PAGE_REVIEWS_ACTOR).call({
+        const { items } = await callActor(client, FB_PAGE_REVIEWS_ACTOR, {
             startUrls: [{ url: ref.url }],
             resultsLimit: limit,
             maxReviews: limit
-        });
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+        }, { maxItems: limit, estimateUsd: 0.02 });
         const rows = (items || []).map(r => ({
             text: String(r.text || r.review || r.comment || '').slice(0, 600),
             isPositive: r.isRecommended ?? r.recommends ?? (Number(r.rating) >= 4) ?? null,
@@ -4522,9 +5291,10 @@ app.get('/api/fb/page/estimate-credits', async (req, res) => {
 // FB PAGE API :: RUN A REPORT  (async job, poll /api/job/:id)
 // ===========================================================================
 
-app.post('/api/fb/page-report', async (req, res) => {
+app.post('/api/fb/page-report', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_page'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
 
         const {
             target, rival, postsPerPage, days,
@@ -4565,100 +5335,15 @@ app.post('/api/fb/page-report', async (req, res) => {
             activeSetId = set?.id || null;
         }
 
+        const since = new Date(Date.now() - window * 86400000).toISOString().slice(0, 10);
+
         const job = await createJob(ctx.user.id, 'fb_page_report', 'fb_page', {
-            target: targetRef.pageId, rival: rivalRef?.pageId || null,
-            postsPerPage: limit, days: window, includeReviews, setId: activeSetId
+            target: targetRef.url, rival: rivalRef?.url || null,
+            postsPerPage: limit, days: window, includeReviews, setId: activeSetId,
+            brief: brief ? String(brief).slice(0, 600) : null, since
         }, estimate);
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('fb_page', ctx.user.id);
-
-            await progress(6, `Reading the Page profile for ${targetRef.pageId}`);
-            const { audit: main } = await fbAuditPage(client, ctx.user.id, targetRef, {
-                limit, days: window, includeReviews
-            });
-            if (!main) throw new Error('The target Page could not be read.');
-
-            await progress(rivalRef ? 42 : 62,
-                `${main.name}: ${main.postsAnalyzed} posts analysed, page score ${main.score}`);
-
-            let rivalAudit = null;
-            if (rivalRef) {
-                await progress(48, `Reading the rival Page ${rivalRef.pageId}`);
-                try {
-                    const r = await fbAuditPage(client, ctx.user.id, rivalRef, {
-                        limit, days: window, includeReviews
-                    });
-                    rivalAudit = r.audit;
-                    await progress(70, `${rivalAudit.name}: ${rivalAudit.postsAnalyzed} posts analysed, page score ${rivalAudit.score}`);
-                } catch (e) {
-                    await progress(70, `Rival failed: ${e.message}. Continuing with a single-page report.`);
-                }
-            }
-
-            if (!main.postsAnalyzed && !(rivalAudit && rivalAudit.postsAnalyzed)) {
-                throw new Error('No public posts were returned. Public Pages only — confirm the URL points at a Facebook Page rather than a personal profile or a group.');
-            }
-
-            await progress(78, 'Building the head-to-head comparison');
-            const benchmark = buildPageBenchmark(main, rivalAudit);
-
-            await progress(82, 'Assembling recommendations');
-            const recommendations = fbPageRecommendations(main, benchmark);
-
-            await progress(88, 'Writing the AI strategy layer');
-            const ai = await fbPageNarrative({
-                target: main, rival: rivalAudit, benchmark,
-                brief: brief ? String(brief).slice(0, 600) : null
-            });
-
-            const payload = {
-                mode: rivalAudit ? 'versus' : 'single',
-                generatedAt: new Date().toISOString(),
-                windowDays: window,
-                target: main, rival: rivalAudit, benchmark, recommendations, ai,
-                brief: brief || null
-            };
-
-            const postsAnalyzed = main.postsAnalyzed + (rivalAudit?.postsAnalyzed || 0);
-
-            await progress(95, 'Saving report to the vault');
-            const { data: saved } = await supabase.from('reports').insert([{
-                user_id: ctx.user.id,
-                platform: 'facebook',
-                report_type: 'fb_page',
-                audit_mode: rivalAudit ? 'versus' : 'single',
-                set_id: activeSetId,
-                target_handle: main.name || main.pageId,
-                competitor_handles: rivalAudit ? [rivalAudit.name || rivalAudit.pageId] : [],
-                fb_page_ids: rivalAudit ? [main.pageId, rivalAudit.pageId] : [main.pageId],
-                fb_page_names: rivalAudit ? [main.name, rivalAudit.name] : [main.name],
-                grade: main.grade,
-                score: main.score,
-                engagement_rate: main.engagementRate,
-                posts_analyzed: postsAnalyzed,
-                snapshot_date: new Date().toISOString().slice(0, 10),
-                credits_estimate: estimate,
-                ai_summary: ai?.executive_summary || null,
-                ai_json: ai || null,
-                report_json: payload
-            }]).select('id').maybeSingle();
-
-            if (saved?.id) {
-                const ids = rivalAudit ? [main.pageId, rivalAudit.pageId] : [main.pageId];
-                await supabase.from('fb_page_posts').update({ report_id: saved.id })
-                    .eq('user_id', ctx.user.id).in('page_id', ids).is('report_id', null);
-            }
-            if (activeSetId) {
-                await supabase.from('fb_page_sets')
-                    .update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
-            }
-
-            return {
-                reportId: saved?.id || null, setId: activeSetId,
-                mode: payload.mode, postsAnalyzed, report: payload
-            };
-        });
+        runJob(job.id, JOB_WORKERS['fb_page_report'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({
             success: true,
@@ -4820,4 +5505,16 @@ app.get('/api/fb/page-posts', async (req, res) => {
 
 // ===========================================================================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Edgelead master engine active on port ${PORT}`));
+
+app.listen(PORT, async () => {
+    console.log(`Edgelead master engine active on port ${PORT}`);
+    console.log(`[config] budget=${BUDGET_MODE} credit=$${APIFY_CYCLE_CREDIT}/key/cycle ` +
+                `memory=${APIFY_MEMORY_MB}MB timeout=${APIFY_TIMEOUT_SECS}s ` +
+                `proxy=${APIFY_PROXY_GROUP || 'actor default'} model=${GEMINI_MODEL}`);
+
+    // Jobs run in-process. Render's free tier sleeps on idle and restarts on
+    // every deploy, so anything still marked running at boot is orphaned.
+    await sweepStaleJobs();
+    setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
+    setInterval(reviveStaleKeys, 3600000).unref?.();
+});
