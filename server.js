@@ -93,6 +93,16 @@ METRICS.authCache = { hit: 0, miss: 0 };
 const RECENT_EVENTS = [];          // last 100 warn/error lines, for /api/admin/metrics
 const _alertSent = new Map();
 
+// This grows for the life of the process, and its keys embed truncated error
+// messages ('job_failed:' + message.slice(0,40)), so the key space is
+// unbounded rather than merely large. Same treatment the auth cache and the
+// rate-limit buckets already get.
+setInterval(() => {
+    const now = Date.now();
+    const ttl = Math.max(ALERT_THROTTLE_MIN * 60000 * 4, 3600000);
+    for (const [k, t] of _alertSent) if (now - t > ttl) _alertSent.delete(k);
+}, 900000).unref?.();
+
 function log(level, event, fields = {}) {
     if ((LOG_LEVELS[level] || 20) < LOG_LEVEL) return;
     const line = { t: new Date().toISOString(), level, event, ...fields };
@@ -341,6 +351,14 @@ const FB_SHARE_WEIGHT      = parseFloat(process.env.FB_SHARE_WEIGHT   || '4');
 // Rough Apify pricing used for the pre-run estimate only.
 const COST_PER_1K_POSTS   = parseFloat(process.env.COST_PER_1K_POSTS   || '2.30');
 const COST_PER_1K_PROFILE = parseFloat(process.env.COST_PER_1K_PROFILE || '2.30');
+
+// Discovery methods asked for 1000 results per call with no cap and no cost
+// estimate, so one campaign with five methods selected could fire eight
+// ungated thousand-result scrapes against a key the budget system believed it
+// was protecting. The limit is now a config value AND the basis of the
+// estimate, so the two can never drift apart.
+const LEADGEN_RESULTS_LIMIT = parseInt(process.env.LEADGEN_RESULTS_LIMIT || '1000', 10);
+const LEADGEN_UNIT_USD      = +((LEADGEN_RESULTS_LIMIT / 1000) * COST_PER_1K_POSTS).toFixed(4);
 
 // --- Instagram analysis layer (phase 4) -------------------------------------
 const IG_COMMENT_WEIGHT = parseFloat(process.env.IG_COMMENT_WEIGHT || '4');
@@ -805,8 +823,31 @@ class NoCreditError extends Error {
         super(message);
         this.name = 'NoCreditError';
         this.code = 'NO_CREDIT';
+        // 402 Payment Required. Without this, a synchronous handler that runs
+        // out of credit answers 500, which is both wrong for the caller and
+        // counted as a server error by the request logger — so a user with an
+        // empty key generated the same alert as a crash.
+        this.statusCode = 402;
         Object.assign(this, detail);
     }
+}
+
+/**
+ * One error responder for every handler.
+ *
+ * Errors carrying a statusCode are the expected ones — out of credit, job cap
+ * reached, bad input. They are the caller's problem, not ours, and must not be
+ * reported as 5xx. Anything without a statusCode is genuinely unexpected and
+ * still gets 500 plus the alert.
+ */
+function sendErr(res, err, fallback = 500) {
+    const status = err?.statusCode || fallback;
+    const body = { error: err?.message || 'Unexpected error' };
+    if (err?.code) body.code = err.code;
+    if (status >= 500) logger.error('handler_error', {
+        message: err?.message, stack: (err?.stack || '').slice(0, 400)
+    });
+    res.status(status).json(body);
 }
 
 /**
@@ -961,8 +1002,14 @@ async function budgetSnapshot(engine, userId, estimateUsd = 0) {
             totalRemainingUsd: +total.toFixed(4),
             largestKeyRemainingUsd: +best.toFixed(4),
             estimatedUsd: +Number(estimateUsd || 0).toFixed(4),
-            affordable: !(estimateUsd > 0) || total >= estimateUsd,
-            willPause: BUDGET_MODE === 'block' && estimateUsd > 0 && total < estimateUsd
+            // A run is affordable when ONE key can cover it, not when the sum
+            // of all keys can. getWorkingClient() walks candidates and needs a
+            // single key to clear needUsd; it never splits a call across two.
+            // Reporting the sum told users a run would go through and then
+            // refused it.
+            affordable: !(estimateUsd > 0) || best >= estimateUsd,
+            splittable: !(estimateUsd > 0) || total >= estimateUsd,
+            willPause: BUDGET_MODE === 'block' && estimateUsd > 0 && best < estimateUsd
         };
     } catch (e) {
         logger.warn('budget_snapshot_failed', { engine, message: e.message });
@@ -1352,10 +1399,18 @@ async function callActor(client, actorId, input, opts = {}) {
     return { run, items: rows, usd };
 }
 
-async function runActor(actorId, input, warningsArray, methodName, client) {
+async function runActor(actorId, input, warningsArray, methodName, client, opts = {}) {
     try {
-        console.log(`[Apify] ${actorId} :: ${methodName}`);
-        const { items } = await callActor(client, actorId, input);
+        logger.info('leadgen_actor', { actorId, method: methodName });
+        // An estimate is not optional. Without one callActor skips the budget
+        // gate, takes no reservation and can never raise NO_CREDIT — which is
+        // why the leadgen engine was the only engine that could overspend a
+        // key silently.
+        const { items } = await callActor(client, actorId, input, {
+            estimateUsd: opts.estimateUsd ?? LEADGEN_UNIT_USD,
+            maxItems:    opts.maxItems    ?? LEADGEN_RESULTS_LIMIT,
+            jobId:       opts.jobId || null
+        });
         const extracted = extractPosts(items || []);
         if (warningsArray) warningsArray.push(`X-RAY (${methodName}): Extracted ${extracted.length} real posts.`);
         return extracted;
@@ -3221,6 +3276,9 @@ function jobUnitCount(job) {
         case 'fb_community_audit': return Math.max(1, (i.groups || []).length);
         case 'fb_discovery':       return Math.max(1, (i.seeds || []).length || Number(i.maxGroups) || 1);
         case 'fb_page_report':     return i.rival ? 2 : 1;
+        case 'fb_verify':          return 1;
+        case 'leadgen_campaign':   return Math.max(1, leadgenUnits(i).length);
+        case 'leadgen_enrich':     return Math.max(1, Math.ceil((Number(i.batchSize) || 25) / 25));
         default:                   return 1;
     }
 }
@@ -3409,6 +3467,12 @@ const AUTO_RESUME = String(process.env.AUTO_RESUME_JOBS || 'true') !== 'false';
 const AUTO_RESUME_MAX = parseInt(process.env.AUTO_RESUME_MAX_ATTEMPTS || '2', 10);
 const _autoResumeTries = new Map();
 
+// A job id not seen in a day is finished, one way or another. _authCache and
+// the rate-limit buckets both get swept; this one never was.
+setInterval(() => {
+    if (_autoResumeTries.size > 500) _autoResumeTries.clear();
+}, 86400000).unref?.();
+
 async function sweepStaleJobs() {
     const cutoff = new Date(Date.now() - JOB_STALE_MINUTES * 60000).toISOString();
     try {
@@ -3420,9 +3484,10 @@ async function sweepStaleJobs() {
         const resumed = [];
         for (const j of (data || [])) {
             const n = Array.isArray(j.completed_units) ? j.completed_units.length : 0;
-            // fb_discovery and fb_verify pass an inline closure to runJob rather
-            // than registering a factory, so they cannot be rebuilt from
-            // jobs.input. Telling their owner to resume produces a 400.
+            // Every job type is registered as of phase 6, so canResume is now
+            // true for all of them. The check stays because a job row written
+            // by an older build can still carry a type this process does not
+            // know, and telling its owner to resume would produce a 400.
             const canResume = !!JOB_WORKERS[j.type];
             await updateJob(j.id, {
                 status: 'interrupted',
@@ -4100,6 +4165,213 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             };
         });
 
+
+// ---------------------------------------------------------------------------
+// fb_discovery and fb_verify used to pass an inline closure to runJob rather
+// than registering a factory, so they could not be rebuilt from jobs.input and
+// could never be resumed. The sharper cost was that the discovery closure never
+// touched the checkpoint at all — a 12-group run that died at group 11 lost all
+// 11 paid units AND could not be picked back up. Both halves are fixed here.
+// ---------------------------------------------------------------------------
+
+registerWorker('fb_discovery', (userId, input, jobId) => async (progress, ck) => {
+    const {
+        location = '', niche = '', keywords = [],
+        seeds = [], sampleSize = 40, maxGroups = 12
+    } = input;
+
+    const sample = Math.min(parseInt(sampleSize, 10) || 40, 120);
+    const cap    = Math.min(parseInt(maxGroups, 10) || 12, FB_MAX_GROUPS);
+
+    const { client } = await getWorkingClient('fb_community', userId, {
+        needUsd: fbEstimateCredits(1, sample, false), jobId
+    });
+
+    let refs = (seeds || []).map(id => ({
+        groupId: id, url: `https://www.facebook.com/groups/${id}/`
+    }));
+
+    // The search phase is itself a billable unit and is now checkpointed. It
+    // used to be repeated in full on every attempt.
+    if (!refs.length) {
+        if (ck.isDone('search')) {
+            refs = (ck.get('search') || []).slice(0, cap);
+            await progress(15, `Reusing ${refs.length} candidate(s) from the earlier search`);
+        } else {
+            await progress(8, `Searching Facebook for "${niche || keywords.join(', ')}" near ${location || 'anywhere'}`);
+            const queries = [
+                ...(keywords || []),
+                niche && location ? `${niche} ${location}` : null,
+                location ? `${location} community` : null,
+                location ? `${location} buy sell` : null,
+                niche || null
+            ].filter(Boolean).slice(0, 5);
+
+            const found = new Map();
+            for (const q of queries) {
+                try {
+                    const { items } = await callActor(client, FB_SEARCH_ACTOR, {
+                        search: q, searchType: 'groups', query: q,
+                        resultsLimit: 25, maxResults: 25
+                    }, { maxItems: 25, estimateUsd: fbEstimateCredits(1, 25, false), jobId });
+                    (items || []).forEach(it => {
+                        const ref = parseGroupRef(it.url || it.groupUrl || it.link || it.id);
+                        if (!ref) return;
+                        if (!found.has(ref.groupId)) found.set(ref.groupId, {
+                            ...ref,
+                            hintName: it.name || it.title || null,
+                            hintMembers: firstNum(it.membersCount, it.memberCount)
+                        });
+                    });
+                    await progress(12, `"${q}" returned ${items?.length || 0} candidates`);
+                } catch (e) {
+                    if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+                    await progress(12, `Search for "${q}" failed: ${e.message}`);
+                }
+            }
+            const all = Array.from(found.values());
+            await ck.done('search', all);
+            refs = all.slice(0, cap);
+        }
+    }
+
+    if (!refs.length) {
+        throw new Error('No groups found. Facebook group search is the least reliable part of this pipeline — paste group URLs directly on the Discover tab and they will be scored the same way.');
+    }
+
+    await progress(20, `Measuring ${refs.length} rooms`);
+
+    const scored = [];
+    const step = Math.max(1, Math.floor(70 / refs.length));
+
+    for (let i = 0; i < refs.length; i++) {
+        const unit = 'group:' + refs[i].groupId;
+
+        // The whole point of registering this worker: a group already sampled
+        // and paid for is replayed from the checkpoint.
+        if (ck.isDone(unit)) {
+            const saved = ck.get(unit);
+            if (saved) scored.push(saved);
+            await progress(20 + step * (i + 1), `${refs[i].groupId} already sampled — reused`);
+            continue;
+        }
+
+        await progress(20 + step * i, `Sampling ${refs[i].groupId} (${i + 1}/${refs.length})`);
+        try {
+            const { meta, rows, demand } = await fbProcessGroup(client, userId, refs[i], {
+                limit: sample, days: 30, sampleComments: false,
+                niche, location, source: 'discovery'
+            });
+
+            if (meta.privacy === 'private') {
+                await ck.done(unit, null);
+                await progress(20 + step * (i + 1),
+                    `${meta.name} is private — skipped (needs a logged-in session, which we will not do)`);
+                continue;
+            }
+
+            await fbSavePosts(rows);
+            await fbSaveDemand(demand);
+
+            const audit = computeGroupAudit(meta, rows, demand);
+            await supabase.from('fb_groups').update({
+                posts_per_day: audit.postsPerDay,
+                median_comments: audit.medianComments,
+                unique_poster_ratio: audit.uniquePosterRatio,
+                room_value_score: audit.roomValue,
+                score_breakdown: audit.roomValueBreakdown,
+                last_scraped_at: new Date().toISOString()
+            }).eq('user_id', userId).eq('group_id', meta.group_id);
+
+            const entry = {
+                groupId: meta.group_id, name: meta.name, url: meta.url,
+                memberCount: meta.member_count, privacy: meta.privacy,
+                promoAllowed: meta.promo_allowed, approvalRequired: meta.approval_required,
+                postsPerDay: audit.postsPerDay, medianComments: audit.medianComments,
+                uniquePosters: audit.uniquePosters, uniquePosterRatio: audit.uniquePosterRatio,
+                demandSignals: audit.demandSignals, demandRate: audit.demandRate,
+                roomValue: audit.roomValue, breakdown: audit.roomValueBreakdown,
+                postsSampled: audit.postsAnalyzed
+            };
+            scored.push(entry);
+            await ck.done(unit, entry);
+            await progress(20 + step * (i + 1),
+                `${meta.name}: Room Value ${audit.roomValue} — ${audit.roomValueBreakdown.verdict}`);
+        } catch (e) {
+            if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+            await progress(20 + step * (i + 1), `Could not sample ${refs[i].groupId}: ${e.message}`);
+        }
+    }
+
+    if (!scored.length) throw new Error('Every candidate group failed to scrape. They are most likely private.');
+
+    scored.sort((a, b) => b.roomValue - a.roomValue);
+    scored.forEach((g, i) => { g.rank = i + 1; g.isTop10 = i < 10; });
+
+    await progress(96, `Ranked ${scored.length} rooms`);
+    return {
+        groups: scored,
+        top10: scored.slice(0, 10),
+        location, niche,
+        skipped: refs.length - scored.length
+    };
+});
+
+registerWorker('fb_verify', (userId, input, jobId) => async (progress, ck) => {
+    const { suggestionId } = input;
+
+    // Read the row here, not in the handler. Closing over a request-scoped
+    // object is exactly what stopped this job type from being resumable.
+    const { data: sug } = await supabase.from('fb_suggestions')
+        .select('*').eq('id', suggestionId).eq('user_id', userId).maybeSingle();
+    if (!sug) throw new Error('That suggestion no longer exists.');
+
+    const { client } = await getWorkingClient('fb_community', userId, {
+        needUsd: fbEstimateCredits(1, 80, false), jobId
+    });
+
+    let rows;
+    if (ck.isDone('scrape')) {
+        rows = ck.get('scrape') || [];
+        await progress(60, 'Reusing the feed already scraped for this check');
+    } else {
+        await progress(20, `Re-scraping ${sug.group_name}`);
+        const ref = { groupId: sug.group_id, url: `https://www.facebook.com/groups/${sug.group_id}/` };
+        const r = await fbProcessGroup(client, userId, ref,
+            { limit: 80, days: 14, sampleComments: false, source: 'verify' });
+        rows = r.rows;
+        await fbSavePosts(rows);
+        await ck.done('scrape', rows);
+    }
+
+    await progress(70, 'Matching the posted draft');
+    const needle = String(sug.draft_text || '').slice(0, 60).toLowerCase().replace(/\s+/g, ' ').trim();
+    const match = sug.posted_url
+        ? rows.find(r => r.post_url && r.post_url.includes(String(sug.posted_url).split('/').filter(Boolean).pop()))
+        : rows.find(r => (r.content || '').toLowerCase().replace(/\s+/g, ' ').includes(needle.slice(0, 40)));
+
+    if (!match) throw new Error('Could not find that post in the recent feed. Paste the exact post URL on the card and try again.');
+
+    await supabase.from('fb_suggestions').update({
+        actual_index: match.performance_index,
+        verified_at: new Date().toISOString(),
+        posted_url: sug.posted_url || match.post_url
+    }).eq('id', sug.id).eq('user_id', userId);
+
+    const predicted = Number(sug.predicted_index) || null;
+    return {
+        suggestionId: sug.id,
+        predictedIndex: predicted,
+        actualIndex: match.performance_index,
+        delta: predicted ? +(match.performance_index - predicted).toFixed(2) : null,
+        verdict: match.performance_index >= 2 ? 'Top performer in that room'
+               : match.performance_index >= 1.2 ? 'Above the room median'
+               : match.performance_index >= 0.8 ? 'Typical for that room'
+               : 'Below the room median',
+        postUrl: match.post_url
+    };
+});
+
 // ===========================================================================
 // PHASE 4 — OPERATIONS ENDPOINTS
 // ===========================================================================
@@ -4746,14 +5018,260 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 });
 
 // ===========================================================================
-// STAGE 1 :: DISCOVERY PIPELINE  (unchanged response shape)
+// STAGE 1 :: DISCOVERY PIPELINE  (checkpointed job)
+//
+// This ran Apify inside the HTTP request until phase 6. A long run hit the
+// proxy timeout while the actor kept billing, and the user got a network error
+// with no job, no checkpoint and no cancel. Worse, none of its actor calls
+// carried a cost estimate, so callActor() skipped the budget gate, took no
+// reservation and could never raise NO_CREDIT — the leadgen engine was the
+// only engine that could overspend a key silently.
+//
+// Each Apify call is now one billable unit, checkpointed with the rows it
+// returned. A resumed run replays those rows instead of paying to scrape them
+// again — the contract every other engine already had.
 // ===========================================================================
 
+function leadgenUnits(input) {
+    const {
+        location = '', hashtags = [], method3_1_keywords = [],
+        competitor_handles = [], method6_keywords = [], selected_methods = []
+    } = input || {};
+
+    const units = [];
+    if (selected_methods.includes('method_1')   && location)                 units.push({ id: 'm1', kind: 'locations' });
+    if (selected_methods.includes('method_3')   && hashtags.length)          units.push({ id: 'm3', kind: 'hashtags' });
+    if (selected_methods.includes('method_3_1'))
+        method3_1_keywords.forEach(kw => units.push({ id: 'm3_1:' + kw, kind: 'phrase', kw }));
+    if (selected_methods.includes('method_4')   && competitor_handles.length) units.push({ id: 'm4', kind: 'tagged' });
+    if (selected_methods.includes('method_6'))
+        method6_keywords.forEach(kw => units.push({ id: 'm6:' + kw, kind: 'accounts', kw }));
+    return units;
+}
+
+registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck) => {
+    const {
+        campaignId, location = '', method1_keywords = [], hashtags = [],
+        competitor_handles = [], method6_keywords = []
+    } = input;
+
+    const warnings = [];
+    const units = leadgenUnits(input);
+    if (!units.length) {
+        throw new Error('No discovery method selected, or the selected methods have no inputs.');
+    }
+
+    // Shape one raw Apify item into the row the save phase writes.
+    const shape = (i) => {
+        const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
+        if (!handle) return null;
+        return {
+            username: String(handle).toLowerCase().trim().replace('@', ''),
+            post_views: getViews(i),
+            post_likes: i.likesCount || 0,
+            post_comments: i.commentsCount || 0,
+            post_timestamp: tsOf(i)?.toISOString() || new Date().toISOString(),
+            post_url: i.url || `https://instagram.com/p/${shortcodeOf(i)}`
+        };
+    };
+
+    const collect = (items, filterKeywords) => {
+        const lower = (filterKeywords || []).map(k => String(k).toLowerCase().trim()).filter(Boolean);
+        const out = [];
+        (items || []).forEach(i => {
+            const caption = String(i.caption || i.text || '').toLowerCase();
+            if (lower.length && !lower.some(kw => caption.includes(kw))) return;
+            const row = shape(i);
+            if (row) out.push(row);
+        });
+        return out;
+    };
+
+    const discovered = [];
+
+    for (let i = 0; i < units.length; i++) {
+        const u = units[i];
+        const pct = 5 + Math.floor(65 * i / units.length);
+
+        // Already paid for on an earlier attempt. Replay, do not re-scrape.
+        if (ck.isDone(u.id)) {
+            discovered.push(...(ck.get(u.id) || []));
+            await progress(pct, `Reusing ${u.id} from the earlier attempt — not re-scraped`);
+            continue;
+        }
+
+        await progress(pct, `${u.id} (${i + 1} of ${units.length})`);
+
+        // Budget gate per unit. A key that cannot cover ONE unit raises
+        // NO_CREDIT, which runJob turns into paused_no_credit with the
+        // checkpoint intact — rather than the old behaviour of scraping anyway.
+        const { client } = await getWorkingClient('leadgen', userId, {
+            needUsd: LEADGEN_UNIT_USD, jobId
+        });
+
+        let rows = [];
+        try {
+            if (u.kind === 'locations') {
+                const directUrls = String(location).split(',').map(c => c.trim())
+                    .filter(loc => loc.includes('instagram.com/explore/locations'));
+                if (!directUrls.length) {
+                    warnings.push('METHOD 1 SKIPPED: Location requires a direct Instagram explore URL.');
+                } else {
+                    const items = await runActor('apify/instagram-scraper',
+                        { directUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
+                        warnings, 'Method 1 (Locations)', client, { jobId });
+                    rows = collect(items, method1_keywords);
+                }
+
+            } else if (u.kind === 'hashtags') {
+                const directUrls = hashtags.map(h => String(h).replace('#', '').trim()).filter(Boolean)
+                    .map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
+                const items = await runActor('apify/instagram-scraper',
+                    { directUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
+                    warnings, 'Method 3 (Hashtags)', client, { jobId });
+                rows = collect(items);
+
+            } else if (u.kind === 'phrase') {
+                const items = await runActor('apify/instagram-api-scraper',
+                    { query: u.kw, limit: LEADGEN_RESULTS_LIMIT },
+                    warnings, `Method 3.1 (${u.kw})`, client, { jobId });
+                rows = collect(items);
+
+            } else if (u.kind === 'tagged') {
+                const taggedUrls = competitor_handles.map(h => String(h).replace('@', '').trim()).filter(Boolean)
+                    .map(handle => `https://www.instagram.com/${handle}/tagged/`);
+                const items = await runActor('apify/instagram-scraper',
+                    { directUrls: taggedUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
+                    warnings, 'Method 4 (Competitor Tagged)', client, { jobId });
+                rows = collect(items);
+
+            } else if (u.kind === 'accounts') {
+                const { items } = await callActor(client, 'apify/instagram-search-scraper',
+                    { searchQueries: [u.kw], searchType: 'user' },
+                    { estimateUsd: COST_PER_1K_PROFILE / 20, maxItems: 50, jobId });
+                rows = (items || []).map(it => {
+                    const handle = it.username || it.ownerUsername;
+                    if (!handle) return null;
+                    return {
+                        username: String(handle).toLowerCase().trim().replace('@', ''),
+                        post_views: 0, post_likes: 0, post_comments: 0,
+                        post_timestamp: new Date().toISOString(),
+                        post_url: `https://instagram.com/${handle}`
+                    };
+                }).filter(Boolean);
+                warnings.push(`X-RAY (Method 6): ${rows.length} accounts for "${u.kw}".`);
+            }
+        } catch (e) {
+            // NO_CREDIT and CANCELLED must reach runJob to park the job with
+            // its checkpoint. Anything else is one method failing, which is not
+            // a reason to throw away the four that worked.
+            if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+            warnings.push(`Error (${u.id}): ${e.message}`);
+            logger.warn('leadgen_unit_failed', { jobId, unit: u.id, message: e.message });
+        }
+
+        discovered.push(...rows);
+        await ck.done(u.id, rows);
+    }
+
+    // --- save -------------------------------------------------------------
+    // Batched. The old loop ran a SELECT and an INSERT per handle — roughly
+    // 2000 sequential round trips on a 1000-lead campaign, which was a large
+    // part of why this endpoint timed out before Apify was even the problem.
+    await progress(75, 'Saving leads');
+
+    const uniqueMap = new Map();
+    discovered.forEach(p => {
+        if (!p?.username) return;
+        const cur = uniqueMap.get(p.username);
+        if (!cur || (p.post_views || 0) > (cur.post_views || 0)) uniqueMap.set(p.username, p);
+    });
+    const posts = Array.from(uniqueMap.values());
+
+    if (!posts.length) {
+        await supabase.from('campaigns')
+            .update({ total_leads_found: 0 }).eq('id', campaignId).eq('user_id', userId);
+        return { campaignId, newUniqueLeads: 0, totalLinked: 0, methodsRun: units.length, warnings };
+    }
+
+    const idByUsername = new Map();
+    const CHUNK = 200;
+
+    for (let i = 0; i < posts.length; i += CHUNK) {
+        const names = posts.slice(i, i + CHUNK).map(p => p.username);
+        const { data: existing } = await supabase.from('leads')
+            .select('id, username').eq('owner_user_id', userId).in('username', names);
+        (existing || []).forEach(l => idByUsername.set(l.username, l.id));
+    }
+
+    const missing = posts.filter(p => !idByUsername.has(p.username));
+    for (let i = 0; i < missing.length; i += CHUNK) {
+        const batch = missing.slice(i, i + CHUNK).map(p => ({
+            owner_user_id: userId,
+            username: p.username,
+            profile_url: `https://instagram.com/${p.username}`,
+            is_enriched: false
+        }));
+        const { data: created, error: insErr } = await supabase.from('leads')
+            .insert(batch).select('id, username');
+        if (insErr) {
+            warnings.push(`DB: ${batch.length} lead(s) in one batch failed to save — ${insErr.message}`);
+            logger.error('leadgen_lead_insert_failed', { jobId, message: insErr.message });
+            continue;
+        }
+        (created || []).forEach(l => idByUsername.set(l.username, l.id));
+        await progress(
+            75 + Math.floor(15 * Math.min(i + CHUNK, missing.length) / Math.max(1, missing.length)),
+            `Saved ${Math.min(i + CHUNK, missing.length)} of ${missing.length} new leads`);
+    }
+
+    const links = posts
+        .filter(p => idByUsername.has(p.username))
+        .map(p => ({
+            campaign_id: campaignId,
+            lead_id: idByUsername.get(p.username),
+            user_id: userId,
+            top_post_url: p.post_url,
+            top_post_views: p.post_views || 0,
+            post_likes: p.post_likes || 0,
+            post_comments: p.post_comments || 0,
+            post_timestamp: new Date(p.post_timestamp).toISOString()
+        }));
+
+    let linked = 0;
+    for (let i = 0; i < links.length; i += CHUNK) {
+        const slice = links.slice(i, i + CHUNK);
+        // Upsert, not insert. A resumed run replays this whole phase, and
+        // without the phase 6 unique index that duplicated every lead in the
+        // Vault and inflated total_leads_found.
+        const { error: linkErr } = await supabase.from('campaign_leads')
+            .upsert(slice, { onConflict: 'campaign_id,lead_id', ignoreDuplicates: false });
+        if (linkErr) {
+            warnings.push(`DB: a batch of campaign links failed — ${linkErr.message}`);
+            logger.error('leadgen_link_failed', { jobId, message: linkErr.message });
+        } else {
+            linked += slice.length;
+        }
+    }
+
+    await progress(95, `Linked ${linked} lead(s) to the campaign`);
+
+    await supabase.from('campaigns')
+        .update({ total_leads_found: linked }).eq('id', campaignId).eq('user_id', userId);
+
+    return {
+        campaignId,
+        newUniqueLeads: missing.length,   // genuinely new leads
+        totalLinked: linked,              // rows on this campaign, new or not
+        methodsRun: units.length,
+        warnings
+    };
+});
+
 app.post('/api/run-campaign', spendLimit, async (req, res) => {
-    let warnings = [];
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
-        const user = ctx.user;
+        await assertJobSlot(ctx.user.id);
 
         const {
             campaignName, location, method1_keywords = [], hashtags = [],
@@ -4761,185 +5279,106 @@ app.post('/api/run-campaign', spendLimit, async (req, res) => {
             selected_methods = []
         } = req.body;
 
-        const { client } = await getWorkingClient('leadgen', user.id);
-
-        const { data: newCmp, error: cmpErr } = await supabase.from('campaigns').insert([{
-            user_id: user.id,
-            name: campaignName || 'Discovery Campaign',
-            location,
-            keywords: [...method1_keywords, ...method3_1_keywords],
-            selected_methods
-        }]).select().single();
-        if (cmpErr) throw cmpErr;
-
-        const activeCampaignId = newCmp.id;
-        let rawDiscoveredPosts = [];
-
-        const collect = (posts, filterKeywords) => {
-            const lower = (filterKeywords || []).map(k => k.toLowerCase().trim());
-            posts.forEach(i => {
-                const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
-                const caption = (i.caption || i.text || '').toLowerCase();
-                if (!handle) return;
-                if (lower.length && !lower.some(kw => caption.includes(kw))) return;
-                rawDiscoveredPosts.push({
-                    username: handle,
-                    post_views: getViews(i),
-                    post_likes: i.likesCount || 0,
-                    post_comments: i.commentsCount || 0,
-                    post_timestamp: tsOf(i)?.toISOString() || new Date().toISOString(),
-                    post_url: i.url || `https://instagram.com/p/${shortcodeOf(i)}`
-                });
-            });
+        const input = {
+            location: location || '',
+            method1_keywords, hashtags, method3_1_keywords,
+            competitor_handles, method6_keywords, selected_methods
         };
 
-        // METHOD 1 :: Location URL feed
-        if (selected_methods.includes('method_1') && location) {
-            const directUrls = location.split(',').map(c => c.trim())
-                .filter(loc => loc.includes('instagram.com/explore/locations'));
-            if (directUrls.length) {
-                const posts = await runActor('apify/instagram-scraper',
-                    { directUrls, resultsLimit: 1000, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
-                    warnings, 'Method 1 (Locations)', client);
-                collect(posts, method1_keywords);
-            } else {
-                warnings.push('METHOD 1 SKIPPED: Location requires a direct Instagram explore URL.');
-            }
+        const units = leadgenUnits(input);
+        if (!units.length) {
+            return res.status(400).json({
+                error: 'Select at least one discovery method and give it something to work with.'
+            });
         }
 
-        // METHOD 3 :: Hashtag feed
-        if (selected_methods.includes('method_3') && hashtags.length) {
-            const directUrls = hashtags.map(h => h.replace('#', '').trim()).filter(Boolean)
-                .map(tag => `https://www.instagram.com/explore/tags/${tag}/`);
-            const posts = await runActor('apify/instagram-scraper',
-                { directUrls, resultsLimit: 1000, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
-                warnings, 'Method 3 (Hashtags)', client);
-            collect(posts);
-        }
+        // The campaign row is created here, not in the worker, so its id is
+        // stable across a resume and the worker stays rebuildable from
+        // jobs.input alone.
+        const { data: newCmp, error: cmpErr } = await supabase.from('campaigns').insert([{
+            user_id: ctx.user.id,
+            name: campaignName || 'Discovery Campaign',
+            location: location || null,
+            keywords: [...method1_keywords, ...method3_1_keywords],
+            selected_methods
+        }]).select('id').single();
+        if (cmpErr) throw cmpErr;
 
-        // METHOD 3.1 :: Global phrase search
-        if (selected_methods.includes('method_3_1') && method3_1_keywords.length) {
-            for (const kw of method3_1_keywords) {
-                const posts = await runActor('apify/instagram-api-scraper',
-                    { query: kw, limit: 1000 }, warnings, `Method 3.1 (${kw})`, client);
-                collect(posts);
-            }
-        }
+        const estimate = +(units.length * LEADGEN_UNIT_USD).toFixed(4);
 
-        // METHOD 4 :: Competitor tagged feed
-        if (selected_methods.includes('method_4') && competitor_handles.length) {
-            const taggedUrls = competitor_handles.map(h => h.replace('@', '').trim()).filter(Boolean)
-                .map(handle => `https://www.instagram.com/${handle}/tagged/`);
-            const posts = await runActor('apify/instagram-scraper',
-                { directUrls: taggedUrls, resultsLimit: 1000, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
-                warnings, 'Method 4 (Competitor Tagged)', client);
-            collect(posts);
-        }
+        const job = await createJob(ctx.user.id, 'leadgen_campaign', 'leadgen',
+            { ...input, campaignId: newCmp.id }, estimate);
 
-        // METHOD 6 :: TopSearch B2B accounts
-        if (selected_methods.includes('method_6') && method6_keywords.length) {
-            for (const kw of method6_keywords) {
-                try {
-                    const { items } = await callActor(client, 'apify/instagram-search-scraper',
-                        { searchQueries: [kw], searchType: 'user' });
-                    (items || []).forEach(item => {
-                        const handle = item.username || item.ownerUsername;
-                        if (handle) rawDiscoveredPosts.push({
-                            username: handle, post_views: 0, post_likes: 0, post_comments: 0,
-                            post_timestamp: new Date().toISOString(),
-                            post_url: `https://instagram.com/${handle}`
-                        });
-                    });
-                    warnings.push(`X-RAY (Method 6): Found ${items?.length || 0} accounts for "${kw}".`);
-                } catch (e) { warnings.push(`Error (Method 6): ${e.message}`); }
-            }
-        }
+        runJob(job.id, JOB_WORKERS['leadgen_campaign'](ctx.user.id, job.input, job.id));
 
-        // Dedupe, keeping the strongest post per handle
-        const uniqueMap = new Map();
-        rawDiscoveredPosts.forEach(post => {
-            const u = post.username.toLowerCase().trim().replace('@', '');
-            if (!uniqueMap.has(u) || post.post_views > uniqueMap.get(u).post_views) {
-                uniqueMap.set(u, { ...post, username: u });
-            }
+        res.status(202).json({
+            success: true,
+            jobId: job.id,
+            campaignId: newCmp.id,
+            methods: units.length,
+            estimatedUsd: estimate,
+            budget: await budgetSnapshot('leadgen', ctx.user.id, LEADGEN_UNIT_USD)
         });
-
-        let newLeadsSaved = 0;
-        for (const post of Array.from(uniqueMap.values())) {
-            let leadId = null;
-
-            const { data: existing } = await supabase.from('leads')
-                .select('id').eq('username', post.username).eq('owner_user_id', user.id).maybeSingle();
-
-            if (existing) {
-                leadId = existing.id;
-            } else {
-                const { data: newLead, error: insErr } = await supabase.from('leads').insert([{
-                    owner_user_id: user.id,
-                    username: post.username,
-                    profile_url: `https://instagram.com/${post.username}`,
-                    is_enriched: false
-                }]).select('id').maybeSingle();
-                if (insErr) { warnings.push(`DB Alert: Failed to save @${post.username}`); continue; }
-                leadId = newLead?.id;
-            }
-
-            if (leadId) {
-                const { error: linkErr } = await supabase.from('campaign_leads').insert([{
-                    campaign_id: activeCampaignId,
-                    lead_id: leadId,
-                    user_id: user.id,
-                    top_post_url: post.post_url,
-                    top_post_views: post.post_views || 0,
-                    post_likes: post.post_likes || 0,
-                    post_comments: post.post_comments || 0,
-                    post_timestamp: new Date(post.post_timestamp).toISOString()
-                }]);
-                if (!linkErr) newLeadsSaved++;
-            }
-        }
-
-        await supabase.from('campaigns')
-            .update({ total_leads_found: newLeadsSaved }).eq('id', activeCampaignId);
-
-        res.status(200).json({ success: true, newUniqueLeads: newLeadsSaved, warnings });
-    } catch (err) {
-        res.status(500).json({ error: err.message, warnings });
-    }
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
-// STAGE 2 :: ENRICHMENT
+// STAGE 2 :: ENRICHMENT  (checkpointed job)
 // ===========================================================================
 
-app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
-    try {
-        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
-        const user = ctx.user;
+registerWorker('leadgen_enrich', (userId, input, jobId) => async (progress, ck) => {
+    const { campaignId, batchSize } = input;
+    const size = Math.min(parseInt(batchSize || 25, 10), 100);
 
-        const { campaignId, batchSize } = req.body;
-        if (!campaignId) return res.status(400).json({ error: 'Campaign ID required' });
+    await progress(5, 'Finding leads that still need enriching');
 
-        const { data: linkData, error: linkErr } = await supabase.from('campaign_leads')
-            .select('leads(id, username, is_enriched)').eq('campaign_id', campaignId);
-        if (linkErr) throw linkErr;
+    const { data: linkData, error: linkErr } = await supabase.from('campaign_leads')
+        .select('leads(id, username, is_enriched)')
+        .eq('campaign_id', campaignId)
+        .eq('user_id', userId);
+    if (linkErr) throw linkErr;
 
-        const handles = (linkData || []).map(d => d.leads)
-            .filter(l => l && l.is_enriched !== true)
-            .map(l => l.username)
-            .slice(0, Math.min(parseInt(batchSize || 25, 10), 100));
+    const handles = (linkData || []).map(d => d.leads)
+        .filter(l => l && l.is_enriched !== true)
+        .map(l => l.username)
+        .slice(0, size);
 
-        if (!handles.length)
-            return res.status(200).json({ success: true, message: 'All leads enriched!', enrichedCount: 0 });
+    if (!handles.length) {
+        return { campaignId, enrichedCount: 0, requested: 0,
+                 message: 'All leads on this campaign are already enriched.' };
+    }
 
-        const { client } = await getWorkingClient('leadgen', user.id);
+    // One unit per batch of 25, so a run that pauses for credit resumes at the
+    // batch boundary instead of re-scraping profiles already paid for.
+    const BATCH = 25;
+    const batches = [];
+    for (let i = 0; i < handles.length; i += BATCH) batches.push(handles.slice(i, i + BATCH));
+
+    let updated = 0;
+
+    for (let b = 0; b < batches.length; b++) {
+        const names = batches[b];
+        const unit = 'enrich:' + names[0] + ':' + names.length;
+        const pct = 10 + Math.floor(80 * b / batches.length);
+
+        if (ck.isDone(unit)) {
+            updated += Number(ck.get(unit) || 0);
+            await progress(pct, `Batch ${b + 1} already done — not re-scraped`);
+            continue;
+        }
+
+        const estimate = +((names.length / 1000) * COST_PER_1K_PROFILE).toFixed(6);
+        await progress(pct, `Enriching ${names.length} profile(s), batch ${b + 1} of ${batches.length}`);
+
+        const { client } = await getWorkingClient('leadgen', userId, { needUsd: estimate, jobId });
+
         const { items: profiles } = await callActor(client, 'apify/instagram-profile-scraper',
-            { usernames: handles },
-            { waitSecs: 25, estimateUsd: (handles.length / 1000) * COST_PER_1K_PROFILE });
+            { usernames: names },
+            { waitSecs: 25, estimateUsd: estimate, maxItems: names.length, jobId });
 
-        let updated = 0;
+        let batchUpdated = 0;
         for (const p of (profiles || [])) {
-            const username = (p.username || p.ownerUsername || '').toLowerCase().trim();
+            const username = String(p.username || p.ownerUsername || '').toLowerCase().trim();
             if (!username) continue;
 
             const { error: updErr } = await supabase.from('leads').update({
@@ -4957,16 +5396,46 @@ app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
                 city: p.city || p.cityName || null,
                 address: p.addressStreet || null,
                 is_enriched: true
-            }).eq('username', username).eq('owner_user_id', user.id);
+            }).eq('username', username).eq('owner_user_id', userId);
 
-            if (!updErr) updated++;
+            if (!updErr) batchUpdated++;
         }
 
-        res.status(200).json({ success: true, enrichedCount: updated });
-    } catch (err) {
-        console.error('[Enrich Error]:', err.message);
-        res.status(500).json({ error: err.message });
+        updated += batchUpdated;
+        await ck.done(unit, batchUpdated);
     }
+
+    return { campaignId, enrichedCount: updated, requested: handles.length };
+});
+
+app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
+
+        const { campaignId, batchSize } = req.body;
+        if (!campaignId) return res.status(400).json({ error: 'Campaign ID required' });
+
+        // Confirm the campaign is the caller's before spending anything on it.
+        // The old handler queried campaign_leads by campaign_id alone, so a
+        // caller could spend their own credit scraping another tenant's handles.
+        const { data: cmp } = await supabase.from('campaigns')
+            .select('id').eq('id', campaignId).eq('user_id', ctx.user.id).maybeSingle();
+        if (!cmp) return res.status(404).json({ error: 'Campaign not found.' });
+
+        const size = Math.min(parseInt(batchSize || 25, 10), 100);
+        const estimate = +((size / 1000) * COST_PER_1K_PROFILE).toFixed(4);
+
+        const job = await createJob(ctx.user.id, 'leadgen_enrich', 'leadgen',
+            { campaignId, batchSize: size }, estimate);
+
+        runJob(job.id, JOB_WORKERS['leadgen_enrich'](ctx.user.id, job.input, job.id));
+
+        res.status(202).json({
+            success: true, jobId: job.id, campaignId,
+            batchSize: size, estimatedUsd: estimate
+        });
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
@@ -4976,18 +5445,44 @@ app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
 app.get('/api/client-history', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        // Paged, and the lead columns are named rather than leads(*). The old
+        // query shipped every bio the account had ever enriched just to draw a
+        // list of campaign names, and grew without bound for the life of the
+        // user.
+        const limit  = Math.min(parseInt(req.query.limit  || '20', 10), 50);
+        const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);
+
+        const { count } = await supabase.from('campaigns')
+            .select('id', { count: 'exact', head: true }).eq('user_id', ctx.user.id);
+
         const { data: campaigns } = await supabase.from('campaigns')
-            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, leads(*))')
+            .select('*, campaign_leads(top_post_views, post_likes, post_comments, post_timestamp, top_post_url, ' +
+                    'leads(id, username, full_name, email, phone, followers_count, following_count, posts_count, ' +
+                    'bio, website, category, is_business, is_verified, city, address, is_enriched, profile_url))')
             .eq('user_id', ctx.user.id)
-            .order('created_at', { ascending: false });
-        res.status(200).json({ campaigns });
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        res.status(200).json({
+            campaigns,
+            paging: { limit, offset, total: count || 0, hasMore: offset + limit < (count || 0) }
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/search-leads', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
-        const query = req.query.q ? req.query.q.toLowerCase().trim().replace('@', '') : '';
+        // PostgREST parses .or() as a DSL: commas separate terms, dots separate
+        // column.operator.value. Anything from the user that survives into that
+        // string is filter injection — bounded by the owner_user_id AND, but
+        // still able to break or redefine the query.
+        const query = String(req.query.q || '')
+            .toLowerCase().trim()
+            .replace(/[@,().\\%*]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80);
         if (!query) return res.status(400).json({ error: 'Query required' });
 
         const { data: leads, error } = await supabase.from('leads')
@@ -5051,8 +5546,7 @@ app.post('/api/generate-ig-report', spendLimit, async (req, res) => {
             estimatedUsd: estimate
         });
     } catch (err) {
-        console.error('[IG Report Error]:', err.message);
-        res.status(500).json({ success: false, error: err.message });
+        sendErr(res, err);
     }
 });
 
@@ -5129,9 +5623,7 @@ app.post('/api/deep-audit', spendLimit, async (req, res) => {
             postsPerAccount: limit,
             estimatedUsd: estimate
         });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
@@ -5205,9 +5697,7 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
             remainingUnits: leftUnits,
             note: 'Already-completed units will be reused, not re-scraped.'
         });
-    } catch (err) {
-        res.status(err.statusCode || 500).json({ error: err.message });
-    }
+    } catch (err) { sendErr(res, err); }
 });
 
 /**
@@ -5376,12 +5866,27 @@ app.get('/api/reports-history', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
         const limit = Math.min(parseInt(req.query.limit || '100', 10), 200);
-        const { data: reports, error } = await supabase.from('reports')
+
+        // The platform filter landed in phase 5; the report_type filter did not,
+        // so the Audit vault listed Competitor Intel runs and vice versa. Both
+        // pages hit this endpoint with no parameters, so both saw everything.
+        // Opening a foreign row switched tabs and rendered below the fold,
+        // which looked like being bounced to the wrong page.
+        //
+        // No parameter keeps the old behaviour, so nothing breaks if one page
+        // is deployed before the other.
+        const type = String(req.query.type || '').trim();
+
+        let q = supabase.from('reports')
             .select('id, platform, report_type, target_handle, competitor_handles, grade, score, ' +
                     'score_version, score_v1, engagement_rate, posts_analyzed, snapshot_date, ' +
                     'created_at, ai_summary, ai_status, set_id, credits_estimate')
             .eq('user_id', ctx.user.id)
-            .eq('platform', 'instagram')
+            .eq('platform', 'instagram');
+
+        if (type) q = q.eq('report_type', type);
+
+        const { data: reports, error } = await q
             .order('created_at', { ascending: false })
             .limit(limit);
         if (error) throw error;
@@ -6623,114 +7128,14 @@ app.post('/api/fb/discover-groups', spendLimit, async (req, res) => {
         const job = await createJob(ctx.user.id, 'fb_discovery', 'fb_community',
             { location, niche, keywords, seeds, sampleSize: sample, maxGroups: cap }, estimate);
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('fb_community', ctx.user.id);
-            let refs = seeds.map(id => ({ groupId: id, url: `https://www.facebook.com/groups/${id}/` }));
-
-            // Keyword search first — only when the user did not paste URLs.
-            if (!refs.length) {
-                await progress(8, `Searching Facebook for "${niche || keywords.join(', ')}" near ${location || 'anywhere'}`);
-                const queries = [
-                    ...(keywords || []),
-                    niche && location ? `${niche} ${location}` : null,
-                    location ? `${location} community` : null,
-                    location ? `${location} buy sell` : null,
-                    niche || null
-                ].filter(Boolean).slice(0, 5);
-
-                const found = new Map();
-                for (const q of queries) {
-                    try {
-                        const { items } = await callActor(client, FB_SEARCH_ACTOR, {
-                            search: q, searchType: 'groups', query: q,
-                            resultsLimit: 25, maxResults: 25
-                        }, { maxItems: 25 });
-                        (items || []).forEach(it => {
-                            const ref = parseGroupRef(it.url || it.groupUrl || it.link || it.id);
-                            if (!ref) return;
-                            if (!found.has(ref.groupId)) {
-                                found.set(ref.groupId, { ...ref, hintName: it.name || it.title || null, hintMembers: firstNum(it.membersCount, it.memberCount) });
-                            }
-                        });
-                        await progress(12, `"${q}" returned ${items?.length || 0} candidates`);
-                    } catch (e) {
-                        await progress(12, `Search for "${q}" failed: ${e.message}`);
-                    }
-                }
-                refs = Array.from(found.values()).slice(0, cap);
-            }
-
-            if (!refs.length) {
-                throw new Error('No groups found. Facebook group search is the least reliable part of this pipeline — paste group URLs directly on the Discover tab and they will be scored the same way.');
-            }
-
-            await progress(20, `Measuring ${refs.length} rooms`);
-
-            const scored = [];
-            const step = Math.floor(70 / refs.length);
-
-            for (let i = 0; i < refs.length; i++) {
-                await progress(20 + step * i, `Sampling ${refs[i].groupId} (${i + 1}/${refs.length})`);
-                try {
-                    const { meta, rows, demand } = await fbProcessGroup(client, ctx.user.id, refs[i], {
-                        limit: sample, days: 30, sampleComments: false,
-                        niche, location, source: 'discovery'
-                    });
-
-                    if (meta.privacy === 'private') {
-                        await progress(20 + step * i, `${meta.name} is private — skipped (needs a logged-in session, which we will not do)`);
-                        continue;
-                    }
-
-                    await fbSavePosts(rows);
-                    await fbSaveDemand(demand);
-
-                    const audit = computeGroupAudit(meta, rows, demand);
-                    await supabase.from('fb_groups').update({
-                        posts_per_day: audit.postsPerDay,
-                        median_comments: audit.medianComments,
-                        unique_poster_ratio: audit.uniquePosterRatio,
-                        room_value_score: audit.roomValue,
-                        score_breakdown: audit.roomValueBreakdown,
-                        last_scraped_at: new Date().toISOString()
-                    }).eq('user_id', ctx.user.id).eq('group_id', meta.group_id);
-
-                    scored.push({
-                        groupId: meta.group_id, name: meta.name, url: meta.url,
-                        memberCount: meta.member_count, privacy: meta.privacy,
-                        promoAllowed: meta.promo_allowed, approvalRequired: meta.approval_required,
-                        postsPerDay: audit.postsPerDay, medianComments: audit.medianComments,
-                        uniquePosters: audit.uniquePosters, uniquePosterRatio: audit.uniquePosterRatio,
-                        demandSignals: audit.demandSignals, demandRate: audit.demandRate,
-                        roomValue: audit.roomValue, breakdown: audit.roomValueBreakdown,
-                        postsSampled: audit.postsAnalyzed
-                    });
-                    await progress(20 + step * (i + 1), `${meta.name}: Room Value ${audit.roomValue} — ${audit.roomValueBreakdown.verdict}`);
-                } catch (e) {
-                    await progress(20 + step * (i + 1), `Could not sample ${refs[i].groupId}: ${e.message}`);
-                }
-            }
-
-            if (!scored.length) throw new Error('Every candidate group failed to scrape. They are most likely private.');
-
-            scored.sort((a, b) => b.roomValue - a.roomValue);
-            scored.forEach((g, i) => { g.rank = i + 1; g.isTop10 = i < 10; });
-
-            await progress(96, `Ranked ${scored.length} rooms`);
-            return {
-                groups: scored,
-                top10: scored.slice(0, 10),
-                location, niche,
-                skipped: refs.length - scored.length
-            };
-        });
+        runJob(job.id, JOB_WORKERS['fb_discovery'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({
             success: true, jobId: job.id,
             candidates: seeds.length || cap,
             estimatedUsd: estimate
         });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { sendErr(res, err); }
 });
 
 /** Manual import — always works, unlike group search. */
@@ -7065,7 +7470,7 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
             estimatedUsd: estimate,
             budget: await budgetSnapshot('fb_community', ctx.user.id, estimate)
         });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
@@ -7368,44 +7773,10 @@ app.post('/api/fb/suggestions/:id/verify', async (req, res) => {
         const job = await createJob(ctx.user.id, 'fb_verify', 'fb_community',
             { suggestionId: sug.id, groupId: sug.group_id }, fbEstimateCredits(1, 60, false));
 
-        runJob(job.id, async (progress) => {
-            const { client } = await getWorkingClient('fb_community', ctx.user.id);
-            await progress(20, `Re-scraping ${sug.group_name}`);
-
-            const ref = { groupId: sug.group_id, url: `https://www.facebook.com/groups/${sug.group_id}/` };
-            const { rows } = await fbProcessGroup(client, ctx.user.id, ref, { limit: 80, days: 14, sampleComments: false, source: 'verify' });
-            await fbSavePosts(rows);
-
-            await progress(70, 'Matching the posted draft');
-            const needle = String(sug.draft_text || '').slice(0, 60).toLowerCase().replace(/\s+/g, ' ').trim();
-            const match = sug.posted_url
-                ? rows.find(r => r.post_url && r.post_url.includes(String(sug.posted_url).split('/').filter(Boolean).pop()))
-                : rows.find(r => (r.content || '').toLowerCase().replace(/\s+/g, ' ').includes(needle.slice(0, 40)));
-
-            if (!match) throw new Error('Could not find that post in the recent feed. Paste the exact post URL on the card and try again.');
-
-            await supabase.from('fb_suggestions').update({
-                actual_index: match.performance_index,
-                verified_at: new Date().toISOString(),
-                posted_url: sug.posted_url || match.post_url
-            }).eq('id', sug.id);
-
-            const predicted = Number(sug.predicted_index) || null;
-            return {
-                suggestionId: sug.id,
-                predictedIndex: predicted,
-                actualIndex: match.performance_index,
-                delta: predicted ? +(match.performance_index - predicted).toFixed(2) : null,
-                verdict: match.performance_index >= 2 ? 'Top performer in that room'
-                       : match.performance_index >= 1.2 ? 'Above the room median'
-                       : match.performance_index >= 0.8 ? 'Typical for that room'
-                       : 'Below the room median',
-                postUrl: match.post_url
-            };
-        });
+        runJob(job.id, JOB_WORKERS['fb_verify'](ctx.user.id, job.input, job.id));
 
         res.status(202).json({ success: true, jobId: job.id });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { sendErr(res, err); }
 });
 
 /** Predicted vs actual across everything verified — the advisor's own scorecard. */
@@ -8605,9 +8976,7 @@ app.post('/api/fb/page-report', spendLimit, async (req, res) => {
             estimatedUsd: estimate,
             budget: await budgetSnapshot('fb_page', ctx.user.id, estimate)
         });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
@@ -9094,7 +9463,53 @@ async function start() {
     return server;
 }
 
-if (require.main === module) start();
+/**
+ * Park in-flight jobs on the way out.
+ *
+ * sweepStaleJobs() already recovers these, but only after JOB_STALE_MINUTES of
+ * a dead heartbeat — during which the UI spins on a job nobody is running.
+ * Render sends SIGTERM on every single deploy, so this is the common path, not
+ * the exceptional one.
+ *
+ * Best-effort and time-boxed: the platform SIGKILLs shortly after, and a
+ * shutdown that hangs is worse than one that misses a row the sweep would have
+ * caught anyway. 'interrupted' is already in RESUMABLE_STATUSES, so these are
+ * picked up — and auto-resumed — on the next boot exactly as before.
+ */
+let _shuttingDown = false;
+async function gracefulShutdown(signal, server) {
+    if (_shuttingDown) return;
+    _shuttingDown = true;
+    logger.warn('shutdown_started', { signal });
+
+    try { server?.close(); } catch (_) {}
+
+    try {
+        await Promise.race([
+            supabase.from('jobs')
+                .update({
+                    status: 'interrupted',
+                    error: 'The server restarted while this job was running. ' +
+                           'Anything already scraped was saved — resume to finish the rest.',
+                    updated_at: new Date().toISOString()
+                })
+                .in('status', ['running', 'queued']),
+            new Promise(r => setTimeout(r, 4000))
+        ]);
+    } catch (e) {
+        logger.error('shutdown_park_failed', { message: e.message });
+    }
+
+    logger.warn('shutdown_complete', { signal });
+    process.exit(0);
+}
+
+if (require.main === module) {
+    start().then(server => {
+        ['SIGTERM', 'SIGINT'].forEach(sig =>
+            process.on(sig, () => gracefulShutdown(sig, server)));
+    });
+}
 
 // Exported so the test suite can exercise the pure logic without booting a
 // server or touching Supabase. Nothing here changes runtime behaviour.
@@ -9105,6 +9520,7 @@ module.exports = {
     // budget + keys
     classifyKeyError, cycleMonth, clientRemaining, estimateCredits, fbEstimateCredits,
     fbPageEstimateCredits, primaryKeyName, buildBenchmark, ruleRecommendations,
+    leadgenUnits,
     // analysis helpers
     median, computeRoomValue, bucketCaption, lengthBand, openingPattern, topicTags,
     categorize, urgencyOf, classifyIntent, mineDemand, parseGroupRef, parsePageRef,
@@ -9118,3 +9534,4 @@ module.exports = {
     // caches
     invalidateAuth, invalidateEngineAccess
 };
+Z
