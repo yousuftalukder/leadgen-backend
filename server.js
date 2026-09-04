@@ -15,6 +15,23 @@
  *   - Competitor benchmarking against up to 10 manually supplied handles
  *   - Gemini narrative layer (server-side only, cached into the report row)
  *
+ * PHASE 4 — Instagram parity:
+ *   - igNormalisePost(): derived-feature pass on every post, matching the
+ *     Facebook Page engine (intent, opening, length band, flags, aspect
+ *     ratio, carousel depth, audio, provisional flagging)
+ *   - igIndexPosts(): each post scored against the account's own monthly
+ *     median, so growth over the window does not make old posts look bad
+ *   - Median-first aggregation throughout. One breakout reel no longer sets
+ *     the account's engagement rate, its best posting hour or its "always use
+ *     emoji" recommendation.
+ *   - Reels get a 48h settle window, stills 24h. A reel scraped six hours
+ *     after posting is an unfinished post, not a weak one.
+ *   - Score v2: seven bounded pillars with a returned breakdown. scoreV1 is
+ *     carried alongside so vault reports stay comparable.
+ *   - /api/admin/cost-reality: validates the estimate constants against the
+ *     settled usage ledger.
+ *   - /api/admin/rotate-encryption-key: re-wraps every secret under a new key.
+ *
  * FACEBOOK COMMUNITY ENGINE (engine key: 'fb_community'):
  *   - Engine 1 Discovery: rank local groups by Room Value, not member count
  *   - Engine 2 Audit: 30/60/90-day scrape, indexed against each room's own
@@ -141,6 +158,17 @@ const ENC_KEY = (() => {
     if (!raw) return null;
     if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
     // Any other string is accepted and stretched, so a passphrase works too.
+    return crypto.createHash('sha256').update(raw).digest();
+})();
+
+// Add next to ENC_KEY. Unset in normal operation.
+// Accepts the same two forms ENC_KEY does — 64-char hex, or any other string
+// stretched through sha256. If it only took hex, an installation that set a
+// passphrase could never rotate away from it.
+const ENC_KEY_OLD = (() => {
+    const raw = (process.env.APP_ENCRYPTION_KEY_OLD || '').trim();
+    if (!raw) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
     return crypto.createHash('sha256').update(raw).digest();
 })();
 
@@ -281,6 +309,34 @@ const FB_SHARE_WEIGHT      = parseFloat(process.env.FB_SHARE_WEIGHT   || '4');
 // Rough Apify pricing used for the pre-run estimate only.
 const COST_PER_1K_POSTS   = parseFloat(process.env.COST_PER_1K_POSTS   || '2.30');
 const COST_PER_1K_PROFILE = parseFloat(process.env.COST_PER_1K_PROFILE || '2.30');
+
+// --- Instagram analysis layer (phase 4) -------------------------------------
+const IG_COMMENT_WEIGHT = parseFloat(process.env.IG_COMMENT_WEIGHT || '4');
+
+// How long a post keeps accumulating before its numbers mean anything.
+// A still image is close to settled inside a day. A reel is not — reels keep
+// being served to non-followers for days, so a reel scraped six hours after
+// posting is not a weak reel, it is an unfinished one. Averaging it in with
+// settled posts is the single biggest source of false "your reels are dying"
+// readings, which is why the two windows are separate.
+const IG_PROVISIONAL_HOURS      = parseFloat(process.env.IG_PROVISIONAL_HOURS || '24');
+const IG_REEL_PROVISIONAL_HOURS = parseFloat(process.env.IG_REEL_PROVISIONAL_HOURS || '48');
+
+// Instagram timestamps come back in UTC. Local hour-of-day is what a posting
+// schedule is actually built on, so shift once, here. Defaults to the same
+// offset the FB engine uses so a mixed IG+FB account reads one clock.
+const IG_TZ_OFFSET_MINS = parseInt(process.env.IG_TZ_OFFSET_MINUTES || String(FB_TZ_OFFSET_MINS), 10);
+
+// Below this many posts the score is reported but flagged. Same threshold as
+// the FB page score, for the same reason: under ~12 posts a single outlier
+// moves the median enough that the index stops meaning anything.
+const IG_MIN_CONFIDENT_POSTS = parseInt(process.env.IG_MIN_CONFIDENT_POSTS || '12', 10);
+
+// v1 score is kept alongside v2 so reports already in the vault stay
+// comparable. Set IG_SCORE_V2=false to keep v1 as the headline number.
+const IG_SCORE_V2 = String(process.env.IG_SCORE_V2 || 'true') !== 'false';
+
+const IG_URL_RE = /https?:\/\/\S+|\b(?:link in bio|linkinbio|bio link|swipe up)\b/i;
 
 // --- Apify run shaping ------------------------------------------------------
 // Compute units are billed as RAM(GB) x hours, so memory is a direct cost lever.
@@ -1183,41 +1239,875 @@ async function runActor(actorId, input, warningsArray, methodName, client) {
 // POST PERSISTENCE
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// FIELD EXTRACTION
+// Everything below reads fields the instagram-scraper actor already returns
+// and savePosts() was dropping on the floor. Each accessor tries the several
+// spellings the actor has shipped over the years and returns null rather than
+// guessing, so a schema drift shows up as a missing field in dataQuality
+// instead of a plausible-looking wrong number.
+// ---------------------------------------------------------------------------
+
+function igCarouselCount(p) {
+    if (Array.isArray(p.childPosts)) return p.childPosts.length;
+    if (Array.isArray(p.sidecarChildren)) return p.sidecarChildren.length;
+    if (Array.isArray(p.edge_sidecar_to_children?.edges)) return p.edge_sidecar_to_children.edges.length;
+    return null;
+}
+
+function igTaggedUsers(p) {
+    const src = p.taggedUsers || p.usertags || p.tagged_users || [];
+    if (!Array.isArray(src)) return [];
+    return Array.from(new Set(src
+        .map(u => (typeof u === 'string' ? u : (u.username || u.user?.username || null)))
+        .filter(Boolean)
+        .map(s => String(s).toLowerCase())))
+        .slice(0, 30);
+}
+
+function igAltText(p) {
+    return p.alt || p.altText || p.accessibilityCaption || p.accessibility_caption || null;
+}
+
+/**
+ * Aspect ratio, bucketed.
+ *
+ * This is not cosmetic. 4:5 occupies roughly 25% more vertical feed space
+ * than 1:1 and materially more than 16:9, and feed real estate is the single
+ * cheapest engagement lever an account has. An account shipping everything at
+ * 1:1 is giving away impressions for free and no other metric in the report
+ * would ever surface it.
+ */
+function igDimensions(p) {
+    const w = p.dimensionsWidth ?? p.dimensions?.width ?? p.imageWidth ?? null;
+    const h = p.dimensionsHeight ?? p.dimensions?.height ?? p.imageHeight ?? null;
+    if (!w || !h) return { width: null, height: null, aspect: null };
+
+    const r = w / h;
+    const aspect =
+        Math.abs(r - 0.8)   < 0.06 ? '4:5'  :
+        Math.abs(r - 1)     < 0.06 ? '1:1'  :
+        Math.abs(r - 0.5625)< 0.06 ? '9:16' :
+        Math.abs(r - 1.777) < 0.12 ? '16:9' :
+        r < 0.8  ? 'tall'   :
+        r > 1.2  ? 'wide'   : 'other';
+
+    return { width: w, height: h, aspect };
+}
+
+function igIsSponsored(p) {
+    return !!(p.isSponsored || p.is_paid_partnership || p.paidPartnership ||
+              (Array.isArray(p.sponsorTags) && p.sponsorTags.length) ||
+              (Array.isArray(p.coauthorProducers) && p.coauthorProducers.some(c => c?.is_paid_partnership)));
+}
+
+function igAudio(p) {
+    const m = p.musicInfo || p.music_info || p.audio || null;
+    if (!m) return null;
+    return {
+        title:  m.song_name || m.title || m.audio_title || null,
+        artist: m.artist_name || m.artist || null,
+        original: m.uses_original_audio ?? m.isOriginalAudio ?? null,
+        audioId: m.audio_id || m.id || null
+    };
+}
+
+function igFirstComment(p) {
+    if (typeof p.firstComment === 'string') return p.firstComment;
+    if (p.firstComment?.text) return p.firstComment.text;
+    const lc = Array.isArray(p.latestComments) ? p.latestComments : [];
+    return lc[0]?.text || null;
+}
+
+function igCommentsDisabled(p) {
+    return p.isCommentsDisabled ?? p.commentsDisabled ?? p.comments_disabled ?? null;
+}
+
+
+// ---------------------------------------------------------------------------
+// NORMALISATION
+// One post in, one fully-derived row out. This is the IG counterpart of
+// fbPageNormalisePost() and it is deliberately the only place that reads the
+// raw actor item, so there is exactly one thing to fix when Apify renames a
+// field.
+// ---------------------------------------------------------------------------
+function igNormalisePost(item, handle, userId = null, meta = {}) {
+    const sc = shortcodeOf(item);
+    if (!sc) return null;
+
+    const caption  = item.caption || item.text || '';
+    const d        = tsOf(item);
+    const type     = postTypeOf(item);
+    const likes    = item.likesCount || 0;
+    const comments = item.commentsCount || 0;
+    const views    = getViews(item);
+    const words    = caption ? caption.split(/\s+/).filter(Boolean).length : 0;
+
+    const { hour, dow } = localParts(d, IG_TZ_OFFSET_MINS);
+    const dims = igDimensions(item);
+
+    const ageHours = d ? (Date.now() - d.getTime()) / 3600000 : 9999;
+    const settleWindow = (type === 'Reel' || type === 'Video')
+        ? IG_REEL_PROVISIONAL_HOURS
+        : IG_PROVISIONAL_HOURS;
+
+    const hashtags = tagsOf(caption, '#').slice(0, 40);
+    const mentions = tagsOf(caption, '@').slice(0, 40);
+
+    return {
+        // --- identity -------------------------------------------------------
+        user_id: userId,
+        platform: 'instagram',
+        handle: (handle || item.ownerUsername || '').toLowerCase(),
+        shortcode: sc,
+        post_url: item.url || `https://www.instagram.com/p/${sc}/`,
+        post_type: type,
+
+        // --- content --------------------------------------------------------
+        caption: caption.slice(0, 4000),
+        caption_length: caption.length,
+        word_count: words,
+        hashtags,
+        mentions,
+        hashtag_count: hashtags.length,
+        mention_count: mentions.length,
+
+        // --- metrics --------------------------------------------------------
+        likes,
+        comments,
+        views,
+        is_video: !!(item.isVideo || item.videoUrl),
+        video_duration: item.videoDuration || item.duration || null,
+        thumbnail_url: item.displayUrl || item.thumbnailUrl || null,
+        media_url: item.videoUrl || item.displayUrl || null,
+        location_name: item.locationName || item.location?.name || null,
+        posted_at: d ? d.toISOString() : null,
+
+        // --- fields the actor returned and savePosts() used to discard ------
+        carousel_count: igCarouselCount(item),
+        tagged_users: igTaggedUsers(item),
+        alt_text: igAltText(item),
+        media_width: dims.width,
+        media_height: dims.height,
+        aspect_ratio: dims.aspect,
+        is_sponsored: igIsSponsored(item),
+        audio: igAudio(item),
+        comments_disabled: igCommentsDisabled(item),
+        first_comment: (igFirstComment(item) || '').slice(0, 1000) || null,
+
+        // --- derived features ----------------------------------------------
+        // Comments are weighted because they cost the viewer far more than a
+        // like and correlate much harder with reach. Same reasoning as
+        // FB_COMMENT_WEIGHT, different constant because the ratios differ.
+        engagement_raw: likes + (IG_COMMENT_WEIGHT * comments),
+        performance_index: null,        // filled by igIndexPosts()
+        hour_local: hour,
+        dow_local: dow,
+        length_band: lengthBand(words),
+        opening_pattern: openingPattern(caption),
+        topic_tags: topicTags(caption),
+        has_link: IG_URL_RE.test(caption),
+        has_question: FB_QUESTION_RE.test(caption),
+        has_cta: FB_CTA_RE.test(caption),
+        has_offer: FB_OFFER_RE.test(caption),
+        has_emoji: FB_EMOJI_RE.test(caption),
+        has_alt_text: !!igAltText(item),
+        is_carousel: (igCarouselCount(item) || 0) > 1,
+        is_provisional: ageHours < settleWindow,
+        age_hours: Math.round(ageHours),
+
+        // --- bookkeeping ----------------------------------------------------
+        report_id: meta.reportId || null,
+        set_id: meta.setId || null,
+        scraped_at: new Date().toISOString(),
+
+        // The diagnostic the FB path has had all along and the IG path did
+        // not. Costs one line and one small jsonb column, and answers "which
+        // fields does this actor version actually return" from production
+        // data instead of from a guess.
+        raw: { keys: Object.keys(item || {}).slice(0, 60) }
+    };
+}
+
+/**
+ * Index every post against the account's own median for its calendar month.
+ *
+ * Identical reasoning to fbPageIndexPosts(): an account that tripled its
+ * following over the scrape window would otherwise have every older post
+ * scored as a failure. Provisional posts are excluded from the baseline
+ * where there are enough settled posts to build one without them — they are
+ * still indexed, they just do not get to drag the baseline down.
+ */
+function igIndexPosts(rows) {
+    const buckets = {};
+    rows.forEach(r => {
+        const month = (r.posted_at || '').slice(0, 7) || 'unknown';
+        const k = `${r.handle}::${month}`;
+        (buckets[k] = buckets[k] || []).push(r);
+    });
+
+    const baselines = {};
+    Object.entries(buckets).forEach(([key, group]) => {
+        const settled = group.filter(r => !r.is_provisional);
+        const pool = settled.length >= 4 ? settled : group;
+        const med = median(pool.map(r => r.engagement_raw));
+        baselines[key] = med > 0 ? med : 1;
+    });
+
+    rows.forEach(r => {
+        const month = (r.posted_at || '').slice(0, 7) || 'unknown';
+        r.performance_index = +(r.engagement_raw / (baselines[`${r.handle}::${month}`] || 1)).toFixed(3);
+    });
+
+    return { rows, baselines, months: Object.keys(baselines).length };
+}
+
+
+// ---------------------------------------------------------------------------
+// DISTRIBUTION STATS
+// The whole reason this exists: computeAudit() averaged everything, and on
+// Instagram one reel that broke containment moves the mean by a multiple
+// while moving the median by almost nothing. Reporting both is the only
+// honest way to show an account whether its typical post is working.
+// ---------------------------------------------------------------------------
+function igDistribution(rows) {
+    const pick = f => rows.map(f).filter(v => typeof v === 'number' && !isNaN(v));
+
+    const likes = pick(r => r.likes);
+    const comments = pick(r => r.comments);
+    const views = pick(r => r.views).filter(v => v > 0);
+    const eng = pick(r => r.engagement_raw);
+
+    const stat = arr => {
+        if (!arr.length) return { mean: 0, median: 0, max: 0, min: 0, p90: 0 };
+        const s = [...arr].sort((a, b) => a - b);
+        return {
+            mean: Math.round(arr.reduce((x, y) => x + y, 0) / arr.length),
+            median: Math.round(median(arr)),
+            min: Math.round(s[0]),
+            max: Math.round(s[s.length - 1]),
+            p90: Math.round(s[Math.min(s.length - 1, Math.floor(s.length * 0.9))])
+        };
+    };
+
+    const e = stat(eng);
+    return {
+        likes: stat(likes),
+        comments: stat(comments),
+        views: stat(views),
+        engagement: e,
+        // How far the mean is being pulled by the tail. Above ~1.6 the average
+        // is describing the outlier, not the account.
+        skew: e.median > 0 ? +(e.mean / e.median).toFixed(2) : null,
+        outlierDriven: e.median > 0 && (e.mean / e.median) > 1.6,
+        viewsAvailable: views.length > 0
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// AGGREGATION — median-first
+//
+// These deliberately do NOT reuse leaderboard(), flagCompare() and
+// timeHeatmap() from the FB engine, even though the shapes match.
+//
+// Those three all aggregate performance_index with a mean, and on Instagram
+// that reintroduces the exact bug this patch exists to remove. Tested against
+// a fixture with one runaway reel, the mean-based helpers reported reels at
+// 7.5x baseline, emoji captions at +640% and Saturday at 16.7x — all of them
+// one post wearing a costume. The medians for the same data are 1.06x, +6%
+// and 1.0x.
+//
+// So: sort and headline on the median, carry the mean alongside for anyone
+// who wants it, and mark a row unreliable when the two disagree badly.
+// ---------------------------------------------------------------------------
+
+// Below this, a median is not a median. With two posts it is just the mean
+// again, which is how a bucket containing one runaway reel and one dud came
+// back claiming a 40x effect. Small buckets are still reported — the post
+// count is useful — but they do not get to make a performance claim.
+const IG_MIN_BUCKET = 3;
+
+function igAggIndex(group) {
+    const idx = group.map(r => r.performance_index || 0);
+    const med = +median(idx).toFixed(2);
+    const avg = +(idx.reduce((s, v) => s + v, 0) / idx.length).toFixed(2);
+    const sparse = group.length < IG_MIN_BUCKET;
+
+    return {
+        medIndex: sparse ? null : med,
+        avgIndex: sparse ? null : avg,
+        sparse,
+        // A big gap means one post is carrying the group, so the row should be
+        // read as "one post did this", not "this category performs".
+        outlierDriven: !sparse && med > 0 && (avg / med) > 1.8,
+        note: sparse ? `Only ${group.length} post(s) — not enough to read a pattern` : null
+    };
+}
+
+function igLeaderboard(rows, dimension, minCount = 2) {
+    const agg = {};
+    rows.forEach(r => {
+        const k = r[dimension] || 'unknown';
+        (agg[k] = agg[k] || []).push(r);
+    });
+
+    return Object.entries(agg)
+        .filter(([, g]) => g.length >= Math.min(minCount, rows.length))
+        .map(([key, g]) => ({
+            key,
+            posts: g.length,
+            share: ((g.length / rows.length) * 100).toFixed(1) + '%',
+            ...igAggIndex(g),
+            medEngagement: Math.round(median(g.map(r => r.engagement_raw))),
+            avgEngagement: Math.round(g.reduce((s, r) => s + r.engagement_raw, 0) / g.length),
+            medComments: Math.round(median(g.map(r => r.comments)))
+        }))
+        .sort((x, y) => (y.medIndex ?? -1) - (x.medIndex ?? -1));
+}
+
+function igFlagCompare(rows, field, labelOn, labelOff) {
+    const on = rows.filter(r => r[field]);
+    const off = rows.filter(r => !r[field]);
+    if (!on.length || !off.length) return null;
+
+    const onA = igAggIndex(on), offA = igAggIndex(off);
+    const side = (g, a, label) => ({
+        label, posts: g.length,
+        share: +((g.length / rows.length) * 100).toFixed(1),
+        medIndex: a.medIndex, avgIndex: a.avgIndex,
+        medEngagement: Math.round(median(g.map(r => r.engagement_raw)))
+    });
+
+    // Lift computed on medians, so a single breakout post cannot manufacture
+    // a "+640% — always use emoji" recommendation out of nothing.
+    const lift = (onA.medIndex != null && offA.medIndex != null && offA.medIndex > 0)
+        ? +((onA.medIndex / offA.medIndex - 1) * 100).toFixed(1)
+        : null;
+
+    return {
+        field,
+        with: side(on, onA, labelOn),
+        without: side(off, offA, labelOff),
+        lift,
+        reliable: on.length >= 4 && off.length >= 4 && lift != null && !onA.outlierDriven && !offA.outlierDriven,
+        note: (onA.sparse || offA.sparse)
+            ? 'One side of this split has too few posts to compare.'
+            : (onA.outlierDriven || offA.outlierDriven)
+            ? 'One post dominates this split — treat the lift as indicative only.'
+            : null
+    };
+}
+
+function igHeatmap(rows) {
+    const cells = {};
+    rows.forEach(r => {
+        if (r.hour_local === null || r.dow_local === null) return;
+        const k = `${r.dow_local}:${r.hour_local}`;
+        (cells[k] = cells[k] || []).push(r);
+    });
+
+    const flat = Object.entries(cells).map(([k, g]) => {
+        const [dow, hour] = k.split(':').map(Number);
+        return { dow, dowName: DOW_NAMES[dow], hour, posts: g.length, ...igAggIndex(g) };
+    });
+
+    const byHour = {}, byDay = {};
+    rows.forEach(r => {
+        if (r.hour_local !== null) (byHour[r.hour_local] = byHour[r.hour_local] || []).push(r);
+        if (r.dow_local !== null) (byDay[r.dow_local] = byDay[r.dow_local] || []).push(r);
+    });
+
+    const hourRank = Object.entries(byHour)
+        .map(([h, g]) => ({ hour: +h, posts: g.length, ...igAggIndex(g) }))
+        .filter(h => h.posts >= IG_MIN_BUCKET)
+        .sort((a, b) => (b.medIndex ?? -1) - (a.medIndex ?? -1));
+
+    const dayRank = Object.entries(byDay)
+        .map(([d, g]) => ({ dow: +d, dowName: DOW_NAMES[+d], posts: g.length, ...igAggIndex(g) }))
+        .filter(d => d.posts >= IG_MIN_BUCKET)
+        .sort((a, b) => (b.medIndex ?? -1) - (a.medIndex ?? -1));
+
+    return {
+        cells: flat,
+        bestHours: hourRank.slice(0, 5),
+        worstHours: hourRank.slice(-3).reverse(),
+        bestDays: dayRank,
+        // Under this many posts a heatmap is decoration, not evidence.
+        reliable: rows.length >= 20
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// CADENCE — mirrors cadenceStats() on the FB side
+// ---------------------------------------------------------------------------
+function igCadence(rows) {
+    const stamps = rows.map(r => r.posted_at ? new Date(r.posted_at).getTime() : null)
+        .filter(Boolean).sort((a, b) => a - b);
+
+    if (stamps.length < 2) {
+        return {
+            postsPerWeek: rows.length, postsPerMonth: rows.length, spanDays: 1,
+            medianGapDays: null, longestGapDays: null, consistency: null,
+            activeWeeks: rows.length ? 1 : 0, lastPostDaysAgo: null, silent: false
+        };
+    }
+
+    const spanDays = Math.max(1, (stamps[stamps.length - 1] - stamps[0]) / 86400000);
+    const gaps = [];
+    for (let i = 1; i < stamps.length; i++) gaps.push((stamps[i] - stamps[i - 1]) / 86400000);
+
+    const mean = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+    const sd = Math.sqrt(gaps.reduce((s, g) => s + Math.pow(g - mean, 2), 0) / gaps.length);
+    const consistency = mean > 0 ? Math.max(0, Math.round(100 - Math.min(100, (sd / mean) * 55))) : null;
+
+    const weeks = new Set(rows.filter(r => r.posted_at).map(r => {
+        const d = new Date(r.posted_at);
+        const y = d.getUTCFullYear();
+        const w = Math.floor((d - new Date(Date.UTC(y, 0, 1))) / (7 * 86400000));
+        return `${y}-${w}`;
+    }));
+
+    return {
+        postsPerWeek: +((rows.length / spanDays) * 7).toFixed(1),
+        postsPerMonth: +((rows.length / spanDays) * 30).toFixed(1),
+        spanDays: Math.round(spanDays),
+        medianGapDays: +median(gaps).toFixed(1),
+        longestGapDays: +Math.max(...gaps).toFixed(1),
+        consistency,
+        activeWeeks: weeks.size,
+        lastPostDaysAgo: +((Date.now() - stamps[stamps.length - 1]) / 86400000).toFixed(1),
+        silent: (Date.now() - stamps[stamps.length - 1]) / 86400000 > 14
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// MOMENTUM — mirrors momentum() on the FB side
+// ---------------------------------------------------------------------------
+function igMomentum(allRows) {
+    const rows = allRows.filter(r => !r.is_provisional);
+    const byMonth = {};
+
+    rows.forEach(r => {
+        if (!r.posted_at) return;
+        const m = r.posted_at.slice(0, 7);
+        byMonth[m] = byMonth[m] || { month: m, posts: 0, engagement: 0, likes: 0, comments: 0, views: 0 };
+        byMonth[m].posts++;
+        byMonth[m].engagement += r.engagement_raw || 0;
+        byMonth[m].likes += r.likes || 0;
+        byMonth[m].comments += r.comments || 0;
+        byMonth[m].views += r.views || 0;
+    });
+
+    const thisMonth = new Date().toISOString().slice(0, 7);
+
+    const months = Object.values(byMonth)
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .map(m => ({
+            ...m,
+            // Median, not mean. A month containing one breakout post otherwise
+            // reads as a spike, and the month after it reads as a collapse.
+            medEngagement: Math.round(median(rows.filter(r => r.posted_at?.slice(0, 7) === m.month)
+                                                 .map(r => r.engagement_raw))),
+            avgEngagement: Math.round(m.engagement / m.posts),
+            avgLikes: Math.round(m.likes / m.posts),
+            avgComments: +(m.comments / m.posts).toFixed(1),
+            avgViews: Math.round(m.views / m.posts),
+            partial: m.month === thisMonth
+        }));
+
+    // The month in progress is not a data point yet. Comparing three days of
+    // September against all of August is how a growing account gets told it
+    // is in freefall — and then gets a -5 momentum penalty for it.
+    const complete = months.filter(m => !m.partial && m.posts >= 3);
+
+    let direction = null, changePct = null, basis = null;
+    if (complete.length >= 2) {
+        const prev = complete[complete.length - 2], last = complete[complete.length - 1];
+        if (prev.medEngagement > 0) {
+            changePct = +(((last.medEngagement - prev.medEngagement) / prev.medEngagement) * 100).toFixed(1);
+            direction = changePct > 8 ? 'rising' : changePct < -8 ? 'falling' : 'flat';
+            basis = `${prev.month} → ${last.month}, median engagement, complete months only`;
+        }
+    }
+
+    // Newest third vs oldest third. Steadier than any single month pair, and
+    // the fallback when there are not two complete months to compare.
+    let halfSplit = null;
+    if (rows.length >= 9) {
+        const sorted = [...rows].filter(r => r.posted_at)
+            .sort((a, b) => new Date(a.posted_at) - new Date(b.posted_at));
+        const third = Math.floor(sorted.length / 3);
+        const oldMed = median(sorted.slice(0, third).map(r => r.engagement_raw));
+        const newMed = median(sorted.slice(-third).map(r => r.engagement_raw));
+        halfSplit = {
+            oldestThirdMedian: Math.round(oldMed),
+            newestThirdMedian: Math.round(newMed),
+            changePct: oldMed > 0 ? +(((newMed - oldMed) / oldMed) * 100).toFixed(1) : null
+        };
+        if (direction === null && halfSplit.changePct != null) {
+            changePct = halfSplit.changePct;
+            direction = changePct > 8 ? 'rising' : changePct < -8 ? 'falling' : 'flat';
+            basis = 'newest third vs oldest third of the window (not enough complete months)';
+        }
+    }
+
+    return {
+        months, direction, changePct, halfSplit, basis,
+        partialMonth: months.find(m => m.partial)?.month || null,
+        completeMonths: complete.length,
+        provisionalExcluded: allRows.length - rows.length
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// PROFILE COMPLETENESS
+// The IG counterpart of profileCompleteness(). Weighted towards the fields
+// that actually convert a profile visit into a contact, because that is what
+// a business account is for.
+// ---------------------------------------------------------------------------
+function igProfileCompleteness(b) {
+    const checks = [
+        { key: 'name',      label: 'Display name set',           ok: !!b.fullName,                      weight: 6 },
+        { key: 'bio',       label: 'Bio written (40+ chars)',    ok: !!(b.bio && b.bio.length > 40),    weight: 16 },
+        { key: 'website',   label: 'Link in bio set',            ok: !!b.website,                       weight: 18 },
+        { key: 'category',  label: 'Business category set',      ok: !!b.category,                      weight: 10 },
+        { key: 'email',     label: 'Contact email published',    ok: !!b.email,                         weight: 12 },
+        { key: 'phone',     label: 'Phone number published',     ok: !!b.phone,                         weight: 12 },
+        { key: 'city',      label: 'Location set',               ok: !!b.city,                          weight: 8 },
+        { key: 'pic',       label: 'Profile photo set',          ok: !!b.profilePic,                    weight: 6 },
+        { key: 'business',  label: 'Business / creator account', ok: !!b.isBusiness,                    weight: 12 }
+    ];
+
+    const earned = checks.filter(c => c.ok).reduce((s, c) => s + c.weight, 0);
+    const total = checks.reduce((s, c) => s + c.weight, 0);
+
+    return {
+        score: Math.round((earned / total) * 100),
+        checks,
+        missing: checks.filter(c => !c.ok).map(c => c.label)
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// SCORE v2
+// Seven bounded pillars plus a bounded momentum adjustment, and the breakdown
+// comes back with the score so the page can show where every point went.
+// The v1 score was four unbounded-ish terms with no explanation attached,
+// which made a grade impossible to argue with or act on.
+// ---------------------------------------------------------------------------
+function igComputeScore(parts) {
+    const { engagementRate, postsPerWeek, consistency, commentRatio,
+            viewsPerFollower, completeness, momentumPct, formatSpread,
+            sampleSize, viewsAvailable } = parts;
+
+    // 1. Engagement per follower (26). Log-scaled: a 2k account routinely
+    //    posts 8% and a 500k account structurally cannot, so a linear scale
+    //    just ranks accounts by how small they are.
+    const er = engagementRate || 0;
+    const engagementPts = Math.min(26, Math.round((Math.log10(1 + er * 12) / Math.log10(13)) * 26));
+
+    // 2. Cadence (16). 3-7 a week is the band where the feed keeps serving
+    //    you without the audience tuning out.
+    const ppw = postsPerWeek || 0;
+    const cadencePts = ppw === 0 ? 0 : ppw < 1 ? 4 : ppw < 2 ? 8 : ppw <= 7 ? 16 : ppw <= 14 ? 12 : 8;
+
+    // 3. Consistency (11) — rhythm, not volume.
+    const consistencyPts = Math.round(((consistency ?? 50) / 100) * 11);
+
+    // 4. Conversation (16) — comments per 100 likes. The hardest engagement
+    //    to buy and the strongest surviving reach signal.
+    const conv = commentRatio || 0;
+    const conversationPts = Math.min(16, Math.round((Math.log10(1 + conv) / Math.log10(11)) * 16));
+
+    // 5. Reach (12) — views per follower. Only scored when the actor actually
+    //    returned view counts; scoring a zero we never measured would punish
+    //    an account for a scrape limitation.
+    const vpf = viewsPerFollower || 0;
+    const reachPts = !viewsAvailable ? null
+        : Math.min(12, Math.round((Math.log10(1 + vpf * 3) / Math.log10(7)) * 12));
+
+    // 6. Format range (7) — reels, carousels and stills do different jobs.
+    const formatPts = Math.min(7, (formatSpread || 0) >= 3 ? 7 : (formatSpread || 0) * 3);
+
+    // 7. Profile completeness (12).
+    const completenessPts = Math.round(((completeness || 0) / 100) * 12);
+
+    // When views are unavailable the 12 reach points are redistributed rather
+    // than lost, so two accounts are not graded on different denominators.
+    const measured = engagementPts + cadencePts + consistencyPts + conversationPts +
+                     formatPts + completenessPts + (reachPts ?? 0);
+    const maxAvailable = 26 + 16 + 11 + 16 + 7 + 12 + (reachPts === null ? 0 : 12);
+    let score = Math.round((measured / maxAvailable) * 100);
+
+    const momentumAdj = momentumPct == null ? 0 : Math.max(-5, Math.min(5, Math.round(momentumPct / 10)));
+    score = Math.max(0, Math.min(100, score + momentumAdj));
+
+    const grade = score >= 80 ? 'A' : score >= 65 ? 'B' : score >= 50 ? 'C' : score >= 35 ? 'D' : 'F';
+    const low = sampleSize > 0 && sampleSize < IG_MIN_CONFIDENT_POSTS;
+
+    const breakdown = [
+        { pillar: 'Engagement per follower', points: engagementPts,   max: 26, detail: `${er.toFixed(2)}% per post` },
+        { pillar: 'Posting cadence',         points: cadencePts,      max: 16, detail: `${ppw} posts/week` },
+        { pillar: 'Consistency',             points: consistencyPts,  max: 11, detail: consistency == null ? 'not enough posts' : `${consistency}/100 rhythm` },
+        { pillar: 'Conversation',            points: conversationPts, max: 16, detail: `${conv.toFixed(1)} comments per 100 likes` },
+        { pillar: 'Reach',                   points: reachPts ?? 0,   max: 12, detail: reachPts === null ? 'no view counts returned — pillar excluded' : `${vpf.toFixed(2)} views per follower` },
+        { pillar: 'Format range',            points: formatPts,       max: 7,  detail: `${formatSpread || 0} formats in use` },
+        { pillar: 'Profile completeness',    points: completenessPts, max: 12, detail: `${completeness || 0}% complete` },
+        { pillar: 'Momentum adjustment',     points: momentumAdj,     max: 5,  detail: momentumPct == null ? 'no trend data' : `${momentumPct > 0 ? '+' : ''}${momentumPct}% month over month` }
+    ];
+
+    return {
+        score, grade, breakdown,
+        lowConfidence: low,
+        sampleSize,
+        verdict: low
+            ? `Only ${sampleSize} posts in the window — treat this as provisional, not a verdict`
+            : score >= 80 ? 'Strong account — the job is protecting what works'
+            : score >= 65 ? 'Healthy, with one clear gap to close'
+            : score >= 50 ? 'Functional but underperforming its follower count'
+            : score >= 35 ? 'Weak — fix the fundamentals before optimising anything'
+            : 'Dormant or badly broken'
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// EXTRAS
+// Everything the scrape now captures, plus the three fields that were being
+// written to the posts table and read by nothing: video_duration,
+// location_name and mentions.
+// ---------------------------------------------------------------------------
+function igExtras(rows) {
+    const n = rows.length;
+    const share = c => n ? +((c / n) * 100).toFixed(1) : 0;
+
+    // --- carousel depth ---------------------------------------------------
+    const carousels = rows.filter(r => r.is_carousel);
+    const depthBuckets = {};
+    carousels.forEach(r => {
+        const d = r.carousel_count;
+        const k = d >= 8 ? '8+' : d >= 5 ? '5-7' : d >= 3 ? '3-4' : '2';
+        (depthBuckets[k] = depthBuckets[k] || []).push(r);
+    });
+
+    // --- aspect ratio ------------------------------------------------------
+    const aspects = {};
+    rows.filter(r => r.aspect_ratio).forEach(r => {
+        (aspects[r.aspect_ratio] = aspects[r.aspect_ratio] || []).push(r);
+    });
+
+    // --- video duration (saved since day one, analysed until now by nobody)
+    const durations = rows.map(r => Number(r.video_duration)).filter(d => d > 0);
+    const durBuckets = {};
+    rows.filter(r => Number(r.video_duration) > 0).forEach(r => {
+        const d = Number(r.video_duration);
+        const k = d <= 15 ? '0-15s' : d <= 30 ? '16-30s' : d <= 60 ? '31-60s' : d <= 90 ? '61-90s' : '90s+';
+        (durBuckets[k] = durBuckets[k] || []).push(r);
+    });
+
+    // --- locations ---------------------------------------------------------
+    const locs = {};
+    rows.filter(r => r.location_name).forEach(r => {
+        (locs[r.location_name] = locs[r.location_name] || []).push(r);
+    });
+
+    // --- mentions ----------------------------------------------------------
+    const mentionCount = {};
+    rows.forEach(r => (r.mentions || []).forEach(m => { mentionCount[m] = (mentionCount[m] || 0) + 1; }));
+
+    // --- audio -------------------------------------------------------------
+    const withAudio = rows.filter(r => r.audio?.title);
+    const audioCount = {};
+    withAudio.forEach(r => {
+        const k = r.audio.artist ? `${r.audio.title} — ${r.audio.artist}` : r.audio.title;
+        audioCount[k] = (audioCount[k] || 0) + 1;
+    });
+
+    // --- tagged users ------------------------------------------------------
+    const tagCount = {};
+    rows.forEach(r => (r.tagged_users || []).forEach(u => { tagCount[u] = (tagCount[u] || 0) + 1; }));
+
+    const top = (obj, limit = 8) => Object.entries(obj)
+        .map(([key, count]) => ({ key, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, limit);
+
+    // Median-based for the same reason the leaderboards are: with a mean, a
+    // single breakout reel made the 9:16 bucket read 39.98x baseline off two
+    // posts, which is a recommendation to shoot everything vertical based on
+    // one lucky video.
+    const bucketRows = obj => Object.entries(obj)
+        .map(([key, group]) => ({
+            key,
+            posts: group.length,
+            share: share(group.length),
+            ...igAggIndex(group),
+            medEngagement: Math.round(median(group.map(r => r.engagement_raw))),
+            avgEngagement: Math.round(group.reduce((s, r) => s + r.engagement_raw, 0) / group.length)
+        }))
+        .sort((a, b) => (b.medIndex ?? -1) - (a.medIndex ?? -1));
+
+    return {
+        carousel: {
+            posts: carousels.length,
+            share: share(carousels.length),
+            avgDepth: carousels.length
+                ? +(carousels.reduce((s, r) => s + (r.carousel_count || 0), 0) / carousels.length).toFixed(1)
+                : null,
+            byDepth: bucketRows(depthBuckets),
+            available: rows.some(r => r.carousel_count !== null)
+        },
+        aspectRatio: {
+            byRatio: bucketRows(aspects),
+            available: Object.keys(aspects).length > 0,
+            // The specific thing worth telling an account about.
+            fourFiveShare: share(rows.filter(r => r.aspect_ratio === '4:5').length),
+            note: Object.keys(aspects).length
+                ? '4:5 takes about 25% more vertical feed space than 1:1. Free impressions if the crop allows it.'
+                : 'The actor did not return image dimensions on this run.'
+        },
+        videoDuration: {
+            available: durations.length > 0,
+            posts: durations.length,
+            medianSeconds: durations.length ? +median(durations).toFixed(1) : null,
+            byBand: bucketRows(durBuckets)
+        },
+        locations: {
+            tagged: rows.filter(r => r.location_name).length,
+            share: share(rows.filter(r => r.location_name).length),
+            top: bucketRows(locs).slice(0, 6)
+        },
+        mentions: {
+            postsWithMentions: rows.filter(r => (r.mentions || []).length).length,
+            share: share(rows.filter(r => (r.mentions || []).length).length),
+            top: top(mentionCount)
+        },
+        taggedUsers: {
+            available: rows.some(r => (r.tagged_users || []).length),
+            postsWithTags: rows.filter(r => (r.tagged_users || []).length).length,
+            share: share(rows.filter(r => (r.tagged_users || []).length).length),
+            top: top(tagCount)
+        },
+        audio: {
+            available: withAudio.length > 0,
+            posts: withAudio.length,
+            originalShare: withAudio.length
+                ? share(withAudio.filter(r => r.audio.original).length)
+                : 0,
+            top: top(audioCount, 6)
+        },
+        altText: {
+            // Accessibility, and IG uses alt text for content understanding.
+            coverage: share(rows.filter(r => r.has_alt_text).length),
+            missing: rows.filter(r => !r.has_alt_text).length
+        },
+        sponsored: {
+            posts: rows.filter(r => r.is_sponsored).length,
+            share: share(rows.filter(r => r.is_sponsored).length)
+        },
+        commentsDisabled: {
+            posts: rows.filter(r => r.comments_disabled === true).length,
+            available: rows.some(r => r.comments_disabled !== null)
+        }
+    };
+}
+
+
+/**
+ * What the actor actually gave us this run.
+ *
+ * The honest counterpart to the raw.keys line. Rather than silently rendering
+ * an empty section, the report can say "the actor did not return dimensions"
+ * — which is a fact about the scrape, not a fact about the account.
+ */
+function igDataQuality(rows, rawItems) {
+    const keySet = new Set();
+    (rawItems || []).slice(0, 25).forEach(i => Object.keys(i || {}).forEach(k => keySet.add(k)));
+
+    const optional = [
+        { field: 'childPosts',    label: 'Carousel children',   present: rows.some(r => r.carousel_count !== null) },
+        { field: 'taggedUsers',   label: 'Tagged users',        present: rows.some(r => (r.tagged_users || []).length) },
+        { field: 'alt',           label: 'Alt text',            present: rows.some(r => r.has_alt_text) },
+        { field: 'dimensions',    label: 'Image dimensions',    present: rows.some(r => r.aspect_ratio) },
+        { field: 'musicInfo',     label: 'Reel audio',          present: rows.some(r => r.audio) },
+        { field: 'isSponsored',   label: 'Paid partnership flag', present: rows.some(r => r.is_sponsored) },
+        { field: 'latestComments',label: 'First comment',       present: rows.some(r => r.first_comment) },
+        { field: 'videoDuration', label: 'Video duration',      present: rows.some(r => Number(r.video_duration) > 0) },
+        { field: 'locationName',  label: 'Location',            present: rows.some(r => r.location_name) },
+        { field: 'playCount',     label: 'View counts',         present: rows.some(r => r.views > 0) }
+    ];
+
+    return {
+        actorKeys: Array.from(keySet).sort(),
+        fields: optional,
+        missing: optional.filter(o => !o.present).map(o => o.label),
+        postsSeen: rows.length,
+        provisional: rows.filter(r => r.is_provisional).length
+    };
+}
+
+
+// ===========================================================================
+// SAVE
+// ===========================================================================
+
 async function savePosts(userId, handle, posts, meta = {}) {
-    const rows = [];
     const seen = new Set();
+    const rows = [];
 
     for (const p of posts || []) {
-        const sc = shortcodeOf(p);
-        if (!sc || seen.has(sc)) continue;
-        seen.add(sc);
+        const row = igNormalisePost(p, handle, userId, meta);
+        if (!row || seen.has(row.shortcode)) continue;
+        seen.add(row.shortcode);
 
-        const caption = p.caption || p.text || '';
-        const d = tsOf(p);
-
+        // The audit-only derived fields are not persisted — they are cheap to
+        // recompute and would otherwise need a migration every time one is
+        // added. What is persisted is the raw signal the actor charged us for.
         rows.push({
-            user_id: userId,
-            platform: 'instagram',
-            handle: (handle || p.ownerUsername || '').toLowerCase(),
-            shortcode: sc,
-            post_url: p.url || `https://www.instagram.com/p/${sc}/`,
-            post_type: postTypeOf(p),
-            caption: caption.slice(0, 4000),
-            caption_length: caption.length,
-            hashtags: tagsOf(caption, '#').slice(0, 40),
-            mentions: tagsOf(caption, '@').slice(0, 40),
-            likes: p.likesCount || 0,
-            comments: p.commentsCount || 0,
-            views: getViews(p),
-            is_video: !!(p.isVideo || p.videoUrl),
-            video_duration: p.videoDuration || null,
-            thumbnail_url: p.displayUrl || p.thumbnailUrl || null,
-            media_url: p.videoUrl || p.displayUrl || null,
-            location_name: p.locationName || p.location?.name || null,
-            posted_at: d ? d.toISOString() : null,
-            report_id: meta.reportId || null,
-            set_id: meta.setId || null,
-            scraped_at: new Date().toISOString()
+            user_id: row.user_id,
+            platform: row.platform,
+            handle: row.handle,
+            shortcode: row.shortcode,
+            post_url: row.post_url,
+            post_type: row.post_type,
+            caption: row.caption,
+            caption_length: row.caption_length,
+            hashtags: row.hashtags,
+            mentions: row.mentions,
+            likes: row.likes,
+            comments: row.comments,
+            views: row.views,
+            is_video: row.is_video,
+            video_duration: row.video_duration,
+            thumbnail_url: row.thumbnail_url,
+            media_url: row.media_url,
+            location_name: row.location_name,
+            posted_at: row.posted_at,
+            report_id: row.report_id,
+            set_id: row.set_id,
+            scraped_at: row.scraped_at,
+
+            // --- phase 4 columns ---------------------------------------------
+            carousel_count: row.carousel_count,
+            tagged_users: row.tagged_users,
+            alt_text: row.alt_text,
+            media_width: row.media_width,
+            media_height: row.media_height,
+            aspect_ratio: row.aspect_ratio,
+            is_sponsored: row.is_sponsored,
+            audio: row.audio,
+            comments_disabled: row.comments_disabled,
+            first_comment: row.first_comment,
+            engagement_raw: row.engagement_raw,
+            hour_local: row.hour_local,
+            dow_local: row.dow_local,
+            is_provisional: row.is_provisional,
+            raw: row.raw
         });
     }
 
@@ -1227,10 +2117,11 @@ async function savePosts(userId, handle, posts, meta = {}) {
         const chunk = rows.slice(i, i + 200);
         const { error } = await supabase.from('posts')
             .upsert(chunk, { onConflict: 'user_id,platform,shortcode' });
-        if (error) console.error('[savePosts]', error.message);
+        if (error) logger.error('save_posts_failed', { message: error.message, handle });
     }
     return rows.length;
 }
+
 
 // ===========================================================================
 // ANALYTICS ENGINE
@@ -1245,13 +2136,12 @@ function bucketCaption(len) {
 
 function computeAudit(handle, profile, posts) {
     const followers = profile.followersCount ?? profile.followers ?? 0;
-    const clean = (posts || []).filter(p => shortcodeOf(p));
 
     const base = {
         handle,
         followers,
         following: profile.followsCount ?? profile.followingCount ?? 0,
-        totalPosts: profile.postsCount ?? profile.postsCount ?? 0,
+        totalPosts: profile.postsCount ?? 0,
         fullName: profile.fullName || null,
         bio: profile.biography || '',
         website: profile.externalUrl || profile.website || null,
@@ -1263,74 +2153,86 @@ function computeAudit(handle, profile, posts) {
         city: profile.city || profile.cityName || null,
         address: profile.addressStreet || null,
         profilePic: profile.profilePicUrlHD || profile.profilePicUrl || null,
-        postsAnalyzed: clean.length
+        postsAnalyzed: 0
     };
 
-    if (!clean.length) {
+    // --- normalise + dedupe once ------------------------------------------
+    const seen = new Set();
+    const rows = [];
+    for (const p of posts || []) {
+        const r = igNormalisePost(p, handle);
+        if (!r || seen.has(r.shortcode)) continue;
+        seen.add(r.shortcode);
+        rows.push(r);
+    }
+
+    base.postsAnalyzed = rows.length;
+    const completeness = igProfileCompleteness(base);
+
+    if (!rows.length) {
+        const empty = igComputeScore({
+            engagementRate: 0, postsPerWeek: 0, consistency: null, commentRatio: 0,
+            viewsPerFollower: 0, completeness: completeness.score, momentumPct: null,
+            formatSpread: 0, sampleSize: 0, viewsAvailable: false
+        });
         return {
             ...base,
             engagementRate: '0.0', viralityScore: '0.0', postsPerWeek: '0.0',
-            avgLikes: 0, avgComments: 0, avgViews: 0, score: 0, grade: 'C',
-            contentMix: {}, topHashtags: [], postingHours: {}, postingDays: {},
-            captionInsight: {}, last30Days: {}, consistency: {}, topPosts: []
+            avgLikes: 0, avgComments: 0, avgViews: 0,
+            score: empty.score, grade: empty.grade, scoreV1: 0,
+            contentMix: {}, topHashtags: [], postingHours: [], postingDays: [],
+            captionInsight: {}, last30Days: {}, consistency: {}, topPosts: [], bottomPosts: [],
+            distribution: null, cadence: igCadence([]), momentum: null, heatmap: null,
+            scoreBreakdown: empty, completeness, leaderboards: {}, flags: [],
+            extras: null, exemplars: {}, provisional: { count: 0, settled: 0 },
+            dataQuality: igDataQuality([], posts)
         };
     }
 
-    let likes = 0, comments = 0, views = 0;
-    const mix = {}, hours = {}, days = {}, tagStat = {}, capStat = {};
-    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const stamps = [];
+    igIndexPosts(rows);
 
-    clean.forEach(p => {
-        const l = p.likesCount || 0, c = p.commentsCount || 0, v = getViews(p);
-        likes += l; comments += c; views += v;
+    // Settled posts drive every rate. A reel three hours old is not a weak
+    // reel, and letting it into the averages is how a healthy account gets
+    // told its content is collapsing.
+    const settled = rows.filter(r => !r.is_provisional);
+    const statPool = settled.length >= Math.max(4, Math.ceil(rows.length * 0.4)) ? settled : rows;
+    const usingSettledOnly = statPool !== rows;
 
-        const type = postTypeOf(p);
-        mix[type] = mix[type] || { count: 0, likes: 0, comments: 0, views: 0 };
-        mix[type].count++; mix[type].likes += l; mix[type].comments += c; mix[type].views += v;
+    const n = statPool.length;
+    const likes = statPool.reduce((s, r) => s + r.likes, 0);
+    const comments = statPool.reduce((s, r) => s + r.comments, 0);
+    const views = statPool.reduce((s, r) => s + r.views, 0);
 
-        const cap = p.caption || p.text || '';
-        const bucket = bucketCaption(cap.length);
-        capStat[bucket] = capStat[bucket] || { count: 0, engagement: 0 };
-        capStat[bucket].count++; capStat[bucket].engagement += l + c;
-
-        tagsOf(cap, '#').forEach(t => {
-            tagStat[t] = tagStat[t] || { uses: 0, engagement: 0 };
-            tagStat[t].uses++; tagStat[t].engagement += l + c;
-        });
-
-        const d = tsOf(p);
-        if (d) {
-            stamps.push(d.getTime());
-            const h = d.getUTCHours();
-            hours[h] = hours[h] || { count: 0, engagement: 0 };
-            hours[h].count++; hours[h].engagement += l + c;
-            const dn = dayNames[d.getUTCDay()];
-            days[dn] = days[dn] || { count: 0, engagement: 0 };
-            days[dn].count++; days[dn].engagement += l + c;
-        }
-    });
-
-    const n = clean.length;
     const avgLikes = likes / n, avgComments = comments / n, avgViews = views / n;
-    const avgInteractions = avgLikes + avgComments;
-    const engagementRate = followers > 0 ? ((avgInteractions / followers) * 100).toFixed(2) : '0.0';
-    const viralityScore  = followers > 0 ? (avgViews / followers).toFixed(2) : '0.0';
 
-    stamps.sort((a, b) => a - b);
-    const daysSpan = stamps.length > 1
-        ? Math.max(1, (stamps[stamps.length - 1] - stamps[0]) / 86400000)
-        : 1;
-    const postsPerWeek = ((n / daysSpan) * 7).toFixed(1);
+    // Two engagement rates, and the difference between them is the point.
+    //
+    // engagementRate is the mean — the number every other tool in this
+    // category reports, kept so the benchmark and the vault stay comparable.
+    // engagementRateMedian describes the post this account typically ships.
+    // On an account with one runaway reel the mean read 19.4% and the median
+    // 2.9%; the second number is the one a strategy should be built on, so
+    // that is the one the score uses.
+    const distribution = igDistribution(statPool);
+    const engagementRate = followers > 0 ? (((avgLikes + avgComments) / followers) * 100).toFixed(2) : '0.0';
+    const engagementRateMedian = followers > 0
+        ? (((distribution.likes.median + distribution.comments.median) / followers) * 100).toFixed(2)
+        : '0.0';
+    const viralityScore = followers > 0 ? (avgViews / followers).toFixed(2) : '0.0';
+    const viralityScoreMedian = followers > 0 ? (distribution.views.median / followers).toFixed(2) : '0.0';
 
-    let longestGap = 0;
-    for (let i = 1; i < stamps.length; i++) {
-        longestGap = Math.max(longestGap, (stamps[i] - stamps[i - 1]) / 86400000);
-    }
+    const cadence = igCadence(rows);
+    const mo = igMomentum(rows);
+    const heatmap = igHeatmap(rows);
 
-    const cutoff = Date.now() - 30 * 86400000;
-    const recent = clean.filter(p => { const d = tsOf(p); return d && d.getTime() >= cutoff; });
-    const recentEng = recent.reduce((s, p) => s + (p.likesCount || 0) + (p.commentsCount || 0), 0);
+    // --- content mix (kept in the v1 shape so nothing downstream breaks) ---
+    const mix = {};
+    statPool.forEach(r => {
+        mix[r.post_type] = mix[r.post_type] || { count: 0, likes: 0, comments: 0, views: 0, idx: 0 };
+        const m = mix[r.post_type];
+        m.count++; m.likes += r.likes; m.comments += r.comments; m.views += r.views;
+        m.idx += r.performance_index || 0;
+    });
 
     const contentMix = {};
     Object.entries(mix).forEach(([k, v]) => {
@@ -1340,75 +2242,225 @@ function computeAudit(handle, profile, posts) {
             avgLikes: Math.round(v.likes / v.count),
             avgComments: Math.round(v.comments / v.count),
             avgViews: Math.round(v.views / v.count),
-            avgEngagement: Math.round((v.likes + v.comments) / v.count)
+            avgEngagement: Math.round((v.likes + v.comments) / v.count),
+            avgIndex: +(v.idx / v.count).toFixed(2)
         };
     });
 
+    // --- hashtags ----------------------------------------------------------
+    const tagStat = {};
+    statPool.forEach(r => r.hashtags.forEach(t => {
+        tagStat[t] = tagStat[t] || { uses: 0, engagement: 0, idx: 0 };
+        tagStat[t].uses++;
+        tagStat[t].engagement += r.likes + r.comments;
+        tagStat[t].idx += r.performance_index || 0;
+    }));
+
     const topHashtags = Object.entries(tagStat)
-        .map(([tag, s]) => ({ tag, uses: s.uses, avgEngagement: Math.round(s.engagement / s.uses) }))
+        .map(([tag, s]) => ({
+            tag, uses: s.uses,
+            avgEngagement: Math.round(s.engagement / s.uses),
+            avgIndex: +(s.idx / s.uses).toFixed(2)
+        }))
         .sort((a, b) => b.uses - a.uses || b.avgEngagement - a.avgEngagement)
-        .slice(0, 15);
+        .slice(0, 20);
 
-    const rank = o => Object.entries(o)
-        .map(([k, v]) => ({ key: k, count: v.count, avgEngagement: Math.round(v.engagement / v.count) }))
-        .sort((a, b) => b.avgEngagement - a.avgEngagement);
-
+    // --- caption length ----------------------------------------------------
+    const capStat = {};
+    statPool.forEach(r => {
+        const b = bucketCaption(r.caption_length);
+        capStat[b] = capStat[b] || { count: 0, engagement: 0 };
+        capStat[b].count++; capStat[b].engagement += r.likes + r.comments;
+    });
     const captionInsight = {};
     Object.entries(capStat).forEach(([k, v]) => {
         captionInsight[k] = { count: v.count, avgEngagement: Math.round(v.engagement / v.count) };
     });
 
-    // 0-100 composite score
-    const erPts   = Math.min(40, parseFloat(engagementRate) * 13);
-    const viPts   = Math.min(25, parseFloat(viralityScore) * 12);
-    const freqPts = Math.min(20, parseFloat(postsPerWeek) * 4);
-    const mixPts  = Math.min(15, (Object.keys(mix).length) * 5);
-    const score   = Math.round(erPts + viPts + freqPts + mixPts);
+    // --- posting hours / days, kept in the v1 shape ------------------------
+    const hours = {}, days = {};
+    statPool.forEach(r => {
+        if (r.hour_local !== null) {
+            hours[r.hour_local] = hours[r.hour_local] || { count: 0, engagement: 0 };
+            hours[r.hour_local].count++; hours[r.hour_local].engagement += r.likes + r.comments;
+        }
+        if (r.dow_local !== null) {
+            const dn = DOW_NAMES[r.dow_local];
+            days[dn] = days[dn] || { count: 0, engagement: 0 };
+            days[dn].count++; days[dn].engagement += r.likes + r.comments;
+        }
+    });
+    const rank = o => Object.entries(o)
+        .map(([k, v]) => ({ key: k, count: v.count, avgEngagement: Math.round(v.engagement / v.count) }))
+        .sort((a, b) => b.avgEngagement - a.avgEngagement);
 
-    let grade = 'C';
-    if (score >= 85) grade = 'A+';
-    else if (score >= 70) grade = 'A';
-    else if (score >= 55) grade = 'B';
-    else if (score >= 40) grade = 'C';
-    else grade = 'D';
+    // --- last 30 days ------------------------------------------------------
+    const cutoff = Date.now() - 30 * 86400000;
+    const recent = rows.filter(r => r.posted_at && new Date(r.posted_at).getTime() >= cutoff);
+    const recentEng = recent.reduce((s, r) => s + r.likes + r.comments, 0);
 
-    const topPosts = [...clean]
-        .sort((a, b) => ((b.likesCount || 0) + (b.commentsCount || 0)) - ((a.likesCount || 0) + (a.commentsCount || 0)))
-        .slice(0, 5)
-        .map(p => ({
-            url: p.url || (shortcodeOf(p) ? `https://www.instagram.com/p/${shortcodeOf(p)}/` : null),
-            likes: p.likesCount || 0,
-            comments: p.commentsCount || 0,
-            views: getViews(p),
-            type: postTypeOf(p),
-            postedAt: tsOf(p)?.toISOString() || null,
-            caption: (p.caption || '').slice(0, 300),
-            thumbnail: p.displayUrl || null
-        }));
+    // --- leaderboards ------------------------------------------------------
+    const leaderboards = {
+        format:  igLeaderboard(statPool, 'post_type', 2),
+        length:  igLeaderboard(statPool, 'length_band', 2),
+        opening: igLeaderboard(statPool, 'opening_pattern', 2),
+        aspect:  igLeaderboard(statPool.filter(r => r.aspect_ratio), 'aspect_ratio', 2)
+    };
+
+    const topicAgg = {};
+    statPool.forEach(r => (r.topic_tags || []).forEach(t => {
+        (topicAgg[t] = topicAgg[t] || []).push(r);
+    }));
+    leaderboards.topic = Object.entries(topicAgg)
+        .filter(([, g]) => g.length >= 2)
+        .map(([key, g]) => ({
+            key, posts: g.length,
+            share: ((g.length / n) * 100).toFixed(1) + '%',
+            ...igAggIndex(g),
+            medEngagement: Math.round(median(g.map(r => r.engagement_raw)))
+        }))
+        .sort((a, b) => (b.medIndex ?? -1) - (a.medIndex ?? -1))
+        .slice(0, 12);
+
+    // --- copy flags --------------------------------------------------------
+    const flags = [
+        igFlagCompare(statPool, 'has_question', 'Asks a question', 'No question'),
+        igFlagCompare(statPool, 'has_cta',      'Has a call to action', 'No CTA'),
+        igFlagCompare(statPool, 'has_offer',    'Mentions an offer', 'No offer'),
+        igFlagCompare(statPool, 'has_emoji',    'Uses emoji', 'No emoji'),
+        igFlagCompare(statPool, 'has_link',     'Points at a link', 'No link'),
+        igFlagCompare(statPool, 'is_carousel',  'Carousel', 'Single media'),
+        igFlagCompare(statPool, 'has_alt_text', 'Has alt text', 'No alt text')
+    ].filter(Boolean);
+
+    // --- posts -------------------------------------------------------------
+    const card = r => ({
+        url: r.post_url,
+        shortcode: r.shortcode,
+        likes: r.likes,
+        comments: r.comments,
+        views: r.views,
+        type: r.post_type,
+        index: r.performance_index,
+        postedAt: r.posted_at,
+        caption: (r.caption || '').slice(0, 300),
+        thumbnail: r.thumbnail_url,
+        aspect: r.aspect_ratio,
+        carouselCount: r.carousel_count,
+        provisional: r.is_provisional
+    });
+
+    const byEngagement = [...statPool].sort((a, b) => b.engagement_raw - a.engagement_raw);
+    const topPosts = byEngagement.slice(0, 6).map(card);
+    const bottomPosts = byEngagement.slice(-4).reverse().map(card);
+
+    const best = (pred) => {
+        const pool = statPool.filter(pred).sort((a, b) => (b.performance_index || 0) - (a.performance_index || 0));
+        return pool.length ? card(pool[0]) : null;
+    };
+    const exemplars = {
+        bestOverall: byEngagement.length ? card(byEngagement[0]) : null,
+        bestReel: best(r => r.post_type === 'Reel'),
+        bestCarousel: best(r => r.is_carousel),
+        bestStill: best(r => r.post_type === 'Image'),
+        mostCommented: [...statPool].sort((a, b) => b.comments - a.comments)[0]
+            ? card([...statPool].sort((a, b) => b.comments - a.comments)[0]) : null
+    };
+
+    const extras = igExtras(rows);
+
+    // --- score -------------------------------------------------------------
+    const commentRatio = distribution.likes.median > 0
+        ? (distribution.comments.median / distribution.likes.median) * 100
+        : 0;
+    const scoreBreakdown = igComputeScore({
+        // Median rates, so the grade describes the account rather than its
+        // single best day.
+        engagementRate: parseFloat(engagementRateMedian),
+        postsPerWeek: cadence.postsPerWeek,
+        consistency: cadence.consistency,
+        commentRatio,
+        viewsPerFollower: parseFloat(viralityScoreMedian),
+        completeness: completeness.score,
+        momentumPct: mo.changePct,
+        formatSpread: Object.keys(mix).length,
+        sampleSize: rows.length,
+        viewsAvailable: distribution.viewsAvailable
+    });
+
+    // v1 score, retained so reports saved before this patch stay comparable
+    // against reports saved after it.
+    const scoreV1 = Math.round(
+        Math.min(40, parseFloat(engagementRate) * 13) +
+        Math.min(25, parseFloat(viralityScore) * 12) +
+        Math.min(20, cadence.postsPerWeek * 4) +
+        Math.min(15, Object.keys(mix).length * 5)
+    );
 
     return {
         ...base,
-        engagementRate, viralityScore, postsPerWeek, score, grade,
+
+        // --- v1 surface, unchanged shape -----------------------------------
+        engagementRate,
+        viralityScore,
+        engagementRateMedian,
+        viralityScoreMedian,
+        postsPerWeek: String(cadence.postsPerWeek),
+        score: IG_SCORE_V2 ? scoreBreakdown.score : scoreV1,
+        grade: IG_SCORE_V2 ? scoreBreakdown.grade
+             : scoreV1 >= 85 ? 'A+' : scoreV1 >= 70 ? 'A' : scoreV1 >= 55 ? 'B' : scoreV1 >= 40 ? 'C' : 'D',
+        scoreV1,
         avgLikes: Math.round(avgLikes),
         avgComments: Math.round(avgComments),
         avgViews: Math.round(avgViews),
-        contentMix, topHashtags,
-        postingHours: rank(hours).slice(0, 6),
+        contentMix,
+        topHashtags,
+        postingHours: rank(hours).slice(0, 8),
         postingDays: rank(days),
         captionInsight,
         consistency: {
-            postsPerWeek,
-            longestGapDays: longestGap.toFixed(1),
-            windowDays: daysSpan.toFixed(0)
+            postsPerWeek: String(cadence.postsPerWeek),
+            longestGapDays: String(cadence.longestGapDays),
+            windowDays: String(cadence.spanDays)
         },
         last30Days: {
             posts: recent.length,
             totalEngagement: recentEng,
             avgEngagement: recent.length ? Math.round(recentEng / recent.length) : 0
         },
-        topPosts
+        topPosts,
+
+        // --- phase 4 ---------------------------------------------------------
+        bottomPosts,
+        exemplars,
+        distribution,
+        cadence,
+        momentum: mo,
+        heatmap,
+        scoreBreakdown,
+        completeness,
+        leaderboards,
+        flags,
+        extras,
+        provisional: {
+            count: rows.length - settled.length,
+            settled: settled.length,
+            total: rows.length,
+            excludedFromRates: usingSettledOnly,
+            // The posts themselves, not just a count. Telling someone "2 posts
+            // were excluded" without saying which is worse than not mentioning
+            // it — they cannot check the call.
+            posts: rows.filter(r => r.is_provisional)
+                       .sort((a, b) => new Date(b.posted_at) - new Date(a.posted_at))
+                       .slice(0, 6).map(card),
+            note: usingSettledOnly
+                ? `${rows.length - settled.length} post(s) newer than the settle window are shown but excluded from rates.`
+                : 'Too few settled posts to exclude the new ones — rates include everything.'
+        },
+        dataQuality: igDataQuality(rows, posts)
     };
 }
+
 
 function buildBenchmark(main, rivals) {
     const all = [main, ...rivals];
@@ -2444,6 +3496,149 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
                 mode: payload.mode, postsAnalyzed, report: payload
             };
         });
+
+// ===========================================================================
+// PHASE 4 — OPERATIONS ENDPOINTS
+// ===========================================================================
+
+/**
+ * The constants a report run is priced on, and which actor each one covers.
+ * Adding a constant here is all it takes to bring it under validation.
+ */
+function costConstants() {
+    return [
+        { name: 'COST_PER_1K_POSTS',   env: 'COST_PER_1K_POSTS',   value: COST_PER_1K_POSTS,
+          actors: ['apify/instagram-scraper'], unit: 'items' },
+        { name: 'COST_PER_1K_PROFILE', env: 'COST_PER_1K_PROFILE', value: COST_PER_1K_PROFILE,
+          actors: ['apify/instagram-profile-scraper'], unit: 'items' },
+        { name: 'COST_PER_1K_FB_POSTS', env: 'COST_PER_1K_FB_POSTS', value: COST_PER_1K_FB_POSTS,
+          actors: [FB_GROUP_POSTS_ACTOR, FB_SEARCH_ACTOR, FB_COMMENTS_ACTOR], unit: 'items' }
+    ];
+}
+
+app.get('/api/admin/cost-reality', async (req, res) => {
+    const ctx = await requireAdmin(req, res);
+    if (!ctx) return;
+
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days || '90', 10)));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    try {
+        // Settled events only. A reservation row still carries the estimate,
+        // and validating an estimate against itself would always agree.
+        const { data: events, error } = await supabase.from('apify_usage_events')
+            .select('actor_id, usage_usd, items, compute_units, created_at')
+            .eq('is_reservation', false)
+            .gt('usage_usd', 0)
+            .gte('created_at', since)
+            .limit(20000);
+
+        if (error) throw new Error(error.message);
+
+        const byActor = {};
+        (events || []).forEach(e => {
+            if (!e.actor_id) return;
+            (byActor[e.actor_id] = byActor[e.actor_id] || []).push(e);
+        });
+
+        const actorRows = Object.entries(byActor).map(([actorId, evs]) => {
+            const withItems = evs.filter(e => (e.items || 0) > 0);
+            const perK = withItems.map(e => (Number(e.usage_usd) / e.items) * 1000);
+            const totalUsd = evs.reduce((s, e) => s + Number(e.usage_usd || 0), 0);
+            const totalItems = evs.reduce((s, e) => s + (e.items || 0), 0);
+
+            return {
+                actorId,
+                runs: evs.length,
+                runsWithItems: withItems.length,
+                totalUsd: +totalUsd.toFixed(4),
+                totalItems,
+                // Median, not mean. One run that timed out after scraping four
+                // items would otherwise set the constant for everything.
+                medianUsdPer1k: perK.length ? +median(perK).toFixed(3) : null,
+                meanUsdPer1k: perK.length ? +(perK.reduce((s, v) => s + v, 0) / perK.length).toFixed(3) : null,
+                p90UsdPer1k: perK.length
+                    ? +[...perK].sort((a, b) => a - b)[Math.min(perK.length - 1, Math.floor(perK.length * 0.9))].toFixed(3)
+                    : null,
+                blendedUsdPer1k: totalItems > 0 ? +((totalUsd / totalItems) * 1000).toFixed(3) : null
+            };
+        });
+
+        const verdicts = costConstants().map(c => {
+            const matched = actorRows.filter(a => c.actors.includes(a.actorId));
+            const sample = matched.reduce((s, a) => s + a.runsWithItems, 0);
+            const observed = matched.length
+                ? +median(matched.map(a => a.medianUsdPer1k).filter(v => v != null)).toFixed(3)
+                : null;
+
+            const ratio = observed != null && c.value > 0 ? observed / c.value : null;
+            const status =
+                sample < 10          ? 'insufficient-data' :
+                ratio == null        ? 'no-data' :
+                ratio > 1.25         ? 'UNDER-ESTIMATING'  :   // runs cost more than we reserve
+                ratio < 0.6          ? 'over-estimating'   :   // we reserve far more than we spend
+                                       'ok';
+
+            return {
+                constant: c.name,
+                env: c.env,
+                configured: c.value,
+                observedUsdPer1k: observed,
+                ratio: ratio != null ? +ratio.toFixed(2) : null,
+                sampleRuns: sample,
+                status,
+                // The number to actually put in the env var: the p90, not the
+                // median. An estimate that is right half the time is an
+                // estimate that pauses half the jobs it prices.
+                suggested: matched.length
+                    ? +Math.max(...matched.map(a => a.p90UsdPer1k || 0)).toFixed(2)
+                    : null,
+                note:
+                    status === 'insufficient-data' ? `Only ${sample} settled runs with item counts in the last ${days} days — not enough to move a constant on.` :
+                    status === 'UNDER-ESTIMATING'  ? 'Runs are costing more than the reservation. This is the direction that causes surprise budget exhaustion mid-job.' :
+                    status === 'over-estimating'   ? 'Reserving well above actual. Jobs are being declined for budget they would never have used.' :
+                    'Within tolerance.'
+            };
+        });
+
+        res.json({
+            windowDays: days,
+            settledEvents: (events || []).length,
+            // The whole point of the endpoint, stated plainly.
+            summary: verdicts.filter(v => v.status === 'UNDER-ESTIMATING' || v.status === 'over-estimating')
+                .map(v => `${v.constant}: configured ${v.configured}, observed ${v.observedUsdPer1k} (${v.ratio}x) — suggest ${v.suggested}`),
+            allWithinTolerance: verdicts.every(v => v.status === 'ok' || v.status === 'insufficient-data'),
+            constants: verdicts,
+            actors: actorRows.sort((a, b) => b.totalUsd - a.totalUsd)
+        });
+    } catch (e) {
+        logger.error('cost_reality_failed', { message: e.message });
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/rotate-encryption-key', async (req, res) => {
+    const ctx = await requireAdmin(req, res);
+    if (!ctx) return;
+
+    // Master admin only. This one touches every credential in the system.
+    if (!MASTER_ADMIN_EMAIL || (ctx.user.email || '').toLowerCase() !== MASTER_ADMIN_EMAIL) {
+        return res.status(403).json({ error: 'Key rotation is restricted to the master admin.' });
+    }
+
+    const dryRun = req.body?.confirm !== 'rotate';
+    try {
+        const report = await rotateEncryptionKey({ dryRun });
+        res.status(report.error ? 400 : 200).json(report);
+    } catch (e) {
+        logger.error('rotate_key_failed', { message: e.message });
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ===========================================================================
+// SYSTEM
+// ===========================================================================
 
 app.get('/api/health', (req, res) => res.json({
     ok: true,
@@ -6783,6 +7978,117 @@ app.get('/api/fb/page-posts', async (req, res) => {
  * sealed, and token_hash is filled in for rows created before it existed.
  * Idempotent, so it is safe on every boot and a no-op once everything is done.
  */
+/** Decrypt with the retiring key. Only used during rotation. */
+function decryptWithOldKey(stored) {
+    if (!ENC_KEY_OLD) throw new Error('APP_ENCRYPTION_KEY_OLD is not set');
+    if (!stored) return stored;
+    if (!isEncrypted(stored)) return stored;          // legacy plaintext row
+    // Same wire format as decryptSecret(): encv1:<iv>:<tag>:<ct>, base64 each.
+    const [, ivB, tagB, ctB] = String(stored).split(':');
+    const d = crypto.createDecipheriv('aes-256-gcm', ENC_KEY_OLD, Buffer.from(ivB, 'base64'));
+    d.setAuthTag(Buffer.from(tagB, 'base64'));
+    return Buffer.concat([d.update(Buffer.from(ctB, 'base64')), d.final()]).toString('utf8');
+}
+
+/**
+ * Re-wrap every stored secret under the current key.
+ *
+ * dryRun defaults to true. A rotation that cannot be rehearsed is a rotation
+ * nobody runs until the incident, which is the worst possible time to find out
+ * one of the rows will not decrypt.
+ */
+async function rotateEncryptionKey({ dryRun = true } = {}) {
+    if (!ENC_KEY)     return { error: 'APP_ENCRYPTION_KEY is not set — nothing to rotate to.' };
+    if (!ENC_KEY_OLD) return { error: 'APP_ENCRYPTION_KEY_OLD is not set — nothing to rotate from.' };
+    if (ENC_KEY.equals(ENC_KEY_OLD)) return { error: 'Old and new keys are identical.' };
+
+    const report = { dryRun, keys: { total: 0, rotated: 0, failed: 0 },
+                     primaries: { total: 0, rotated: 0, failed: 0 }, failures: [] };
+
+    // A secret may be encrypted under the old key, under the new key already
+    // (a partial previous run), or sitting in plaintext. Try each in turn and
+    // record which path worked, so a resumed rotation is idempotent.
+    const recover = (stored, label) => {
+        if (!isEncrypted(stored)) return { plain: stored, via: 'plaintext' };
+        try { return { plain: decryptSecret(stored), via: 'already-new' }; } catch (_) {}
+        try { return { plain: decryptWithOldKey(stored), via: 'old-key' }; } catch (e) {
+            report.failures.push({ item: label, message: e.message });
+            return null;
+        }
+    };
+
+    // --- apify_keys --------------------------------------------------------
+    try {
+        const { data: rows, error } = await supabase.from('apify_keys').select('id, token, token_hash');
+        if (error) throw new Error(error.message);
+
+        for (const row of rows || []) {
+            report.keys.total += 1;
+            const rec = recover(row.token, `apify_keys:${row.id}`);
+            if (!rec) { report.keys.failed += 1; continue; }
+            if (rec.via === 'already-new') continue;   // nothing to do
+
+            if (!dryRun) {
+                const patch = { token: encryptSecret(rec.plain) };
+                if (!row.token_hash) patch.token_hash = tokenHash(rec.plain);
+                const { error: upErr } = await supabase.from('apify_keys').update(patch).eq('id', row.id);
+                if (upErr) { report.keys.failed += 1; report.failures.push({ item: `apify_keys:${row.id}`, message: upErr.message }); continue; }
+            }
+            report.keys.rotated += 1;
+        }
+    } catch (e) {
+        report.failures.push({ item: 'apify_keys', message: e.message });
+    }
+
+    // --- system_settings primaries ------------------------------------------
+    for (const engine of ENGINES) {
+        const name = primaryKeyName(engine);
+        try {
+            const { data } = await supabase.from('system_settings').select('value').eq('key', name).maybeSingle();
+            if (!data?.value) continue;
+            report.primaries.total += 1;
+
+            const rec = recover(data.value, `system_settings:${name}`);
+            if (!rec) { report.primaries.failed += 1; continue; }
+            if (rec.via === 'already-new') continue;
+
+            if (!dryRun) {
+                await supabase.from('system_settings').upsert({
+                    key: name, value: encryptSecret(rec.plain), updated_at: new Date().toISOString()
+                }, { onConflict: 'key' });
+            }
+            report.primaries.rotated += 1;
+        } catch (e) {
+            report.primaries.failed += 1;
+            report.failures.push({ item: `system_settings:${name}`, message: e.message });
+        }
+    }
+
+    // Any in-process client holds a decrypted token bound to the old row. They
+    // are still valid tokens — rotation changes how the token is stored, not
+    // the token — so nothing needs invalidating. The BYO cache is cleared
+    // anyway so the next request re-reads from the rotated rows.
+    if (!dryRun) {
+        _byoCache.clear();
+        _statusCache.clear();
+        logger.info('encryption_key_rotated', {
+            keysRotated: report.keys.rotated, primariesRotated: report.primaries.rotated,
+            failed: report.keys.failed + report.primaries.failed
+        });
+    }
+
+    report.ok = report.failures.length === 0;
+    report.nextStep = dryRun
+        ? (report.ok
+            ? 'Dry run clean. Re-POST with { "confirm": "rotate" } to write.'
+            : 'Dry run found failures — resolve them before writing. Nothing was changed.')
+        : (report.ok
+            ? 'Rotation complete. Remove APP_ENCRYPTION_KEY_OLD from the environment and redeploy.'
+            : 'Rotation finished with failures. Leave APP_ENCRYPTION_KEY_OLD set until they are resolved — it is the only thing that can still read those rows.');
+
+    return report;
+}
+
 async function migrateSecretsAtRest() {
     if (!ENC_KEY) {
         logger.warn('encryption_disabled', {
@@ -6833,6 +8139,21 @@ async function migrateSecretsAtRest() {
 /** A boot-time sanity check. Anything printed here is a deployment mistake. */
 function preflight() {
     const problems = [];
+
+    // Phase 4: a half-configured rotation should fail at boot, not on the
+    // first request that touches a credential.
+    if (ENC_KEY_OLD && ENC_KEY && ENC_KEY_OLD.equals(ENC_KEY)) {
+        problems.push('APP_ENCRYPTION_KEY_OLD is identical to APP_ENCRYPTION_KEY.');
+    }
+    if (ENC_KEY_OLD && !ENC_KEY) {
+        problems.push('APP_ENCRYPTION_KEY_OLD is set but APP_ENCRYPTION_KEY is not — nothing to rotate to.');
+    }
+    if (ENC_KEY_OLD) {
+        logger.warn('rotation_mode_active', {
+            note: 'APP_ENCRYPTION_KEY_OLD is set. Finish the rotation and unset it — ' +
+                  'leaving it in place keeps the retired key live in the environment.'
+        });
+    }
     if (!process.env.SUPABASE_URL) problems.push('SUPABASE_URL is not set');
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY is not set');
     if (!ENC_KEY) problems.push('APP_ENCRYPTION_KEY is not set — Apify tokens will be stored in plaintext');
