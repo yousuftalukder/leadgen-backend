@@ -86,6 +86,10 @@ const METRICS = {
     keys:   { invalid: 0, exhausted: 0, transient: 0, noCreditEvents: 0 }
 };
 
+METRICS.rotation = { readsViaOldKey: 0 };
+METRICS.ai = { ok: 0, failed: 0, truncated: 0, promptChars: 0, dropped: 0 };
+METRICS.authCache = { hit: 0, miss: 0 };
+
 const RECENT_EVENTS = [];          // last 100 warn/error lines, for /api/admin/metrics
 const _alertSent = new Map();
 
@@ -182,14 +186,42 @@ function encryptSecret(plain) {
     return ENC_PREFIX + [iv, c.getAuthTag(), ct].map(b => b.toString('base64')).join(':');
 }
 
-function decryptSecret(stored) {
-    if (!stored) return stored;
-    if (!isEncrypted(stored)) return stored;          // legacy plaintext row
-    if (!ENC_KEY) throw new Error('APP_ENCRYPTION_KEY is missing but encrypted keys exist in the database.');
+function openSealed(stored, key) {
     const [, ivB, tagB, ctB] = String(stored).split(':');
-    const d = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, Buffer.from(ivB, 'base64'));
+    const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivB, 'base64'));
     d.setAuthTag(Buffer.from(tagB, 'base64'));
     return Buffer.concat([d.update(Buffer.from(ctB, 'base64')), d.final()]).toString('utf8');
+}
+
+/**
+ * Read a stored secret.
+ *
+ * Falls back to APP_ENCRYPTION_KEY_OLD when it is set and the current key
+ * cannot open the row. Without that fallback the gap between "deploy the new
+ * key" and "run the rotation" is a hard outage: every token in the database is
+ * sealed under a key the running process refuses to try, so key resolution,
+ * /api/actor-status and every run in that window fail. With it, rotation is a
+ * background operation.
+ *
+ * `currentKeyOnly` disables the fallback. rotateEncryptionKey() needs that to
+ * tell "already re-wrapped under the new key" apart from "still under the old
+ * one" — without it every row would look already-done and nothing would rotate.
+ */
+function decryptSecret(stored, opts = {}) {
+    if (!stored) return stored;
+    if (!isEncrypted(stored)) return stored;          // legacy plaintext row
+    if (!ENC_KEY && !ENC_KEY_OLD) {
+        throw new Error('APP_ENCRYPTION_KEY is missing but encrypted keys exist in the database.');
+    }
+    if (ENC_KEY) {
+        try { return openSealed(stored, ENC_KEY); }
+        catch (err) {
+            if (opts.currentKeyOnly || !ENC_KEY_OLD) throw err;
+        }
+    }
+    const plain = openSealed(stored, ENC_KEY_OLD);
+    METRICS.rotation.readsViaOldKey += 1;
+    return plain;
 }
 
 /** Never print a whole token. */
@@ -336,6 +368,16 @@ const IG_MIN_CONFIDENT_POSTS = parseInt(process.env.IG_MIN_CONFIDENT_POSTS || '1
 // comparable. Set IG_SCORE_V2=false to keep v1 as the headline number.
 const IG_SCORE_V2 = String(process.env.IG_SCORE_V2 || 'true') !== 'false';
 
+// Which scoring scale a saved report was graded on.
+//
+// reports.score used to record a number with no note of which formula produced
+// it, and /api/set-trend diffs that column across snapshots. Flip IG_SCORE_V2
+// — or simply deploy the v2 patch mid-cohort — and the delta the user reads as
+// "the account declined 13 points" is entirely an artifact of the change.
+// Recording the version makes the series self-describing, so the trend
+// endpoint can plot a comparable scale instead of guessing.
+const IG_SCORE_VERSION = IG_SCORE_V2 ? 2 : 1;
+
 const IG_URL_RE = /https?:\/\/\S+|\b(?:link in bio|linkinbio|bio link|swipe up)\b/i;
 
 // --- Apify run shaping ------------------------------------------------------
@@ -415,21 +457,76 @@ async function ensureProfile(user) {
     return profile;
 }
 
+/**
+ * Short-lived resolved-caller cache.
+ *
+ * auth() is three network round trips: getUser() against GoTrue, then
+ * app_users, then user_engine_access on engine routes. A single running job is
+ * polled every 2.5s, so an untouched cache costs ~72 round trips per minute
+ * per active job and puts GoTrue latency on the critical path of every poll.
+ *
+ * The TTL is deliberately short. A disabled account or a revoked engine grant
+ * takes effect within AUTH_CACHE_MS rather than instantly, and the admin
+ * endpoints that change either one call invalidateAuth() so the common case is
+ * immediate anyway.
+ */
+const AUTH_CACHE_MS = parseInt(process.env.AUTH_CACHE_MS || '45000', 10);
+const _authCache = new Map();
+
+function invalidateAuth(userId = null) {
+    if (!userId) { _authCache.clear(); return; }
+    for (const [k, v] of _authCache) if (v.ctx?.user?.id === userId) _authCache.delete(k);
+}
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _authCache) if (now - v.t > AUTH_CACHE_MS) _authCache.delete(k);
+}, 60000).unref?.();
+
 /** Resolves the caller. Returns null and writes the response on failure. */
 async function auth(req, res) {
     const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
     if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
 
+    const ck = tokenHash(token);
+    const hit = _authCache.get(ck);
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) {
+        METRICS.authCache.hit += 1;
+        if (hit.ctx.profile?.is_active === false) {
+            res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
+            return null;
+        }
+        return hit.ctx;
+    }
+    METRICS.authCache.miss += 1;
+
     const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data?.user) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+    if (error || !data?.user) {
+        _authCache.delete(ck);
+        res.status(401).json({ error: 'Unauthorized' });
+        return null;
+    }
 
     const profile = await ensureProfile(data.user);
+    const ctx = { user: data.user, profile: profile || { role: 'user' } };
+    _authCache.set(ck, { ctx, t: Date.now() });
+
     if (profile && profile.is_active === false) {
         res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
         return null;
     }
 
-    return { user: data.user, profile: profile || { role: 'user' } };
+    return ctx;
+}
+
+/**
+ * Engine grants are read on every spend route. Same reasoning as the auth
+ * cache, same TTL, invalidated by the admin routes that change them.
+ */
+const _engineCache = new Map();
+function invalidateEngineAccess(userId = null) {
+    if (!userId) { _engineCache.clear(); return; }
+    for (const k of [..._engineCache.keys()]) if (k.startsWith(userId + ':')) _engineCache.delete(k);
 }
 
 async function requireAdmin(req, res) {
@@ -447,10 +544,19 @@ async function requireEngine(req, res, engine) {
     if (!ctx) return null;
     if (ctx.profile.role === 'admin') return ctx;
 
-    const { data } = await supabase.from('user_engine_access')
-        .select('id').eq('user_id', ctx.user.id).eq('engine', engine).maybeSingle();
+    const ek = ctx.user.id + ':' + engine;
+    const ehit = _engineCache.get(ek);
+    let granted;
+    if (ehit && Date.now() - ehit.t < AUTH_CACHE_MS) {
+        granted = ehit.v;
+    } else {
+        const { data } = await supabase.from('user_engine_access')
+            .select('id').eq('user_id', ctx.user.id).eq('engine', engine).maybeSingle();
+        granted = !!data;
+        _engineCache.set(ek, { v: granted, t: Date.now() });
+    }
 
-    if (!data) {
+    if (!granted) {
         res.status(403).json({ error: `No access to the ${engine} engine. Ask your administrator.` });
         return null;
     }
@@ -1033,14 +1139,19 @@ async function releaseUsage(client, reservationId, estimateUsd = 0) {
  * Turn a reservation into a settled row carrying the real usageTotalUsd, or
  * write a fresh row when nothing was reserved.
  */
-async function recordUsage(client, { actorId, run, items = 0, jobId = null, reservationId = null, reservedUsd = 0 }) {
+async function recordUsage(client, { actorId, run, items = 0, jobId = null, reservationId = null, reservedUsd = 0, floorUsd = 0 }) {
     const el = client?.__el;
     if (!el) return 0;
 
-    const usd =
+    const reported =
         Number(run?.usageTotalUsd) ||
         Number(run?.usage?.USD) ||
         0;
+
+    // floorUsd is set when the run had not settled at read time, so `reported`
+    // is a partial figure. Charging the estimate instead of the partial keeps
+    // the budget honest; the real number lands in Apify's own ledger either way.
+    const usd = Math.max(reported, Number(floorUsd) || 0);
 
     const row = {
         user_id:        el.userId || null,
@@ -1171,9 +1282,30 @@ async function callActor(client, actorId, input, opts = {}) {
         throw err;
     }
 
+    // An unfinished run under-reports both ways: the dataset is only partly
+    // written, and run.usageTotalUsd is the spend so far rather than the spend
+    // this run will end up billing. Settling the reservation at that number
+    // understates the cycle and lets the next call through a gate it should
+    // have failed. Keep the larger of the two.
+    const runStatus = String(run?.status || '').toUpperCase();
+    const finished = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT', 'TIMED_OUT'].includes(runStatus);
+    if (!finished) {
+        METRICS.apify.unfinished = (METRICS.apify.unfinished || 0) + 1;
+        logger.warn('actor_run_unfinished', {
+            actorId, runId: run?.id || null, status: runStatus || 'unknown',
+            items: rows.length, jobId: opts.jobId || null,
+            note: 'dataset read before the run settled — results and cost are both partial'
+        });
+        alertOnce('unfinished_run:' + actorId,
+            `Apify actor ${actorId} was read while still ${runStatus || 'running'}. ` +
+            `Results are partial and the recorded cost is a floor, not the final bill.`,
+            { actorId, runId: run?.id || null });
+    }
+
     const usd = await recordUsage(client, {
         actorId, run, items: rows.length, jobId: opts.jobId,
-        reservationId, reservedUsd: estimate
+        reservationId, reservedUsd: estimate,
+        floorUsd: finished ? 0 : estimate
     });
 
     METRICS.apify.runs  += 1;
@@ -2111,15 +2243,34 @@ async function savePosts(userId, handle, posts, meta = {}) {
         });
     }
 
-    if (!rows.length) return 0;
+    if (!rows.length) return { saved: 0, failed: 0, error: null };
 
+    // A failure here used to be invisible. computeAudit() works from the
+    // in-memory array, so the report rendered perfectly while the posts table
+    // stayed empty — which is exactly what happens when schema-phase4.sql was
+    // never applied and every upsert errors on an unknown column. The run
+    // looked fine and /api/posts silently returned nothing for weeks.
+    let saved = 0, failed = 0, firstError = null;
     for (let i = 0; i < rows.length; i += 200) {
         const chunk = rows.slice(i, i + 200);
         const { error } = await supabase.from('posts')
             .upsert(chunk, { onConflict: 'user_id,platform,shortcode' });
-        if (error) logger.error('save_posts_failed', { message: error.message, handle });
+        if (error) {
+            failed += chunk.length;
+            firstError = firstError || error.message;
+            logger.error('save_posts_failed', { message: error.message, handle, chunk: chunk.length });
+        } else {
+            saved += chunk.length;
+        }
     }
-    return rows.length;
+
+    if (firstError) {
+        alertOnce('save_posts_failed',
+            'Instagram posts are not being written to the database. The reports still render from memory, ' +
+            'but post-level history is not accumulating. Usually a missing migration: ' + firstError,
+            { handle });
+    }
+    return { saved, failed, error: firstError };
 }
 
 
@@ -2534,22 +2685,107 @@ function ruleRecommendations(a) {
  * job fires several calls back to back, which previously returned null and
  * silently dropped the whole narrative layer.
  */
-async function geminiCall(prompt, { temperature = 0.5, maxOutputTokens = 4096, tag = 'gemini', retries = 3 } = {}) {
-    if (!GEMINI_API_KEY) return null;
+/**
+ * Serialise a payload to fit a character budget WITHOUT slicing the string.
+ *
+ * The old code did `JSON.stringify(payload).slice(0, 60000)`, which cuts
+ * mid-token and hands the model an unterminated string inside an unclosed
+ * array inside an unclosed object. It also cut in key order, so on a
+ * comparison run the budget was exhausted inside `target` and the rivals and
+ * the benchmark were never transmitted at all — while the prompt still asked
+ * for competitor insights.
+ *
+ * This drops whole top-level sections, largest first, in reverse priority
+ * order, and records what it dropped inside the document. The output is always
+ * valid JSON and the model is always told what is missing.
+ */
+function budgetedJson(payload, { maxChars = 40000, keep = [] } = {}) {
+    let obj = { ...(payload || {}) };
+    let out = JSON.stringify(obj);
+    if (out.length <= maxChars) return { json: out, dropped: [], chars: out.length };
+
+    const dropped = [];
+    // Biggest first, but never touch anything the prompt depends on.
+    const candidates = Object.keys(obj)
+        .filter(k => !keep.includes(k))
+        .map(k => ({ k, size: JSON.stringify(obj[k] || null).length }))
+        .sort((a, b) => b.size - a.size);
+
+    for (const c of candidates) {
+        if (out.length <= maxChars) break;
+        delete obj[c.k];
+        dropped.push(c.k);
+        obj._omitted = dropped;
+        out = JSON.stringify(obj);
+    }
+
+    // Everything droppable is gone and it still does not fit. Truncate the
+    // arrays inside what is left rather than the string that holds them.
+    if (out.length > maxChars) {
+        for (const k of Object.keys(obj)) {
+            if (Array.isArray(obj[k]) && obj[k].length > 3) obj[k] = obj[k].slice(0, 3);
+        }
+        obj._omitted = dropped.concat('array-tails');
+        out = JSON.stringify(obj);
+    }
+
+    METRICS.ai.dropped += dropped.length;
+    return { json: out, dropped, chars: out.length };
+}
+
+/**
+ * One call to Gemini. Returns a status object, never a bare null.
+ *
+ *   { ok: true,  data: {...}, reason: 'ok' }
+ *   { ok: false, data: null,  reason: 'no_key' | 'http_4xx' | 'max_tokens' |
+ *                                     'blocked' | 'empty' | 'unparseable' |
+ *                                     'network' }
+ *
+ * Three things the old version got wrong:
+ *
+ *   1. maxOutputTokens 4096 against a thinking model. Thinking tokens are
+ *      spent from the same budget, so the model could exhaust the cap before
+ *      emitting a character of JSON. thinkingBudget bounds that separately.
+ *   2. finishReason was never read, so MAX_TOKENS looked identical to a
+ *      malformed response and to a missing API key.
+ *   3. An unparseable body was retried with the byte-identical prompt, three
+ *      times, at full price, for the same failure. Now it is retried once with
+ *      a repair instruction, and only once.
+ */
+async function geminiCallDetailed(prompt, {
+    temperature = 0.5,
+    maxOutputTokens = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '8192', 10),
+    thinkingBudget = parseInt(process.env.GEMINI_THINKING_BUDGET || '2048', 10),
+    tag = 'gemini',
+    retries = 3
+} = {}) {
+    if (!GEMINI_API_KEY) return { ok: false, data: null, reason: 'no_key' };
     METRICS.gemini.calls += 1;
+    METRICS.ai.promptChars += prompt.length;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const body = JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature, maxOutputTokens, responseMimeType: 'application/json' }
+
+    const buildBody = (text) => JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text }] }],
+        generationConfig: {
+            temperature,
+            maxOutputTokens,
+            responseMimeType: 'application/json',
+            // Ignored by models that do not think; bounds the budget on the
+            // ones that do, which is what stops MAX_TOKENS before any output.
+            thinkingConfig: { thinkingBudget }
+        }
     });
+
+    let text = prompt;
+    let repairUsed = false;
 
     for (let attempt = 0; attempt < retries; attempt++) {
         try {
             const r = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body
+                body: buildBody(text)
             });
 
             if (r.status === 429 || r.status >= 500) {
@@ -2562,29 +2798,264 @@ async function geminiCall(prompt, { temperature = 0.5, maxOutputTokens = 4096, t
 
             if (!r.ok) {
                 METRICS.gemini.failed += 1;
-                logger.error('gemini_failed', { tag, status: r.status, body: (await r.text()).slice(0, 300) });
+                METRICS.ai.failed += 1;
+                const body = (await r.text()).slice(0, 300);
+                logger.error('gemini_failed', { tag, status: r.status, body });
                 alertOnce('gemini_failed', `Gemini returned ${r.status}. Reports will ship without their narrative layer.`, { tag });
-                return null;
+                return { ok: false, data: null, reason: 'http_' + r.status, detail: body };
             }
 
             const data = await r.json();
-            const text = data?.candidates?.[0]?.content?.parts?.map(x => x.text).join('') || '';
-            if (!text) { METRICS.gemini.failed += 1; return null; }
-            const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-            METRICS.gemini.ok += 1;
-            return parsed;
+            const cand = data?.candidates?.[0];
+            const finish = String(cand?.finishReason || '').toUpperCase();
+            const raw = (cand?.content?.parts || []).map(x => x.text || '').join('');
+
+            if (finish === 'SAFETY' || finish === 'PROHIBITED_CONTENT' || finish === 'RECITATION') {
+                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+                logger.warn('gemini_blocked', { tag, finishReason: finish });
+                return { ok: false, data: null, reason: 'blocked', detail: finish };
+            }
+
+            if (finish === 'MAX_TOKENS') {
+                METRICS.gemini.failed += 1;
+                METRICS.ai.truncated += 1;
+                logger.warn('gemini_max_tokens', {
+                    tag, maxOutputTokens, thinkingBudget,
+                    promptChars: text.length, chars: raw.length
+                });
+                alertOnce('gemini_max_tokens',
+                    'Gemini hit its output cap before finishing the JSON. Raise GEMINI_MAX_OUTPUT_TOKENS ' +
+                    'or lower GEMINI_THINKING_BUDGET.', { tag });
+                return { ok: false, data: null, reason: 'max_tokens' };
+            }
+
+            if (!raw.trim()) {
+                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+                logger.warn('gemini_empty', { tag, finishReason: finish || 'none' });
+                return { ok: false, data: null, reason: 'empty', detail: finish || null };
+            }
+
+            try {
+                const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+                METRICS.gemini.ok += 1;
+                METRICS.ai.ok += 1;
+                return { ok: true, data: parsed, reason: 'ok' };
+            } catch (parseErr) {
+                if (repairUsed) {
+                    METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+                    logger.error('gemini_unparseable', { tag, chars: raw.length, head: raw.slice(0, 200) });
+                    return { ok: false, data: null, reason: 'unparseable' };
+                }
+                repairUsed = true;
+                METRICS.gemini.retries += 1;
+                logger.warn('gemini_repair_retry', { tag, chars: raw.length });
+                text = prompt +
+                    '\n\nYour previous reply was not valid JSON. Reply again with ONLY the JSON object, ' +
+                    'no markdown fences, no commentary, and make sure every bracket and quote is closed.';
+                continue;
+            }
         } catch (err) {
             const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
             logger.error('gemini_error', { tag, attempt: attempt + 1, message: err.message });
-            if (attempt === retries - 1) { METRICS.gemini.failed += 1; return null; }
+            if (attempt === retries - 1) {
+                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+                return { ok: false, data: null, reason: 'network', detail: err.message };
+            }
             await new Promise(res => setTimeout(res, waitMs));
         }
     }
-    return null;
+    METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+    return { ok: false, data: null, reason: 'exhausted' };
+}
+
+/** Back-compat shape: the parsed object, or null. */
+async function geminiCall(prompt, opts = {}) {
+    const r = await geminiCallDetailed(prompt, opts);
+    return r.ok ? r.data : null;
+}
+
+/** Human-readable version of a failure reason, for the report and the UI. */
+function aiReasonText(reason) {
+    switch (reason) {
+        case 'ok':          return 'Generated.';
+        case 'no_key':      return 'No Gemini API key is configured on this server.';
+        case 'max_tokens':  return 'The model ran out of output budget before it finished. Raise GEMINI_MAX_OUTPUT_TOKENS.';
+        case 'blocked':     return 'The model declined to answer for this content.';
+        case 'empty':       return 'The model returned an empty response.';
+        case 'unparseable': return 'The model returned something that was not valid JSON, twice.';
+        case 'network':     return 'The strategy service could not be reached.';
+        case 'exhausted':   return 'The strategy service was rate limited and did not recover in time.';
+        default:
+            if (String(reason).startsWith('http_')) return `The strategy service returned ${String(reason).slice(5)}.`;
+            return 'The strategy layer could not be generated.';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AI PAYLOAD PROJECTORS
+//
+// The render payload and the model payload are two different documents and
+// were being treated as one. A single IG audit serialises to 50-90KB, and
+// most of that is thumbnail URLs — Instagram CDN links run 600-1500 characters
+// each and there are 21 post cards per account. None of it helps the model.
+//
+// These projectors carry the numbers a strategist would actually reason over
+// and drop everything that only exists to be drawn on screen.
+// ---------------------------------------------------------------------------
+
+const AI_PROMPT_BUDGET = parseInt(process.env.AI_PROMPT_BUDGET_CHARS || '40000', 10);
+
+/** A post reduced to the parts that carry signal. No media URLs. */
+function aiPostCard(p) {
+    if (!p) return null;
+    return {
+        type: p.type || p.postType || null,
+        likes: p.likes ?? null,
+        comments: p.comments ?? null,
+        views: p.views ?? null,
+        index: p.index ?? null,
+        postedAt: p.postedAt || p.posted_at || null,
+        caption: String(p.caption || '').slice(0, 160)
+    };
+}
+
+function igAiSlim(a) {
+    if (!a) return null;
+    return {
+        handle: a.handle,
+        followers: a.followers,
+        totalPosts: a.totalPosts,
+        category: a.category,
+        isBusiness: a.isBusiness,
+        isVerified: a.isVerified,
+        bio: String(a.bio || '').slice(0, 300),
+        postsAnalyzed: a.postsAnalyzed,
+        score: a.score,
+        grade: a.grade,
+        engagementRate: a.engagementRate,
+        engagementRateMedian: a.engagementRateMedian,
+        viralityScore: a.viralityScore,
+        avgLikes: a.avgLikes,
+        avgComments: a.avgComments,
+        avgViews: a.avgViews,
+        postsPerWeek: a.postsPerWeek,
+        scorePillars: (a.scoreBreakdown?.breakdown || [])
+            .map(b => ({ pillar: b.pillar, points: b.points, max: b.max, detail: b.detail })),
+        confidence: a.scoreBreakdown
+            ? { lowConfidence: a.scoreBreakdown.lowConfidence, sampleSize: a.scoreBreakdown.sampleSize, verdict: a.scoreBreakdown.verdict }
+            : null,
+        completeness: a.completeness
+            ? { score: a.completeness.score, missing: a.completeness.missing }
+            : null,
+        contentMix: a.contentMix,
+        topHashtags: (a.topHashtags || []).slice(0, 12),
+        captionInsight: a.captionInsight,
+        cadence: a.cadence ? {
+            postsPerWeek: a.cadence.postsPerWeek,
+            longestGapDays: a.cadence.longestGapDays,
+            consistency: a.cadence.consistency,
+            spanDays: a.cadence.spanDays
+        } : null,
+        momentum: a.momentum,
+        last30Days: a.last30Days,
+        bestHours: (a.heatmap?.bestHours || []).slice(0, 5),
+        worstHours: (a.heatmap?.worstHours || []).slice(0, 3),
+        bestDays: (a.heatmap?.bestDays || []).slice(0, 4),
+        heatmapReliable: a.heatmap?.reliable ?? null,
+        leaderboards: a.leaderboards ? {
+            format: (a.leaderboards.format || []).slice(0, 6),
+            length: (a.leaderboards.length || []).slice(0, 6),
+            opening: (a.leaderboards.opening || []).slice(0, 6),
+            topic: (a.leaderboards.topic || []).slice(0, 8)
+        } : null,
+        copyFlags: a.flags,
+        topPosts: (a.topPosts || []).slice(0, 5).map(aiPostCard),
+        bottomPosts: (a.bottomPosts || []).slice(0, 3).map(aiPostCard),
+        provisionalExcluded: a.provisional
+            ? { count: a.provisional.count, excludedFromRates: a.provisional.excludedFromRates }
+            : null,
+        missingSignals: a.dataQuality?.missing || []
+    };
+}
+
+function igAiPayload({ target, rivals = [], benchmark = null }) {
+    return {
+        target: igAiSlim(target),
+        rivals: (rivals || []).slice(0, 6).map(igAiSlim),
+        benchmark: benchmark ? {
+            cohort: benchmark.cohort,
+            targetRank: benchmark.targetRank,
+            gaps: benchmark.gaps || null,
+            leaders: benchmark.leaders || null
+        } : null
+    };
+}
+
+function fbGroupAiSlim(g) {
+    if (!g) return null;
+    return {
+        name: g.name,
+        groupId: g.groupId,
+        members: g.members ?? null,
+        postsAnalyzed: g.postsAnalyzed,
+        roomValue: g.roomValue,
+        medianComments: g.medianComments,
+        medianReactions: g.medianReactions,
+        postsPerDay: g.postsPerDay ?? g.cadence?.postsPerDay ?? null,
+        demandSignals: g.demandSignals,
+        rules: g.rules,
+        intents: g.intents,
+        categories: g.categories,
+        formats: g.formats || g.mediaMix || null,
+        bestHours: (g.heatmap?.bestHours || g.bestHours || []).slice(0, 5),
+        bestDays: (g.heatmap?.bestDays || g.bestDays || []).slice(0, 4),
+        leaderboards: g.leaderboards,
+        topDemand: (g.topDemand || g.demand || []).slice(0, 12),
+        exemplars: (g.exemplars || []).slice(0, 4).map(aiPostCard)
+    };
+}
+
+function fbPageAiSlim(p) {
+    if (!p) return null;
+    return {
+        name: p.name,
+        pageId: p.pageId,
+        category: p.category,
+        likes: p.likes ?? null,
+        followers: p.followers ?? null,
+        postsAnalyzed: p.postsAnalyzed,
+        score: p.score,
+        grade: p.grade,
+        engagementRate: p.engagementRate,
+        avgReactions: p.avgReactions,
+        avgComments: p.avgComments,
+        avgShares: p.avgShares,
+        scorePillars: (p.scoreBreakdown?.breakdown || [])
+            .map(b => ({ pillar: b.pillar, points: b.points, max: b.max, detail: b.detail })),
+        completeness: p.completeness ? { score: p.completeness.score, missing: p.completeness.missing } : null,
+        cadence: p.cadence,
+        momentum: p.momentum,
+        sentiment: p.sentiment || p.reactionSentiment || null,
+        bestHours: (p.heatmap?.bestHours || []).slice(0, 5),
+        bestDays: (p.heatmap?.bestDays || []).slice(0, 4),
+        leaderboards: p.leaderboards,
+        copyFlags: p.flags,
+        reviews: p.reviews ? { rating: p.reviews.rating, count: p.reviews.count, themes: (p.reviews.themes || []).slice(0, 8) } : null,
+        topPosts: (p.topPosts || []).slice(0, 5).map(aiPostCard),
+        bottomPosts: (p.bottomPosts || []).slice(0, 3).map(aiPostCard),
+        missingSignals: p.dataQuality?.missing || []
+    };
 }
 
 async function geminiNarrative(payload) {
-    if (!GEMINI_API_KEY) return null;
+    if (!GEMINI_API_KEY) {
+        return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
+    }
+
+    const { json, dropped, chars } = budgetedJson(igAiPayload(payload), {
+        maxChars: AI_PROMPT_BUDGET,
+        keep: ['target', 'benchmark']
+    });
 
     const prompt =
 `You are a senior social media strategist writing a paid client audit.
@@ -2602,11 +3073,22 @@ Analyse the JSON below and reply with ONLY valid JSON matching this schema:
 }
 
 No markdown, no commentary outside the JSON.
+Ground every claim in the numbers supplied. Never invent a metric that is not in the data.
+If the rivals array is empty, return an empty array for competitor_insights rather than guessing.
 
 DATA:
-${JSON.stringify(payload).slice(0, 60000)}`;
+${json}`;
 
-    return geminiCall(prompt, { temperature: 0.4, maxOutputTokens: 4096, tag: 'Gemini IG' });
+    const r = await geminiCallDetailed(prompt, { temperature: 0.4, tag: 'Gemini IG' });
+    logger.info('ai_narrative', { tag: 'ig', ok: r.ok, reason: r.reason, promptChars: chars, dropped });
+    return {
+        ai: r.data,
+        aiStatus: {
+            ok: r.ok, reason: r.reason, message: aiReasonText(r.reason),
+            promptChars: chars, dropped, model: GEMINI_MODEL,
+            generatedAt: new Date().toISOString()
+        }
+    };
 }
 
 // ===========================================================================
@@ -2923,14 +3405,19 @@ function registerWorker(type, factory) { JOB_WORKERS[type] = factory; }
  * Anything left 'running' with no heartbeat is orphaned by a restart. Park it
  * so the UI stops spinning and the user can resume it by hand.
  */
+const AUTO_RESUME = String(process.env.AUTO_RESUME_JOBS || 'true') !== 'false';
+const AUTO_RESUME_MAX = parseInt(process.env.AUTO_RESUME_MAX_ATTEMPTS || '2', 10);
+const _autoResumeTries = new Map();
+
 async function sweepStaleJobs() {
     const cutoff = new Date(Date.now() - JOB_STALE_MINUTES * 60000).toISOString();
     try {
         const { data } = await supabase.from('jobs')
-            .select('id, type, completed_units')
+            .select('id, type, user_id, input, completed_units')
             .in('status', ['running', 'queued'])
             .lt('updated_at', cutoff);
 
+        const resumed = [];
         for (const j of (data || [])) {
             const n = Array.isArray(j.completed_units) ? j.completed_units.length : 0;
             // fb_discovery and fb_verify pass an inline closure to runJob rather
@@ -2945,13 +3432,72 @@ async function sweepStaleJobs() {
                            : n ? `${n} unit(s) were already saved — resume to finish the rest.`
                                : 'Nothing was charged. Resume to start again.')
             }, 'Interrupted by a server restart');
+
+            // Pick it back up without waiting for a human to click Resume.
+            //
+            // The checkpoint makes this safe: claimJob() is a single
+            // conditional UPDATE so only one process can win it, and every
+            // completed unit is skipped rather than re-scraped. Leaving the
+            // job parked meant a user who closed their laptop came back to a
+            // dead run they had to restart by hand.
+            if (AUTO_RESUME && canResume) {
+                const tries = (_autoResumeTries.get(j.id) || 0) + 1;
+                _autoResumeTries.set(j.id, tries);
+                if (tries > AUTO_RESUME_MAX) {
+                    logger.warn('auto_resume_giving_up', { jobId: j.id, tries });
+                    await updateJob(j.id, {}, 'Auto-resume gave up after repeated interruptions — resume manually.');
+                    continue;
+                }
+                try {
+                    const factory = JOB_WORKERS[j.type];
+                    runJob(j.id, factory(j.user_id, j.input || {}, j.id), { resume: true });
+                    resumed.push(j.id);
+                } catch (e) {
+                    logger.error('auto_resume_failed', { jobId: j.id, message: e.message });
+                }
+            }
         }
         if (data?.length) {
             METRICS.jobs.interrupted += data.length;
-            logger.warn('jobs_interrupted', { count: data.length, ids: data.map(j => j.id) });
-            alertOnce('jobs_interrupted', `${data.length} job(s) were orphaned by a restart and parked as resumable.`);
+            METRICS.jobs.autoResumed = (METRICS.jobs.autoResumed || 0) + resumed.length;
+            logger.warn('jobs_interrupted', {
+                count: data.length, ids: data.map(j => j.id), autoResumed: resumed.length
+            });
+            if (resumed.length < data.length) {
+                alertOnce('jobs_interrupted',
+                    `${data.length - resumed.length} job(s) were orphaned by a restart and could not be auto-resumed.`);
+            }
         }
     } catch (e) { logger.error('sweep_failed', { message: e.message }); }
+}
+
+/**
+ * Keep the instance awake while work is in flight.
+ *
+ * Render's free tier spins a web service down on absence of INBOUND HTTP. The
+ * job heartbeat writes to Supabase, which is outbound and does not count, so
+ * until now the only thing keeping a running job alive was the user's browser
+ * polling it. Close the laptop mid-run and the instance slept, the Apify call
+ * in flight was billed and produced nothing, and the job sat dead until
+ * somebody came back and pressed Resume.
+ *
+ * One request to our own /api/health is inbound traffic and resets the idle
+ * timer. It only fires when there is actually a job running.
+ */
+const SELF_URL = (process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
+const KEEPALIVE_MS = parseInt(process.env.KEEPALIVE_MS || '240000', 10);
+
+async function keepAwakeIfBusy() {
+    if (!SELF_URL) return;
+    try {
+        const { data } = await supabase.from('jobs')
+            .select('id').in('status', ['running', 'queued']).limit(1);
+        if (!data?.length) return;
+        const r = await fetch(SELF_URL + '/api/health', { method: 'GET' });
+        logger.debug('keepalive_ping', { status: r.status, jobs: data.length });
+    } catch (e) {
+        logger.debug('keepalive_failed', { message: e.message });
+    }
 }
 
 /**
@@ -3010,8 +3556,10 @@ async function auditHandle(client, userId, handle, postsLimit, meta = {}) {
     }, { estimateUsd: (limit / 1000) * COST_PER_1K_POSTS, maxItems: limit, jobId: meta.jobId });
     const posts = extractPosts(rawPosts || []);
 
-    await savePosts(userId, h, posts, meta);
-    return computeAudit(h, prof, posts);
+    const persistence = await savePosts(userId, h, posts, meta);
+    const audit = computeAudit(h, prof, posts);
+    if (audit) audit.persistence = persistence;
+    return audit;
 }
 
 // ===========================================================================
@@ -3050,6 +3598,10 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
                 await progress(5, `Auditing target @${cleanTarget}`);
                 main = await auditHandle(await grab(), userId, cleanTarget, limit, { jobId });
                 if (!main) throw new Error('Target profile could not be scraped.');
+                if (main.persistence?.error) {
+                    warnings.push('Posts could not be written to the database, so this run adds nothing to post history. ' +
+                                  'The report itself is unaffected.');
+                }
                 await ck.done(cleanTarget, main);
             }
 
@@ -3074,9 +3626,13 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
             const recommendations = ruleRecommendations(main);
 
             await progress(92, 'Generating AI narrative');
-            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+            const { ai, aiStatus } = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+            if (!aiStatus.ok) warnings.push(`Strategy layer unavailable: ${aiStatus.message}`);
 
-            const payload = { main, rivals: rivalAudits, recommendations, benchmark, ai, warnings };
+            const payload = {
+                main, rivals: rivalAudits, recommendations, benchmark, ai, aiStatus, warnings,
+                scoreVersion: IG_SCORE_VERSION, generatedAt: new Date().toISOString()
+            };
             const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
 
             await progress(96, 'Saving report');
@@ -3092,12 +3648,29 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
                 posts_analyzed: postsAnalyzed,
                 snapshot_date: new Date().toISOString().slice(0, 10),
                 credits_estimate: estimate,
+                score_version: IG_SCORE_VERSION,
+                score_v1: main.scoreV1 ?? null,
+                followers_snapshot: main.followers ?? null,
+                posts_per_week: parseFloat(main.postsPerWeek) || null,
+                cohort_avg_er: benchmark?.cohort?.avgEngagementRate ?? null,
+                target_rank: benchmark?.targetRank ?? null,
                 ai_summary: ai?.executive_summary || null,
                 ai_json: ai || null,
+                ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
 
-            return { reportId: saved?.id || null, postsAnalyzed, report: payload };
+            // The payload is already in reports.report_json. Storing a second
+            // copy in jobs.result doubled the write and shipped ~600KB to the
+            // browser on the final poll. reportRef tells /api/job/:id to
+            // hydrate it from the vault instead.
+            return {
+                reportId: saved?.id || null,
+                reportRef: saved?.id || null,
+                postsAnalyzed,
+                aiStatus,
+                report: saved?.id ? undefined : payload
+            };
         });
 
 registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
@@ -3124,6 +3697,10 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
                 await progress(5, `Auditing target @${cleanTarget}`);
                 main = await auditHandle(await grab(), userId, cleanTarget, limit, meta);
                 if (!main) throw new Error('Target profile could not be scraped.');
+                if (main.persistence?.error) {
+                    warnings.push('Posts could not be written to the database, so this run adds nothing to post history. ' +
+                                  'The report itself is unaffected.');
+                }
                 await ck.done(cleanTarget, main);
             }
 
@@ -3148,9 +3725,13 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
             const recommendations = ruleRecommendations(main);
 
             await progress(92, 'Generating AI strategy');
-            const ai = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+            const { ai, aiStatus } = await geminiNarrative({ target: main, rivals: rivalAudits, benchmark });
+            if (!aiStatus.ok) warnings.push(`Strategy layer unavailable: ${aiStatus.message}`);
 
-            const payload = { main, rivals: rivalAudits, benchmark, recommendations, ai, warnings };
+            const payload = {
+                main, rivals: rivalAudits, benchmark, recommendations, ai, aiStatus, warnings,
+                scoreVersion: IG_SCORE_VERSION, generatedAt: new Date().toISOString()
+            };
             const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
 
             await progress(96, 'Saving report');
@@ -3167,8 +3748,15 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
                 posts_analyzed: postsAnalyzed,
                 snapshot_date: new Date().toISOString().slice(0, 10),
                 credits_estimate: estimate,
+                score_version: IG_SCORE_VERSION,
+                score_v1: main.scoreV1 ?? null,
+                followers_snapshot: main.followers ?? null,
+                posts_per_week: parseFloat(main.postsPerWeek) || null,
+                cohort_avg_er: benchmark?.cohort?.avgEngagementRate ?? null,
+                target_rank: benchmark?.targetRank ?? null,
                 ai_summary: ai?.executive_summary || null,
                 ai_json: ai || null,
+                ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
 
@@ -3177,7 +3765,14 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
                     .update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
             }
 
-            return { reportId: saved?.id || null, setId: activeSetId, postsAnalyzed, report: payload };
+            return {
+                reportId: saved?.id || null,
+                reportRef: saved?.id || null,
+                setId: activeSetId,
+                postsAnalyzed,
+                aiStatus,
+                report: saved?.id ? undefined : payload
+            };
         });
 
 registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, ck) => {
@@ -3288,8 +3883,8 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                     if (!a.postsAnalyzed) continue;
                     await progress(72 + aiStep * i, `Writing report for ${a.name}`);
 
-                    const ai = await fbNarrative({ mode: 'single', group: a });
-                    const payload = { mode: 'individual', group: a, benchmark: null, ai };
+                    const { ai, aiStatus } = await fbNarrative({ mode: 'single', group: a });
+                    const payload = { mode: 'individual', group: a, benchmark: null, ai, aiStatus };
 
                     const { data: saved } = await supabase.from('reports').insert([{
                         user_id: userId,
@@ -3310,6 +3905,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                         credits_estimate: fbEstimateCredits(1, limit, sampleComments),
                         ai_summary: ai?.executive_summary || null,
                         ai_json: ai || null,
+                        ai_status: aiStatus,
                         report_json: payload
                     }]).select('id').maybeSingle();
 
@@ -3337,9 +3933,9 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
             const benchmark = buildCommunityBenchmark(audits);
 
             await progress(84, 'Writing the community strategy');
-            const ai = await fbNarrative({ mode: 'combined', groups: audits, benchmark });
+            const { ai, aiStatus } = await fbNarrative({ mode: 'combined', groups: audits, benchmark });
 
-            const payload = { mode: 'combined', groups: audits, benchmark, ai };
+            const payload = { mode: 'combined', groups: audits, benchmark, ai, aiStatus };
             const live = audits.filter(a => a.postsAnalyzed > 0);
 
             await progress(94, 'Saving report');
@@ -3362,6 +3958,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                 credits_estimate: estimate,
                 ai_summary: ai?.executive_summary || null,
                 ai_json: ai || null,
+                ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
 
@@ -3375,8 +3972,10 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
             if (activeSetId) await supabase.from('fb_group_sets').update({ last_run_at: new Date().toISOString() }).eq('id', activeSetId);
 
             return {
-                mode: 'combined', reportId: saved?.id || null, setId: activeSetId,
-                postsAnalyzed: totalPosts, demandSignals: totalDemand, report: payload
+                mode: 'combined', reportId: saved?.id || null, reportRef: saved?.id || null,
+                setId: activeSetId, aiStatus,
+                postsAnalyzed: totalPosts, demandSignals: totalDemand,
+                report: saved?.id ? undefined : payload
             };
         });
 
@@ -3444,7 +4043,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             const recommendations = fbPageRecommendations(main, benchmark);
 
             await progress(88, 'Writing the AI strategy layer');
-            const ai = await fbPageNarrative({
+            const { ai, aiStatus } = await fbPageNarrative({
                 target: main, rival: rivalAudit, benchmark,
                 brief: brief ? String(brief).slice(0, 600) : null
             });
@@ -3453,7 +4052,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
                 mode: rivalAudit ? 'versus' : 'single',
                 generatedAt: new Date().toISOString(),
                 windowDays: window,
-                target: main, rival: rivalAudit, benchmark, recommendations, ai,
+                target: main, rival: rivalAudit, benchmark, recommendations, ai, aiStatus,
                 brief: brief || null
             };
 
@@ -3478,6 +4077,8 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
                 credits_estimate: estimate,
                 ai_summary: ai?.executive_summary || null,
                 ai_json: ai || null,
+                ai_status: aiStatus,
+                followers_snapshot: main.followers ?? main.likes ?? null,
                 report_json: payload
             }]).select('id').maybeSingle();
 
@@ -3492,8 +4093,10 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             }
 
             return {
-                reportId: saved?.id || null, setId: activeSetId,
-                mode: payload.mode, postsAnalyzed, report: payload
+                reportId: saved?.id || null, reportRef: saved?.id || null,
+                setId: activeSetId, aiStatus,
+                mode: payload.mode, postsAnalyzed,
+                report: saved?.id ? undefined : payload
             };
         });
 
@@ -3646,6 +4249,10 @@ app.get('/api/health', (req, res) => res.json({
     version: APP_VERSION,
     uptimeSecs: Math.round((Date.now() - BOOT_TS) / 1000),
     encryptionAtRest: !!ENC_KEY,
+    rotationPending: !!ENC_KEY_OLD,
+    keepAlive: !!SELF_URL,
+    igScoreVersion: IG_SCORE_VERSION,
+    ai: { model: GEMINI_MODEL, configured: !!GEMINI_API_KEY, ok: METRICS.ai.ok, failed: METRICS.ai.failed, truncated: METRICS.ai.truncated },
     budgetMode: BUDGET_MODE
 }));
 
@@ -4096,6 +4703,9 @@ app.post('/api/admin/users', async (req, res) => {
     } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// Admin writes below invalidate the auth/engine caches for the affected user,
+// so a disabled account or a revoked grant takes effect immediately rather
+// than at the end of the cache TTL.
 app.patch('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
@@ -4117,6 +4727,8 @@ app.patch('/api/admin/users/:id', async (req, res) => {
                     .upsert({ user_id: target, engine: e, granted_by: ctx.user.id }, { onConflict: 'user_id,engine' });
             }
         }
+        invalidateAuth(target);
+        invalidateEngineAccess(target);
         res.json({ success: true });
     } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -4127,6 +4739,8 @@ app.delete('/api/admin/users/:id', async (req, res) => {
         if (req.params.id === ctx.user.id) return res.status(400).json({ error: 'You cannot delete yourself.' });
         await supabase.auth.admin.deleteUser(req.params.id);
         await supabase.from('app_users').delete().eq('id', req.params.id);
+        invalidateAuth(req.params.id);
+        invalidateEngineAccess(req.params.id);
         res.json({ success: true });
     } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -4661,6 +5275,17 @@ app.get('/api/job/:id', async (req, res) => {
         if (error) throw error;
         if (!data) return res.status(404).json({ error: 'Job not found' });
 
+        // Workers store the payload once, in reports.report_json, and leave a
+        // reportRef behind. Hydrate it here so every existing page keeps
+        // reading job.result.report exactly as before, without the payload
+        // being written to Postgres twice and shipped on the final poll.
+        if (data.status === 'done' && data.result?.reportRef && !data.result.report) {
+            const { data: rep } = await supabase.from('reports')
+                .select('report_json').eq('id', data.result.reportRef)
+                .eq('user_id', ctx.user.id).maybeSingle();
+            if (rep?.report_json) data.result = { ...data.result, report: rep.report_json };
+        }
+
         const view = {
             ...data,
             completedUnits: (data.completed_units || []).length,
@@ -4733,13 +5358,34 @@ app.get('/api/jobs', async (req, res) => {
 // REPORTS VAULT + TREND COMPARISON
 // ===========================================================================
 
+/**
+ * The Instagram vault list.
+ *
+ * This was `select('*')` with no platform filter and no limit — the only vault
+ * endpoint that never got the treatment /api/fb/reports did. Two things went
+ * wrong. Facebook community and Page reports appeared in the Instagram list,
+ * and opening one handed an incompatible payload to renderReportDashboard(),
+ * which reads `rep.main` and rendered a blank card. And every full
+ * report_json the user had ever generated crossed the wire to draw a list of
+ * names and grades.
+ *
+ * Columns only. Platform filtered. Capped. The payload comes from
+ * /api/report/:id on click.
+ */
 app.get('/api/reports-history', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
+        const limit = Math.min(parseInt(req.query.limit || '100', 10), 200);
         const { data: reports, error } = await supabase.from('reports')
-            .select('*').eq('user_id', ctx.user.id).order('created_at', { ascending: false });
+            .select('id, platform, report_type, target_handle, competitor_handles, grade, score, ' +
+                    'score_version, score_v1, engagement_rate, posts_analyzed, snapshot_date, ' +
+                    'created_at, ai_summary, ai_status, set_id, credits_estimate')
+            .eq('user_id', ctx.user.id)
+            .eq('platform', 'instagram')
+            .order('created_at', { ascending: false })
+            .limit(limit);
         if (error) throw error;
-        res.status(200).json({ reports });
+        res.status(200).json({ reports: reports || [] });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -4750,6 +5396,66 @@ app.get('/api/report/:id', async (req, res) => {
             .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (!data) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/**
+ * Re-run the strategy layer against a report that is already in the vault.
+ *
+ * A run whose narrative failed used to be dead: ai_json was null forever, and
+ * the only way to get the strategy layer was to pay Apify to scrape the same
+ * accounts again. Everything the model needs is in report_json, so this costs
+ * nothing but a Gemini call.
+ */
+app.post('/api/report/:id/regenerate-narrative', spendLimit, async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+
+        const { data: rep } = await supabase.from('reports')
+            .select('id, platform, report_type, report_json')
+            .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
+        if (!rep) return res.status(404).json({ error: 'Report not found' });
+
+        const engine = rep.platform === 'instagram' ? 'report'
+                     : rep.report_type === 'fb_page' ? 'fb_page'
+                     : 'fb_community';
+        if (ctx.profile.role !== 'admin') {
+            const { data: grant } = await supabase.from('user_engine_access')
+                .select('id').eq('user_id', ctx.user.id).eq('engine', engine).maybeSingle();
+            if (!grant) return res.status(403).json({ error: `No access to the ${engine} engine.` });
+        }
+
+        const rj = rep.report_json || {};
+        let out;
+        if (rep.platform === 'instagram') {
+            if (!rj.main) return res.status(409).json({ error: 'This report has no stored payload to regenerate from.' });
+            out = await geminiNarrative({ target: rj.main, rivals: rj.rivals || [], benchmark: rj.benchmark || null });
+        } else if (rep.report_type === 'fb_page') {
+            if (!rj.target) return res.status(409).json({ error: 'This report has no stored payload to regenerate from.' });
+            out = await fbPageNarrative({ target: rj.target, rival: rj.rival || null, benchmark: rj.benchmark || null, brief: rj.brief || null });
+        } else if (rj.mode === 'combined') {
+            out = await fbNarrative({ mode: 'combined', groups: rj.groups || [], benchmark: rj.benchmark || null });
+        } else if (rj.group) {
+            out = await fbNarrative({ mode: 'single', group: rj.group });
+        } else {
+            return res.status(409).json({ error: 'This report shape cannot be regenerated.' });
+        }
+
+        const { ai, aiStatus } = out;
+        if (!aiStatus.ok) {
+            return res.status(502).json({ success: false, aiStatus, error: aiStatus.message });
+        }
+
+        const patched = { ...rj, ai, aiStatus };
+        const { error } = await supabase.from('reports').update({
+            ai_json: ai,
+            ai_summary: ai?.executive_summary || null,
+            ai_status: aiStatus,
+            report_json: patched
+        }).eq('id', rep.id).eq('user_id', ctx.user.id);
+        if (error) throw error;
+
+        res.json({ success: true, aiStatus, ai });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -4770,8 +5476,13 @@ app.get('/api/set-trend/:setId', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
 
+        // report_json is no longer selected here. This endpoint used to pull
+        // the entire payload for every snapshot in the set to read four
+        // scalars off it; those four are now written onto the report row at
+        // insert time.
         const { data: runs } = await supabase.from('reports')
-            .select('id, snapshot_date, created_at, score, grade, engagement_rate, target_handle, report_json')
+            .select('id, snapshot_date, created_at, score, grade, engagement_rate, target_handle, ' +
+                    'score_version, score_v1, followers_snapshot, posts_per_week, cohort_avg_er, target_rank')
             .eq('set_id', req.params.setId).eq('user_id', ctx.user.id)
             .order('created_at', { ascending: true });
 
@@ -4781,13 +5492,30 @@ app.get('/api/set-trend/:setId', async (req, res) => {
             reportId: r.id,
             date: r.snapshot_date || r.created_at?.slice(0, 10),
             score: r.score,
+            scoreVersion: r.score_version ?? 1,
+            scoreV1: r.score_v1 ?? null,
             grade: r.grade,
             engagementRate: r.engagement_rate,
-            postsPerWeek: r.report_json?.main?.postsPerWeek || null,
-            followers: r.report_json?.main?.followers || null,
-            cohortAvgEngagement: r.report_json?.benchmark?.cohort?.avgEngagementRate || null,
-            rank: r.report_json?.benchmark?.targetRank || null
+            postsPerWeek: r.posts_per_week ?? null,
+            followers: r.followers_snapshot ?? null,
+            cohortAvgEngagement: r.cohort_avg_er ?? null,
+            rank: r.target_rank ?? null
         }));
+
+        // Scoring-version discontinuity.
+        //
+        // reports.score holds whichever formula was live when the snapshot was
+        // taken. Diffing a v1 snapshot against a v2 one reports the scoring
+        // change as an account change — a healthy account reads as "down 13"
+        // for reasons that have nothing to do with the account. When the
+        // series is mixed, fall back to the v1 score, which every version
+        // records, and say so rather than silently plotting two scales.
+        const versions = [...new Set(points.map(p => p.scoreVersion))];
+        const mixed = versions.length > 1;
+        const comparable = mixed && points.every(p => p.scoreV1 != null);
+
+        const scoreOf = p => (mixed && comparable) ? p.scoreV1 : p.score;
+        points.forEach(p => { p.comparableScore = scoreOf(p); });
 
         let delta = null;
         if (points.length > 1) {
@@ -4795,14 +5523,25 @@ app.get('/api/set-trend/:setId', async (req, res) => {
             const days = Math.round((new Date(b.date) - new Date(a.date)) / 86400000);
             delta = {
                 from: a.date, to: b.date, days,
-                score: (b.score || 0) - (a.score || 0),
+                score: (mixed && !comparable) ? null : (scoreOf(b) || 0) - (scoreOf(a) || 0),
                 engagementRate: +((b.engagementRate || 0) - (a.engagementRate || 0)).toFixed(2),
                 followers: (b.followers || 0) - (a.followers || 0),
                 rankChange: (a.rank && b.rank) ? a.rank - b.rank : null
             };
         }
 
-        res.json({ runs: points, delta });
+        const scoring = {
+            versions,
+            mixed,
+            comparable,
+            basis: (mixed && comparable) ? 'score_v1' : 'score',
+            note: !mixed ? null
+                : comparable
+                    ? 'This set spans a scoring change. The line is plotted on the original v1 scale so the snapshots stay comparable.'
+                    : 'This set spans a scoring change and some snapshots predate the comparable score, so the score delta is not shown. Engagement rate, followers and rank are unaffected.'
+        };
+
+        res.json({ runs: points, delta, scoring });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5603,6 +6342,21 @@ async function geminiJSON(prompt, maxTokens = 4096, temperature = 0.5) {
 }
 
 async function fbNarrative(payload) {
+    if (!GEMINI_API_KEY) {
+        return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
+    }
+
+    const slim = payload.mode === 'single'
+        ? { mode: 'single', group: fbGroupAiSlim(payload.group) }
+        : {
+            mode: 'combined',
+            groups: (payload.groups || []).slice(0, 15).map(fbGroupAiSlim),
+            benchmark: payload.benchmark || null
+          };
+    const { json, dropped, chars } = budgetedJson(slim, {
+        maxChars: AI_PROMPT_BUDGET, keep: ['mode', 'group', 'groups']
+    });
+
     const prompt =
 `You are a local-market community strategist writing a paid client report about Facebook groups.
 The client wants to know which rooms are worth their time, what to post in them, and what demand is going unmet.
@@ -5622,9 +6376,18 @@ Reply with ONLY valid JSON matching this schema:
 Ground every claim in the numbers supplied. Do not invent group names. No markdown outside the JSON.
 
 DATA:
-${JSON.stringify(payload).slice(0, 60000)}`;
+${json}`;
 
-    return geminiJSON(prompt, 4096, 0.45);
+    const r = await geminiCallDetailed(prompt, { temperature: 0.45, tag: 'Gemini FB' });
+    logger.info('ai_narrative', { tag: 'fb_community', ok: r.ok, reason: r.reason, promptChars: chars, dropped });
+    return {
+        ai: r.data,
+        aiStatus: {
+            ok: r.ok, reason: r.reason, message: aiReasonText(r.reason),
+            promptChars: chars, dropped, model: GEMINI_MODEL,
+            generatedAt: new Date().toISOString()
+        }
+    };
 }
 
 /**
@@ -7545,6 +8308,17 @@ function fbPageRecommendations(a, benchmark) {
 // AI NARRATIVE
 // ---------------------------------------------------------------------------
 async function fbPageNarrative(payload) {
+    if (!GEMINI_API_KEY) {
+        return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
+    }
+
+    const { json, dropped, chars } = budgetedJson({
+        target: fbPageAiSlim(payload.target),
+        rival: fbPageAiSlim(payload.rival),
+        benchmark: payload.benchmark || null,
+        brief: payload.brief || null
+    }, { maxChars: AI_PROMPT_BUDGET, keep: ['target', 'brief'] });
+
     const prompt =
 `You are a social media strategist writing a paid client report about a Facebook business Page.
 The reader is the business owner. They want to know how their Page is really doing, what to change,
@@ -7567,9 +8341,18 @@ Ground every claim in the numbers supplied. Never invent a metric that is not in
 If a rival is not supplied, return an empty array for competitor_read. No markdown outside the JSON.
 
 DATA:
-${JSON.stringify(payload).slice(0, 60000)}`;
+${json}`;
 
-    return geminiJSON(prompt, 4096, 0.45);
+    const r = await geminiCallDetailed(prompt, { temperature: 0.45, tag: 'Gemini FB Page' });
+    logger.info('ai_narrative', { tag: 'fb_page', ok: r.ok, reason: r.reason, promptChars: chars, dropped });
+    return {
+        ai: r.data,
+        aiStatus: {
+            ok: r.ok, reason: r.reason, message: aiReasonText(r.reason),
+            promptChars: chars, dropped, model: GEMINI_MODEL,
+            generatedAt: new Date().toISOString()
+        }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -7979,6 +8762,44 @@ app.get('/api/fb/page-posts', async (req, res) => {
  * Idempotent, so it is safe on every boot and a no-op once everything is done.
  */
 /** Decrypt with the retiring key. Only used during rotation. */
+// ===========================================================================
+// TERMINAL HANDLERS
+// Registered after every route, which is the only place they work.
+// ===========================================================================
+
+/**
+ * A JSON 404 for the API surface.
+ *
+ * Without this a typo'd path fell through to Express's built-in handler, which
+ * answers with an HTML page. EL.api() then failed inside JSON.parse and the
+ * user saw "Unexpected token <" instead of "no such endpoint".
+ */
+app.use('/api', (req, res) => {
+    res.status(404).json({
+        error: `No such endpoint: ${req.method} ${req.path}`,
+        hint: 'Check the path, or the frontend may be newer than the deployed server.'
+    });
+});
+
+/**
+ * The last line. Anything a route threw synchronously, or handed to next(),
+ * lands here as JSON instead of a stack trace in an HTML page.
+ */
+app.use((err, req, res, _next) => {
+    const status = err.status || err.statusCode || 500;
+    METRICS.http.errors += 1;
+    logger.error('unhandled_route_error', {
+        method: req.method, path: req.path, status,
+        message: err.message, stack: (err.stack || '').slice(0, 600)
+    });
+    if (res.headersSent) return;
+    res.status(status).json({
+        error: status >= 500 ? 'Something went wrong on the server.' : (err.message || 'Request failed'),
+        // A malformed JSON body is the common 400 here and the caller can fix it.
+        detail: status < 500 ? err.message : undefined
+    });
+});
+
 function decryptWithOldKey(stored) {
     if (!ENC_KEY_OLD) throw new Error('APP_ENCRYPTION_KEY_OLD is not set');
     if (!stored) return stored;
@@ -8010,7 +8831,7 @@ async function rotateEncryptionKey({ dryRun = true } = {}) {
     // record which path worked, so a resumed rotation is idempotent.
     const recover = (stored, label) => {
         if (!isEncrypted(stored)) return { plain: stored, via: 'plaintext' };
-        try { return { plain: decryptSecret(stored), via: 'already-new' }; } catch (_) {}
+        try { return { plain: decryptSecret(stored, { currentKeyOnly: true }), via: 'already-new' }; } catch (_) {}
         try { return { plain: decryptWithOldKey(stored), via: 'old-key' }; } catch (e) {
             report.failures.push({ item: label, message: e.message });
             return null;
@@ -8105,8 +8926,16 @@ async function migrateSecretsAtRest() {
         for (const row of rows || []) {
             const patch = {};
             let plain = null;
-            try { plain = decryptSecret(row.token); }
-            catch (e) { logger.error('migrate_decrypt_failed', { keyId: row.id, message: e.message }); continue; }
+            try { plain = decryptSecret(row.token, { currentKeyOnly: true }); }
+            catch (e) {
+                // During a rotation window this is expected: the row is sealed
+                // under APP_ENCRYPTION_KEY_OLD and rotateEncryptionKey() owns
+                // moving it. decryptSecret() can still read it, so nothing is
+                // broken — this migration just has no work to do here.
+                if (ENC_KEY_OLD) logger.debug('migrate_skipped_pending_rotation', { keyId: row.id });
+                else logger.error('migrate_decrypt_failed', { keyId: row.id, message: e.message });
+                continue;
+            }
 
             if (!isEncrypted(row.token)) { patch.token = encryptSecret(plain); encrypted += 1; }
             if (!row.token_hash)         { patch.token_hash = tokenHash(plain); hashed += 1; }
@@ -8136,6 +8965,49 @@ async function migrateSecretsAtRest() {
     return { encrypted, hashed, skipped: false };
 }
 
+/**
+ * Confirm at boot that the migrations this build depends on have actually run.
+ *
+ * Every one of these failures used to be silent at boot and only visible much
+ * later as missing data: posts that never persisted, a trend line that could
+ * not tell v1 from v2 snapshots, an AI status nobody could read back.
+ */
+async function schemaProbe() {
+    const required = [
+        { table: 'posts',   column: 'is_provisional',    migration: 'schema-phase4.sql',
+          impact: 'Instagram posts will not be written — reports still render, but post history stops accumulating.' },
+        { table: 'reports', column: 'score_version',     migration: 'schema-phase5.sql',
+          impact: 'Trend lines cannot tell a scoring change apart from a real change in the account.' },
+        { table: 'reports', column: 'ai_status',         migration: 'schema-phase5.sql',
+          impact: 'A failed strategy layer will not record why it failed.' },
+        { table: 'reports', column: 'followers_snapshot', migration: 'schema-phase5.sql',
+          impact: 'Trend snapshots fall back to nulls for followers, cadence and rank.' },
+        { table: 'jobs',    column: 'partials',          migration: 'schema-phase1.sql',
+          impact: 'Job checkpoints cannot be stored — a paused run will re-scrape and re-charge on resume.' }
+    ];
+
+    const missing = [];
+    for (const r of required) {
+        try {
+            const { error } = await supabase.from(r.table).select(r.column).limit(1);
+            if (error) missing.push(r);
+        } catch (_) { missing.push(r); }
+    }
+
+    if (missing.length) {
+        missing.forEach(m => logger.error('schema_missing', {
+            table: m.table, column: m.column, migration: m.migration, impact: m.impact
+        }));
+        alertOnce('schema_missing',
+            `${missing.length} required column(s) are missing. Run: ` +
+            [...new Set(missing.map(m => m.migration))].join(', '),
+            { columns: missing.map(m => `${m.table}.${m.column}`) });
+    } else {
+        logger.info('schema_ok', { checked: required.length });
+    }
+    return missing;
+}
+
 /** A boot-time sanity check. Anything printed here is a deployment mistake. */
 function preflight() {
     const problems = [];
@@ -8160,6 +9032,9 @@ function preflight() {
     if (!GEMINI_API_KEY) problems.push('GEMINI_API_KEY is not set — reports will ship without their narrative layer');
     if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
     if (!ALERT_WEBHOOK) problems.push('ALERT_WEBHOOK_URL is not set — failures will only appear in the logs');
+    if (!SELF_URL) problems.push(
+        'Neither SELF_URL nor RENDER_EXTERNAL_URL is set — the instance cannot keep itself awake, ' +
+        'so a long job will be interrupted whenever the user closes the tab');
     if (BUDGET_MODE !== 'block') problems.push(`BUDGET_MODE=${BUDGET_MODE} — a run can overspend a key without pausing`);
 
     // The default run has to fit the default budget. Checking the actual number
@@ -8191,10 +9066,17 @@ async function start() {
             timeoutSecs: APIFY_TIMEOUT_SECS,
             proxy: APIFY_PROXY_GROUP || 'actor default',
             geminiModel: GEMINI_MODEL,
+            geminiMaxOutputTokens: parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '8192', 10),
+            aiPromptBudgetChars: AI_PROMPT_BUDGET,
+            igScoreVersion: IG_SCORE_VERSION,
             encryptionAtRest: !!ENC_KEY,
+            rotationPending: !!ENC_KEY_OLD,
+            keepAlive: !!SELF_URL,
+            autoResume: AUTO_RESUME,
             alerts: !!ALERT_WEBHOOK
         });
 
+        await schemaProbe();
         await migrateSecretsAtRest();
 
         // Jobs run in-process. Render's free tier sleeps on idle and restarts on
@@ -8206,6 +9088,7 @@ async function start() {
         setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(sweepStaleReservations, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(reviveStaleKeys, 3600000).unref?.();
+        if (SELF_URL) setInterval(keepAwakeIfBusy, KEEPALIVE_MS).unref?.();
     });
 
     return server;
@@ -8227,7 +9110,11 @@ module.exports = {
     categorize, urgencyOf, classifyIntent, mineDemand, parseGroupRef, parsePageRef,
     parseRules, localParts, domainOf, fbReactions, fbMediaType, normaliseReactionBreakdown,
     computePageScore, profileCompleteness, timeHeatmap, leaderboard,
+    // ai layer
+    budgetedJson, igAiPayload, igAiSlim, fbPageAiSlim, fbGroupAiSlim, aiPostCard, aiReasonText,
     // observability
-    METRICS, RECENT_EVENTS, logger, preflight, migrateSecretsAtRest,
-    sweepStaleJobs, sweepStaleReservations
+    METRICS, RECENT_EVENTS, logger, preflight, schemaProbe, migrateSecretsAtRest,
+    sweepStaleJobs, sweepStaleReservations, keepAwakeIfBusy,
+    // caches
+    invalidateAuth, invalidateEngineAccess
 };
