@@ -52,7 +52,7 @@ require('dotenv').config();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase2';
+const APP_VERSION = process.env.APP_VERSION || 'phase3';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -65,7 +65,7 @@ const METRICS = {
     http:   { total: 0, errors: 0, slow: 0, byStatus: {} },
     apify:  { runs: 0, failures: 0, emptyRuns: 0, usd: 0, items: 0 },
     gemini: { calls: 0, ok: 0, failed: 0, retries: 0 },
-    jobs:   { started: 0, resumed: 0, done: 0, failed: 0, paused: 0, interrupted: 0 },
+    jobs:   { started: 0, resumed: 0, done: 0, failed: 0, paused: 0, interrupted: 0, cancelled: 0 },
     keys:   { invalid: 0, exhausted: 0, transient: 0, noCreditEvents: 0 }
 };
 
@@ -262,7 +262,10 @@ const FB_GROUP_POSTS_ACTOR = process.env.FB_GROUP_POSTS_ACTOR || 'apify/facebook
 const FB_SEARCH_ACTOR      = process.env.FB_SEARCH_ACTOR      || 'apify/facebook-search-scraper';
 const FB_COMMENTS_ACTOR    = process.env.FB_COMMENTS_ACTOR    || 'apify/facebook-comments-scraper';
 const FB_MAX_GROUPS        = parseInt(process.env.FB_MAX_GROUPS        || '15', 10);
-const FB_DEFAULT_POSTS     = parseInt(process.env.FB_DEFAULT_POSTS_PER_GROUP || '120', 10);
+// Groups selected by default when the caller does not say. Kept well under
+// FB_MAX_GROUPS so an accidental run cannot eat a whole cycle of credit.
+const FB_DEFAULT_GROUPS    = parseInt(process.env.FB_DEFAULT_GROUPS     || '5', 10);
+const FB_DEFAULT_POSTS     = parseInt(process.env.FB_DEFAULT_POSTS_PER_GROUP || '40', 10);
 const FB_MAX_POSTS         = parseInt(process.env.FB_MAX_POSTS_PER_GROUP     || '400', 10);
 const FB_DEFAULT_DAYS      = parseInt(process.env.FB_DEFAULT_DAYS_WINDOW     || '60', 10);
 const FB_TZ_OFFSET_MINS    = parseInt(process.env.FB_TZ_OFFSET_MINUTES || '360', 10); // default Asia/Dhaka +6
@@ -284,6 +287,9 @@ const APIFY_TIMEOUT_SECS = parseInt(process.env.APIFY_RUN_TIMEOUT_SECS || '900',
 const APIFY_PROXY_GROUP  = (process.env.APIFY_PROXY_GROUP || '').trim().toUpperCase();
 
 // --- Budget ledger ----------------------------------------------------------
+// Default cycle credit for a key that has no explicit limit of its own.
+// Every key row can override this with apify_keys.monthly_credit_usd, so a
+// customer on a paid Apify plan is no longer capped at the free-tier number.
 const APIFY_CYCLE_CREDIT = parseFloat(process.env.APIFY_MONTHLY_CREDIT_USD || '5');
 // 'off'   - track only
 // 'warn'  - track, expose remaining, never block
@@ -435,19 +441,45 @@ async function isByoOnly(userId) {
     return v;
 }
 
+/**
+ * Cycle credit for an engine primary key. Stored in system_settings so an
+ * admin can raise it from the UI without a redeploy, and cached briefly
+ * because key resolution happens on every spend.
+ */
+const _primaryCreditCache = new Map();
+async function enginePrimaryCredit(engine) {
+    const hit = _primaryCreditCache.get(engine);
+    if (hit && Date.now() - hit.t < 60000) return hit.v;
+    let v = APIFY_CYCLE_CREDIT;
+    try {
+        const { data } = await supabase.from('system_settings')
+            .select('value').eq('key', primaryKeyName(engine) + '_credit_usd').maybeSingle();
+        const n = parseFloat(data?.value || '');
+        if (n > 0) v = n;
+    } catch { /* fall back to the default */ }
+    _primaryCreditCache.set(engine, { v, t: Date.now() });
+    return v;
+}
+
 /** Ordered list of candidate tokens to try for this engine + user. */
 async function buildTokenCandidates(engine, userId) {
-    await reviveStaleKeys();
+    // reviveStaleKeys() used to run here, which meant a database write on every
+    // single key resolution — including every page load, via /api/actor-status.
+    // It is on an hourly timer and runs at boot, which is what it was always for.
     const out = [];
     const seen = new Set();
-    const push = (token, source, id) => {
+    const push = (token, source, id, creditUsd) => {
         if (!token || seen.has(token)) return;
         seen.add(token);
-        out.push({ token, source, id: id || null });
+        out.push({
+            token, source,
+            id: id || null,
+            creditUsd: Number(creditUsd) > 0 ? Number(creditUsd) : APIFY_CYCLE_CREDIT
+        });
     };
 
     const open = (row, source) => {
-        try { push(decryptSecret(row.token), source, row.id); }
+        try { push(decryptSecret(row.token), source, row.id, row.monthly_credit_usd); }
         catch (e) { logger.error('key_decrypt_failed', { keyId: row.id, message: e.message }); }
     };
 
@@ -456,7 +488,7 @@ async function buildTokenCandidates(engine, userId) {
     //    another account and never enters the shared pool.
     if (userId) {
         const { data: mine } = await supabase.from('apify_keys')
-            .select('id, token, engine, status, last_used_at')
+            .select('id, token, engine, status, last_used_at, monthly_credit_usd')
             .eq('owner_user_id', userId)
             .eq('status', 'active')
             .in('engine', [engine, 'any'])
@@ -470,12 +502,14 @@ async function buildTokenCandidates(engine, userId) {
         return out;
     }
 
-    // 2. The engine primary key — always present, never deleted
-    push(await getEnginePrimary(engine), 'engine_primary');
+    // 2. The engine primary key — always present, never deleted.
+    //    Its limit is configurable per engine so a company card on a paid plan
+    //    is not throttled to the free-tier default.
+    push(await getEnginePrimary(engine), 'engine_primary', null, await enginePrimaryCredit(engine));
 
     // 3. Global rotation pool (admin-owned keys only: owner_user_id is null)
     const { data: pool } = await supabase.from('apify_keys')
-        .select('id, token, engine, status, last_used_at')
+        .select('id, token, engine, status, last_used_at, monthly_credit_usd')
         .is('owner_user_id', null)
         .eq('status', 'active')
         .in('engine', [engine, 'any'])
@@ -483,7 +517,8 @@ async function buildTokenCandidates(engine, userId) {
     (pool || []).forEach(k => open(k, 'global_pool'));
 
     // 4. Env fallback
-    push(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN, 'env');
+    push(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN, 'env', null,
+         parseFloat(process.env.APIFY_ENV_CREDIT_USD || '') || APIFY_CYCLE_CREDIT);
 
     return out;
 }
@@ -641,12 +676,27 @@ async function getWorkingClient(engine, userId, opts = {}) {
 
         // Budget gate BEFORE spending anything. This is what turns a mid-run
         // blowup into a clean, resumable pause.
+        //
+        // A key is only PARKED as exhausted when it is genuinely dry. Skipping
+        // it because one expensive unit does not fit is not the same thing:
+        // a key with $0.60 left can still fund four $0.15 units, and marking it
+        // exhausted used to strand that credit for KEY_REVIVE_HOURS.
         if (BUDGET_MODE === 'block' && needUsd > 0) {
             const spent = await cycleUsage(hash);
-            const remaining = APIFY_CYCLE_CREDIT - spent - BUDGET_RESERVE;
+            const remaining = c.creditUsd - spent - BUDGET_RESERVE;
             if (remaining < needUsd) {
-                skipped.push({ source: c.source, remaining: +remaining.toFixed(4) });
-                await markKey(c.id, { status: 'exhausted', last_checked_at: new Date().toISOString() });
+                skipped.push({
+                    source: c.source,
+                    remaining: +Math.max(0, remaining).toFixed(4),
+                    neededUsd: +needUsd.toFixed(4)
+                });
+                if (remaining <= 0) {
+                    await markKey(c.id, { status: 'exhausted', last_checked_at: new Date().toISOString() });
+                } else {
+                    logger.debug('key_skipped_too_small', {
+                        source: c.source, remaining: +remaining.toFixed(4), needUsd: +needUsd.toFixed(4)
+                    });
+                }
                 continue;
             }
         }
@@ -670,8 +720,9 @@ async function getWorkingClient(engine, userId, opts = {}) {
                 tokenHash: hash,
                 apifyUsername: u.username,
                 engine, userId, jobId,
+                creditUsd: c.creditUsd,
                 spentThisCycle: spent,
-                remaining: +(APIFY_CYCLE_CREDIT - spent).toFixed(4)
+                remaining: +(c.creditUsd - spent).toFixed(4)
             };
 
             return { client, candidate: c, apifyUsername: u.username, budget: client.__el };
@@ -713,6 +764,36 @@ async function getWorkingClient(engine, userId, opts = {}) {
         `No Apify key can cover this run.${detail} Add or update a key, then resume.`,
         { skipped, lastError: lastErr?.message || null }
     );
+}
+
+/**
+ * What this user can actually afford right now, without spending anything to
+ * find out. Used to warn BEFORE the Run button rather than pausing a job at
+ * group six of ten — a pause is recoverable, but it is still a worse
+ * experience than being told the truth up front.
+ */
+async function budgetSnapshot(engine, userId, estimateUsd = 0) {
+    try {
+        const candidates = await buildTokenCandidates(engine, userId);
+        const month = cycleMonth();
+        let total = 0, best = 0;
+        for (const c of candidates) {
+            const remaining = Math.max(0, c.creditUsd - await cycleUsage(tokenHash(c.token), month) - BUDGET_RESERVE);
+            total += remaining;
+            if (remaining > best) best = remaining;
+        }
+        return {
+            keys: candidates.length,
+            totalRemainingUsd: +total.toFixed(4),
+            largestKeyRemainingUsd: +best.toFixed(4),
+            estimatedUsd: +Number(estimateUsd || 0).toFixed(4),
+            affordable: !(estimateUsd > 0) || total >= estimateUsd,
+            willPause: BUDGET_MODE === 'block' && estimateUsd > 0 && total < estimateUsd
+        };
+    } catch (e) {
+        logger.warn('budget_snapshot_failed', { engine, message: e.message });
+        return null;
+    }
 }
 
 // Legacy helpers kept so nothing else in the file has to change shape.
@@ -775,9 +856,34 @@ function tsOf(p) {
 // budget before spending it).
 // ===========================================================================
 
-/** Total USD spent by one key in the current billing cycle. */
+/**
+ * Total USD committed by one key in the current billing cycle: settled spend
+ * plus anything currently reserved by a run in flight.
+ *
+ * Summed in Postgres via el_cycle_spend() rather than pulled row by row, so a
+ * key with thousands of runs behind it does not drag the hot path. The RPC is
+ * optional — if the migration has not been applied yet this falls back to the
+ * old client-side sum, so deploying the server before the SQL degrades rather
+ * than breaks.
+ */
+let _rpcSpendAvailable = true;
 async function cycleUsage(hash, month = cycleMonth()) {
     if (!hash) return 0;
+
+    if (_rpcSpendAvailable) {
+        try {
+            const { data, error } = await supabase.rpc('el_cycle_spend', {
+                p_token_hash: hash, p_cycle_month: month
+            });
+            if (!error) return Number(data || 0);
+            _rpcSpendAvailable = false;
+            logger.warn('rpc_cycle_spend_unavailable', { message: error.message });
+        } catch (e) {
+            _rpcSpendAvailable = false;
+            logger.warn('rpc_cycle_spend_unavailable', { message: e.message });
+        }
+    }
+
     try {
         const { data } = await supabase
             .from('apify_usage_events')
@@ -786,12 +892,69 @@ async function cycleUsage(hash, month = cycleMonth()) {
             .eq('cycle_month', month);
         return (data || []).reduce((sum, r) => sum + Number(r.usage_usd || 0), 0);
     } catch (e) {
-        console.error('[cycleUsage]', e.message);
+        logger.error('cycle_usage_failed', { message: e.message });
         return 0;   // fail open: never block a run because the ledger is down
     }
 }
 
-async function recordUsage(client, { actorId, run, items = 0, jobId = null }) {
+/**
+ * Claim budget BEFORE the actor starts.
+ *
+ * A reservation is a normal ledger row carrying the estimate, flagged
+ * is_reservation. Because cycleUsage() sums reservations too, two runs on the
+ * same key — in the same process or in two Render instances — can no longer
+ * both pass the budget gate and then discover the overspend afterwards. The
+ * row is settled with the real cost the moment the run returns, and deleted if
+ * the run never happened.
+ *
+ * Returns a reservation id, or null when reservations are unavailable (the
+ * column does not exist yet). A null reservation degrades to exactly the old
+ * record-after-the-fact behaviour rather than blocking the run.
+ */
+async function reserveUsage(client, { actorId, estimateUsd = 0, jobId = null }) {
+    const el = client?.__el;
+    if (!el || !(estimateUsd > 0)) return null;
+    try {
+        const { data, error } = await supabase.from('apify_usage_events').insert([{
+            user_id:        el.userId || null,
+            key_id:         el.keyId || null,
+            token_hash:     el.tokenHash,
+            apify_username: el.apifyUsername || null,
+            engine:         el.engine || null,
+            job_id:         jobId || el.jobId || null,
+            actor_id:       actorId,
+            usage_usd:      +Number(estimateUsd).toFixed(6),
+            items:          0,
+            is_reservation: true,
+            cycle_month:    cycleMonth()
+        }]).select('id').single();
+        if (error) throw error;
+        el.spentThisCycle = Number(el.spentThisCycle || 0) + Number(estimateUsd);
+        el.remaining = +(el.creditUsd - el.spentThisCycle).toFixed(4);
+        return data.id;
+    } catch (e) {
+        logger.warn('reserve_failed', { actorId, message: e.message });
+        return null;
+    }
+}
+
+/** Release a reservation for a run that never billed anything. */
+async function releaseUsage(client, reservationId, estimateUsd = 0) {
+    if (!reservationId) return;
+    try { await supabase.from('apify_usage_events').delete().eq('id', reservationId); }
+    catch (e) { logger.warn('release_failed', { message: e.message }); }
+    const el = client?.__el;
+    if (el) {
+        el.spentThisCycle = Math.max(0, Number(el.spentThisCycle || 0) - Number(estimateUsd || 0));
+        el.remaining = +(el.creditUsd - el.spentThisCycle).toFixed(4);
+    }
+}
+
+/**
+ * Turn a reservation into a settled row carrying the real usageTotalUsd, or
+ * write a fresh row when nothing was reserved.
+ */
+async function recordUsage(client, { actorId, run, items = 0, jobId = null, reservationId = null, reservedUsd = 0 }) {
     const el = client?.__el;
     if (!el) return 0;
 
@@ -800,25 +963,37 @@ async function recordUsage(client, { actorId, run, items = 0, jobId = null }) {
         Number(run?.usage?.USD) ||
         0;
 
-    try {
-        await supabase.from('apify_usage_events').insert([{
-            user_id:        el.userId || null,
-            key_id:         el.keyId || null,
-            token_hash:     el.tokenHash,
-            apify_username: el.apifyUsername || null,
-            engine:         el.engine || null,
-            job_id:         jobId || el.jobId || null,
-            actor_id:       actorId,
-            run_id:         run?.id || null,
-            usage_usd:      usd,
-            compute_units:  Number(run?.stats?.computeUnits) || null,
-            items,
-            cycle_month:    cycleMonth()
-        }]);
-    } catch (e) { console.error('[recordUsage]', e.message); }
+    const row = {
+        user_id:        el.userId || null,
+        key_id:         el.keyId || null,
+        token_hash:     el.tokenHash,
+        apify_username: el.apifyUsername || null,
+        engine:         el.engine || null,
+        job_id:         jobId || el.jobId || null,
+        actor_id:       actorId,
+        run_id:         run?.id || null,
+        usage_usd:      usd,
+        compute_units:  Number(run?.stats?.computeUnits) || null,
+        items,
+        cycle_month:    cycleMonth()
+    };
 
-    el.spentThisCycle = Number(el.spentThisCycle || 0) + usd;
-    el.remaining = +(APIFY_CYCLE_CREDIT - el.spentThisCycle).toFixed(4);
+    try {
+        if (reservationId) {
+            await supabase.from('apify_usage_events')
+                .update({ ...row, is_reservation: false }).eq('id', reservationId);
+            // The estimate was already counted against the cycle. Swap it for
+            // the real number rather than adding on top of it.
+            el.spentThisCycle = Math.max(0, Number(el.spentThisCycle || 0) - Number(reservedUsd || 0) + usd);
+        } else {
+            await supabase.from('apify_usage_events').insert([row]);
+            el.spentThisCycle = Number(el.spentThisCycle || 0) + usd;
+        }
+    } catch (e) {
+        logger.error('record_usage_failed', { actorId, message: e.message });
+    }
+
+    el.remaining = +(el.creditUsd - el.spentThisCycle).toFixed(4);
     return usd;
 }
 
@@ -826,7 +1001,8 @@ async function recordUsage(client, { actorId, run, items = 0, jobId = null }) {
 function clientRemaining(client) {
     const el = client?.__el;
     if (!el) return Infinity;
-    return APIFY_CYCLE_CREDIT - Number(el.spentThisCycle || 0) - BUDGET_RESERVE;
+    const credit = Number(el.creditUsd) > 0 ? Number(el.creditUsd) : APIFY_CYCLE_CREDIT;
+    return credit - Number(el.spentThisCycle || 0) - BUDGET_RESERVE;
 }
 
 /**
@@ -864,12 +1040,24 @@ async function callActor(client, actorId, input, opts = {}) {
     if (opts.waitSecs) runOpts.waitSecs = opts.waitSecs;
     if (opts.maxItems) runOpts.maxItems = opts.maxItems;
 
+    // Claim the estimate up front so a second run on the same key cannot slip
+    // through the gate while this one is still in flight.
+    const reservationId = await reserveUsage(client, {
+        actorId, estimateUsd: estimate, jobId: opts.jobId
+    });
+
     const t0 = Date.now();
     let run;
     try {
         run = await client.actor(actorId).call(payload, runOpts);
     } catch (err) {
-        if (!/expected property|did not match|validation/i.test(err.message || '')) {
+        // Older apify-client builds validate run options strictly. If the
+        // options are what it rejected, fall back to a bare call rather than
+        // failing the whole job.
+        const m = (err.message || '').toLowerCase();
+        const optionsRejected = m.includes('expected property') || m.includes('did not match') || m.includes('validation');
+
+        if (!optionsRejected) {
             METRICS.apify.failures += 1;
             logger.error('actor_failed', {
                 actorId, jobId: opts.jobId || null,
@@ -877,22 +1065,37 @@ async function callActor(client, actorId, input, opts = {}) {
                 ms: Date.now() - t0, message: err.message
             });
         }
-        // Older apify-client builds validate run options strictly. If the
-        // options are what it rejected, fall back to a bare call rather than
-        // failing the whole job.
-        const m = (err.message || '').toLowerCase();
-        if (m.includes('expected property') || m.includes('did not match') || m.includes('validation')) {
-            console.warn('[callActor] run options rejected, retrying bare:', err.message);
-            run = await client.actor(actorId).call(payload);
+
+        if (optionsRejected) {
+            logger.warn('actor_options_rejected', { actorId, message: err.message });
+            try {
+                run = await client.actor(actorId).call(payload);
+            } catch (err2) {
+                await releaseUsage(client, reservationId, estimate);
+                throw err2;
+            }
         } else {
+            // Nothing ran, so nothing is owed. Hand the credit straight back.
+            await releaseUsage(client, reservationId, estimate);
             throw err;
         }
     }
 
-    const { items } = await client.dataset(run.defaultDatasetId).listItems();
-    const rows = items || [];
+    let rows;
+    try {
+        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+        rows = items || [];
+    } catch (err) {
+        // The run happened and will be billed even though the dataset read
+        // failed, so the reservation is settled rather than released.
+        await recordUsage(client, { actorId, run, items: 0, jobId: opts.jobId, reservationId, reservedUsd: estimate });
+        throw err;
+    }
 
-    const usd = await recordUsage(client, { actorId, run, items: rows.length, jobId: opts.jobId });
+    const usd = await recordUsage(client, {
+        actorId, run, items: rows.length, jobId: opts.jobId,
+        reservationId, reservedUsd: estimate
+    });
 
     METRICS.apify.runs  += 1;
     METRICS.apify.usd   += usd;
@@ -1370,20 +1573,60 @@ async function assertJobSlot(userId) {
  * from the post rows alone. Persisting it here means a resumed job never has to
  * re-scrape, and therefore never pays twice.
  */
+let _rpcCheckpointAvailable = true;
 async function savePartial(jobId, unit, value) {
     if (!jobId || !unit) return;
+    const key = String(unit);
+
+    // Append inside Postgres. The old read-modify-write was safe only because
+    // a job processed one unit at a time; the moment two units overlap, or a
+    // resumed job races the sweep, the losing write silently drops a completed
+    // unit and the user pays to scrape it twice.
+    if (_rpcCheckpointAvailable) {
+        try {
+            const { error } = await supabase.rpc('el_job_checkpoint', {
+                p_job_id: jobId, p_unit: key,
+                p_value: value === undefined ? null : value
+            });
+            if (!error) return;
+            _rpcCheckpointAvailable = false;
+            logger.warn('rpc_checkpoint_unavailable', { message: error.message });
+        } catch (e) {
+            _rpcCheckpointAvailable = false;
+            logger.warn('rpc_checkpoint_unavailable', { message: e.message });
+        }
+    }
+
     try {
         const { data } = await supabase.from('jobs')
             .select('completed_units, partials').eq('id', jobId).maybeSingle();
         const done = Array.isArray(data?.completed_units) ? data.completed_units : [];
         const partials = (data?.partials && typeof data.partials === 'object') ? data.partials : {};
-        const key = String(unit);
         if (!done.includes(key)) done.push(key);
         if (value !== undefined) partials[key] = value;
         await supabase.from('jobs')
             .update({ completed_units: done, partials, updated_at: new Date().toISOString() })
             .eq('id', jobId);
-    } catch (e) { console.error('[savePartial]', e.message); }
+    } catch (e) { logger.error('save_partial_failed', { jobId, message: e.message }); }
+}
+
+/**
+ * Cooperative cancellation.
+ *
+ * An Apify run already in flight cannot be recalled, but the unit boundary is
+ * where the money is: stopping before group 6 of 10 saves 5 units of credit.
+ * Workers check this through the progress callback, so no worker needs to know
+ * cancellation exists.
+ */
+class JobCancelled extends Error {
+    constructor() { super('Cancelled'); this.name = 'JobCancelled'; this.code = 'CANCELLED'; }
+}
+
+async function isCancelRequested(jobId) {
+    try {
+        const { data } = await supabase.from('jobs').select('cancel_requested, status').eq('id', jobId).maybeSingle();
+        return !!data?.cancel_requested || data?.status === 'cancelled';
+    } catch { return false; }
 }
 
 async function updateJob(jobId, patch, logLine) {
@@ -1439,10 +1682,14 @@ function runJob(jobId, worker, opts = {}) {
                 { status: 'running', progress: opts.resume ? undefined : 1, error: null },
                 opts.resume ? `Resuming, ${units.length} unit(s) already complete` : 'Job started');
 
-            const result = await worker(
-                (progress, step) => updateJob(jobId, { progress, current_step: step }, step),
-                ck
-            );
+            // Every progress tick is also a cancellation checkpoint, which is
+            // why workers get this for free without knowing about it.
+            const progressFn = async (progress, step) => {
+                if (await isCancelRequested(jobId)) throw new JobCancelled();
+                return updateJob(jobId, { progress, current_step: step }, step);
+            };
+
+            const result = await worker(progressFn, ck);
 
             METRICS.jobs.done += 1;
             logger.info('job_done', { jobId, ms: Date.now() - jobT0, units: units.length });
@@ -1453,6 +1700,17 @@ function runJob(jobId, worker, opts = {}) {
                 finished_at: new Date().toISOString()
             }, 'Job complete');
         } catch (err) {
+            if (err && err.code === 'CANCELLED') {
+                METRICS.jobs.cancelled += 1;
+                logger.info('job_cancelled', { jobId });
+                await updateJob(jobId, {
+                    status: 'cancelled',
+                    cancel_requested: false,
+                    error: 'Cancelled. Anything already scraped was saved and will be reused if you run this again.',
+                    finished_at: new Date().toISOString()
+                }, 'Cancelled by the user');
+                return;
+            }
             if (err && err.code === 'NO_CREDIT') {
                 METRICS.jobs.paused += 1;
                 logger.warn('job_paused_no_credit', { jobId, message: err.message });
@@ -1510,6 +1768,34 @@ async function sweepStaleJobs() {
             alertOnce('jobs_interrupted', `${data.length} job(s) were orphaned by a restart and parked as resumable.`);
         }
     } catch (e) { logger.error('sweep_failed', { message: e.message }); }
+}
+
+/**
+ * Release reservations left behind by a process that died mid-run.
+ *
+ * A reservation holds credit against the cycle on purpose — that is what stops
+ * two runs double-spending the same key. But if the server is killed between
+ * reserving and settling, that hold never clears and the key looks poorer than
+ * it is until the month rolls over. Anything older than the maximum possible
+ * run is by definition abandoned: the actor cannot still be going.
+ */
+async function sweepStaleReservations() {
+    const cutoff = new Date(Date.now() - (APIFY_TIMEOUT_SECS + 300) * 1000).toISOString();
+    try {
+        const { data, error } = await supabase.from('apify_usage_events')
+            .delete().eq('is_reservation', true).lt('created_at', cutoff)
+            .select('id, usage_usd');
+        if (error) throw error;
+        if (data?.length) {
+            const usd = data.reduce((sum, r) => sum + Number(r.usage_usd || 0), 0);
+            logger.warn('reservations_released', { count: data.length, usd: +usd.toFixed(4) });
+        }
+    } catch (e) {
+        // A missing is_reservation column means the phase 3 migration has not
+        // run yet. Reservations are simply not in use, so there is nothing to
+        // sweep and nothing to warn about on every tick.
+        logger.debug('reservation_sweep_skipped', { message: e.message });
+    }
 }
 
 function estimateCredits(accounts, postsPerAccount) {
@@ -2048,18 +2334,23 @@ app.get('/api/admin/metrics', async (req, res) => {
         const [{ data: jobRows }, { data: usageRows }, { data: keyRows }] = await Promise.all([
             supabase.from('jobs').select('status').limit(2000),
             supabase.from('apify_usage_events')
-                .select('engine, usage_usd, apify_username, items, actor_id')
+                .select('engine, usage_usd, apify_username, items, actor_id, is_reservation')
                 .eq('cycle_month', month).limit(5000),
-            supabase.from('apify_keys').select('status, engine, owner_user_id, apify_username')
+            supabase.from('apify_keys')
+                .select('status, engine, owner_user_id, apify_username, label, monthly_credit_usd, token_hash')
         ]);
 
         const jobsByStatus = {};
         (jobRows || []).forEach(j => { jobsByStatus[j.status] = (jobsByStatus[j.status] || 0) + 1; });
 
         const spendByEngine = {}, spendByKey = {}, runsByActor = {};
-        let totalSpend = 0, totalItems = 0;
+        let totalSpend = 0, totalItems = 0, reservedUsd = 0, openReservations = 0;
         (usageRows || []).forEach(u => {
             const usd = Number(u.usage_usd || 0);
+            // A reservation is credit claimed by a run still in flight. It is
+            // committed against the budget but has not settled, so it is
+            // reported separately rather than folded into actual spend.
+            if (u.is_reservation) { reservedUsd += usd; openReservations += 1; return; }
             totalSpend += usd;
             totalItems += Number(u.items || 0);
             spendByEngine[u.engine || 'unknown'] = +((spendByEngine[u.engine || 'unknown'] || 0) + usd).toFixed(4);
@@ -2071,6 +2362,23 @@ app.get('/api/admin/metrics', async (req, res) => {
 
         const keysByStatus = {};
         (keyRows || []).forEach(k => { keysByStatus[k.status] = (keysByStatus[k.status] || 0) + 1; });
+
+        // What each key is allowed to spend against what it has spent. This is
+        // the view that answers "are we about to run out" before a job pauses.
+        const keyBudgets = [];
+        for (const k of (keyRows || [])) {
+            const credit = Number(k.monthly_credit_usd) > 0 ? Number(k.monthly_credit_usd) : APIFY_CYCLE_CREDIT;
+            const spent = k.token_hash ? await cycleUsage(k.token_hash, month) : 0;
+            keyBudgets.push({
+                label: k.apify_username || k.label || 'unnamed',
+                engine: k.engine, status: k.status,
+                scope: k.owner_user_id ? 'personal' : 'shared',
+                creditUsd: +credit.toFixed(2),
+                spentUsd: +spent.toFixed(4),
+                remainingUsd: +Math.max(0, credit - spent).toFixed(4)
+            });
+        }
+        keyBudgets.sort((a, b) => b.remainingUsd - a.remainingUsd);
 
         // Real cost per 1k rows this cycle. This is the number the estimate
         // constants in env are supposed to approximate — compare them.
@@ -2093,6 +2401,11 @@ app.get('/api/admin/metrics', async (req, res) => {
                     COST_PER_1K_POSTS,
                     COST_PER_1K_PROFILE,
                     COST_PER_1K_FB_POSTS
+                },
+                fbDefaults: {
+                    postsPerGroup: FB_DEFAULT_POSTS,
+                    groups: FB_DEFAULT_GROUPS,
+                    daysWindow: FB_DEFAULT_DAYS
                 }
             },
             counters: {
@@ -2103,12 +2416,14 @@ app.get('/api/admin/metrics', async (req, res) => {
                 totalUsd: +totalSpend.toFixed(4),
                 totalItems,
                 actualCostPer1kItems: actualPer1k,
+                reservedUsd: +reservedUsd.toFixed(4),
+                openReservations,
                 byEngine: spendByEngine,
                 byKey: spendByKey,
                 byActor: runsByActor
             },
             jobs: jobsByStatus,
-            keys: { byStatus: keysByStatus, total: (keyRows || []).length },
+            keys: { byStatus: keysByStatus, total: (keyRows || []).length, budgets: keyBudgets },
             recentEvents: RECENT_EVENTS.slice(-40)
         });
     } catch (err) {
@@ -2128,13 +2443,52 @@ app.get('/api/me', async (req, res) => {
     });
 });
 
-// Actor status — now authenticated (it leaks your Apify username otherwise)
+/**
+ * Connectivity badge. Authenticated, because it discloses the Apify username.
+ *
+ * This is called on every page load by every user. It used to run a database
+ * write and a live round trip to Apify each time, which cost latency on the
+ * free tier and — worse — mutated key status as a side effect of somebody
+ * merely looking at a page. It is now cached per user + engine, and the
+ * expensive path only runs on a miss or when explicitly refreshed.
+ */
+const _statusCache = new Map();
+const STATUS_TTL_MS = parseInt(process.env.ACTOR_STATUS_TTL_MS || '120000', 10);
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _statusCache) if (now - v.t > STATUS_TTL_MS * 4) _statusCache.delete(k);
+}, 600000).unref?.();
+
 app.get('/api/actor-status', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         const engine = ENGINES.includes(req.query.engine) ? req.query.engine : 'leadgen';
-        const { apifyUsername, candidate } = await getWorkingClient(engine, ctx.user.id);
-        res.status(200).json({ active: true, username: apifyUsername, engine, source: candidate.source });
+        const cacheKey = ctx.user.id + ':' + engine;
+        const force = req.query.refresh === '1' || req.query.refresh === 'true';
+
+        const hit = _statusCache.get(cacheKey);
+        if (!force && hit && Date.now() - hit.t < STATUS_TTL_MS) {
+            return res.status(200).json({ ...hit.v, cached: true });
+        }
+
+        let payload;
+        try {
+            const { apifyUsername, candidate, budget } = await getWorkingClient(engine, ctx.user.id);
+            payload = {
+                active: true, username: apifyUsername, engine,
+                source: candidate.source,
+                remainingUsd: budget ? +Math.max(0, budget.remaining).toFixed(2) : null
+            };
+        } catch (err) {
+            payload = {
+                active: false, engine,
+                error: err.code === 'NO_CREDIT' ? 'No credit' : 'Invalid/Expired Key'
+            };
+        }
+
+        _statusCache.set(cacheKey, { v: payload, t: Date.now() });
+        res.status(200).json(payload);
     } catch (err) {
         res.status(200).json({ active: false, error: 'Invalid/Expired Key' });
     }
@@ -2184,6 +2538,10 @@ app.post('/api/update-apify-key', async (req, res) => {
             });
         }
         _byoCache.delete(ctx.user.id);
+        _primaryCreditCache.clear();
+        for (const k of [..._statusCache.keys()]) {
+            if (k.startsWith(ctx.user.id + ':')) _statusCache.delete(k);
+        }
 
         res.status(200).json({
             success: true,
@@ -2206,7 +2564,7 @@ app.get('/api/apify-keys', async (req, res) => {
         const isAdmin = ctx.profile.role === 'admin';
 
         let q = supabase.from('apify_keys')
-            .select('id, owner_user_id, engine, label, apify_username, status, fail_count, last_used_at, created_at')
+            .select('id, owner_user_id, engine, label, apify_username, status, fail_count, last_used_at, created_at, monthly_credit_usd, token_hash')
             .order('created_at', { ascending: false });
 
         if (!isAdmin) q = q.eq('owner_user_id', ctx.user.id);
@@ -2217,10 +2575,33 @@ app.get('/api/apify-keys', async (req, res) => {
         const primaries = {};
         for (const e of ENGINES) {
             const v = await getEnginePrimary(e);
-            primaries[e] = v ? { configured: true, masked: maskSecret(v) } : { configured: false };
+            primaries[e] = v
+                ? {
+                    configured: true,
+                    masked: maskSecret(v),
+                    creditUsd: await enginePrimaryCredit(e),
+                    spentUsd: +(await cycleUsage(tokenHash(v))).toFixed(4)
+                  }
+                : { configured: false, creditUsd: await enginePrimaryCredit(e) };
         }
 
-        res.json({ keys: data, primaries });
+        // Live spend per key, so the admin screen shows what is left rather
+        // than only what is configured.
+        const month = cycleMonth();
+        const keys = [];
+        for (const k of (data || [])) {
+            const credit = Number(k.monthly_credit_usd) > 0 ? Number(k.monthly_credit_usd) : APIFY_CYCLE_CREDIT;
+            const spent = k.token_hash ? await cycleUsage(k.token_hash, month) : 0;
+            const { token_hash, ...safe } = k;
+            keys.push({
+                ...safe,
+                creditUsd: +credit.toFixed(2),
+                spentUsd: +spent.toFixed(4),
+                remainingUsd: +Math.max(0, credit - spent).toFixed(4)
+            });
+        }
+
+        res.json({ keys, primaries, defaultCreditUsd: APIFY_CYCLE_CREDIT, cycleMonth: month });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2265,6 +2646,67 @@ app.post('/api/apify-keys/:id/recheck', async (req, res) => {
             await markKey(key.id, { status: 'invalid', last_checked_at: new Date().toISOString() });
             res.json({ success: false, status: 'invalid', error: e.message });
         }
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/**
+ * Per-key cycle credit.
+ *
+ * The single global APIFY_MONTHLY_CREDIT_USD capped everybody at the free-tier
+ * $5, including a customer paying Apify $49 a month. Raising the env var lifted
+ * the ceiling for every key at once, including the free ones, which is the
+ * wrong lever. A limit now lives on the key it describes.
+ */
+app.patch('/api/apify-keys/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const patch = {};
+
+        if (req.body.monthlyCreditUsd !== undefined) {
+            const n = parseFloat(req.body.monthlyCreditUsd);
+            if (!(n >= 0) || n > 10000) return res.status(400).json({ error: 'Enter a credit limit between 0 and 10000.' });
+            patch.monthly_credit_usd = n || null;      // null falls back to the default
+        }
+        if (req.body.label !== undefined)  patch.label  = String(req.body.label).slice(0, 120) || null;
+        if (req.body.status !== undefined && ctx.profile.role === 'admin') {
+            if (!['active', 'exhausted', 'invalid'].includes(req.body.status)) {
+                return res.status(400).json({ error: 'Unknown status.' });
+            }
+            patch.status = req.body.status;
+            if (req.body.status === 'active') patch.fail_count = 0;
+        }
+        if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to update.' });
+
+        let q = supabase.from('apify_keys').update(patch).eq('id', req.params.id);
+        if (ctx.profile.role !== 'admin') q = q.eq('owner_user_id', ctx.user.id);
+
+        const { data, error } = await q
+            .select('id, engine, label, apify_username, status, monthly_credit_usd').maybeSingle();
+        if (error) throw error;
+        if (!data) return res.status(404).json({ error: 'Key not found.' });
+
+        logger.info('key_limit_updated', { keyId: data.id, by: ctx.user.id, patch: Object.keys(patch) });
+        res.json({ success: true, key: data });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** Cycle credit for an engine primary key, which has no row in apify_keys. */
+app.patch('/api/admin/engine-credit', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+        const { engine, monthlyCreditUsd } = req.body;
+        if (!ENGINES.includes(engine)) return res.status(400).json({ error: 'Unknown engine.' });
+        const n = parseFloat(monthlyCreditUsd);
+        if (!(n > 0) || n > 10000) return res.status(400).json({ error: 'Enter a credit limit between 0 and 10000.' });
+
+        await supabase.from('system_settings').upsert({
+            key: primaryKeyName(engine) + '_credit_usd',
+            value: String(n),
+            updated_at: new Date().toISOString()
+        }, { onConflict: 'key' });
+
+        _primaryCreditCache.clear();
+        res.json({ success: true, engine, monthlyCreditUsd: n });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2681,10 +3123,12 @@ app.get('/api/estimate-credits', async (req, res) => {
     const ctx = await auth(req, res); if (!ctx) return;
     const accounts = Math.min(parseInt(req.query.accounts || '1', 10), MAX_COMPETITORS + 1);
     const posts = Math.min(parseInt(req.query.posts || DEFAULT_POSTS_PER_ACC, 10), MAX_POSTS_PER_ACC);
+    const estimatedUsd = estimateCredits(accounts, posts);
     res.json({
         accounts, postsPerAccount: posts,
         totalPosts: accounts * posts,
-        estimatedUsd: estimateCredits(accounts, posts),
+        estimatedUsd,
+        budget: await budgetSnapshot('report', ctx.user.id, estimatedUsd),
         note: 'Estimate only. Actual Apify billing depends on the actor and result count.'
     });
 });
@@ -2767,7 +3211,7 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
             .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (!job) return res.status(404).json({ error: 'Job not found.' });
 
-        if (!['paused_no_credit', 'interrupted', 'failed'].includes(job.status)) {
+        if (!['paused_no_credit', 'interrupted', 'failed', 'cancelled'].includes(job.status)) {
             return res.status(409).json({
                 error: `This job is ${job.status} and cannot be resumed.`
             });
@@ -2795,6 +3239,8 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
         }
 
         await assertJobSlot(ctx.user.id);
+        // Clear any stale cancellation flag, or the job stops the instant it starts.
+        await supabase.from('jobs').update({ cancel_requested: false }).eq('id', job.id);
         runJob(job.id, factory(ctx.user.id, job.input, job.id), { resume: true });
 
         res.status(202).json({
@@ -2825,7 +3271,7 @@ app.get('/api/budget', async (req, res) => {
         for (const c of candidates) {
             const hash = tokenHash(c.token);
             const spent = await cycleUsage(hash, month);
-            const remaining = Math.max(0, APIFY_CYCLE_CREDIT - spent);
+            const remaining = Math.max(0, c.creditUsd - spent);
             total += remaining;
             keys.push({
                 source: c.source,
@@ -2833,21 +3279,31 @@ app.get('/api/budget', async (req, res) => {
                      : c.source === 'engine_primary' ? 'Shared primary'
                      : c.source === 'global_pool' ? 'Shared pool'
                      : 'Server fallback',
-                spentUsd: +spent.toFixed(4),
-                remainingUsd: +remaining.toFixed(4)
+                creditUsd:   +Number(c.creditUsd).toFixed(2),
+                spentUsd:    +spent.toFixed(4),
+                remainingUsd:+remaining.toFixed(4)
             });
         }
 
         res.json({
             engine, cycleMonth: month,
-            creditPerKeyUsd: APIFY_CYCLE_CREDIT,
+            creditPerKeyUsd: APIFY_CYCLE_CREDIT,   // default only; see keys[].creditUsd
             keys,
             totalRemainingUsd: +total.toFixed(4),
+            reserveUsd: BUDGET_RESERVE,
             mode: BUDGET_MODE
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+/**
+ * Job state.
+ *
+ * The fields are returned BOTH at the top level and under `job`. The older
+ * pages read `.job`, the header helper reads the top level, and that mismatch
+ * meant EL.pollJob spun forever on a job it could never see the status of.
+ * Serving both shapes fixes it without a flag-day frontend deploy.
+ */
 app.get('/api/job/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -2855,7 +3311,45 @@ app.get('/api/job/:id', async (req, res) => {
             .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (error) throw error;
         if (!data) return res.status(404).json({ error: 'Job not found' });
-        res.json({ job: data });
+        res.json({ ...data, job: data });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/**
+ * Ask a running job to stop at its next unit boundary.
+ *
+ * The Apify run currently in flight still bills, but every unit after it does
+ * not — on a ten-group audit that is most of the cost. The checkpoint is left
+ * intact, so a cancelled job's completed units are reused if it is run again.
+ */
+app.post('/api/job/:id/cancel', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: job } = await supabase.from('jobs')
+            .select('id, status, completed_units').eq('id', req.params.id)
+            .eq('user_id', ctx.user.id).maybeSingle();
+        if (!job) return res.status(404).json({ error: 'Job not found.' });
+
+        if (['done', 'failed', 'cancelled'].includes(job.status)) {
+            return res.status(409).json({ error: `This job is already ${job.status}.` });
+        }
+
+        if (job.status === 'queued' || job.status === 'paused_no_credit' || job.status === 'interrupted') {
+            await updateJob(job.id, {
+                status: 'cancelled', cancel_requested: false,
+                error: 'Cancelled before it resumed. Nothing further was charged.',
+                finished_at: new Date().toISOString()
+            }, 'Cancelled by the user');
+            return res.json({ success: true, stopped: 'immediately' });
+        }
+
+        await updateJob(job.id, { cancel_requested: true }, 'Cancellation requested');
+        res.json({
+            success: true,
+            stopped: 'at the next step',
+            note: 'The step already running will finish and be billed. Nothing after it will start.',
+            completed: (job.completed_units || []).length
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2863,7 +3357,7 @@ app.get('/api/jobs', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         const { data } = await supabase.from('jobs')
-            .select('id, type, engine, status, progress, current_step, error, credits_estimate, created_at, finished_at')
+            .select('id, type, engine, status, progress, current_step, error, credits_estimate, created_at, finished_at, cancel_requested, completed_units')
             .eq('user_id', ctx.user.id)
             .order('created_at', { ascending: false })
             .limit(30);
@@ -3038,6 +3532,7 @@ function firstNum(...vals) {
 }
 
 function fbReactions(p) {
+    if (!p || typeof p !== 'object') return { total: 0, breakdown: null };
     const b = p.reactions || p.reactionsCount || p.reactionCount || {};
     if (typeof b === 'object' && !Array.isArray(b)) {
         const sum = Object.values(b).reduce((s, v) => s + (Number(v) || 0), 0);
@@ -3049,6 +3544,9 @@ function fbReactions(p) {
 }
 
 function fbMediaType(p) {
+    // Actors do occasionally emit a null row in the middle of a dataset.
+    // Throwing here killed the whole job after the scrape had already billed.
+    if (!p || typeof p !== 'object') return { type: 'text', link: null };
     const attach = p.attachments || p.media || [];
     const arr = Array.isArray(attach) ? attach : [attach];
     const link = p.link || p.linkUrl || p.externalUrl ||
@@ -3250,8 +3748,11 @@ function openingPattern(text) {
     if (/^(who|what|where|when|why|how|which|is|are|can|does|do|any|has)\b/i.test(first)) return 'question';
     if (/\?$/.test(first)) return 'question';
     if (/^\d/.test(first)) return 'number';
-    if (/^[A-Z\u0980-\u09FF][\w\u0980-\u09FF' ]{2,24},/.test(first)) return 'location/name';
+    // Greeting is checked BEFORE location/name. "Hi everyone," satisfies both,
+    // and the location rule used to win, quietly filing every greeting-opener
+    // under location/name and skewing the opening-pattern leaderboard.
     if (/^(hi|hello|hey|assalamu|salam|dear|friends|guys|everyone)\b/i.test(first)) return 'greeting';
+    if (/^[A-Z\u0980-\u09FF][\w\u0980-\u09FF' ]{2,24},/.test(first)) return 'location/name';
     if (first.length < 45 && !/\s/.test(first.slice(-1))) return 'short hook';
     return 'statement';
 }
@@ -3948,11 +4449,13 @@ app.get('/api/fb/estimate-credits', async (req, res) => {
     const groups = Math.min(parseInt(req.query.groups || '1', 10), FB_MAX_GROUPS);
     const posts = Math.min(parseInt(req.query.posts || FB_DEFAULT_POSTS, 10), FB_MAX_POSTS);
     const sampleComments = req.query.comments === 'true' || req.query.comments === '1';
+    const estimatedUsd = fbEstimateCredits(groups, posts, sampleComments);
     res.json({
         groups, postsPerGroup: posts,
         totalPosts: groups * posts,
         sampleComments,
-        estimatedUsd: fbEstimateCredits(groups, posts, sampleComments),
+        estimatedUsd,
+        budget: await budgetSnapshot('fb_community', ctx.user.id, estimatedUsd),
         note: 'Estimate only. Facebook group runs cost more per post than Instagram — comment sampling is the expensive part.'
     });
 });
@@ -4139,6 +4642,144 @@ app.get('/api/fb/groups', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+/**
+ * Add one room by hand.
+ *
+ * fb-communities.html has always had this form; the endpoint behind it was
+ * never written, so "Save room" returned a 404 and the manual path into the
+ * product did not work at all. Optionally probes the room so it arrives with a
+ * Room Value score instead of an empty one.
+ *
+ * The rules text matters more than it looks: the advisor's compliance gate
+ * reads promo_allowed, and for a hand-added room this is the only place it
+ * can be set.
+ */
+app.post('/api/fb/groups', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        const {
+            url, name, memberCount, location, niche, rulesText,
+            promoAllowed = true, approvalRequired = false, probe = false
+        } = req.body;
+
+        const ref = parseGroupRef(url);
+        if (!ref) return res.status(400).json({ error: 'That is not a Facebook group URL. It should look like facebook.com/groups/…' });
+
+        // Stated rules win over the checkboxes when they contradict them: a
+        // group that writes "no promotion" in its rules bans promotion no
+        // matter which box was ticked.
+        const parsed = rulesText ? parseRules(rulesText) : null;
+
+        const meta = {
+            group_id: ref.groupId,
+            name: (name && String(name).trim()) || ref.groupId,
+            url: ref.url,
+            member_count: parseInt(memberCount || '0', 10) || 0,
+            privacy: 'unknown',
+            rules_text: rulesText ? String(rulesText).slice(0, 4000) : null,
+            promo_allowed: parsed ? parsed.promo_allowed : promoAllowed !== false,
+            approval_required: parsed ? parsed.approval_required : !!approvalRequired
+        };
+
+        const extra = {
+            niche: niche || null,
+            location_label: location || null,
+            source: 'manual'
+        };
+
+        const warnings = [];
+
+        if (probe) {
+            // A shallow probe: enough posts to score the room, not enough to
+            // cost real money.
+            const PROBE_POSTS = 25;
+            try {
+                const { client } = await getWorkingClient('fb_community', ctx.user.id, {
+                    needUsd: fbEstimateCredits(1, PROBE_POSTS, false)
+                });
+                const { rows, demand, meta: scraped } = await fbProcessGroup(
+                    client, ctx.user.id, ref,
+                    { limit: PROBE_POSTS, days: 30, sampleComments: false, source: 'manual' }
+                );
+
+                // What the scrape found beats what was typed in, except where
+                // the user deliberately overrode it.
+                if (scraped?.name && !name) meta.name = scraped.name;
+                if (scraped?.member_count) meta.member_count = scraped.member_count;
+                if (scraped?.privacy) meta.privacy = scraped.privacy;
+
+                if (rows?.length) {
+                    await fbSavePosts(rows);
+                    await fbSaveDemand(demand);
+                    // Scored the same way discovery scores a room, so a
+                    // hand-added group is directly comparable to a found one.
+                    const audit = computeGroupAudit({ ...meta, ...scraped }, rows, demand || []);
+                    extra.room_value_score = audit.roomValue;
+                    extra.score_breakdown = audit.roomValueBreakdown;
+                } else {
+                    warnings.push('The probe returned no posts — the group may be private, empty, or blocked. Saved unscored.');
+                }
+                extra.last_scraped_at = new Date().toISOString();
+            } catch (e) {
+                if (e.code === 'NO_CREDIT') {
+                    warnings.push('Saved, but not probed: no Apify key has credit for it right now.');
+                } else {
+                    warnings.push('Saved, but the probe failed: ' + e.message);
+                }
+            }
+        }
+
+        const row = await fbUpsertGroup(ctx.user.id, meta, extra);
+        if (!row) return res.status(500).json({ error: 'The room could not be saved.' });
+
+        res.json({ success: true, group: row, warnings });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/**
+ * Edit a saved room's details. Rules text is the field that actually changes
+ * behaviour downstream, so it is re-parsed rather than stored blindly.
+ */
+app.patch('/api/fb/groups/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        const patch = {};
+
+        if (req.body.name !== undefined)           patch.name = String(req.body.name || '').slice(0, 300) || null;
+        if (req.body.niche !== undefined)          patch.niche = String(req.body.niche || '').slice(0, 120) || null;
+        if (req.body.location_label !== undefined) patch.location_label = String(req.body.location_label || '').slice(0, 200) || null;
+        if (req.body.member_count !== undefined)   patch.member_count = parseInt(req.body.member_count, 10) || 0;
+
+        if (req.body.rules_text !== undefined) {
+            const text = String(req.body.rules_text || '');
+            patch.rules_text = text.slice(0, 4000) || null;
+            if (text.trim()) {
+                const parsed = parseRules(text);
+                patch.promo_allowed = parsed.promo_allowed;
+                patch.approval_required = parsed.approval_required;
+            }
+        }
+        // An explicit toggle still wins over the parse when no rules were given.
+        if (req.body.promo_allowed !== undefined && !patch.rules_text) {
+            patch.promo_allowed = req.body.promo_allowed !== false;
+        }
+        if (req.body.approval_required !== undefined && !patch.rules_text) {
+            patch.approval_required = !!req.body.approval_required;
+        }
+
+        if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to update.' });
+
+        const { data, error } = await supabase.from('fb_groups')
+            .update(patch).eq('id', req.params.id).eq('user_id', ctx.user.id)
+            .select('id, group_id, name, url, niche, location_label, member_count, rules_text, promo_allowed, approval_required, room_value_score')
+            .maybeSingle();
+        if (error) throw error;
+        if (!data) return res.status(404).json({ error: 'Room not found.' });
+
+        res.json({ success: true, group: data });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.delete('/api/fb/groups/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
@@ -4294,7 +4935,8 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
         res.status(202).json({
             success: true, jobId: job.id, mode: auditMode, setId: activeSetId,
             groups: refs.length, postsPerGroup: limit, days: window,
-            estimatedUsd: estimate
+            estimatedUsd: estimate,
+            budget: await budgetSnapshot('fb_community', ctx.user.id, estimate)
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -4307,8 +4949,11 @@ app.get('/api/fb/reports', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
         const { data, error } = await supabase.from('reports')
-            .select('id, target_handle, fb_group_names, fb_group_ids, audit_mode, grade, score, posts_analyzed, snapshot_date, created_at, ai_summary, location_label, niche, set_id')
+            .select('id, target_handle, fb_group_names, fb_group_ids, audit_mode, grade, score, posts_analyzed, snapshot_date, created_at, ai_summary, location_label, niche, set_id, report_type')
             .eq('user_id', ctx.user.id).eq('platform', 'facebook')
+            // Page reports share the vault but are a different engine. Without
+            // this they showed up in the community list and 404'd on open.
+            .neq('report_type', 'fb_page')
             .order('created_at', { ascending: false }).limit(100);
         if (error) throw error;
         res.json({ reports: data || [] });
@@ -4322,6 +4967,18 @@ app.get('/api/fb/report/:id', async (req, res) => {
             .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (!data) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** Delete one community report. The vault list has always offered this. */
+app.delete('/api/fb/report/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
+        const { error } = await supabase.from('reports')
+            .delete().eq('id', req.params.id).eq('user_id', ctx.user.id)
+            .eq('platform', 'facebook').neq('report_type', 'fb_page');
+        if (error) throw error;
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -4441,7 +5098,10 @@ app.patch('/api/fb/demand/:id', async (req, res) => {
 });
 
 /** CSV export of the lead feed. No names — the link is the identity. */
-app.get('/api/fb/demand-export', async (req, res) => {
+// The page asks for '.csv'; the original route had no extension, so the
+// export button 404'd. Both spellings are served rather than picking one and
+// breaking whichever caller used the other.
+app.get(['/api/fb/demand-export', '/api/fb/demand-export.csv'], async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
         let q = supabase.from('fb_demand_signals')
@@ -5719,9 +6379,11 @@ app.get('/api/fb/page/estimate-credits', async (req, res) => {
     const pages = Math.min(parseInt(req.query.pages || '1', 10), 2);
     const posts = Math.min(parseInt(req.query.posts || FB_PAGE_DEFAULT_POSTS, 10), FB_PAGE_MAX_POSTS);
     const withReviews = req.query.reviews === 'true' || req.query.reviews === '1';
+    const estimatedUsd = fbPageEstimateCredits(pages, posts, withReviews);
     res.json({
         pages, postsPerPage: posts, totalPosts: pages * posts, includeReviews: withReviews,
-        estimatedUsd: fbPageEstimateCredits(pages, posts, withReviews),
+        estimatedUsd,
+        budget: await budgetSnapshot('fb_page', ctx.user.id, estimatedUsd),
         note: 'Estimate only. Actual Apify billing depends on the actor and how many posts the page actually returns.'
     });
 });
@@ -5793,7 +6455,8 @@ app.post('/api/fb/page-report', spendLimit, async (req, res) => {
             pages: pageCount,
             postsPerPage: limit,
             days: window,
-            estimatedUsd: estimate
+            estimatedUsd: estimate,
+            budget: await budgetSnapshot('fb_page', ctx.user.id, estimate)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -6007,7 +6670,18 @@ function preflight() {
     if (!GEMINI_API_KEY) problems.push('GEMINI_API_KEY is not set — reports will ship without their narrative layer');
     if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
     if (!ALERT_WEBHOOK) problems.push('ALERT_WEBHOOK_URL is not set — failures will only appear in the logs');
-    if (FB_DEFAULT_POSTS > 60) problems.push(`FB_DEFAULT_POSTS_PER_GROUP=${FB_DEFAULT_POSTS} is expensive on a $${APIFY_CYCLE_CREDIT} cycle budget`);
+    if (BUDGET_MODE !== 'block') problems.push(`BUDGET_MODE=${BUDGET_MODE} — a run can overspend a key without pausing`);
+
+    // The default run has to fit the default budget. Checking the actual number
+    // beats warning on a hard-coded threshold that drifts away from the config.
+    const defaultRunUsd = fbEstimateCredits(FB_DEFAULT_GROUPS, FB_DEFAULT_POSTS, false);
+    if (defaultRunUsd > APIFY_CYCLE_CREDIT * 0.5) {
+        problems.push(
+            `A default Facebook audit (${FB_DEFAULT_GROUPS} groups x ${FB_DEFAULT_POSTS} posts) ` +
+            `estimates $${defaultRunUsd.toFixed(2)} against a $${APIFY_CYCLE_CREDIT} cycle — ` +
+            `fewer than 2 runs per key per month`
+        );
+    }
     problems.forEach(p => logger.warn('preflight', { problem: p }));
     return problems;
 }
@@ -6036,7 +6710,11 @@ async function start() {
         // Jobs run in-process. Render's free tier sleeps on idle and restarts on
         // every deploy, so anything still marked running at boot is orphaned.
         await sweepStaleJobs();
+        await sweepStaleReservations();
+        await reviveStaleKeys();
+
         setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
+        setInterval(sweepStaleReservations, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(reviveStaleKeys, 3600000).unref?.();
     });
 
@@ -6053,11 +6731,13 @@ module.exports = {
     encryptSecret, decryptSecret, isEncrypted, maskSecret, tokenHash,
     // budget + keys
     classifyKeyError, cycleMonth, clientRemaining, estimateCredits, fbEstimateCredits,
+    fbPageEstimateCredits, primaryKeyName, buildBenchmark, ruleRecommendations,
     // analysis helpers
     median, computeRoomValue, bucketCaption, lengthBand, openingPattern, topicTags,
     categorize, urgencyOf, classifyIntent, mineDemand, parseGroupRef, parsePageRef,
     parseRules, localParts, domainOf, fbReactions, fbMediaType, normaliseReactionBreakdown,
     computePageScore, profileCompleteness, timeHeatmap, leaderboard,
     // observability
-    METRICS, RECENT_EVENTS, logger, preflight, migrateSecretsAtRest
+    METRICS, RECENT_EVENTS, logger, preflight, migrateSecretsAtRest,
+    sweepStaleJobs, sweepStaleReservations
 };
