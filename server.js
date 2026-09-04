@@ -173,6 +173,11 @@ function maskSecret(v) {
 
 const app = express();
 
+// Render terminates TLS at its edge, so without this every request reports the
+// proxy's address as req.ip and the per-IP rate limiter degenerates into one
+// global bucket — unable to throttle an individual, able to lock out everyone.
+app.set('trust proxy', 1);
+
 const ALLOWED = (process.env.ALLOWED_ORIGINS || '*')
     .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -298,7 +303,14 @@ const BUDGET_MODE        = (process.env.BUDGET_MODE || 'block').toLowerCase();
 const BUDGET_RESERVE     = parseFloat(process.env.BUDGET_RESERVE_USD || '0.05');
 
 // --- Job engine -------------------------------------------------------------
-const JOB_STALE_MINUTES  = parseInt(process.env.JOB_STALE_MINUTES || '15', 10);
+// A job mid-actor-call emits no progress tick, so the staleness window must be
+// longer than the longest possible single call. The default used to be exactly
+// APIFY_RUN_TIMEOUT_SECS, which meant the sweep parked LIVE jobs as resumable
+// and then invited the user to start a second copy of one still running.
+const JOB_STALE_MINUTES  = Math.max(
+    parseInt(process.env.JOB_STALE_MINUTES || '15', 10),
+    Math.ceil((APIFY_TIMEOUT_SECS + 300) / 60)
+);
 const MAX_ACTIVE_JOBS    = parseInt(process.env.MAX_ACTIVE_JOBS_PER_USER || '2', 10);
 // An 'exhausted' key is not dead, it is out of credit for this cycle. Retry it
 // after this many hours so monthly credit renewal is picked up automatically.
@@ -665,7 +677,14 @@ async function getWorkingClient(engine, userId, opts = {}) {
 
     const candidates = await buildTokenCandidates(engine, userId);
     if (!candidates.length) {
-        throw new NoCreditError('No Apify key configured for this engine. Use "Update key" in the header to add one.');
+        // This check used to sit below the retry loop, where it was
+        // unreachable, so a bring-your-own-key account with no key saved was
+        // told "no key configured for this engine" rather than the one thing
+        // it needed to know: that it cannot fall back to shared credit.
+        throw new NoCreditError(await isByoOnly(userId)
+            ? 'This account is set to use its own Apify key only, and no working key is saved. ' +
+              'Use "Update key" in the header to add one.'
+            : 'No Apify key configured for this engine. Use "Update key" in the header to add one.');
     }
 
     let lastErr = null;
@@ -745,13 +764,6 @@ async function getWorkingClient(engine, userId, opts = {}) {
     }
 
     METRICS.keys.noCreditEvents += 1;
-    const byoOnly = await isByoOnly(userId);
-    if (byoOnly && !candidates.length) {
-        throw new NoCreditError(
-            'This account is set to use its own Apify key only, and no working key is saved. ' +
-            'Use "Update key" in the header to add one.'
-        );
-    }
     alertOnce('no_credit:' + engine,
         `No Apify key can cover a ${engine} run`,
         { engine, skipped: skipped.length, lastError: lastErr?.message || null });
@@ -893,7 +905,18 @@ async function cycleUsage(hash, month = cycleMonth()) {
         return (data || []).reduce((sum, r) => sum + Number(r.usage_usd || 0), 0);
     } catch (e) {
         logger.error('cycle_usage_failed', { message: e.message });
-        return 0;   // fail open: never block a run because the ledger is down
+        alertOnce('ledger_unreadable',
+            'The usage ledger is unreadable, so cycle spend cannot be checked.',
+            { message: e.message });
+        // Failing open here would silently disable every budget gate in the
+        // app: each key reads as having spent nothing and every affordability
+        // check passes. That is acceptable when the operator asked only to
+        // track spend. It is the opposite of what BUDGET_MODE=block was set
+        // for, so in that mode nothing starts until the ledger is readable.
+        if (BUDGET_MODE === 'block') {
+            throw new Error('Spend cannot be verified right now, so nothing will be started. Try again shortly.');
+        }
+        return 0;
     }
 }
 
@@ -1610,6 +1633,64 @@ async function savePartial(jobId, unit, value) {
     } catch (e) { logger.error('save_partial_failed', { jobId, message: e.message }); }
 }
 
+/** The states a job can be picked back up from. Shared so the resume endpoint
+ *  and the claim can never disagree about what is resumable. */
+const RESUMABLE_STATUSES = ['paused_no_credit', 'interrupted', 'failed', 'cancelled'];
+
+/**
+ * Take exclusive ownership of a job before running it.
+ *
+ * The status check and the status write used to be two separate statements, so
+ * a double-clicked Resume — or the same job resumed on two Render instances —
+ * passed the check twice and ran the worker twice against one checkpoint. Both
+ * copies then scraped the same pending units and both were billed.
+ *
+ * One conditional UPDATE is the claim. Whoever flips the row out of the
+ * expected set wins; every other caller gets zero rows back and stops. This is
+ * the job-level equivalent of what budget reservations already do at the key
+ * level.
+ */
+async function claimJob(jobId, fromStatuses, { resume = false } = {}) {
+    const patch = {
+        status: 'running',
+        error: null,
+        cancel_requested: false,
+        updated_at: new Date().toISOString()
+    };
+    if (!resume) patch.progress = 1;
+
+    const { data, error } = await supabase.from('jobs')
+        .update(patch)
+        .eq('id', jobId)
+        .in('status', fromStatuses)
+        .select('id')
+        .maybeSingle();
+
+    if (error) throw error;
+    return !!data;
+}
+
+/**
+ * How many billable units a job's input describes.
+ *
+ * Resume needs this to price ONE remaining unit rather than the whole run. The
+ * old divisor was `groups.length || competitors.length || 1`, and three job
+ * types carry neither key, so it fell through to 1 and demanded the entire job
+ * estimate be free on a single key before it would restart a run that was nine
+ * tenths paid for.
+ */
+function jobUnitCount(job) {
+    const i = job?.input || {};
+    switch (job?.type) {
+        case 'ig_report':          return 1 + (Array.isArray(i.rivals) ? i.rivals.length : 0);
+        case 'deep_audit':         return 1 + (Array.isArray(i.competitors) ? i.competitors.length : 0);
+        case 'fb_community_audit': return Math.max(1, (i.groups || []).length);
+        case 'fb_discovery':       return Math.max(1, (i.seeds || []).length || Number(i.maxGroups) || 1);
+        case 'fb_page_report':     return i.rival ? 2 : 1;
+        default:                   return 1;
+    }
+}
+
 /**
  * Cooperative cancellation.
  *
@@ -1622,11 +1703,30 @@ class JobCancelled extends Error {
     constructor() { super('Cancelled'); this.name = 'JobCancelled'; this.code = 'CANCELLED'; }
 }
 
-async function isCancelRequested(jobId) {
-    try {
-        const { data } = await supabase.from('jobs').select('cancel_requested, status').eq('id', jobId).maybeSingle();
-        return !!data?.cancel_requested || data?.status === 'cancelled';
-    } catch { return false; }
+/**
+ * One progress tick: cancellation check, log append and progress write.
+ *
+ * This was three round trips — a select for cancel_requested, then updateJob's
+ * select for the log, then the update — on every step of every job. Folding
+ * the two reads together also means the cancellation decision and the log line
+ * come from the same snapshot, and closes the read-modify-write on `log` that
+ * dropped a line whenever two writes overlapped.
+ */
+async function jobTick(jobId, progress, step) {
+    const { data } = await supabase.from('jobs')
+        .select('cancel_requested, status, log').eq('id', jobId).maybeSingle();
+    if (!data) return;
+    if (data.cancel_requested || data.status === 'cancelled') throw new JobCancelled();
+
+    const log = Array.isArray(data.log) ? data.log : [];
+    if (step) log.push({ t: new Date().toISOString(), m: step });
+
+    await supabase.from('jobs').update({
+        progress,
+        current_step: step,
+        log: log.slice(-100),
+        updated_at: new Date().toISOString()
+    }).eq('id', jobId);
 }
 
 async function updateJob(jobId, patch, logLine) {
@@ -1655,7 +1755,21 @@ async function updateJob(jobId, patch, logLine) {
  */
 function runJob(jobId, worker, opts = {}) {
     (async () => {
+        let beat = null;
         try {
+            // Claim BEFORE reading the checkpoint. Losing the claim means some
+            // other process already owns this job, and the correct action is to
+            // do nothing at all rather than run a second copy of it.
+            const claimed = opts.claimed === true || await claimJob(
+                jobId,
+                opts.resume ? RESUMABLE_STATUSES : ['queued'],
+                { resume: !!opts.resume }
+            );
+            if (!claimed) {
+                logger.warn('job_claim_lost', { jobId, resume: !!opts.resume });
+                return;
+            }
+
             const { data: row } = await supabase.from('jobs')
                 .select('completed_units, partials').eq('id', jobId).maybeSingle();
             const units = Array.isArray(row?.completed_units) ? row.completed_units.slice() : [];
@@ -1678,16 +1792,26 @@ function runJob(jobId, worker, opts = {}) {
             logger.info(opts.resume ? 'job_resumed' : 'job_started',
                 { jobId, completedUnits: units.length });
 
-            await updateJob(jobId,
-                { status: 'running', progress: opts.resume ? undefined : 1, error: null },
+            // The status write moved into claimJob above, where it is atomic.
+            // This is only the log line.
+            await updateJob(jobId, {},
                 opts.resume ? `Resuming, ${units.length} unit(s) already complete` : 'Job started');
+
+            // A unit that is one long actor call emits no progress tick for up
+            // to APIFY_RUN_TIMEOUT_SECS. Without a heartbeat, sweepStaleJobs()
+            // cannot tell that job apart from one killed by a restart, and it
+            // parks a live run as resumable.
+            beat = setInterval(() => {
+                supabase.from('jobs')
+                    .update({ updated_at: new Date().toISOString() })
+                    .eq('id', jobId).eq('status', 'running')
+                    .then(() => {}, () => {});
+            }, 60000);
+            beat.unref?.();
 
             // Every progress tick is also a cancellation checkpoint, which is
             // why workers get this for free without knowing about it.
-            const progressFn = async (progress, step) => {
-                if (await isCancelRequested(jobId)) throw new JobCancelled();
-                return updateJob(jobId, { progress, current_step: step }, step);
-            };
+            const progressFn = (progress, step) => jobTick(jobId, progress, step);
 
             const result = await worker(progressFn, ck);
 
@@ -1728,6 +1852,8 @@ function runJob(jobId, worker, opts = {}) {
                 status: 'failed', error: err.message,
                 finished_at: new Date().toISOString()
             }, 'Failed: ' + err.message);
+        } finally {
+            if (beat) clearInterval(beat);
         }
     })();
 }
@@ -1755,11 +1881,17 @@ async function sweepStaleJobs() {
 
         for (const j of (data || [])) {
             const n = Array.isArray(j.completed_units) ? j.completed_units.length : 0;
+            // fb_discovery and fb_verify pass an inline closure to runJob rather
+            // than registering a factory, so they cannot be rebuilt from
+            // jobs.input. Telling their owner to resume produces a 400.
+            const canResume = !!JOB_WORKERS[j.type];
             await updateJob(j.id, {
                 status: 'interrupted',
                 error: 'The server restarted while this job was running. ' +
-                       (n ? `${n} unit(s) were already saved — resume to finish the rest.`
-                          : 'Nothing was charged. Resume to start again.')
+                       (!canResume
+                           ? 'This job type cannot be resumed — start a new run.'
+                           : n ? `${n} unit(s) were already saved — resume to finish the rest.`
+                               : 'Nothing was charged. Resume to start again.')
             }, 'Interrupted by a server restart');
         }
         if (data?.length) {
@@ -3211,7 +3343,7 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
             .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (!job) return res.status(404).json({ error: 'Job not found.' });
 
-        if (!['paused_no_credit', 'interrupted', 'failed', 'cancelled'].includes(job.status)) {
+        if (!RESUMABLE_STATUSES.includes(job.status)) {
             return res.status(409).json({
                 error: `This job is ${job.status} and cannot be resumed.`
             });
@@ -3226,27 +3358,42 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
 
         // Confirm there is now a key that can actually pay, so the user gets an
         // immediate answer instead of watching the job pause again.
-        const perUnit = Number(job.credits_estimate || 0) /
-                        Math.max(1, (job.input?.groups?.length || job.input?.competitors?.length || 1));
+        const totalUnits = jobUnitCount(job);
+        const doneUnits  = (job.completed_units || []).length;
+        const leftUnits  = Math.max(0, totalUnits - doneUnits);
+        const perUnit    = Number(job.credits_estimate || 0) / totalUnits;
         try {
             await getWorkingClient(job.engine, ctx.user.id, { needUsd: perUnit, jobId: job.id });
         } catch (e) {
             return res.status(402).json({
                 error: e.message,
                 code: 'NO_CREDIT',
-                completed: (job.completed_units || []).length
+                completed: doneUnits,
+                remainingUnits: leftUnits,
+                remainingEstimateUsd: +(perUnit * leftUnits).toFixed(4)
             });
         }
 
         await assertJobSlot(ctx.user.id);
-        // Clear any stale cancellation flag, or the job stops the instant it starts.
-        await supabase.from('jobs').update({ cancel_requested: false }).eq('id', job.id);
-        runJob(job.id, factory(ctx.user.id, job.input, job.id), { resume: true });
+
+        // Claim here rather than inside runJob, which is fire-and-forget: a
+        // second click would otherwise be answered 202 while quietly doing
+        // nothing. The claim also clears any stale cancellation flag, which
+        // would stop the job the instant it started.
+        const claimed = await claimJob(job.id, RESUMABLE_STATUSES, { resume: true });
+        if (!claimed) {
+            return res.status(409).json({
+                error: 'This job is already running. Nothing further was started.'
+            });
+        }
+
+        runJob(job.id, factory(ctx.user.id, job.input, job.id), { resume: true, claimed: true });
 
         res.status(202).json({
             success: true,
             jobId: job.id,
-            resumedFrom: (job.completed_units || []).length,
+            resumedFrom: doneUnits,
+            remainingUnits: leftUnits,
             note: 'Already-completed units will be reused, not re-scraped.'
         });
     } catch (err) {
@@ -3307,11 +3454,27 @@ app.get('/api/budget', async (req, res) => {
 app.get('/api/job/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
+        // Explicit columns. `partials` holds the full computed audit for every
+        // finished unit, and select('*') was shipping it — twice, because the
+        // payload is doubled for the old and new frontend shapes — on every
+        // poll of a running job. Nothing in any page reads it.
         const { data, error } = await supabase.from('jobs')
-            .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
+            .select('id, type, engine, status, progress, current_step, error, log, ' +
+                    'result, result_report_id, credits_estimate, completed_units, ' +
+                    'cancel_requested, created_at, updated_at, finished_at')
+            .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
         if (error) throw error;
         if (!data) return res.status(404).json({ error: 'Job not found' });
-        res.json({ ...data, job: data });
+
+        const view = {
+            ...data,
+            completedUnits: (data.completed_units || []).length,
+            // Only registered worker types can be rebuilt from jobs.input, so
+            // only they can be resumed. Surfacing it means the recovery banner
+            // never has to offer a button that answers 400.
+            resumable: !!JOB_WORKERS[data.type] && RESUMABLE_STATUSES.includes(data.status)
+        };
+        res.json({ ...view, job: view });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -3361,7 +3524,13 @@ app.get('/api/jobs', async (req, res) => {
             .eq('user_id', ctx.user.id)
             .order('created_at', { ascending: false })
             .limit(30);
-        res.json({ jobs: data || [] });
+        res.json({
+            jobs: (data || []).map(j => ({
+                ...j,
+                completedUnits: (j.completed_units || []).length,
+                resumable: !!JOB_WORKERS[j.type] && RESUMABLE_STATUSES.includes(j.status)
+            }))
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
