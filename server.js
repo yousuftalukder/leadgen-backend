@@ -11943,6 +11943,16 @@ async function gracefulShutdown(signal, server) {
 
     try { server?.close(); } catch (_) {}
 
+    // Drop our own heartbeat so the instance that replaces us does not see a
+    // fresh row and raise multiple_instances on every deploy. Best-effort;
+    // the 90 s staleness window still covers a SIGKILL.
+    try {
+        await Promise.race([
+            supabase.from('system_settings').delete().eq('key', 'instance_heartbeat:' + INSTANCE_ID),
+            new Promise(r => setTimeout(r, 1500))
+        ]);
+    } catch (_) {}
+
     try {
         await Promise.race([
             supabase.from('jobs')
