@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — Schedules</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* schedules.html — page-specific only. */
+    .s-row { display: grid; grid-template-columns: 96px 1fr auto; gap: 14px; align-items: center; padding: 13px 15px;
+        border: 1px solid var(--card-border); border-radius: 10px; background: rgba(15,23,42,0.6); margin-bottom: 8px; }
+    .s-row.is-paused { opacity: .6; }
+    .s-row .cad { font-size: .7rem; font-weight: 800; padding: 4px 8px; border-radius: 6px; text-align: center;
+        background: rgba(59,130,246,0.12); color: #93c5fd; }
+    .s-row b { color: #fff; display: block; font-size: .92rem; }
+    .s-row small { color: var(--text-muted); display: block; margin-top: 3px; line-height: 1.5; }
+    .s-row .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .st { font-weight: 700; }
+    .st.done { color: #6ee7b7; } .st.failed, .st.skipped, .st.skipped_no_credit { color: #fca5a5; }
+    .st.started, .st.deferred { color: #fbbf24; }
+    .note { font-size: .82rem; margin-top: 10px; min-height: 1.2em; font-weight: 600; color: var(--text-muted); }
+    .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .filters label { font-size: .8rem; color: var(--text-muted); display: flex; gap: 6px; align-items: center; }
+    @media (max-width: 760px) { .s-row { grid-template-columns: 1fr; } .s-row .acts { justify-content: flex-start; } }
+</style>
+</head>
+<body>
+
+<main class="el-page">
+<div class="card">
+    <h2 class="card-title">Scheduled runs</h2>
+    <p class="card-subtitle" style="margin-bottom:0">
+        A schedule re-runs a report you already ran — same accounts, same settings, same client — every week or month.
+        Each run spends Apify credit like a manual one, files under the same client, and pauses the same way if credit runs out.
+        Create one from any finished report with <b>Repeat on a schedule</b>. Times are UTC.
+    </p>
+</div>
+
+<div class="card">
+    <div class="filters">
+        <label><input type="checkbox" id="show-paused" checked> show paused</label>
+        <span class="hint" id="scope"></span>
+        <button class="btn-secondary btn-mini" id="btn-refresh" type="button" style="margin-left:auto">Refresh</button>
+    </div>
+    <div id="list"><div class="empty">Loading…</div></div>
+    <div class="note" id="note"></div>
+</div>
+</main>
+
+<script src="header.js"></script>
+<script>
+(async () => {
+    await EL.init({ engine: null, page: 'schedules.html' });
+    const $ = id => document.getElementById(id);
+    const esc = EL.escape;
+    const fmt = d => d ? new Date(d).toLocaleString() : '—';
+    const PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', fb_community_audit: 'fb-audit.html', fb_page_report: 'fb-report.html', meta_insights: 'content-plan.html' };
+
+    const cur = EL.currentClient();
+    $('scope').textContent = cur ? `Showing schedules filed under "${cur.name}" (client selected in the header).` : 'Showing your own schedules. Select a client in the header to see a client\'s schedules, including teammates\'.';
+
+    async function load() {
+        const host = $('list');
+        try {
+            // EL.api adds client_id when a client is selected; without one the server lists the caller's own.
+            const { schedules } = await EL.api('/api/schedules');
+            const rows = (schedules || []).filter(s => $('show-paused').checked || !s.paused);
+            host.innerHTML = rows.length ? rows.map(s => `
+                <div class="s-row ${s.paused ? 'is-paused' : ''}">
+                    <span class="cad">${esc(s.cadence)}</span>
+                    <div>
+                        <b>${esc(s.label || s.summary)}</b>
+                        <small>${esc(s.summary)}${s.mine === false ? ' · teammate\'s' : ''}</small>
+                        <small>${esc(EL.scheduleWhen(s))} · next ${fmt(s.next_run_at)} · ${s.runs || 0} run(s) · est. $${Number(s.credits_estimate || 0).toFixed(2)} each</small>
+                        <small>Last: ${s.last_status ? `<span class="st ${esc(s.last_status)}">${esc(s.last_status)}</span>` : 'never'}${s.last_run_at ? ' at ' + fmt(s.last_run_at) : ''}${s.last_error ? ' — ' + esc(s.last_error.slice(0, 160)) : ''}</small>
+                    </div>
+                    <div class="acts">
+                        ${s.last_report_id ? `<a class="btn-secondary btn-mini" href="${PAGE[s.job_type] || '#'}?report=${s.last_report_id}">Last report</a>` : ''}
+                        <button class="btn-secondary btn-mini" data-run="${s.id}" type="button">Run now</button>
+                        <button class="btn-secondary btn-mini" data-pause="${s.id}" data-val="${s.paused ? 'false' : 'true'}" type="button">${s.paused ? 'Resume' : 'Pause'}</button>
+                        <button class="btn-secondary btn-mini" data-edit="${s.id}" type="button">Edit</button>
+                        <button class="btn-secondary btn-mini" data-del="${s.id}" type="button">Delete</button>
+                    </div>
+                </div>`).join('') : '<div class="empty">No schedules yet. Open a finished report and click "Repeat on a schedule".</div>';
+
+            host.querySelectorAll('[data-run]').forEach(b => b.addEventListener('click', async () => {
+                b.disabled = true; $('note').textContent = 'Starting…';
+                try { const r = await EL.api(`/api/schedules/${b.dataset.run}/run-now`, { method: 'POST' }); $('note').textContent = `Started job ${r.jobId}. It will appear on the client timeline and in the engine vault when done.`; }
+                catch (err) { $('note').textContent = err.message; if (err.status === 402) EL.openKeyModal(); }
+                b.disabled = false; setTimeout(load, 1500);
+            }));
+            host.querySelectorAll('[data-pause]').forEach(b => b.addEventListener('click', async () => {
+                b.disabled = true;
+                try { await EL.api(`/api/schedules/${b.dataset.pause}`, { method: 'PATCH', body: { paused: b.dataset.val === 'true' } }); load(); }
+                catch (err) { $('note').textContent = err.message; b.disabled = false; }
+            }));
+            host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+                if (!confirm('Delete this schedule? Reports it already produced stay in the vault.')) return;
+                try { await EL.api(`/api/schedules/${b.dataset.del}`, { method: 'DELETE' }); load(); }
+                catch (err) { $('note').textContent = err.message; }
+            }));
+            host.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+                const s = rows.find(x => x.id === b.dataset.edit);
+                const cadence = prompt('Cadence: weekly or monthly', s.cadence);
+                if (!cadence || !['weekly', 'monthly'].includes(cadence)) return;
+                const day = cadence === 'weekly'
+                    ? prompt('Day of week (0 = Sunday … 6 = Saturday)', s.day_of_week)
+                    : prompt('Day of month (1–28)', s.day_of_month);
+                const hour = prompt('Hour (UTC, 0–23)', s.hour_utc);
+                const label = prompt('Label', s.label || '');
+                const body = { cadence, hourUtc: +hour, label };
+                if (cadence === 'weekly') body.dayOfWeek = +day; else body.dayOfMonth = +day;
+                EL.api(`/api/schedules/${s.id}`, { method: 'PATCH', body }).then(load).catch(err => { $('note').textContent = err.message; });
+            }));
+        } catch (err) { host.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
+    }
+
+    $('btn-refresh').addEventListener('click', load);
+    $('show-paused').addEventListener('change', load);
+    await load();
+})();
+</script>
+</body>
+</html>

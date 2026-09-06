@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — Competitor Intel</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* ig-competitors.html — page-specific only. Shared rules live in app.css. */
+    h3.block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin-bottom: 12px; }
+    label { display: block; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.02em; color: var(--accent-solid);
+        margin-top: 22px; margin-bottom: 8px; }
+    input[type="text"], input[type="number"] { width: 100%; padding: 14px 16px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem; font-weight: 500; }
+    input:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
+    .rival-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .rival-row input { flex: 1; }
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin: 22px 0; }
+    .kpi-num { font-size: 1.55rem; font-weight: 800; color: #fff; margin-top: 4px; }
+    .grade-badge { display: inline-block; padding: 5px 14px; border-radius: 8px; font-weight: 800; font-size: 1.15rem;
+        background: rgba(16,185,129,0.18); color: var(--success); }
+    th { padding: 11px 10px; color: var(--text-muted); border-bottom: 1px solid var(--card-border); font-weight: 700; font-size: 0.75rem; }
+    td { padding: 11px 10px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); vertical-align: top; }
+    tr.is-target td { background: rgba(96,165,250,0.09); }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 11px 15px; font-size: 0.82rem; }
+    .chip strong { display: block; font-size: 1.05rem; font-weight: 800; margin-top: 3px; }
+    .up { color: var(--success); }
+    .down { color: var(--danger); }
+    .post-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 14px; }
+    .post-card { background: rgba(15,23,42,0.8); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; font-size: 0.8rem; }
+    .post-card a { color: var(--accent-solid); font-weight: 800; text-decoration: none; font-size: 0.75rem; }
+    .section { margin-top: 34px; }
+    .ai-panel p, .ai-panel li { font-size: 0.86rem; line-height: 1.65; color: var(--text-primary); }
+    .job-head strong { font-size: 0.9rem; font-weight: 800; }
+
+    .est-warn { margin: 10px 0 0; font-size: 0.8rem; font-weight: 700; line-height: 1.5; padding: 10px 12px;
+        border-radius: 8px; }
+    .est-warn.hidden { display: none; }
+    .est-warn.is-over { color: #fca5a5; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.35); }
+    .est-warn.is-tight { color: #fcd34d; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); }
+</style>
+</head>
+<body>
+
+<main class="el-page">
+
+    <div class="segment-bar el-owner-only">
+        <button class="segment-btn active" type="button" data-tab="builder">Run a benchmark</button>
+        <button class="segment-btn" type="button" data-tab="sets">Saved sets</button>
+        <button class="segment-btn" type="button" data-tab="vault">Reports</button>
+    </div>
+
+    <!-- ================= BUILDER ================= -->
+    <section id="tab-builder">
+        <div class="card el-owner-only">
+            <h2 class="card-title">Benchmark against your competitors</h2>
+            <p class="card-subtitle">Scrapes your account and up to 10 rivals, then scores everyone on the same
+                engagement, virality and cadence maths so the gaps are directly comparable. Long runs keep going if you
+                close this tab — pick the job back up from Reports.</p>
+
+            <label for="target">Your Instagram handle</label>
+            <input type="text" id="target" placeholder="my_brand" autocomplete="off">
+
+            <label>Competitor handles</label>
+            <div id="rivals"></div>
+            <button class="btn-secondary" type="button" id="add-rival">Add another competitor</button>
+
+            <label for="posts">Posts to pull per account</label>
+            <input type="number" id="posts" value="30" min="5" max="100" step="5">
+
+            <label for="setname">Name this set</label>
+            <input type="text" id="setname" placeholder="Providence cafés — Q3" autocomplete="off">
+
+            <div class="estimate">
+                <div><span>Accounts</span><strong id="est-accounts">1</strong></div>
+                <div><span>Posts total</span><strong id="est-posts">30</strong></div>
+                <div><span>Estimated Apify spend</span><strong id="est-usd">$0.00</strong></div>
+                <div><span>Credit available</span><strong id="est-left">—</strong></div>
+            </div>
+            <p id="est-warn" class="est-warn hidden"></p>
+
+            <button class="btn-primary" type="button" id="run">Run benchmark</button>
+        </div>
+
+        <div id="job" class="job-panel hidden">
+            <div class="job-head">
+                <strong id="job-step">Starting…</strong>
+                <span id="job-pct" style="font-size:0.8rem; color:var(--accent-solid); font-weight:700;">0%</span>
+            </div>
+            <div class="bar"><div id="job-bar"></div></div>
+            <div class="job-logs" id="job-logs"></div>
+        </div>
+
+        <div id="report-card" class="card hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <h2 class="card-title" style="margin:0;">Benchmark report</h2>
+                <button class="btn-secondary" type="button" id="export">Download PDF</button>
+            </div>
+            <div id="paper" class="report-paper"></div>
+        </div>
+    </section>
+
+    <!-- ================= SAVED SETS ================= -->
+    <section id="tab-sets" class="hidden el-owner-only">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+                <div>
+                    <h2 class="card-title">Saved sets</h2>
+                    <p class="card-subtitle" style="margin:0;">Re-run the same cohort later and the two snapshots line up into a trend.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-sets">Refresh</button>
+            </div>
+            <div id="sets-list" class="empty">Loading sets…</div>
+        </div>
+
+        <div id="trend-card" class="card hidden">
+            <h2 class="card-title" id="trend-title">Trend</h2>
+            <div id="trend-body"></div>
+        </div>
+    </section>
+
+    <!-- ================= REPORTS ================= -->
+    <section id="tab-vault" class="hidden el-owner-only">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+                <div>
+                    <h2 class="card-title">Reports</h2>
+                    <p class="card-subtitle" style="margin:0;">Every audit you have run, newest first.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-reports">Refresh</button>
+            </div>
+            <div id="reports-list" class="empty">Loading reports…</div>
+        </div>
+    </section>
+
+</main>
+
+<script src="header.js"></script>
+<script src="report-cover.js"></script>
+<script>
+(async function () {
+    await EL.init({ engine: 'report', page: 'ig-competitors.html' });
+
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /**
+     * esc() stops an attribute breakout but leaves `javascript:` intact, and
+     * every URL on this page came from a scraped post. Only http(s) is let
+     * through; anything else becomes an inert '#'.
+     */
+    const safeUrl = u => {
+        const v = String(u == null ? '' : u).trim();
+        return /^https?:\/\//i.test(v) ? esc(v) : '#';
+    };
+
+    const num = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
+    const dateStr = d => d ? new Date(d).toLocaleDateString() : '—';
+
+
+    let currentReport = null;
+
+    // ---------- tabs ----------
+    document.querySelectorAll('.segment-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            ['builder', 'sets', 'vault'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'sets') loadSets();
+            if (btn.dataset.tab === 'vault') loadReports();
+        });
+    });
+
+    // ---------- rival inputs ----------
+    function addRival(value = '') {
+        const rows = $('rivals').children.length;
+        if (rows >= 10) return;
+        const row = document.createElement('div');
+        row.className = 'rival-row';
+        row.innerHTML = `<input type="text" placeholder="competitor_${rows + 1}" autocomplete="off">
+            <button class="btn-danger" type="button">Remove</button>`;
+        row.querySelector('input').value = value;
+        row.querySelector('input').addEventListener('input', estimate);
+        row.querySelector('button').addEventListener('click', () => { row.remove(); estimate(); });
+        $('rivals').appendChild(row);
+        estimate();
+    }
+    $('add-rival').addEventListener('click', () => addRival());
+    addRival();
+
+    const rivalHandles = () => Array.from($('rivals').querySelectorAll('input'))
+        .map(i => i.value.replace('@', '').trim().toLowerCase()).filter(Boolean);
+
+
+    /**
+     * Turn the estimate response into a plain answer: can this run finish on
+     * the credit that exists right now? A job that pauses at room six is
+     * recoverable, but being told before pressing Run is strictly better.
+     */
+    function showBudget(d, costUsd) {
+        const box = $('est-left'), warn = $('est-warn');
+        if (!box) return;
+        const b = d && d.budget;
+        if (!b) { box.textContent = '—'; if (warn) warn.classList.add('hidden'); return; }
+
+        const left = Number(b.totalRemainingUsd || 0);
+        box.textContent = '$' + left.toFixed(2);
+        box.style.color = left < costUsd ? '#ef4444' : (left - costUsd < costUsd ? '#f59e0b' : '#10b981');
+
+        if (!warn) return;
+        if (b.willPause) {
+            warn.className = 'est-warn is-over';
+            warn.textContent = `This run needs about $${costUsd.toFixed(2)} but only $${left.toFixed(2)} is available. ` +
+                `It will start, save what it can, then pause and wait for a key with credit.`;
+        } else if (left - costUsd < costUsd) {
+            warn.className = 'est-warn is-tight';
+            warn.textContent = `This run fits, but it leaves under one more run's worth of credit this cycle.`;
+        } else {
+            warn.className = 'est-warn hidden';
+        }
+    }
+
+    // ---------- estimate ----------
+    let estTimer = null;
+    async function estimate() {
+        const accounts = rivalHandles().length + 1;
+        const posts = Math.max(5, Math.min(100, parseInt($('posts').value || '30', 10)));
+        $('est-accounts').textContent = accounts;
+        $('est-posts').textContent = (accounts * posts).toLocaleString();
+        clearTimeout(estTimer);
+        estTimer = setTimeout(async () => {
+            try {
+                const d = await EL.api(`/api/estimate-credits?accounts=${accounts}&posts=${posts}`);
+                const cost = Number(d.estimatedUsd);
+                $('est-usd').textContent = '$' + cost.toFixed(2);
+                showBudget(d, cost);
+            } catch { $('est-usd').textContent = '—'; }
+        }, 350);
+    }
+    $('posts').addEventListener('input', estimate);
+    estimate();
+
+    // ---------- run ----------
+    $('run').addEventListener('click', () => startRun());
+
+    async function startRun(setId) {
+        const target = $('target').value.replace('@', '').trim().toLowerCase();
+        if (!target) { $('target').focus(); return alert('Enter your own handle first.'); }
+
+        $('run').disabled = true;
+        $('report-card').classList.add('hidden');
+        $('job').classList.remove('hidden');
+        $('job-logs').innerHTML = '';
+        setProgress(1, 'Queueing job…');
+
+        try {
+            const res = await EL.api('/api/deep-audit', {
+                method: 'POST',
+                body: {
+                    target,
+                    competitors: rivalHandles(),
+                    postsPerAccount: parseInt($('posts').value || '30', 10),
+                    setName: $('setname').value.trim() || null,
+                    setId: setId || null
+                }
+            });
+            log(`Job ${res.jobId} queued — ${res.accounts} accounts, ~$${Number(res.estimatedUsd).toFixed(2)}.`);
+            poll(res.jobId);
+        } catch (err) {
+            log('Could not start: ' + err.message);
+            setProgress(0, 'Failed to start');
+            $('run').disabled = false;
+        }
+    }
+
+    function setProgress(pct, step) {
+        $('job-bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        $('job-pct').textContent = `${Math.round(pct)}%`;
+        $('job-step').textContent = step || '';
+    }
+
+    function log(line) {
+        const el = $('job-logs');
+        el.innerHTML += `&gt; ${esc(line)}<br>`;
+        el.scrollTop = el.scrollHeight;
+    }
+
+    /**
+     * Follows a job to the end.
+     *
+     * Delegates to EL.pollJob, which unwraps the response correctly and knows
+     * about every state a run can stop in. The hand-rolled loop this replaced
+     * only understood 'done' and 'failed', so a run that paused for credit —
+     * or was interrupted by a restart — span this progress bar forever with
+     * no way to resume it.
+     */
+    function poll(jobId) {
+        EL._renderCancel(jobId, 'results', () => log('Cancelling after the current step…'));
+
+        EL.pollJob(jobId, {
+            mount: 'results',
+            onLog: m => log(m),
+            onProgress: job => setProgress(job.progress || 0, job.current_step || job.status),
+
+            onDone: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(100, 'Report ready');
+                if (job.result && job.result.report) {
+                    render(job.result.report, job.result.reportId || job.result_report_id || null,
+                        { elapsedSec: ELCover.elapsed(job.created_at, job.finished_at), jobId: job.id });
+                }
+                loadReports();
+            },
+
+            onPaused: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(job.progress || 0, job.status === 'cancelled' ? 'Cancelled' : 'Paused — resume below');
+                log(job.error || 'Run stopped. Everything already scraped was saved.');
+            },
+
+            onFailed: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(0, 'Run failed');
+                log(job.error || 'Unknown error');
+            }
+        });
+    }
+
+    // ---------- report rendering ----------
+    let currentReportId = null;
+
+    function benchCover(rep, meta = {}) {
+        const m = rep.main || {};
+        const b = rep.benchmark || {};
+        const ranked = b.ranked || [];
+        const me = ranked.find(r => r.isTarget);
+        const rivals = Math.max(0, ranked.length - 1);
+        const el = meta.elapsedSec;
+        const elTxt = el ? (el < 90 ? Math.round(el) + ' seconds' : Math.round(el / 60) + ' minutes') : null;
+        const totalPosts = ranked.reduce((s, r) => s + (r.postsAnalyzed || 0), 0) || m.postsAnalyzed;
+        return ELCover.html({
+            kind: 'Instagram competitor benchmark',
+            target: '@' + (m.handle || 'account'),
+            sub: rivals ? `Ranked against ${rivals} competitor${rivals === 1 ? '' : 's'} on the same metrics, same window${me?.rank ? ` — currently #${me.rank} of ${ranked.length}` : ''}`
+                        : `${num(m.postsAnalyzed)} posts scored against the account's own median`,
+            stats: [
+                { value: totalPosts, label: 'posts analysed' },
+                { value: ranked.length || 1, label: 'accounts measured' },
+                me?.rank ? { value: `#${me.rank}`, label: 'cohort rank' } : null,
+                m.followers ? { value: m.followers, label: 'followers' } : null,
+                elTxt ? { value: el < 90 ? Math.round(el) + 's' : Math.round(el / 60) + ' min', label: 'run time' } : null
+            ],
+            what: [
+                `EdgeLead pulled public posts from every account in the cohort, normalised each one against its own account's median so a small account and a large one are compared fairly, and ranked the set on the metrics that actually move.`,
+                elTxt ? `Scraping ${ranked.length || 1} accounts, scoring and the strategy layer took ${elTxt}. By hand this is a week of spreadsheets.`
+                      : `Scraping every account, scoring and the strategy layer complete in minutes. By hand this is a week of spreadsheets.`
+            ],
+            elapsedSec: el, date: meta.date
+        });
+    }
+
+    function render(rep, reportId, meta = {}) {
+        if (reportId !== undefined) currentReportId = reportId;
+        currentReport = rep;
+        const m = rep.main || {};
+        const b = rep.benchmark;
+        const ai = rep.ai;
+
+        let html = benchCover(rep, meta) + `
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;
+             border-bottom:1px solid var(--card-border); padding-bottom:20px; flex-wrap:wrap;">
+            <div>
+                <h1 style="font-size:1.75rem; font-weight:800; color:#fff;">@${esc(m.handle)}</h1>
+                <p style="color:var(--text-muted); font-size:0.82rem; margin-top:5px;">
+                    ${esc(m.fullName || '')}${m.category ? ' · ' + esc(m.category) : ''} ·
+                    ${num(m.postsAnalyzed)} posts analysed · ${dateStr(Date.now())}</p>
+            </div>
+            <div style="text-align:right;">
+                <span style="font-size:0.72rem; color:var(--text-muted); font-weight:700; display:block;">Health score</span>
+                <span class="grade-badge">${esc(m.grade)} · ${num(m.score)}/100</span>
+            </div>
+        </div>
+
+        <div class="kpi-grid">
+            ${kpi('Followers', num(m.followers))}
+            ${kpi('Engagement rate', `${esc(m.engagementRate)}%`, 'var(--accent-solid)')}
+            ${kpi('Virality index', `${esc(m.viralityScore)}x`, '#a78bfa')}
+            ${kpi('Posts per week', esc(m.postsPerWeek))}
+            ${kpi('Avg likes', num(m.avgLikes))}
+            ${kpi('Avg comments', num(m.avgComments))}
+        </div>`;
+
+        if (b && b.ranked && b.ranked.length > 1) {
+            html += `<div class="section">
+                <h3 class="block-title">Where you sit in the cohort</h3>
+                <p class="card-subtitle" style="margin:0;">Ranked by composite score across ${b.cohort.accounts} accounts.</p>
+                <table><thead><tr><th>#</th><th>Account</th><th>Score</th><th>Grade</th><th>Followers</th>
+                    <th>Engagement</th><th>Posts/wk</th></tr></thead><tbody>
+                ${b.ranked.map(r => `<tr class="${r.isTarget ? 'is-target' : ''}">
+                    <td>${r.rank}</td>
+                    <td><strong>@${esc(r.handle)}</strong>${r.isTarget ? ' <span style="color:var(--accent-solid); font-size:0.72rem;">you</span>' : ''}</td>
+                    <td>${num(r.score)}</td><td>${esc(r.grade)}</td><td>${num(r.followers)}</td>
+                    <td>${esc(r.engagementRate)}%</td><td>${esc(r.postsPerWeek)}</td></tr>`).join('')}
+                </tbody></table>
+
+                <div class="chip-row">
+                    ${gap('Engagement vs cohort', b.gaps.engagementRate, '%')}
+                    ${gap('Virality vs cohort', b.gaps.viralityScore, 'x')}
+                    ${gap('Cadence vs cohort', b.gaps.postsPerWeek, '/wk')}
+                    ${gap('Score vs cohort', b.gaps.score, '')}
+                </div>
+            </div>`;
+
+            if (b.hashtagGaps && b.hashtagGaps.length) {
+                html += `<div class="section">
+                    <h3 class="block-title">Hashtags rivals use that you don't</h3>
+                    <table><thead><tr><th>Hashtag</th><th>Rivals using it</th><th>Avg engagement</th></tr></thead><tbody>
+                    ${b.hashtagGaps.map(h => `<tr><td>#${esc(h.tag)}</td><td>${h.usedBy}</td><td>${num(h.avgEngagement)}</td></tr>`).join('')}
+                    </tbody></table></div>`;
+            }
+        }
+
+        const mix = Object.entries(m.contentMix || {});
+        if (mix.length) {
+            html += `<div class="section">
+                <h3 class="block-title">What formats earn their slot</h3>
+                <table><thead><tr><th>Format</th><th>Posts</th><th>Share</th><th>Avg likes</th>
+                    <th>Avg comments</th><th>Avg views</th></tr></thead><tbody>
+                ${mix.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.count}</td><td>${esc(v.share)}</td>
+                    <td>${num(v.avgLikes)}</td><td>${num(v.avgComments)}</td><td>${num(v.avgViews)}</td></tr>`).join('')}
+                </tbody></table></div>`;
+        }
+
+        if ((m.postingDays || []).length || (m.postingHours || []).length) {
+            html += `<div class="section">
+                <h3 class="block-title">When your posts land best</h3>
+                <div class="chip-row">
+                    ${(m.postingDays || []).slice(0, 4).map(d =>
+                        `<div class="chip">${esc(d.key)} · ${d.count} posts<strong>${num(d.avgEngagement)}</strong></div>`).join('')}
+                    ${(m.postingHours || []).slice(0, 4).map(h =>
+                        `<div class="chip">${String(h.key).padStart(2, '0')}:00 UTC · ${h.count} posts<strong>${num(h.avgEngagement)}</strong></div>`).join('')}
+                </div>
+                <p class="card-subtitle" style="margin-top:14px;">Longest silence in the window:
+                    ${esc(m.consistency?.longestGapDays || '0')} days across ${esc(m.consistency?.windowDays || '0')} days of history.</p>
+            </div>`;
+        }
+
+        if ((m.topHashtags || []).length) {
+            html += `<div class="section">
+                <h3 class="block-title">Your own hashtags, by return</h3>
+                <table><thead><tr><th>Hashtag</th><th>Uses</th><th>Avg engagement</th></tr></thead><tbody>
+                ${m.topHashtags.slice(0, 12).map(h => `<tr><td>#${esc(h.tag)}</td><td>${h.uses}</td><td>${num(h.avgEngagement)}</td></tr>`).join('')}
+                </tbody></table></div>`;
+        }
+
+        if ((m.topPosts || []).length) {
+            html += `<div class="section">
+                <h3 class="block-title">Top posts</h3>
+                <div class="post-gallery">
+                ${m.topPosts.map(p => `<div class="post-card">
+                    <p style="color:var(--accent-solid); font-weight:800; margin-bottom:6px;">${esc(p.type)}</p>
+                    <p style="color:var(--text-muted); font-size:0.75rem; margin-bottom:10px; line-height:1.5;">
+                        ${esc((p.caption || 'No caption').slice(0, 90))}${(p.caption || '').length > 90 ? '…' : ''}</p>
+                    <div style="display:flex; justify-content:space-between; font-weight:700; margin-bottom:8px;">
+                        <span>♥ ${num(p.likes)}</span><span>💬 ${num(p.comments)}</span><span>▶ ${num(p.views)}</span></div>
+                    ${p.url ? `<a href="${safeUrl(p.url)}" target="_blank" rel="noopener">Open on Instagram</a>` : ''}
+                </div>`).join('')}
+                </div></div>`;
+        }
+
+        if (ai) {
+            html += `<div class="ai-panel">
+                <h4>Executive summary</h4><p>${esc(ai.executive_summary || '')}</p>
+                ${aiList('Strengths', ai.strengths)}
+                ${aiList('Weaknesses', ai.weaknesses)}
+                ${aiList('What rivals are doing that you are not', ai.competitor_insights)}
+                ${aiList('Content strategy', ai.content_strategy)}
+                ${aiList('Hashtag strategy', ai.hashtag_strategy)}
+                ${(ai.action_plan_30_days || []).length ? `<h4>Next 30 days</h4>${
+                    ai.action_plan_30_days.map(w => `<p style="margin-top:8px;"><strong>${esc(w.week)}</strong></p>
+                        <ul>${(w.actions || []).map(a => `<li>${esc(a)}</li>`).join('')}</ul>`).join('')}` : ''}
+                ${ai.kpi_targets ? `<h4>Targets</h4><ul>${Object.entries(ai.kpi_targets)
+                    .map(([k, v]) => `<li>${esc(k.replace(/_/g, ' '))}: ${esc(v)}</li>`).join('')}</ul>` : ''}
+            </div>`;
+        } else if (rep.aiStatus) {
+            // Say which failure this was. A blank space where the strategy
+            // should be reads as "there was nothing to say", which is the one
+            // thing it never means.
+            html += `<div class="ai-panel">
+                <h4>Strategy layer not generated</h4>
+                <p>${esc(rep.aiStatus.message || 'The strategy layer could not be generated.')}</p>
+                <p style="opacity:.75">The rankings and gaps above are computed here, not by the model, so they are unaffected.</p>
+                ${(currentReportId && rep.aiStatus.reason !== 'no_key')
+                    ? `<p><button class="btn-secondary" type="button" data-regen="${esc(currentReportId)}">Generate it now</button>
+                       <span style="margin-left:8px;opacity:.7;font-size:.8rem;">Uses the data already saved — no scraping, no Apify credit.</span></p>`
+                    : ''}
+            </div>`;
+        }
+
+        if ((rep.recommendations || []).length) {
+            html += `<div class="section"><h3 class="block-title">Fix these first</h3>
+                <ul style="padding-left:20px; font-size:0.86rem; line-height:1.75;">
+                ${rep.recommendations.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`;
+        }
+
+        $('paper').innerHTML = html;
+        $('report-card').classList.remove('hidden');
+        EL.reportActions('report-actions', { reportId: currentReportId, jobId: meta.jobId });
+        $('report-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    const kpi = (label, value, color) =>
+        `<div class="kpi-box"><span>${label}</span><div class="kpi-num" ${color ? `style="color:${color}"` : ''}>${value}</div></div>`;
+
+    function gap(label, value, unit) {
+        const n = parseFloat(value || 0);
+        const cls = n > 0 ? 'up' : (n < 0 ? 'down' : '');
+        return `<div class="chip">${label}<strong class="${cls}">${n > 0 ? '+' : ''}${value}${unit}</strong></div>`;
+    }
+
+    const aiList = (title, items) => (items && items.length)
+        ? `<h4>${title}</h4><ul>${items.map(i => `<li>${esc(i)}</li>`).join('')}</ul>` : '';
+
+    $('export').addEventListener('click', () => {
+        const handle = currentReport?.main?.handle || 'report';
+        ELCover.exportPdf($('paper'), `Edgelead_Benchmark_${handle}.pdf`, { format: 'letter', margin: 0.4 });
+    });
+
+    // ---------- saved sets ----------
+    $('reload-sets').addEventListener('click', loadSets);
+
+    async function loadSets() {
+        const box = $('sets-list');
+        try {
+            const { sets } = await EL.api('/api/competitor-sets');
+            if (!sets.length) {
+                box.innerHTML = 'No sets yet. Run a benchmark and it gets saved here so you can re-run the same cohort.';
+                return;
+            }
+            box.innerHTML = sets.map(s => `
+                <div class="row-card">
+                    <div>
+                        <strong>${esc(s.name || s.target_handle)}</strong>
+                        <div class="meta">@${esc(s.target_handle)} vs ${(s.competitor_handles || []).length} rivals ·
+                            ${s.posts_per_account} posts each · last run ${dateStr(s.last_run_at)}</div>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn-secondary" type="button" data-rerun="${esc(s.id)}">Re-run</button>
+                        <button class="btn-secondary" type="button" data-trend="${esc(s.id)}">View trend</button>
+                    </div>
+                </div>`).join('');
+
+            box.querySelectorAll('[data-rerun]').forEach(btn => btn.addEventListener('click', () => {
+                const set = sets.find(s => s.id === btn.dataset.rerun);
+                document.querySelector('.segment-btn[data-tab="builder"]').click();
+                $('target').value = set.target_handle;
+                $('posts').value = set.posts_per_account || 30;
+                $('setname').value = set.name || '';
+                $('rivals').innerHTML = '';
+                (set.competitor_handles || []).forEach(h => addRival(h));
+                if (!set.competitor_handles?.length) addRival();
+                startRun(set.id);
+            }));
+
+            box.querySelectorAll('[data-trend]').forEach(btn =>
+                btn.addEventListener('click', () => loadTrend(btn.dataset.trend, sets.find(s => s.id === btn.dataset.trend))));
+        } catch (err) {
+            box.innerHTML = `Could not load sets: ${esc(err.message)}`;
+        }
+    }
+
+    async function loadTrend(setId, set) {
+        const card = $('trend-card'), body = $('trend-body');
+        card.classList.remove('hidden');
+        $('trend-title').textContent = `Trend — ${set?.name || set?.target_handle || 'set'}`;
+        body.innerHTML = '<p class="empty">Loading…</p>';
+        try {
+            const { runs, delta } = await EL.api(`/api/set-trend/${setId}`);
+            if (!runs.length) { body.innerHTML = '<p class="empty">No snapshots for this set yet.</p>'; return; }
+            if (runs.length === 1) {
+                body.innerHTML = '<p class="empty">Only one snapshot so far. Re-run the set to get a comparison window.</p>' + trendTable(runs);
+                return;
+            }
+            body.innerHTML = `
+                <div class="chip-row">
+                    ${gap('Score', delta.score, '')}
+                    ${gap('Engagement', delta.engagementRate, '%')}
+                    ${gap('Followers', delta.followers, '')}
+                    <div class="chip">Window<strong>${delta.days} days</strong></div>
+                </div>${trendTable(runs)}`;
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (err) {
+            body.innerHTML = `<p class="empty">Could not load trend: ${esc(err.message)}</p>`;
+        }
+    }
+
+    const trendTable = runs => `
+        <table><thead><tr><th>Snapshot</th><th>Score</th><th>Grade</th><th>Engagement</th>
+            <th>Followers</th><th>Posts/wk</th><th>Cohort rank</th></tr></thead><tbody>
+        ${runs.map(r => `<tr><td>${esc(r.date)}</td><td>${num(r.score)}</td><td>${esc(r.grade)}</td>
+            <td>${r.engagementRate ?? '—'}%</td><td>${num(r.followers)}</td>
+            <td>${esc(r.postsPerWeek || '—')}</td><td>${r.rank ?? '—'}</td></tr>`).join('')}
+        </tbody></table>`;
+
+    // ---------- reports vault ----------
+    $('reload-reports').addEventListener('click', loadReports);
+
+    async function loadReports() {
+        const box = $('reports-list');
+        try {
+            const { reports } = await EL.api('/api/reports-history?type=deep_audit');
+            if (!reports.length) { box.innerHTML = 'No reports yet.'; return; }
+            // The list is columns only now. report_json is fetched per report
+            // on open rather than for every row on page load.
+            box.innerHTML = reports.map(r => `
+                <div class="row-card">
+                    <div>
+                        <strong>@${esc(r.target_handle)}</strong>
+                        <div class="meta">Grade ${esc(r.grade)} · ${r.engagement_rate}% engagement ·
+                            ${(r.competitor_handles || []).length} rivals · ${r.posts_analyzed || 0} posts ·
+                            ${dateStr(r.created_at)}</div>
+                    </div>
+                    <button class="btn-secondary" type="button" data-report="${esc(r.id)}">Open</button>
+                </div>`).join('');
+            box.querySelectorAll('[data-report]').forEach(btn => btn.addEventListener('click', async () => {
+                const label = btn.textContent;
+                btn.disabled = true; btn.textContent = 'Loading…';
+                try {
+                    const { report } = await EL.api('/api/report/' + encodeURIComponent(btn.dataset.report));
+                    if (!report?.report_json?.main) {
+                        throw new Error('This report was not produced by the Instagram engine.');
+                    }
+                    document.querySelector('.segment-btn[data-tab="builder"]').click();
+                    render(report.report_json, report.id, { date: report.created_at });
+                } catch (err) {
+                    alert('Could not open the report: ' + err.message);
+                } finally {
+                    btn.disabled = false; btn.textContent = label;
+                }
+            }));
+        } catch (err) {
+            box.innerHTML = `Could not load reports: ${esc(err.message)}`;
+        }
+    }
+
+    // Free retry of the strategy layer against a report already in the vault.
+    document.addEventListener('click', async e => {
+        const btn = e.target.closest('button[data-regen]');
+        if (!btn) return;
+        const id = btn.dataset.regen;
+        btn.disabled = true; btn.textContent = 'Generating…';
+        try {
+            const res = await EL.api(`/api/report/${encodeURIComponent(id)}/regenerate-narrative`, { method: 'POST' });
+            if (!res.success) throw new Error(res.error || 'Still could not generate it.');
+            const { report } = await EL.api('/api/report/' + encodeURIComponent(id));
+            render(report.report_json, report.id, { date: report.created_at });
+        } catch (err) {
+            btn.disabled = false; btn.textContent = 'Generate it now';
+            alert('Could not generate the strategy layer: ' + err.message);
+        }
+    });
+
+    // ---------- share mode / deep link (phase 10/11) ----------
+    async function openById(id) {
+        const { report } = await EL.api('/api/report/' + encodeURIComponent(id));
+        if (!report?.report_json?.main) throw new Error('This report was not produced by the Instagram engine.');
+        render(report.report_json, report.id, { date: report.created_at });
+    }
+    if (EL.isShared()) {
+        try { const d = await EL.loadShared(); render(d.report.report_json, d.report.id, { date: d.report.created_at }); }
+        catch (err) { $('paper').innerHTML = `<div class="warnbox">${esc(err.message)}</div>`; $('report-card').classList.remove('hidden'); }
+        return;
+    }
+    loadReports();
+    if (EL.reportParam()) openById(EL.reportParam()).catch(err => alert('Could not open the report: ' + err.message));
+})();
+</script>
+</body>
+</html>

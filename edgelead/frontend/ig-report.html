@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edgelead - Instagram Performance Audit</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+<style>
+    /* ig-report.html — page-specific only. Shared rules live in app.css. */
+    input[type="text"], input[type="password"] { width: 100%; padding: 15px 18px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none;
+        font-size: 0.95rem; font-weight: 500; }
+    input:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
+    .toggle-container { display: flex; align-items: center; gap: 12px; margin-top: 20px; cursor: pointer; }
+    .toggle-switch { width: 46px; height: 24px; background: var(--input-bg); border-radius: 20px;
+        border: 1px solid var(--card-border); position: relative; transition: background 0.3s; }
+    .toggle-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+        background: var(--text-muted); border-radius: 50%; transition: transform 0.3s; }
+    input[type="checkbox"]:checked + .toggle-switch { background: var(--accent-solid); }
+    input[type="checkbox"]:checked + .toggle-switch::after { transform: translateX(22px); background: #fff; }
+
+    .kpi-grade { display: inline-block; padding: 4px 12px; border-radius: 6px; font-weight: 800;
+        font-size: 1.2rem; background: rgba(16, 185, 129, 0.2); color: var(--success); }
+    .post-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 15px; margin-top: 15px; }
+    .post-card { background: rgba(15, 23, 42, 0.8); border: 1px solid var(--card-border);
+        border-radius: 10px; padding: 14px; font-size: 0.8rem; }
+    .post-card a { color: var(--accent-solid); font-size: 0.75rem; font-weight: 700; text-decoration: none; }
+
+    .section { margin-top: 34px; }
+    .block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin-bottom: 6px; }
+    .block-note { color: var(--text-muted); font-size: 0.78rem; line-height: 1.55; margin-bottom: 12px; }
+
+    /* Timing heatmap — copied from fb-report so the two engines read alike. */
+    .heat { display: grid; grid-template-columns: 42px repeat(24, 1fr); gap: 2px; margin-top: 14px; min-width: 700px; }
+    .heat .lab { font-size: 0.66rem; color: var(--text-muted); font-weight: 700; display: flex; align-items: center; }
+    .heat .cell { aspect-ratio: 1; border-radius: 3px; background: rgba(255,255,255,0.04); }
+    .heat-legend { font-size: 0.75rem; color: var(--text-muted); margin-top: 10px; line-height: 1.6; }
+
+    /* Score pillars */
+    .pillar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 0.83rem; }
+    .pillar .name { width: 200px; font-weight: 700; color: var(--text-primary); flex: 0 0 auto; }
+    .pillar .track { flex: 1; height: 8px; background: rgba(255,255,255,0.07); border-radius: 5px; overflow: hidden; }
+    .pillar .track > div { height: 100%; background: var(--accent-glow); }
+    .pillar .pts { width: 58px; text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+    .pillar .detail { width: 220px; color: var(--text-muted); font-size: 0.76rem; flex: 0 0 auto; }
+
+    /* Mean vs median comparison */
+    .dual { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
+    .dual-box { background: rgba(15,23,42,0.8); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; }
+    .dual-box .lbl { font-size: 0.7rem; color: var(--text-muted); font-weight: 800; text-transform: uppercase; }
+    .dual-box .med { font-size: 1.35rem; font-weight: 800; color: #fff; margin-top: 4px; }
+    .dual-box .mn  { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+    /* Month bars */
+    .mbar { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 0.8rem; }
+    .mbar .m { width: 68px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); }
+    .mbar .track { flex: 1; height: 16px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
+    .mbar .track > div { height: 100%; background: var(--accent-glow); }
+    .mbar .v { width: 92px; text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+
+    .flagrow { display: grid; grid-template-columns: 1fr 90px 90px 90px; gap: 10px; padding: 10px 0;
+        border-bottom: 1px solid var(--card-border); font-size: 0.82rem; align-items: center; }
+    .flagrow.head { color: var(--text-muted); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
+    .chk { display: flex; gap: 8px; align-items: center; font-size: 0.83rem; margin-top: 8px; }
+    .chk .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+
+<div id="dashboard-section">
+
+    <div class="segment-bar el-owner-only">
+        <button class="segment-btn active" data-tab="builder">📊 Audit Builder</button>
+        <button class="segment-btn" data-tab="vault">📦 Dedicated Reports Vault</button>
+    </div>
+
+    <!-- TAB 1: AUDIT BUILDER -->
+    <div id="tab-builder" class="report-tab-content">
+        <div class="card el-owner-only">
+            <h2 class="card-title">Generate Social Performance Audit</h2>
+            <p class="card-subtitle">Audits profile engagement, virality index, posting velocity, and rival benchmarks.</p>
+
+            <label>Primary Business Instagram Handle</label>
+            <input type="text" id="target-handle" placeholder="e.g., @my_brand">
+
+            <label class="toggle-container">
+                <input type="checkbox" id="rival-toggle" style="display:none;">
+                <div class="toggle-switch"></div>
+                <span style="font-weight: 700; font-size: 0.88rem;">Enable Competitor Head-to-Head Comparison Matrix</span>
+            </label>
+
+            <div id="rival-inputs-container" class="hidden" style="margin-top: 15px; padding-left: 15px; border-left: 2px solid var(--accent-solid);">
+                <label>Rival Competitor 1 Handle</label>
+                <input type="text" id="rival-1" placeholder="e.g., @competitor_one">
+
+                <label>Rival Competitor 2 Handle (Optional)</label>
+                <input type="text" id="rival-2" placeholder="e.g., @competitor_two">
+            </div>
+
+            <button class="btn-primary" id="run">🚀 Execute Audit &amp; Build Report</button>
+            <div id="run-cost" class="el-run-cost" style="margin-top:12px;"></div>
+        </div>
+
+        <div id="results">
+            <div id="job" class="job-panel hidden">
+                <div class="job-head">
+                    <strong id="job-step">Starting…</strong>
+                    <span id="job-pct" style="font-size:0.8rem; color:var(--accent-solid); font-weight:700;">0%</span>
+                </div>
+                <div class="bar"><div id="job-bar"></div></div>
+                <div class="job-logs" id="job-logs"></div>
+            </div>
+        </div>
+
+        <!-- REPORT PREVIEW -->
+        <div id="report-output-card" class="card hidden">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 class="card-title" style="margin: 0;">Live Report Preview</h2>
+                <button class="btn-secondary" id="export-pdf">📄 Export Executive PDF</button>
+            </div>
+
+            <!--
+                Everything below this point is built by renderReportDashboard()
+                from the report payload. The old page had a fixed skeleton of
+                four KPI boxes, a four-row rival table and a gallery, which is
+                why roughly four fifths of the payload — including every field
+                of the Gemini narrative the server pays for on every run — had
+                nowhere to go. A payload-driven render means a field added
+                server-side shows up here without an HTML change.
+            -->
+            <div id="report-actions"></div>
+            <div id="pdf-content" class="report-paper"></div>
+        </div>
+    </div>
+
+    <!-- TAB 2: DEDICATED REPORT VAULT -->
+    <div id="tab-vault" class="report-tab-content hidden el-owner-only">
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <div>
+                    <h2 class="card-title">Dedicated Audit Reports Vault</h2>
+                    <p class="card-subtitle">Access previously generated social media audits and competitor reports.</p>
+                </div>
+                <button class="btn-secondary" id="refresh-vault">Refresh Vault</button>
+            </div>
+            <div id="saved-reports-list">Loading saved audit reports...</div>
+        </div>
+    </div>
+
+</div>
+
+<script src="header.js"></script>
+<script src="report-cover.js"></script>
+<script>
+(async function () {
+    await EL.init({ engine: 'report', page: 'ig-report.html' });
+
+    const $   = id => document.getElementById(id);
+    const esc = EL.escape;
+    const safeUrl = EL.safeUrl;
+    const num = v => Number(v || 0).toLocaleString();
+
+    let savedReports = [];
+
+    // ---------- tabs ----------
+    document.querySelectorAll('.segment-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            ['builder', 'vault'].forEach(t =>
+                $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'vault') loadSavedReports();
+        });
+    });
+
+    // ---------- rival inputs ----------
+    $('rival-toggle').addEventListener('change', () => {
+        $('rival-inputs-container').classList.toggle('hidden', !$('rival-toggle').checked);
+        updateCost();
+    });
+    ['rival-1', 'rival-2'].forEach(id => $(id).addEventListener('input', debounce(updateCost, 400)));
+
+    function debounce(fn, ms) {
+        let t;
+        return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+    }
+
+    function accountCount() {
+        if (!$('rival-toggle').checked) return 1;
+        const rivals = ['rival-1', 'rival-2']
+            .map(id => $(id).value.replace('@', '').trim().toLowerCase())
+            .filter(Boolean);
+        return 1 + new Set(rivals).size;
+    }
+
+    function updateCost() {
+        EL.showCost('run-cost', `/api/estimate-credits?accounts=${accountCount()}`);
+    }
+    updateCost();
+
+    // ---------- run ----------
+    $('run').addEventListener('click', startAudit);
+
+    async function startAudit() {
+        const target = $('target-handle').value.trim();
+        if (!target) return alert('Please enter a target Instagram handle.');
+
+        const compareRivals = $('rival-toggle').checked;
+        const rival1 = $('rival-1').value.trim();
+        const rival2 = $('rival-2').value.trim();
+
+        EL._clearJobBanner('results');
+        $('report-output-card').classList.add('hidden');
+        $('job').classList.remove('hidden');
+        $('job-logs').innerHTML = '';
+        $('run').disabled = true;
+        setProgress(1, 'Queueing audit…');
+        log(`Queueing audit for @${target.replace('@', '')}…`);
+
+        try {
+            const res = await EL.api('/api/generate-ig-report', {
+                method: 'POST',
+                body: { target, compareRivals, rival1, rival2 }
+            });
+            if (!res.jobId) throw new Error(res.error || 'Could not start the audit.');
+
+            log(`Job accepted — ${res.accounts} account(s), est. $${Number(res.estimatedUsd).toFixed(2)}.`);
+            poll(res.jobId);
+        } catch (err) {
+            $('run').disabled = false;
+            setProgress(0, 'Failed to start');
+            log('Could not start: ' + err.message);
+        }
+    }
+
+    function poll(jobId) {
+        EL._renderCancel(jobId, 'results', () => log('Cancelling after the current step…'));
+
+        EL.pollJob(jobId, {
+            mount: 'results',
+            onLog: m => log(m),
+            onProgress: job => setProgress(job.progress || 0, job.current_step || job.status),
+
+            onDone: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(100, 'Report ready');
+                const report = job.result && job.result.report;
+                if (!report) { log('Job finished but returned no report.'); return; }
+                log('Calculations complete. Rendering report…');
+                if (report.aiStatus && !report.aiStatus.ok) {
+                    log('Strategy layer: ' + (report.aiStatus.message || 'not generated'));
+                }
+                renderReportDashboard(report, job.result.reportId || job.result_report_id || null,
+                    { elapsedSec: ELCover.elapsed(job.created_at, job.finished_at), jobId: job.id });
+                loadSavedReports();
+            },
+
+            onPaused: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(job.progress || 0,
+                    job.status === 'cancelled' ? 'Cancelled' : 'Paused — resume below');
+                log(job.error || 'Run stopped. Everything already scraped was saved.');
+            },
+
+            onFailed: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(0, 'Run failed');
+                log(job.error || 'Unknown error');
+            }
+        });
+    }
+
+    function setProgress(pct, step) {
+        $('job-bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        $('job-pct').textContent = `${Math.round(pct)}%`;
+        $('job-step').textContent = step || '';
+    }
+
+    function log(line) {
+        const el = $('job-logs');
+        el.innerHTML += `&gt; ${esc(line)}<br>`;
+        el.scrollTop = el.scrollHeight;
+    }
+
+    // =======================================================================
+    // RENDER
+    // Every block below is defensive about its input. A report generated
+    // before this patch has no scoreBreakdown, no momentum and no heatmap,
+    // and it must still open from the vault rather than throwing — so each
+    // block returns '' when its slice of the payload is absent.
+    // =======================================================================
+
+    const kpi = (label, value, color) =>
+        `<div class="kpi-box"><span>${label}</span>
+         <div class="kpi-num"${color ? ` style="color:${color}"` : ''}>${value}</div></div>`;
+
+    const section = (title, note, body) => body
+        ? `<div class="section"><h3 class="block-title">${title}</h3>
+           ${note ? `<p class="block-note">${note}</p>` : ''}${body}</div>`
+        : '';
+
+    // ---- header + headline KPIs -------------------------------------------
+    function headerBlock(m) {
+        const sb = m.scoreBreakdown;
+        const gradeColor = /^A/.test(m.grade || '') ? 'var(--success)'
+                         : /^B/.test(m.grade || '') ? 'var(--accent-solid)'
+                         : /^C/.test(m.grade || '') ? 'var(--warn)' : '#fca5a5';
+
+        return `<div style="display:flex; justify-content:space-between; align-items:flex-start;
+                    border-bottom:1px solid var(--card-border); padding-bottom:20px;">
+            <div>
+                <h1 style="font-size:1.8rem; font-weight:800; color:#fff;">@${esc(m.handle)}</h1>
+                <p style="color:var(--text-muted); font-size:0.82rem; margin-top:4px;">
+                    ${esc(m.fullName || '')}${m.fullName ? ' · ' : ''}${m.isVerified ? '✔ verified · ' : ''}${esc(m.category || 'no category set')}
+                </p>
+                <p style="color:var(--text-muted); font-size:0.82rem; margin-top:4px;">
+                    Audit date: ${new Date().toLocaleDateString()} ·
+                    ${num(m.postsAnalyzed)} posts analysed${m.cadence ? ` over ${m.cadence.spanDays} days` : ''}
+                </p>
+            </div>
+            <div style="text-align:right;">
+                <span style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:800; display:block;">Health Score</span>
+                <span class="kpi-grade" style="background:rgba(255,255,255,0.06); color:${gradeColor};">
+                    ${esc(m.grade || '—')} · ${num(m.score)}/100</span>
+                ${sb?.verdict ? `<p style="color:var(--text-muted); font-size:0.75rem; margin-top:6px; max-width:260px;">${esc(sb.verdict)}</p>` : ''}
+            </div>
+        </div>
+
+        ${sb?.lowConfidence ? `<div class="warnbox">Sample size is below the confidence threshold.
+            Everything below is directionally useful but should not be quoted as a verdict.</div>` : ''}
+
+        ${m.provisional?.count ? `<div class="warnbox">${esc(m.provisional.note)}
+            Instagram reels in particular keep collecting views for days — scoring one that is hours old
+            would report an unfinished post as a weak one.</div>` : ''}
+
+        <div class="kpi-grid">
+            ${kpi('Followers', num(m.followers))}
+            ${kpi('Engagement rate', `${esc(m.engagementRateMedian ?? m.engagementRate)}%`, 'var(--accent-solid)')}
+            ${kpi('Views per follower', `${esc(m.viralityScoreMedian ?? m.viralityScore)}x`, '#60a5fa')}
+            ${kpi('Posts / week', esc(m.postsPerWeek))}
+            ${kpi('Median likes', num(m.distribution?.likes?.median ?? m.avgLikes))}
+            ${kpi('Median comments', num(m.distribution?.comments?.median ?? m.avgComments))}
+        </div>`;
+    }
+
+    // ---- mean vs median ----------------------------------------------------
+    // The single most load-bearing block on the page. An account with one
+    // breakout post has a mean that describes the breakout and a median that
+    // describes the account, and the old report only ever showed the mean.
+    function distributionBlock(d) {
+        if (!d) return '';
+        const box = (label, s) => `<div class="dual-box">
+            <div class="lbl">${label}</div>
+            <div class="med">${num(s.median)}</div>
+            <div class="mn">mean ${num(s.mean)} · best ${num(s.max)}</div>
+        </div>`;
+
+        return section('Typical post vs average post',
+            d.outlierDriven
+                ? `The mean is running ${d.skew}x the median, so one or two breakout posts are carrying the average.
+                   The median column is what a new post can actually expect. Every rate above and every ranking
+                   below is computed on medians for this reason.`
+                : `Mean and median are close (${d.skew ?? '—'}x), so this account performs consistently and the
+                   average is a fair description of a typical post.`,
+            `<div class="dual">
+                ${box('Likes', d.likes)}
+                ${box('Comments', d.comments)}
+                ${d.viewsAvailable ? box('Views', d.views) : ''}
+                ${box('Weighted engagement', d.engagement)}
+            </div>`);
+    }
+
+    // ---- score breakdown ----------------------------------------------------
+    function scoreBlock(sb) {
+        if (!sb?.breakdown?.length) return '';
+        return section('Where the score came from', null,
+            sb.breakdown.map(p => {
+                const pctFill = p.max > 0 ? Math.max(0, (p.points / p.max) * 100) : 0;
+                return `<div class="pillar">
+                    <span class="name">${esc(p.pillar)}</span>
+                    <span class="track"><div style="width:${pctFill}%"></div></span>
+                    <span class="pts">${p.points}/${p.max}</span>
+                    <span class="detail">${esc(p.detail)}</span>
+                </div>`;
+            }).join(''));
+    }
+
+    // ---- momentum ----------------------------------------------------------
+    function momentumBlock(mo) {
+        if (!mo?.months?.length) return '';
+        const peak = Math.max(...mo.months.map(m => m.medEngagement ?? m.avgEngagement ?? 0), 1);
+        const badge = mo.direction === 'rising' ? 'b-ok' : mo.direction === 'falling' ? 'b-bad' : 'b-mute';
+
+        return section('Momentum',
+            `Month over month, on the median post. ${mo.partialMonth
+                ? `${esc(mo.partialMonth)} is still in progress and is shown but excluded from the trend — comparing a
+                   part-month against a full one is how a growing account gets told it is collapsing.` : ''}`,
+            `${mo.months.map(m => {
+                const v = m.medEngagement ?? m.avgEngagement ?? 0;
+                return `<div class="mbar">
+                    <span class="m">${esc(m.month)}${m.partial ? '*' : ''}</span>
+                    <span class="track"><div style="width:${(v / peak) * 100}%; ${m.partial ? 'opacity:.4' : ''}"></div></span>
+                    <span class="v">${num(v)}</span>
+                    <span style="color:var(--text-muted); font-size:0.75rem;">${m.posts}p</span>
+                </div>`;
+            }).join('')}
+            <p class="heat-legend">
+                ${mo.direction
+                    ? `Direction: <span class="badge ${badge}">${esc(mo.direction)}</span>
+                       ${mo.changePct != null ? ` ${mo.changePct > 0 ? '+' : ''}${mo.changePct}%` : ''}
+                       ${mo.basis ? `<br><span style="opacity:.75">Basis: ${esc(mo.basis)}</span>` : ''}`
+                    : 'Not enough complete months to read a direction yet.'}
+                ${mo.halfSplit ? `<br>Newest third vs oldest third of the window:
+                    ${num(mo.halfSplit.oldestThirdMedian)} → ${num(mo.halfSplit.newestThirdMedian)}
+                    (${mo.halfSplit.changePct > 0 ? '+' : ''}${mo.halfSplit.changePct}%).` : ''}
+            </p>`);
+    }
+
+    // ---- heatmap -----------------------------------------------------------
+    function heatmapBlock(hm) {
+        if (!hm?.cells?.length) return '';
+        const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const lookup = {};
+        hm.cells.forEach(c => { lookup[`${c.dow}:${c.hour}`] = c; });
+        const peak = Math.max(...hm.cells.map(c => c.medIndex ?? c.avgIndex ?? 0), 1);
+
+        let grid = '<div class="lab"></div>';
+        for (let h = 0; h < 24; h++) grid += `<div class="lab" style="justify-content:center">${h % 3 === 0 ? h : ''}</div>`;
+        days.forEach((d, di) => {
+            grid += `<div class="lab">${d}</div>`;
+            for (let h = 0; h < 24; h++) {
+                const c = lookup[`${di}:${h}`];
+                const v = c ? (c.medIndex ?? c.avgIndex ?? 0) : 0;
+                const a = c ? Math.max(0.12, Math.min(1, v / peak)) : 0;
+                grid += `<div class="cell"${c ? ` style="background:rgba(96,165,250,${a})" title="${d} ${h}:00 — ${c.posts} post(s), index ${v ?? 'n/a'}"` : ''}></div>`;
+            }
+        });
+
+        return section('When posts land best (local time)',
+            hm.reliable ? null : 'Fewer than 20 posts in the window — read this as a sketch, not a schedule.',
+            `<div class="table-wrap"><div class="heat">${grid}</div></div>
+             <p class="heat-legend">Darker = higher median performance index. Best windows:
+                ${hm.bestHours?.length
+                    ? hm.bestHours.slice(0, 4).map(h => `<strong>${h.hour}:00</strong> (${h.medIndex}x, ${h.posts}p)`).join(', ')
+                    : 'not enough posts per slot to call one'}.
+                ${hm.bestDays?.length ? `<br>Strongest days: ${hm.bestDays.slice(0, 3).map(d => `<strong>${esc(d.dowName)}</strong> (${d.medIndex}x)`).join(', ')}.` : ''}
+             </p>`);
+    }
+
+    // ---- generic leaderboard table -----------------------------------------
+    function lbTable(title, note, rows) {
+        if (!rows?.length) return '';
+        return section(title, note, `<div class="table-wrap"><table>
+            <thead><tr><th>${esc(title)}</th><th>Posts</th><th>Share</th><th>Index</th><th>Median engagement</th></tr></thead>
+            <tbody>${rows.map(r => `<tr>
+                <td>${esc(r.key)}</td>
+                <td>${r.posts}</td>
+                <td>${esc(r.share)}</td>
+                <td>${r.medIndex == null
+                        ? `<span class="badge b-mute">too few</span>`
+                        : `<span class="idx ${r.medIndex >= 1.15 ? 'hot' : r.medIndex <= 0.85 ? 'cold' : ''}">${r.medIndex}x</span>`}
+                    ${r.outlierDriven ? ' <span class="badge b-warn">1 post drives this</span>' : ''}</td>
+                <td>${num(r.medEngagement ?? r.avgEngagement)}</td>
+            </tr>`).join('')}</tbody></table></div>`);
+    }
+
+    // ---- copy flags --------------------------------------------------------
+    function flagsBlock(flags) {
+        if (!flags?.length) return '';
+        return section('What the caption itself does',
+            'Each row splits the account against itself. Lift is computed on medians, so a single ' +
+            'breakout post cannot manufacture a "+600% — always use emoji" recommendation.',
+            `<div class="flagrow head"><span>Split</span><span>With</span><span>Without</span><span>Lift</span></div>
+             ${flags.map(f => `<div class="flagrow">
+                <span>${esc(f.with.label)} <span style="color:var(--text-muted)">(${f.with.posts} vs ${f.without.posts} posts)</span>
+                    ${f.note ? `<br><span style="color:var(--warn); font-size:0.72rem;">${esc(f.note)}</span>` : ''}</span>
+                <span class="idx">${f.with.medIndex ?? '—'}</span>
+                <span class="idx">${f.without.medIndex ?? '—'}</span>
+                <span>${f.lift == null ? '—' :
+                    `<span class="badge ${f.reliable ? (f.lift > 0 ? 'b-ok' : 'b-bad') : 'b-mute'}">${f.lift > 0 ? '+' : ''}${f.lift}%</span>`}</span>
+             </div>`).join('')}`);
+    }
+
+    // ---- profile completeness ----------------------------------------------
+    function completenessBlock(c) {
+        if (!c?.checks?.length) return '';
+        return section(`Profile completeness — ${c.score}%`,
+            'The cheapest fixes on the whole report. Nothing here needs a content strategy.',
+            `<div class="grid-2">${c.checks.map(k => `<div class="chk">
+                <span class="dot" style="background:${k.ok ? 'var(--success)' : '#ef4444'}"></span>
+                <span style="${k.ok ? '' : 'color:#fca5a5;font-weight:700;'}">${esc(k.label)}</span>
+             </div>`).join('')}</div>`);
+    }
+
+    // ---- extras ------------------------------------------------------------
+    // Fields that were being scraped and thrown away, plus the three that were
+    // written to the posts table and read by nobody.
+    function extrasBlock(x) {
+        if (!x) return '';
+        let html = '';
+
+        if (x.carousel?.available && x.carousel.byDepth?.length) {
+            html += lbTable('Carousel depth', 'How many cards, and whether more is working.', x.carousel.byDepth);
+        }
+        if (x.aspectRatio?.available) {
+            html += lbTable('Aspect ratio', esc(x.aspectRatio.note), x.aspectRatio.byRatio);
+        }
+        if (x.videoDuration?.available) {
+            html += lbTable('Video length',
+                `Median ${x.videoDuration.medianSeconds}s across ${x.videoDuration.posts} videos.`,
+                x.videoDuration.byBand);
+        }
+        if (x.locations?.top?.length) {
+            html += lbTable('Location tags',
+                `${x.locations.share}% of posts carry a location.`, x.locations.top);
+        }
+
+        const chips = [];
+        if (x.altText) chips.push(kpi('Alt text coverage', `${x.altText.coverage}%`,
+            x.altText.coverage < 50 ? 'var(--warn)' : 'var(--success)'));
+        if (x.audio?.available) chips.push(kpi('Original audio', `${x.audio.originalShare}%`));
+        if (x.taggedUsers?.available) chips.push(kpi('Posts with tagged accounts', `${x.taggedUsers.share}%`));
+        if (x.mentions) chips.push(kpi('Posts with @mentions', `${x.mentions.share}%`));
+        if (x.sponsored?.posts) chips.push(kpi('Paid partnership posts', num(x.sponsored.posts)));
+        if (x.commentsDisabled?.available && x.commentsDisabled.posts)
+            chips.push(kpi('Comments switched off', num(x.commentsDisabled.posts), 'var(--warn)'));
+
+        if (chips.length) html += section('Signals from the media itself', null,
+            `<div class="kpi-grid">${chips.join('')}</div>`);
+
+        const partners = [
+            x.taggedUsers?.top?.length ? `Tagged most: ${x.taggedUsers.top.slice(0,5).map(t => '@' + esc(t.key)).join(', ')}` : '',
+            x.mentions?.top?.length ? `Mentioned most: ${x.mentions.top.slice(0,5).map(t => '@' + esc(t.key)).join(', ')}` : '',
+            x.audio?.top?.length ? `Audio used most: ${x.audio.top.slice(0,3).map(t => esc(t.key)).join('; ')}` : ''
+        ].filter(Boolean);
+        if (partners.length) html += `<p class="heat-legend">${partners.join('<br>')}</p>`;
+
+        return html;
+    }
+
+    // ---- posts -------------------------------------------------------------
+    function postCard(p) {
+        return `<div class="post-card">
+            <p style="color:var(--accent-solid); font-weight:800; margin-bottom:6px;">
+                ${esc(String(p.type || '').toUpperCase())}
+                ${p.carouselCount > 1 ? ` · ${p.carouselCount} cards` : ''}
+                ${p.aspect ? ` · ${esc(p.aspect)}` : ''}
+                ${p.provisional ? ' <span class="badge b-warn">still settling</span>' : ''}
+            </p>
+            <p style="margin-bottom:10px; font-size:0.75rem; color:var(--text-muted); line-height:1.5;">
+                ${p.caption ? esc(p.caption.slice(0, 90)) + (p.caption.length > 90 ? '…' : '') : 'No caption'}</p>
+            <div style="display:flex; justify-content:space-between; font-weight:700; margin-bottom:8px;">
+                <span>♥ ${num(p.likes)}</span><span>💬 ${num(p.comments)}</span><span>▶ ${num(p.views)}</span>
+            </div>
+            ${p.index != null ? `<p style="font-size:0.72rem; color:var(--text-muted); margin-bottom:6px;">
+                <span class="idx ${p.index >= 1.15 ? 'hot' : p.index <= 0.85 ? 'cold' : ''}">${p.index}x</span>
+                vs this account's baseline that month</p>` : ''}
+            ${p.url ? `<a href="${safeUrl(p.url)}" target="_blank" rel="noopener">Open on Instagram</a>` : ''}
+        </div>`;
+    }
+
+    function exemplarsBlock(ex) {
+        const labels = { bestOverall: 'Best overall', bestReel: 'Best reel',
+                         bestCarousel: 'Best carousel', bestStill: 'Best still',
+                         mostCommented: 'Most commented' };
+        const items = Object.entries(labels)
+            .filter(([k]) => ex?.[k])
+            .map(([k, label]) => `<div>
+                <p style="font-size:0.72rem; color:var(--text-muted); font-weight:800; text-transform:uppercase; margin-bottom:6px;">${label}</p>
+                ${postCard(ex[k])}</div>`);
+        return items.length
+            ? section('Templates worth copying', 'The best example of each format this account has already made.',
+                `<div class="post-gallery">${items.join('')}</div>`)
+            : '';
+    }
+
+    // ---- rivals ------------------------------------------------------------
+    function rivalBlock(rep) {
+        const rivals = rep.rivals || [];
+        if (!rivals.length) return '';
+        const m = rep.main;
+        const all = [m, ...rivals];
+
+        const row = (label, fn, hi) => `<tr><td>${label}</td>${all.map((a, i) => `
+            <td>${i === 0 ? `<strong${hi ? ` style="color:${hi}"` : ''}>${fn(a)}</strong>` : fn(a)}</td>`).join('')}</tr>`;
+
+        const b = rep.benchmark;
+        return section('Head-to-head competitor benchmark', null,
+            `<div class="table-wrap"><table>
+                <thead><tr><th>Metric</th>${all.map(a => `<th>@${esc(a.handle)}</th>`).join('')}</tr></thead>
+                <tbody>
+                    ${row('Followers', a => num(a.followers))}
+                    ${row('Engagement rate (median)', a => `${esc(a.engagementRateMedian ?? a.engagementRate ?? '—')}%`, 'var(--accent-solid)')}
+                    ${row('Engagement rate (mean)', a => `${esc(a.engagementRate ?? '—')}%`)}
+                    ${row('Views per follower', a => `${esc(a.viralityScoreMedian ?? a.viralityScore ?? '—')}x`)}
+                    ${row('Posts / week', a => esc(a.postsPerWeek ?? '—'))}
+                    ${row('Score', a => `${num(a.score)} (${esc(a.grade || '—')})`)}
+                    ${row('Median likes', a => num(a.distribution?.likes?.median ?? a.avgLikes))}
+                    ${row('Median comments', a => num(a.distribution?.comments?.median ?? a.avgComments))}
+                    ${row('Consistency', a => a.cadence?.consistency != null ? `${a.cadence.consistency}/100` : '—')}
+                    ${row('Momentum', a => a.momentum?.direction ? `${esc(a.momentum.direction)} ${a.momentum.changePct != null ? (a.momentum.changePct > 0 ? '+' : '') + a.momentum.changePct + '%' : ''}` : '—')}
+                    ${row('Profile complete', a => a.completeness?.score != null ? `${a.completeness.score}%` : '—')}
+                    ${row('Reel share', a => a.contentMix?.Reel?.share || '—')}
+                </tbody>
+            </table></div>
+            ${b?.cohort ? `<p class="heat-legend">Cohort of ${b.cohort.accounts}: average ER
+                ${esc(b.cohort.avgEngagementRate)}%, average followers ${num(b.cohort.avgFollowers)}.</p>` : ''}`);
+    }
+
+    // ---- AI narrative ------------------------------------------------------
+    // The block this page has been missing entirely. geminiNarrative() runs on
+    // every single IG report and returns eight populated fields; until now the
+    // page rendered none of them, so the Gemini call was pure cost.
+    function aiBlock(ai, aiStatus, reportId) {
+        // An absent panel used to be silent, so "no Gemini key configured",
+        // "the model hit its output cap" and "the call was rate limited" all
+        // looked identical to "this account has no strategy worth writing".
+        if (!ai) {
+            if (!aiStatus) return '';
+            const canRetry = reportId && aiStatus.reason !== 'no_key';
+            return `<div class="section"><h3 class="block-title">Strategy layer</h3>
+                <div class="warnbox">
+                    <strong>Not generated for this run.</strong><br>
+                    ${esc(aiStatus.message || 'The strategy layer could not be generated.')}<br>
+                    <span style="opacity:.75">Every number above is unaffected — they are computed here, not by the model.</span>
+                    ${canRetry ? `<div style="margin-top:10px;">
+                        <button class="btn-secondary" type="button" data-regen="${esc(reportId)}">Generate it now</button>
+                        <span style="margin-left:8px;opacity:.7;font-size:.8rem;">Re-runs the strategy layer against the data already saved. No scraping, no Apify credit.</span>
+                    </div>` : ''}
+                </div></div>`;
+        }
+        const list = (title, arr) => (arr && arr.length)
+            ? `<h4>${title}</h4><ul>${arr.map(i => `<li>${esc(i)}</li>`).join('')}</ul>` : '';
+
+        return `<div class="ai-panel">
+            ${ai.executive_summary ? `<h4>Executive summary</h4><p>${esc(ai.executive_summary)}</p>` : ''}
+            ${list('Strengths', ai.strengths)}
+            ${list('Weaknesses', ai.weaknesses)}
+            ${list('What rivals are doing that you are not', ai.competitor_insights)}
+            ${list('Content strategy', ai.content_strategy)}
+            ${list('Hashtag strategy', ai.hashtag_strategy)}
+            ${(ai.action_plan_30_days || []).length ? `<h4>Next 30 days</h4>${
+                ai.action_plan_30_days.map(w => `<p style="margin-top:8px;"><strong>${esc(w.week)}</strong></p>
+                    <ul>${(w.actions || []).map(a => `<li>${esc(a)}</li>`).join('')}</ul>`).join('')}` : ''}
+            ${ai.kpi_targets ? `<h4>Targets</h4><ul>${Object.entries(ai.kpi_targets)
+                .map(([k, v]) => `<li>${esc(k.replace(/_/g, ' '))}: ${esc(String(v))}</li>`).join('')}</ul>` : ''}
+        </div>`;
+    }
+
+    // ---- data quality ------------------------------------------------------
+    // An empty section is ambiguous: it could mean the account does nothing,
+    // or it could mean the actor returned nothing. This says which.
+    function dataQualityBlock(dq) {
+        if (!dq) return '';
+        return `<details class="explainer" style="margin-top:30px;">
+            <summary><span class="ex-dot"></span><strong>What this run actually captured</strong></summary>
+            <div class="ex-body">
+                <p class="block-note">${dq.postsSeen} posts, ${dq.provisional} of them still inside the settle window.</p>
+                <div class="grid-2">${(dq.fields || []).map(f => `<div class="chk">
+                    <span class="dot" style="background:${f.present ? 'var(--success)' : 'var(--text-muted)'}"></span>
+                    <span style="${f.present ? '' : 'color:var(--text-muted);'}">${esc(f.label)}</span>
+                </div>`).join('')}</div>
+                ${dq.missing?.length ? `<p class="heat-legend" style="margin-top:14px;">
+                    The actor did not return: ${dq.missing.map(esc).join(', ')}.
+                    Sections depending on those fields are hidden rather than shown empty — that is a fact
+                    about this scrape, not about the account.</p>` : ''}
+                ${dq.actorKeys?.length ? `<p class="heat-legend" style="margin-top:10px;">
+                    <strong>${dq.actorKeys.length} fields returned:</strong>
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:0.7rem; opacity:.75;">
+                    ${dq.actorKeys.map(esc).join(', ')}</span></p>` : ''}
+            </div>
+        </details>`;
+    }
+
+    // ---- the whole report ---------------------------------------------------
+    let currentReportId = null;
+
+    function igCover(rep, meta = {}) {
+        const m = rep.main || {};
+        const el = meta.elapsedSec;
+        const elTxt = el ? (el < 90 ? Math.round(el) + ' seconds' : Math.round(el / 60) + ' minutes') : null;
+        return ELCover.html({
+            kind: rep.competitors?.length ? 'Instagram performance audit — with benchmark' : 'Instagram performance audit',
+            target: '@' + (m.handle || 'account'),
+            sub: [m.fullName, m.category].filter(Boolean).join(' — ') ||
+                 `${num(m.postsAnalyzed)} posts scored against the account's own median`,
+            stats: [
+                { value: m.postsAnalyzed, label: 'posts analysed' },
+                m.followers ? { value: m.followers, label: 'followers' } : null,
+                (m.engagementRateMedian ?? m.engagementRate) != null ? { value: `${m.engagementRateMedian ?? m.engagementRate}%`, label: 'median engagement' } : null,
+                { value: `${m.score ?? '—'}/100`, label: 'health score' },
+                elTxt ? { value: el < 90 ? Math.round(el) + 's' : Math.round(el / 60) + ' min', label: 'run time' } : null
+            ],
+            what: [
+                `EdgeLead pulled the account's public posts, indexed each one against the account's own median so formats, captions, hashtags and posting times are compared on equal footing, and wrote the fixes in priority order.`,
+                elTxt ? `Scraping, scoring and the strategy layer took ${elTxt}. The same audit by hand takes an analyst a full day.`
+                      : `Scraping, scoring and the strategy layer complete in minutes. The same audit by hand takes an analyst a full day.`
+            ],
+            elapsedSec: el, date: meta.date
+        });
+    }
+
+    function renderReportDashboard(rep, reportId, meta = {}) {
+        // Guard the shape. The vault used to hand this function Facebook
+        // payloads because /api/reports-history returned every platform; the
+        // server filters now, but a clear message beats a blank card if a
+        // stale response ever gets here again.
+        if (!rep) return;
+        if (!rep.main) {
+            $('pdf-content').innerHTML =
+                '<div class="warnbox">This report was not produced by the Instagram engine, so it cannot be ' +
+                'displayed here. Open it from the page that generated it.</div>';
+            $('report-output-card').classList.remove('hidden');
+            return;
+        }
+        currentReportId = reportId || null;
+        const m = rep.main;
+
+        const html = [
+            igCover(rep, meta),
+            headerBlock(m),
+            (rep.warnings || []).length
+                ? `<div class="warnbox">${rep.warnings.map(esc).join('<br>')}</div>` : '',
+
+            distributionBlock(m.distribution),
+            scoreBlock(m.scoreBreakdown),
+            momentumBlock(m.momentum),
+
+            rivalBlock(rep),
+
+            m.topPosts?.length
+                ? section('Top performing posts', null, `<div class="post-gallery">${m.topPosts.map(postCard).join('')}</div>`) : '',
+            exemplarsBlock(m.exemplars),
+            m.provisional?.posts?.length
+                ? section('Posted too recently to score',
+                    'These are shown but kept out of every rate and ranking above. A reel scraped hours after ' +
+                    'posting has barely started collecting views — counting it as a finished post is how a ' +
+                    'healthy account gets told its newest content is failing.',
+                    `<div class="post-gallery">${m.provisional.posts.map(postCard).join('')}</div>`) : '',
+            m.bottomPosts?.length
+                ? section('Weakest posts',
+                    'Not a naming and shaming exercise — these are the patterns to stop repeating.',
+                    `<div class="post-gallery">${m.bottomPosts.map(postCard).join('')}</div>`) : '',
+
+            lbTable('Format', 'Indexed against this account\'s own median for the month each post went out, so growth over the window does not make old posts look like failures.', m.leaderboards?.format),
+            heatmapBlock(m.heatmap),
+            flagsBlock(m.flags),
+            lbTable('Caption length', null, m.leaderboards?.length),
+            lbTable('Opening line', 'How the first line of the caption is built.', m.leaderboards?.opening),
+            lbTable('Topic', 'Recurring subjects, pulled from caption text.', m.leaderboards?.topic),
+
+            m.topHashtags?.length ? section('Hashtags', 'Ranked by use, with the median engagement of the posts carrying them.',
+                `<div class="table-wrap"><table>
+                    <thead><tr><th>Tag</th><th>Uses</th><th>Avg engagement</th><th>Index</th></tr></thead>
+                    <tbody>${m.topHashtags.map(h => `<tr>
+                        <td>#${esc(h.tag)}</td><td>${h.uses}</td><td>${num(h.avgEngagement)}</td>
+                        <td>${h.avgIndex != null ? `<span class="idx ${h.avgIndex >= 1.15 ? 'hot' : h.avgIndex <= 0.85 ? 'cold' : ''}">${h.avgIndex}x</span>` : '—'}</td>
+                    </tr>`).join('')}</tbody></table></div>`) : '',
+
+            extrasBlock(m.extras),
+            completenessBlock(m.completeness),
+
+            m.cadence ? section('Posting rhythm', null, `<div class="kpi-grid">
+                ${kpi('Posts / week', m.cadence.postsPerWeek)}
+                ${kpi('Median gap', `${m.cadence.medianGapDays ?? '—'}d`)}
+                ${kpi('Longest gap', `${m.cadence.longestGapDays ?? '—'}d`)}
+                ${kpi('Consistency', m.cadence.consistency != null ? `${m.cadence.consistency}/100` : '—')}
+                ${kpi('Last post', m.cadence.lastPostDaysAgo != null ? `${m.cadence.lastPostDaysAgo}d ago` : '—',
+                      m.cadence.silent ? 'var(--warn)' : null)}
+                ${kpi('Active weeks', m.cadence.activeWeeks)}
+            </div>`) : '',
+
+            (rep.recommendations || []).length
+                ? section('Fix these first', null,
+                    `<ul style="padding-left:20px; font-size:0.86rem; line-height:1.75;">
+                     ${rep.recommendations.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`) : '',
+
+            aiBlock(rep.ai, rep.aiStatus, currentReportId),
+            dataQualityBlock(m.dataQuality)
+        ].join('');
+
+        $('pdf-content').innerHTML = html;
+        $('report-output-card').classList.remove('hidden');
+        $('report-output-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        EL.reportActions('report-actions', { reportId, jobId: meta.jobId });
+    }
+
+    // ---------- vault ----------
+    $('refresh-vault').addEventListener('click', loadSavedReports);
+
+    async function loadSavedReports() {
+        const container = $('saved-reports-list');
+        try {
+            // ?type= keeps Competitor Intel runs out of this vault (they live in
+            // ig-competitors.html). Without it, opening one switched tabs and
+            // rendered below the fold, which looked like a redirect.
+            const data = await EL.api('/api/reports-history?type=ig_report');
+            savedReports = data.reports || [];
+
+            if (!savedReports.length) {
+                container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">No saved reports found.</p>';
+                return;
+            }
+
+            container.innerHTML = savedReports.map((r, idx) => `
+                <div class="row-card">
+                    <div>
+                        <strong>@${esc(r.target_handle)}</strong>
+                        <div class="meta">Grade ${esc(r.grade ?? '—')} · ER ${esc(r.engagement_rate ?? '—')}% ·
+                            ${esc(new Date(r.created_at).toLocaleDateString())}
+                            ${r.ai_status && r.ai_status.ok === false ? ' · <span style="color:var(--warn)">no strategy layer</span>' : ''}</div>
+                    </div>
+                    <button class="btn-secondary" data-idx="${idx}">👁️ Inspect Report</button>
+                </div>
+            `).join('');
+        } catch (err) {
+            container.innerHTML =
+                `<p style="color:#ef4444; font-size:0.85rem;">Could not load the vault: ${esc(err.message)}</p>`;
+        }
+    }
+
+    // The vault list no longer carries report_json — it was shipping every
+    // full payload the user had ever generated just to draw a list of names.
+    // The payload is fetched for the one report actually opened.
+    $('saved-reports-list').addEventListener('click', async e => {
+        const btn = e.target.closest('button[data-idx]');
+        if (!btn) return;
+        const row = savedReports[Number(btn.dataset.idx)];
+        if (!row) return;
+
+        const label = btn.textContent;
+        btn.disabled = true; btn.textContent = 'Loading…';
+        try {
+            const { report } = await EL.api('/api/report/' + encodeURIComponent(row.id));
+            if (!report?.report_json) throw new Error('This report has no stored payload.');
+            document.querySelector('.segment-btn[data-tab="builder"]').click();
+            renderReportDashboard(report.report_json, report.id, { date: report.created_at });
+        } catch (err) {
+            alert('Could not open the report: ' + err.message);
+        } finally {
+            btn.disabled = false; btn.textContent = label;
+        }
+    });
+
+    // Free retry of the strategy layer for a report already in the vault.
+    document.addEventListener('click', async e => {
+        const btn = e.target.closest('button[data-regen]');
+        if (!btn) return;
+        const id = btn.dataset.regen;
+        btn.disabled = true; btn.textContent = 'Generating…';
+        try {
+            const res = await EL.api(`/api/report/${encodeURIComponent(id)}/regenerate-narrative`, { method: 'POST' });
+            if (!res.success) throw new Error(res.error || 'Still could not generate it.');
+            const { report } = await EL.api('/api/report/' + encodeURIComponent(id));
+            renderReportDashboard(report.report_json, report.id, { date: report.created_at });
+        } catch (err) {
+            btn.disabled = false; btn.textContent = 'Generate it now';
+            alert('Could not generate the strategy layer: ' + err.message);
+        }
+    });
+
+    // ---------- export ----------
+    $('export-pdf').addEventListener('click', () => {
+        const element = $('pdf-content');
+        const targetName = (element.querySelector('.ec-target')?.textContent || 'report').replace('@', '').trim();
+        ELCover.exportPdf(element, `Instagram_Audit_Report_${targetName}.pdf`, { format: 'letter', margin: 0.5 });
+    });
+
+    // ---------- share mode / deep link (phase 10/11) ----------
+    async function openById(id) {
+        const { report } = await EL.api('/api/report/' + encodeURIComponent(id));
+        if (!report?.report_json) throw new Error('This report has no stored payload.');
+        renderReportDashboard(report.report_json, report.id, { date: report.created_at });
+    }
+    if (EL.isShared()) {
+        try { const d = await EL.loadShared(); renderReportDashboard(d.report.report_json, d.report.id, { date: d.report.created_at }); }
+        catch (err) { $('pdf-content').innerHTML = `<div class="warnbox">${esc(err.message)}</div>`; $('report-output-card').classList.remove('hidden'); }
+        return;
+    }
+    loadSavedReports();
+    if (EL.reportParam()) openById(EL.reportParam()).catch(err => alert('Could not open the report: ' + err.message));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — Demand Feed</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* fb-leads.html — page-specific only. Shared rules live in app.css. */
+    body { background: var(--bg-color); color: var(--text-primary); padding: 110px 20px 60px; max-width: 1400px;
+        margin: 0 auto; min-height: 100vh;
+        background-image: radial-gradient(circle at 50% 0%, rgba(59,130,246,0.08) 0%, transparent 50%); }
+    .card { background: var(--card-bg); backdrop-filter: blur(16px); padding: 30px; border-radius: 16px;
+        margin-bottom: 22px; border: 1px solid var(--card-border); }
+    .card-subtitle { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 20px; line-height: 1.55; }
+    label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin-bottom: 7px; }
+    input[type="text"], select { width: 100%; padding: 12px 14px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
+    .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; align-items: end; }
+    .btn-secondary { background: rgba(255,255,255,0.05); color: var(--text-primary); border: 1px solid var(--card-border);
+        padding: 9px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem; }
+    .btn-go { background: var(--accent-glow); border: none; color: #fff; font-weight: 800; }
+    .btn-mini { padding: 6px 11px; font-size: 0.75rem; }
+    .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+    .stat { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 13px 18px; }
+    .stat span { display: block; font-size: 0.7rem; color: var(--text-muted); font-weight: 700; }
+    .stat strong { font-size: 1.3rem; font-weight: 800; color: #fff; }
+    .lead { background: var(--input-bg); border: 1px solid var(--card-border); border-left: 3px solid var(--card-border);
+        border-radius: 12px; padding: 20px; margin-bottom: 14px; }
+    .lead.u-high { border-left-color: var(--danger); }
+    .lead.u-medium { border-left-color: var(--warn); }
+    .lead.u-low { border-left-color: rgba(148,163,184,0.5); }
+    .lead-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+    .lead-meta { font-size: 0.76rem; color: var(--text-muted); font-weight: 600; }
+    .lead-snippet { font-size: 0.95rem; line-height: 1.65; color: var(--text-primary); margin-bottom: 6px; }
+    .lead-full { font-size: 0.83rem; line-height: 1.6; color: var(--text-muted); margin-bottom: 14px;
+        max-height: 0; overflow: hidden; transition: max-height .25s ease; }
+    .lead-full.is-open { max-height: 400px; overflow-y: auto; }
+    .lead-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .lead-actions .spacer { flex: 1; }
+    .score { display: flex; align-items: center; gap: 8px; }
+    .score strong { font-size: 1.5rem; font-weight: 800; color: var(--accent-solid); font-family: 'JetBrains Mono', monospace; }
+    .score span { font-size: 0.68rem; color: var(--text-muted); font-weight: 700; line-height: 1.2; }
+    .badge { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 0.7rem; font-weight: 800; margin-right: 5px; }
+    .b-blue { background: rgba(96,165,250,0.16); color: var(--accent-solid); }
+    .status-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pill { background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); color: var(--text-muted);
+        padding: 6px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; cursor: pointer; }
+    .pill.is-on { background: var(--accent-glow); border-color: transparent; color: #fff; }
+    .empty { color: var(--text-muted); font-size: 0.88rem; line-height: 1.7; padding: 24px 0; }
+    .privacy { background: rgba(96,165,250,0.06); border: 1px solid rgba(96,165,250,0.25); border-radius: 10px;
+        padding: 14px 16px; font-size: 0.79rem; color: var(--text-muted); line-height: 1.6; margin-top: 18px; }
+</style>
+</head>
+<body>
+
+<main class="el-page">
+
+    <details class="explainer" open>
+        <summary><span class="ex-dot"></span>How the Demand Feed works — read this first</summary>
+        <div class="ex-body">
+
+            <div class="ex-note info" style="margin-top:0;">
+                <b>The big picture.</b> Edgelead is one app with two halves. The Instagram half (Lead Finder,
+                Performance Audit, Competitor Intel) works on accounts. The Facebook half is these four pages, and they
+                all run on one engine called <code>fb_community</code> — an admin has to grant you that engine and you
+                have to save an Apify token for it, or every Facebook page will just return "access denied".
+                Everything on the Facebook side is about <b>groups only</b>, and <b>public groups only</b>. A private
+                group is skipped on purpose, because reading it would need a logged-in session and this tool will not
+                do that.
+            </div>
+
+            <h3>The idea</h3>
+            <p class="ex-lead">This page is the lead generator, and it is a <strong>byproduct</strong>. You never "run"
+                the Demand Feed. It fills itself every time discovery or an audit scrapes a room.</p>
+            <p>Run discovery once, run an audit once, then come back here and the leads are already sitting there.
+                These are people who have publicly said, in the last few days, that they want to buy something. That is
+                a kind of lead that does not exist on Instagram.</p>
+
+            <h3>How the detection works</h3>
+            <p>While scraping, every single post is run through a buying-intent phrase detector that works in
+                <strong>both English and Bangla</strong>:</p>
+            <div class="ex-grid">
+                <div class="ex-tile"><b>English triggers</b><span>"looking for", "does anyone know", "can anyone
+                    recommend", "need a", "need someone who", "where can I get", "suggest me", "any good", "in search
+                    of", "who can help", "best place for", "hiring", "urgently need"</span></div>
+                <div class="ex-tile"><b>Bangla triggers</b><span>খুঁজছি / খুজছি / খুঁজতেছি, দরকার / প্রয়োজন / লাগবে,
+                    কেউ কি জানেন, কেউ কি আছেন, কোথায় পাবো, সাজেস্ট করুন, রেফার করুন</span></div>
+            </div>
+            <p>Most posts produce nothing, and that is correct — a room where every post is a demand signal is a room
+                full of spam. Each post also produces <strong>one signal at most</strong>, built from its strongest
+                phrase, so the same lead can never be counted twice.</p>
+
+            <h3>What each lead gets tagged with</h3>
+            <div class="ex-grid">
+                <div class="ex-tile"><b>Category</b><span>home services, auto, real estate, food, health, education,
+                    tech, beauty, events, legal &amp; finance, logistics, jobs — or "other". Detected in English and
+                    Bangla both.</span></div>
+                <div class="ex-tile"><b>Urgency</b><span><b>High</b> for urgent / asap / today / tonight / emergency /
+                    জরুরি / এখনই. <b>Medium</b> for "this week", "soon", "by Friday". Otherwise <b>low</b>.</span></div>
+                <div class="ex-tile"><b>Lead score, out of 100</b><span>Phrase strength + urgency boost + how specific
+                    the post is + how much engagement it already has + how recent it is. Anything 60 or above is counted
+                    as <b>hot</b>.</span></div>
+            </div>
+
+            <h3>How you use this page</h3>
+            <ol class="ex-steps">
+                <li>Open it. Leads are already there if you have run discovery or an audit.</li>
+                <li>Filter by <strong>room, category, urgency</strong>, or search a keyword like "plumber", "tutor" or
+                    "flat".</li>
+                <li>Read the card — it shows the exact trigger phrase, a snippet of what they asked for, how long ago
+                    they posted, and the score.</li>
+                <li>Click through to the <strong>live Facebook post and reply there</strong>. That is the whole play.
+                    The tool finds the conversation; you have the conversation.</li>
+                <li>Move the lead through the pipeline as you work it, and add notes.</li>
+            </ol>
+
+            <div class="ex-flow">
+                <span class="ex-chip">New</span><span class="ex-arrow">&rarr;</span>
+                <span class="ex-chip">Saved</span><span class="ex-arrow">&rarr;</span>
+                <span class="ex-chip">Contacted</span><span class="ex-arrow">&rarr;</span>
+                <span class="ex-chip">Won</span>
+                <span class="ex-arrow" style="margin-left:8px;">or</span>
+                <span class="ex-chip">Dropped</span>
+            </div>
+            <p>Dropped leads are hidden from the default view but never deleted, so a lead you dismissed today will not
+                come back to clutter the feed tomorrow. <strong>Export CSV</strong> gives you the whole working list to
+                take into a spreadsheet or hand to someone else.</p>
+
+            <hr class="ex-hr">
+
+            <div class="ex-note good">
+                <b>On privacy — this is deliberate.</b> The tool never stores anyone's name. The post author is stored
+                as a one-way hash, purely so it can count unique posters. <b>The link to the post is the identity.</b>
+                You click through and reply on Facebook like a normal person. Nothing here builds a contact database of
+                private individuals.
+            </div>
+
+            <div class="ex-note warn">
+                <b>Speed matters more than volume here.</b> The lead score already fades with age, because a
+                "need a plumber today" post is worthless a week later. Work the high-urgency, high-score rows first and
+                re-run your audits regularly to keep the top of the feed fresh.
+            </div>
+
+        </div>
+    </details>
+
+
+
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+            <div style="flex:1; min-width:260px;">
+                <h2 class="card-title">Demand feed</h2>
+                <p class="card-subtitle" style="margin:0;">Every "anyone know a good…", "looking for…", "need someone
+                    who…" pulled out of your audited rooms. This is a lead that does not exist on Instagram. Click through
+                    to the live post and reply there — that is the whole play.</p>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn-secondary" type="button" id="reload">Refresh</button>
+                <button class="btn-secondary btn-go" type="button" id="export">Export CSV</button>
+            </div>
+        </div>
+
+        <div class="filters" style="margin-top:22px;">
+            <div>
+                <label for="f-group">Room</label>
+                <select id="f-group"><option value="">All rooms</option></select>
+            </div>
+            <div>
+                <label for="f-category">Category</label>
+                <select id="f-category"><option value="">All categories</option></select>
+            </div>
+            <div>
+                <label for="f-urgency">Urgency</label>
+                <select id="f-urgency">
+                    <option value="">Any</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+            </div>
+            <div>
+                <label for="f-sort">Sort by</label>
+                <select id="f-sort">
+                    <option value="score">Lead score</option>
+                    <option value="recent">Most recent</option>
+                </select>
+            </div>
+            <div>
+                <label for="f-q">Search text</label>
+                <input type="text" id="f-q" placeholder="plumber, tutor, flat…" autocomplete="off">
+            </div>
+        </div>
+
+        <div style="margin-top:18px;">
+            <label>Pipeline</label>
+            <div class="status-pills" id="status-pills">
+                <button class="pill is-on" type="button" data-status="">All</button>
+                <button class="pill" type="button" data-status="new">New</button>
+                <button class="pill" type="button" data-status="saved">Saved</button>
+                <button class="pill" type="button" data-status="contacted">Contacted</button>
+                <button class="pill" type="button" data-status="won">Won</button>
+                <button class="pill" type="button" data-status="dropped">Dropped</button>
+            </div>
+        </div>
+
+        <div class="stat-row" id="stats"></div>
+
+        <div class="privacy">Member names are never stored. Each signal keeps a salted one-way hash of the author plus the
+            public post link, which is enough to act on the lead and keeps you clear of storing identifiable personal data
+            without a basis.</div>
+    </div>
+
+    <div id="feed"><p class="empty">Loading signals…</p></div>
+
+</main>
+
+<script src="header.js"></script>
+<script>
+(async function () {
+    await EL.init({ engine: 'fb_community', page: 'fb-leads.html' });
+
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /**
+     * esc() stops an attribute breakout but leaves `javascript:` intact, and
+     * every URL on this page came from a scraped post. Only http(s) is let
+     * through; anything else becomes an inert '#'.
+     */
+    const safeUrl = u => {
+        const v = String(u == null ? '' : u).trim();
+        return /^https?:\/\//i.test(v) ? esc(v) : '#';
+    };
+
+    const num = v => (v == null || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
+
+    let status = '';
+    let signals = [];
+
+    function when(d) {
+        if (!d) return 'unknown date';
+        const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+        if (days <= 0) return 'today';
+        if (days === 1) return 'yesterday';
+        if (days < 30) return `${days} days ago`;
+        return new Date(d).toLocaleDateString();
+    }
+
+    // ---------- filters ----------
+    $('status-pills').addEventListener('click', e => {
+        const btn = e.target.closest('[data-status]');
+        if (!btn) return;
+        status = btn.dataset.status;
+        $('status-pills').querySelectorAll('.pill').forEach(p => p.classList.toggle('is-on', p === btn));
+        load();
+    });
+
+    ['f-group', 'f-category', 'f-urgency', 'f-sort'].forEach(id => $(id).addEventListener('change', load));
+    let qTimer = null;
+    $('f-q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(load, 400); });
+    $('reload').addEventListener('click', load);
+
+    async function loadRooms() {
+        try {
+            const { groups } = await EL.api('/api/fb/groups');
+            $('f-group').innerHTML = '<option value="">All rooms</option>' +
+                groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('');
+        } catch {}
+    }
+
+    function qs() {
+        const p = new URLSearchParams();
+        if ($('f-group').value) p.set('group_id', $('f-group').value);
+        if ($('f-category').value) p.set('category', $('f-category').value);
+        if ($('f-urgency').value) p.set('urgency', $('f-urgency').value);
+        if ($('f-q').value.trim()) p.set('q', $('f-q').value.trim());
+        if (status) p.set('status', status);
+        p.set('sort', $('f-sort').value);
+        p.set('limit', '300');
+        return p.toString();
+    }
+
+    async function load() {
+        const box = $('feed');
+        box.innerHTML = '<p class="empty">Loading signals…</p>';
+        try {
+            const res = await EL.api(`/api/fb/demand-feed?${qs()}`);
+            signals = res.signals;
+            renderStats(res.counts);
+            fillCategories(res.counts);
+
+            if (!signals.length) {
+                box.innerHTML = `<div class="card"><p class="empty">No demand signals match these filters.
+                    Signals are extracted during a Community Audit — run one from the
+                    <a href="fb-audit.html" style="color:var(--accent-solid)">audit page</a> and they land here automatically.</p></div>`;
+                return;
+            }
+            box.innerHTML = signals.map(card).join('');
+            wire();
+        } catch (err) {
+            box.innerHTML = `<div class="card"><p class="empty">Could not load the feed: ${esc(err.message)}</p></div>`;
+        }
+    }
+
+    function renderStats(counts) {
+        const total = signals.length;
+        const high = signals.filter(s => s.urgency === 'high').length;
+        const fresh = signals.filter(s => s.posted_at && (Date.now() - new Date(s.posted_at).getTime()) < 7 * 86400000).length;
+        const open = signals.filter(s => s.status === 'new').length;
+        $('stats').innerHTML =
+            `<div class="stat"><span>Signals shown</span><strong>${num(total)}</strong></div>
+             <div class="stat"><span>Urgent</span><strong style="color:#fca5a5">${num(high)}</strong></div>
+             <div class="stat"><span>Last 7 days</span><strong style="color:var(--success)">${num(fresh)}</strong></div>
+             <div class="stat"><span>Untouched</span><strong>${num(open)}</strong></div>`;
+    }
+
+    let catsFilled = false;
+    function fillCategories(counts) {
+        if (catsFilled || !counts?.byCategory) return;
+        const cats = Object.keys(counts.byCategory).sort();
+        if (!cats.length) return;
+        const cur = $('f-category').value;
+        $('f-category').innerHTML = '<option value="">All categories</option>' +
+            cats.map(c => `<option value="${esc(c)}" ${c === cur ? 'selected' : ''}>${esc(c.replace(/_/g, ' '))}</option>`).join('');
+        catsFilled = true;
+    }
+
+    const statusBadge = s => ({
+        new: '<span class="badge b-blue">new</span>',
+        saved: '<span class="badge b-mute">saved</span>',
+        contacted: '<span class="badge b-warn">contacted</span>',
+        won: '<span class="badge b-ok">won</span>',
+        dropped: '<span class="badge b-mute">dropped</span>'
+    }[s] || '');
+
+    function card(s) {
+        return `
+        <div class="lead u-${esc(s.urgency)}" data-id="${esc(s.id)}">
+            <div class="lead-top">
+                <div style="flex:1; min-width:240px;">
+                    <div class="lead-meta">${esc(s.group_name || 'unknown room')} · ${when(s.posted_at)} ·
+                        ${s.source_type === 'comment' ? 'said in a comment' : 'said in a post'}</div>
+                    <div style="margin-top:7px;">
+                        <span class="badge ${s.urgency === 'high' ? 'b-bad' : s.urgency === 'medium' ? 'b-warn' : 'b-mute'}">${esc(s.urgency)} urgency</span>
+                        <span class="badge b-blue">${esc(String(s.category).replace(/_/g, ' '))}</span>
+                        <span class="badge b-mute">${esc(String(s.intent).replace(/_/g, ' '))}</span>
+                        ${statusBadge(s.status)}
+                    </div>
+                </div>
+                <div class="score"><strong>${Math.round(Number(s.lead_score ?? s.score ?? 0))}</strong><span>lead<br>score</span></div>
+            </div>
+
+            <p class="lead-snippet">${esc(s.snippet || '')}</p>
+            <div class="lead-full" data-full>${esc(s.full_text || '')}</div>
+
+            <div class="lead-actions">
+                ${s.full_text && s.full_text.length > (s.snippet || '').length
+                    ? '<button class="btn-secondary btn-mini" type="button" data-expand>Show full post</button>' : ''}
+                ${s.source_url ? `<a class="btn-secondary btn-mini" href="${safeUrl(s.source_url)}" target="_blank" rel="noopener">Open in Facebook →</a>` : ''}
+                <span class="spacer"></span>
+                <button class="btn-secondary btn-mini" type="button" data-set="saved">Save</button>
+                <button class="btn-secondary btn-mini" type="button" data-set="contacted">Contacted</button>
+                <button class="btn-secondary btn-mini" type="button" data-set="won">Won</button>
+                <button class="btn-secondary btn-mini" type="button" data-set="dropped">Drop</button>
+            </div>
+        </div>`;
+    }
+
+    function wire() {
+        $('feed').querySelectorAll('.lead').forEach(el => {
+            const id = el.dataset.id;
+            const exp = el.querySelector('[data-expand]');
+            if (exp) exp.addEventListener('click', () => {
+                const f = el.querySelector('[data-full]');
+                f.classList.toggle('is-open');
+                exp.textContent = f.classList.contains('is-open') ? 'Hide full post' : 'Show full post';
+            });
+            el.querySelectorAll('[data-set]').forEach(b => b.addEventListener('click', async () => {
+                b.disabled = true;
+                try {
+                    await EL.api(`/api/fb/demand/${id}`, { method: 'PATCH', body: { status: b.dataset.set } });
+                    const s = signals.find(x => x.id === id);
+                    if (s) s.status = b.dataset.set;
+                    if (status && status !== b.dataset.set) { el.remove(); }
+                    else {
+                        el.querySelector('.badge:last-of-type')?.remove();
+                        el.querySelector('.lead-top > div > div:last-child')
+                          .insertAdjacentHTML('beforeend', statusBadge(b.dataset.set));
+                    }
+                } catch (err) { alert(err.message); }
+                finally { b.disabled = false; }
+            }));
+        });
+    }
+
+    // ---------- CSV ----------
+    $('export').addEventListener('click', async () => {
+        const btn = $('export');
+        btn.disabled = true; btn.textContent = 'Exporting…';
+        try {
+            const token = await EL.token();
+            const p = new URLSearchParams();
+            if ($('f-group').value) p.set('group_id', $('f-group').value);
+            if ($('f-category').value) p.set('category', $('f-category').value);
+            if ($('f-urgency').value) p.set('urgency', $('f-urgency').value);
+            if ($('f-q').value.trim()) p.set('q', $('f-q').value.trim());
+            if (status) p.set('status', status);
+            const r = await fetch(`${EL.BACKEND_URL}/api/fb/demand-export.csv?${p}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!r.ok) throw new Error(`Export failed (${r.status})`);
+            const blob = await r.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'edgelead_demand_feed.csv';
+            a.click();
+            URL.revokeObjectURL(a.href);
+        } catch (err) { alert(err.message); }
+        finally { btn.disabled = false; btn.textContent = 'Export CSV'; }
+    });
+
+    await loadRooms();
+    load();
+})();
+</script>
+</body>
+</html>

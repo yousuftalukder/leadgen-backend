@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — FB Communities</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* fb-communities.html — page-specific only. Shared rules live in app.css. */
+    h3.block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin-bottom: 12px; }
+    input[type="text"], input[type="number"], textarea, select { width: 100%; padding: 14px 16px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem;
+        font-weight: 500; font-family: inherit; }
+    textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 20px; }
+    .check { display: flex; align-items: center; gap: 9px; font-size: 0.86rem; color: var(--text-primary);
+        font-weight: 600; margin-top: 14px; cursor: pointer; }
+    td { padding: 11px 10px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); vertical-align: top; }
+    .rv { display: flex; align-items: center; gap: 9px; min-width: 120px; }
+    .rv-bar { flex: 1; height: 7px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; }
+    .rv strong { font-size: 0.9rem; font-weight: 800; width: 26px; text-align: right; }
+    .sticky-actions { position: sticky; bottom: 0; background: rgba(6,9,19,0.94); backdrop-filter: blur(10px);
+        border-top: 1px solid var(--card-border); padding: 16px 0; margin-top: 18px; display: flex; gap: 12px;
+        align-items: center; flex-wrap: wrap; }
+    .sticky-actions .count { font-size: 0.85rem; color: var(--text-muted); font-weight: 700; margin-right: auto; }
+
+    .est-warn { margin: 10px 0 0; font-size: 0.8rem; font-weight: 700; line-height: 1.5; padding: 10px 12px;
+        border-radius: 8px; }
+    .est-warn.hidden { display: none; }
+    .est-warn.is-over { color: #fca5a5; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.35); }
+    .est-warn.is-tight { color: #fcd34d; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); }
+</style>
+</head>
+<body>
+
+<main class="el-page">
+
+    <details class="explainer" open>
+        <summary><span class="ex-dot"></span>How FB Communities works — read this first</summary>
+        <div class="ex-body">
+
+            <div class="ex-note info" style="margin-top:0;">
+                <b>The big picture.</b> Edgelead is one app with two halves. The Instagram half (Lead Finder,
+                Performance Audit, Competitor Intel) works on accounts. The Facebook half is these four pages, and they
+                all run on one engine called <code>fb_community</code> — an admin has to grant you that engine and you
+                have to save an Apify token for it, or every Facebook page will just return "access denied".
+                Everything on the Facebook side is about <b>groups only</b>, and <b>public groups only</b>. A private
+                group is skipped on purpose, because reading it would need a logged-in session and this tool will not
+                do that.
+            </div>
+
+            <h3>The idea</h3>
+            <p class="ex-lead">A group with 80,000 members but no conversation is worthless. A group with 4,000 members
+                where people talk every day is gold. Member count is a vanity number, so this page ignores it and
+                <strong>scores the room instead</strong>.</p>
+            <p>Every candidate group gets a real probe scrape — a shallow sample of recent posts — and the ranking is
+                built from what that sample actually shows. Size is only used as a tiebreaker at the very end.</p>
+
+            <h3>How you use this page</h3>
+            <ol class="ex-steps">
+                <li>Type a <strong>location</strong> (say "Rangpur") and a <strong>niche</strong> ("plumbing"). Or skip
+                    both and paste group URLs straight into the seed box.</li>
+                <li>Press <strong>Discover and score rooms</strong>. Watch the live log — it names each group as it
+                    samples it.</li>
+                <li>It searches Facebook for matching groups, then pulls roughly 25–40 recent posts from each one to
+                    measure how alive it really is.</li>
+                <li>You get a <strong>ranked list with the top 10 flagged</strong>. Tick the rooms you want, then either
+                    "Save as set" or "Send to audit".</li>
+            </ol>
+
+            <h3>How Room Value is calculated (0–100)</h3>
+            <p>Five signals go into the score. Each one saturates, so a room cannot win on one metric alone.</p>
+            <div class="ex-grid">
+                <div class="ex-tile"><b>Liveness — 28%</b><span>Posts per day. 15 a day or more scores full marks.</span></div>
+                <div class="ex-tile"><b>Conversation — 30%</b><span>Median comments per post. 10 or more scores full marks. This is the heaviest weight.</span></div>
+                <div class="ex-tile"><b>Diversity — 22%</b><span>How many different people post, versus the same three spammers on repeat.</span></div>
+                <div class="ex-tile"><b>Demand — 20%</b><span>What share of posts are people actively asking to buy something. 20% of posts saturates it.</span></div>
+                <div class="ex-tile"><b>Permission — multiplier</b><span>The app reads the group rules. Promotion banned = score cut by 25%. Posts need admin approval = cut another 25%.</span></div>
+                <div class="ex-tile"><b>Size — tiebreaker only</b><span>Adds a maximum of 5 points, on a log scale. It can break a tie, never win one.</span></div>
+            </div>
+
+            <h4>The confidence damper</h4>
+            <p>If the scrape only returned 12 posts, the whole score gets pulled down and the room is flagged
+                <strong>provisional</strong>. Twelve posts is not enough to call a room, and a thin sample scoring 58
+                next to a thick sample scoring 28 would be a lie. Anything under 15 posts is labelled
+                "Not enough data — treat as provisional".</p>
+
+            <h4>What the final label means</h4>
+            <div class="ex-scroll">
+                <table class="ex-table">
+                    <thead><tr><th>Score</th><th>Verdict</th><th>What to do</th></tr></thead>
+                    <tbody>
+                        <tr><td>70 – 100</td><td>Prime room</td><td>Audit it properly and start posting.</td></tr>
+                        <tr><td>50 – 69</td><td>Worth working</td><td>Audit it. Solid, not spectacular.</td></tr>
+                        <tr><td>30 – 49</td><td>Marginal</td><td>Only if you have nothing better in that niche.</td></tr>
+                        <tr><td>Under 30</td><td>Dead room — skip it</td><td>Do not waste a scrape on it.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <hr class="ex-hr">
+
+            <h3>Two things you need to know</h3>
+            <div class="ex-note warn">
+                <b>Facebook's group search is genuinely unreliable.</b> Some runs come back with nothing. That is
+                Facebook, not a bug in this tool. When it happens, paste the group URLs into the
+                <b>Seed group URLs</b> box, or use the <b>Add a room manually</b> tab — those always work, and the
+                rooms get scored exactly the same way.
+            </div>
+            <div class="ex-note info">
+                <b>Save your rooms as a set.</b> Tick the rooms you care about and press "Save as set". A set can be
+                re-run later with one click, and because the same rooms are measured again on the same settings, the
+                Community Audit page can draw you a trend line over time.
+            </div>
+
+            <h3>What happens next</h3>
+            <p>Discovery tells you <strong>which</strong> rooms deserve your effort. It does not tell you what to post.
+                For that, send the rooms to <strong>Community Audit</strong>, which pulls a much deeper sample and works
+                out the winning format, intent, length and posting time for each room.</p>
+            <p>One thing happens automatically here though: every scrape on this page also mines buying intent out of
+                the posts it reads, so your <strong>Demand Feed</strong> starts filling with leads the moment discovery
+                finishes. You do not have to run anything to get those.</p>
+
+        </div>
+    </details>
+
+
+
+    <div class="segment-bar">
+        <button class="segment-btn active" type="button" data-tab="find">Find rooms</button>
+        <button class="segment-btn" type="button" data-tab="add">Add a room manually</button>
+        <button class="segment-btn" type="button" data-tab="saved">Saved rooms</button>
+    </div>
+
+    <!-- ================= DISCOVERY ================= -->
+    <section id="tab-find">
+        <div class="card">
+            <h2 class="card-title">Find the rooms worth your time</h2>
+            <p class="card-subtitle">Member count is a vanity number. A 200k group with 4 posts a day is dead; a 6k group
+                with 40 posts a day is where business happens. Every candidate gets a real probe scrape, and Room Value is
+                measured from median comments, unique posters, posting speed and reply latency. Size is only a tiebreaker.</p>
+
+            <div class="grid-2">
+                <div>
+                    <label for="location">Location</label>
+                    <input type="text" id="location" placeholder="Rangpur, Bangladesh" autocomplete="off">
+                </div>
+                <div>
+                    <label for="niche">Niche</label>
+                    <input type="text" id="niche" placeholder="home services / plumbing" autocomplete="off">
+                </div>
+            </div>
+
+            <label for="extra">Extra search phrases <span style="color:var(--text-muted); font-weight:600;">(one per line, optional)</span></label>
+            <textarea id="extra" placeholder="Rangpur buy sell group&#10;রংপুর কমিউনিটি"></textarea>
+
+            <label for="seeds">Seed group URLs <span style="color:var(--text-muted); font-weight:600;">(one per line — use this when search comes back empty)</span></label>
+            <textarea id="seeds" placeholder="https://www.facebook.com/groups/1234567890/&#10;https://www.facebook.com/groups/rangpur-community/"></textarea>
+
+            <div class="grid-2">
+                <div>
+                    <label for="cands">Candidates to probe</label>
+                    <input type="number" id="cands" value="20" min="3" max="50" step="1">
+                </div>
+                <div>
+                    <label for="probe">Posts pulled per probe</label>
+                    <input type="number" id="probe" value="25" min="10" max="60" step="5">
+                </div>
+            </div>
+
+            <label for="tz">Timezone offset for heatmaps (minutes from UTC)</label>
+            <input type="number" id="tz" value="360" step="15">
+
+            <div class="estimate">
+                <div><span>Groups probed</span><strong id="est-groups">20</strong></div>
+                <div><span>Posts pulled</span><strong id="est-posts">500</strong></div>
+                <div><span>Estimated Apify spend</span><strong id="est-usd">$0.00</strong></div>
+                <div><span>Credit available</span><strong id="est-left">—</strong></div>
+            </div>
+            <p id="est-warn" class="est-warn hidden"></p>
+
+            <button class="btn-primary" type="button" id="run">Discover and score rooms</button>
+        </div>
+
+        <div id="job" class="job-panel hidden">
+            <div class="job-head">
+                <strong id="job-step">Starting…</strong>
+                <span id="job-pct" style="font-size:0.8rem; color:var(--accent-solid); font-weight:700;">0%</span>
+            </div>
+            <div class="bar"><div id="job-bar"></div></div>
+            <div class="job-logs" id="job-logs"></div>
+        </div>
+
+        <div id="results" class="card hidden">
+            <h2 class="card-title">Ranked rooms</h2>
+            <p class="card-subtitle" id="results-sub"></p>
+            <div id="warn-box"></div>
+            <div class="table-wrap"><div id="results-table"></div></div>
+        </div>
+    </section>
+
+    <!-- ================= MANUAL ADD ================= -->
+    <section id="tab-add" class="hidden">
+        <div class="card">
+            <h2 class="card-title">Add a room by URL</h2>
+            <p class="card-subtitle">Already know the group? Paste it here. The rules and promo flags you set are enforced
+                downstream — the Post Advisor will refuse to draft a pitch for a room that bans promotion.</p>
+
+            <label for="m-url">Group URL</label>
+            <input type="text" id="m-url" placeholder="https://www.facebook.com/groups/…" autocomplete="off">
+
+            <div class="grid-2">
+                <div>
+                    <label for="m-name">Display name</label>
+                    <input type="text" id="m-name" placeholder="Rangpur Buy &amp; Sell" autocomplete="off">
+                </div>
+                <div>
+                    <label for="m-members">Member count (optional)</label>
+                    <input type="number" id="m-members" placeholder="12000" min="0">
+                </div>
+                <div>
+                    <label for="m-location">Location label</label>
+                    <input type="text" id="m-location" placeholder="Rangpur" autocomplete="off">
+                </div>
+                <div>
+                    <label for="m-niche">Niche</label>
+                    <input type="text" id="m-niche" placeholder="general community" autocomplete="off">
+                </div>
+            </div>
+
+            <label for="m-rules">Stated group rules (paste them — the advisor reads these)</label>
+            <textarea id="m-rules" placeholder="No selling. No links. English and Bangla only…"></textarea>
+
+            <label class="check"><input type="checkbox" id="m-promo"> Promotional posts are allowed here</label>
+            <label class="check"><input type="checkbox" id="m-approval"> Posts go through an admin approval queue</label>
+            <label class="check"><input type="checkbox" id="m-probe" checked> Probe it now to measure Room Value</label>
+
+            <label for="m-tz">Timezone offset (minutes from UTC)</label>
+            <input type="number" id="m-tz" value="360" step="15">
+
+            <button class="btn-primary" type="button" id="m-save">Add room</button>
+            <div class="empty" id="m-note" style="margin-top:14px;"></div>
+        </div>
+    </section>
+
+    <!-- ================= SAVED ================= -->
+    <section id="tab-saved" class="hidden">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+                <div>
+                    <h2 class="card-title">Saved rooms</h2>
+                    <p class="card-subtitle" style="margin:0;">Ranked by Room Value. Tick the rooms you want, then send them
+                        to the audit — you choose there whether they get examined together or one at a time.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-saved">Refresh</button>
+            </div>
+            <div class="table-wrap"><div id="saved-table" class="empty">Loading rooms…</div></div>
+
+            <div class="sticky-actions" id="saved-actions">
+                <span class="count" id="sel-count">0 selected</span>
+                <input type="text" id="set-name" placeholder="Name this set (optional)" style="width:auto; flex:1; min-width:200px;">
+                <button class="btn-secondary" type="button" id="save-set">Save as set</button>
+                <button class="btn-secondary" type="button" id="to-audit">Send to audit →</button>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<script src="header.js"></script>
+<script>
+(async function () {
+    await EL.init({ engine: 'fb_community', page: 'fb-communities.html' });
+
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /**
+     * esc() stops an attribute breakout but leaves `javascript:` intact, and
+     * every URL on this page came from a scraped post. Only http(s) is let
+     * through; anything else becomes an inert '#'.
+     */
+    const safeUrl = u => {
+        const v = String(u == null ? '' : u).trim();
+        return /^https?:\/\//i.test(v) ? esc(v) : '#';
+    };
+
+    const num = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
+    const dateStr = d => d ? new Date(d).toLocaleDateString() : 'never';
+
+
+    let savedGroups = [];
+    const selected = new Set();
+
+    document.querySelectorAll('.segment-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            ['find', 'add', 'saved'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'saved') loadSaved();
+        });
+    });
+
+
+    /**
+     * Turn the estimate response into a plain answer: can this run finish on
+     * the credit that exists right now? A job that pauses at room six is
+     * recoverable, but being told before pressing Run is strictly better.
+     */
+    function showBudget(d, costUsd) {
+        const box = $('est-left'), warn = $('est-warn');
+        if (!box) return;
+        const b = d && d.budget;
+        if (!b) { box.textContent = '—'; if (warn) warn.classList.add('hidden'); return; }
+
+        const left = Number(b.totalRemainingUsd || 0);
+        box.textContent = '$' + left.toFixed(2);
+        box.style.color = left < costUsd ? '#ef4444' : (left - costUsd < costUsd ? '#f59e0b' : '#10b981');
+
+        if (!warn) return;
+        if (b.willPause) {
+            warn.className = 'est-warn is-over';
+            warn.textContent = `This run needs about $${costUsd.toFixed(2)} but only $${left.toFixed(2)} is available. ` +
+                `It will start, save what it can, then pause and wait for a key with credit.`;
+        } else if (left - costUsd < costUsd) {
+            warn.className = 'est-warn is-tight';
+            warn.textContent = `This run fits, but it leaves under one more run's worth of credit this cycle.`;
+        } else {
+            warn.className = 'est-warn hidden';
+        }
+    }
+
+    // ---------- estimate ----------
+    let estTimer = null;
+    function estimate() {
+        const groups = Math.max(3, Math.min(50, parseInt($('cands').value || '20', 10)));
+        const posts = Math.max(10, Math.min(60, parseInt($('probe').value || '25', 10)));
+        $('est-groups').textContent = groups;
+        $('est-posts').textContent = (groups * posts).toLocaleString();
+        clearTimeout(estTimer);
+        estTimer = setTimeout(async () => {
+            try {
+                const d = await EL.api(`/api/fb/estimate-credits?groups=${Math.min(groups, 10)}&posts=${posts}`);
+                const scaled = d.estimatedUsd * (groups / Math.min(groups, 10));
+                $('est-usd').textContent = '$' + Number(scaled).toFixed(2);
+                showBudget(d, Number(scaled));
+            } catch { $('est-usd').textContent = '—'; }
+        }, 350);
+    }
+    ['cands', 'probe'].forEach(id => $(id).addEventListener('input', estimate));
+    estimate();
+
+    // ---------- job plumbing ----------
+    function setProgress(pct, step) {
+        $('job-bar').style.width = `${pct}%`;
+        $('job-pct').textContent = `${pct}%`;
+        $('job-step').textContent = step || '';
+    }
+    function log(line) {
+        const box = $('job-logs');
+        box.innerHTML += `<div>&gt; ${esc(line)}</div>`;
+        box.scrollTop = box.scrollHeight;
+    }
+
+    // ---------- discovery run ----------
+    $('run').addEventListener('click', async () => {
+        const location = $('location').value.trim();
+        const niche = $('niche').value.trim();
+        const seedUrls = $('seeds').value.split(/\n/).map(s => s.trim()).filter(Boolean);
+
+        if (!location && !niche && !seedUrls.length) {
+            return alert('Give me a location and niche, or paste at least one group URL.');
+        }
+
+        $('run').disabled = true;
+        $('results').classList.add('hidden');
+        $('job').classList.remove('hidden');
+        $('job-logs').innerHTML = '';
+        setProgress(1, 'Queueing job…');
+
+        try {
+            const res = await EL.api('/api/fb/discover-groups', {
+                method: 'POST',
+                body: {
+                    // Field names match what POST /api/fb/discover-groups
+                    // destructures: groupUrls, keywords, maxGroups, sampleSize.
+                    // The old names (seedUrls, extraQueries, maxCandidates,
+                    // probePosts) were silently ignored, so every discovery ran
+                    // on server defaults and pasted URLs were dropped.
+                    location, niche,
+                    groupUrls: seedUrls,
+                    keywords: $('extra').value.split(/\n/).map(s => s.trim()).filter(Boolean),
+                    maxGroups: parseInt($('cands').value || '20', 10),
+                    sampleSize: parseInt($('probe').value || '25', 10),
+                    tzOffsetMinutes: parseInt($('tz').value || '360', 10),
+                    save: true
+                }
+            });
+            log(`Job ${res.jobId} queued — up to ${res.candidates} rooms, ~$${Number(res.estimatedUsd).toFixed(2)}.`);
+            poll(res.jobId);
+        } catch (err) {
+            log('Could not start: ' + err.message);
+            setProgress(0, 'Failed to start');
+            $('run').disabled = false;
+        }
+    });
+
+    /**
+     * Follows a job to the end.
+     *
+     * Delegates to EL.pollJob, which unwraps the response correctly and knows
+     * about every state a run can stop in. The hand-rolled loop this replaced
+     * only understood 'done' and 'failed', so a run that paused for credit —
+     * or was interrupted by a restart — span this progress bar forever with
+     * no way to resume it.
+     */
+    function poll(jobId) {
+        EL._renderCancel(jobId, 'results', () => log('Cancelling after the current step…'));
+
+        EL.pollJob(jobId, {
+            mount: 'results',
+            onLog: m => log(m),
+            onProgress: job => setProgress(job.progress || 0, job.current_step || job.status),
+
+            onDone: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(100, 'Rooms ranked');
+                renderResults(job.result);
+            },
+
+            onPaused: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(job.progress || 0, job.status === 'cancelled' ? 'Cancelled' : 'Paused — resume below');
+                log(job.error || 'Run stopped. Everything already scraped was saved.');
+            },
+
+            onFailed: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(0, 'Run failed');
+                log(job.error || 'Unknown error');
+            }
+        });
+    }
+
+    const rvCell = score => `<div class="rv"><div class="rv-bar"><div style="width:${Math.max(2, score)}%"></div></div>
+        <strong>${score}</strong></div>`;
+
+    function renderResults(result) {
+        if (!result) return;
+        $('results').classList.remove('hidden');
+        $('results-sub').textContent =
+            `${result.candidates} candidates probed · ${result.scrapeable} reachable · ${result.unreachable} unreachable. ` +
+            `The top 10 are highlighted.`;
+
+        $('warn-box').innerHTML = (result.warnings || []).length || result.note
+            ? `<div class="warnbox">${result.note ? esc(result.note) + '<br>' : ''}${(result.warnings || []).slice(-6).map(esc).join('<br>')}</div>`
+            : '';
+
+        const top = new Set((result.top10 || []).map(g => g.groupId));
+        $('results-table').innerHTML = `
+            <table><thead><tr>
+                <th>#</th><th>Room</th><th>Room Value</th><th>Posts/day</th><th>Median comments</th>
+                <th>Unique posters</th><th>1st reply</th><th>Members</th><th>Demand hits</th><th></th>
+            </tr></thead><tbody>
+            ${(result.all || []).map((g, i) => {
+                const rv = g.roomValue || {};
+                return `<tr class="${top.has(g.groupId) ? 'is-top' : ''}">
+                    <td>${i + 1}</td>
+                    <td><strong>${esc(g.name)}</strong><br>
+                        <span class="badge ${g.scrapeable ? 'b-ok' : 'b-bad'}">${g.scrapeable ? 'public' : 'unreachable'}</span>
+                        ${g.discoveredVia === 'seed' ? '<span class="badge b-mute">seeded</span>' : ''}</td>
+                    <td>${rvCell(rv.score || 0)}</td>
+                    <td>${rv.postsPerDay ?? '—'}</td>
+                    <td>${rv.medianComments ?? '—'}</td>
+                    <td>${rv.uniquePosterRatio != null ? (rv.uniquePosterRatio * 100).toFixed(0) + '%' : '—'}</td>
+                    <td>${rv.medianFirstCommentMins != null ? rv.medianFirstCommentMins + 'm' : '—'}</td>
+                    <td>${num(g.memberCount)}</td>
+                    <td>${g.sampleDemand ?? 0}</td>
+                    <td><a class="btn-secondary" href="${safeUrl(g.url)}" target="_blank" rel="noopener">Open</a></td>
+                </tr>`;
+            }).join('')}
+            </tbody></table>
+            <p class="card-subtitle" style="margin-top:16px;">Every reachable room was saved. Go to
+                <strong>Saved rooms</strong> to pick which ones to audit.</p>`;
+        $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ---------- manual add ----------
+    $('m-save').addEventListener('click', async () => {
+        const url = $('m-url').value.trim();
+        if (!url) return alert('Paste the group URL.');
+        $('m-save').disabled = true;
+        $('m-note').textContent = $('m-probe').checked ? 'Probing the room… this takes a minute.' : 'Saving…';
+        try {
+            const res = await EL.api('/api/fb/groups', {
+                method: 'POST',
+                body: {
+                    url,
+                    name: $('m-name').value.trim() || null,
+                    memberCount: parseInt($('m-members').value || '0', 10) || null,
+                    location: $('m-location').value.trim() || null,
+                    niche: $('m-niche').value.trim() || null,
+                    rulesText: $('m-rules').value.trim() || null,
+                    promoAllowed: $('m-promo').checked,
+                    approvalRequired: $('m-approval').checked,
+                    tzOffsetMinutes: parseInt($('m-tz').value || '360', 10),
+                    probe: $('m-probe').checked
+                }
+            });
+            $('m-note').innerHTML = `Saved <strong>${esc(res.group.name)}</strong>` +
+                (res.group.room_value_score != null ? ` — Room Value ${res.group.room_value_score}/100.` : '.') +
+                ((res.warnings || []).length ? `<br><span style="color:var(--warn)">${res.warnings.map(esc).join('<br>')}</span>` : '');
+            ['m-url', 'm-name', 'm-members', 'm-rules'].forEach(id => $(id).value = '');
+            loadSaved();
+        } catch (err) {
+            $('m-note').innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`;
+        } finally { $('m-save').disabled = false; }
+    });
+
+    // ---------- saved rooms ----------
+    $('reload-saved').addEventListener('click', loadSaved);
+
+    async function loadSaved() {
+        const box = $('saved-table');
+        try {
+            const { groups } = await EL.api('/api/fb/groups');
+            savedGroups = groups;
+            if (!groups.length) {
+                box.innerHTML = '<p class="empty">No rooms yet. Run a discovery pass or add one by URL.</p>';
+                return;
+            }
+            box.innerHTML = `
+                <table><thead><tr>
+                    <th><input type="checkbox" id="sel-all"></th>
+                    <th>Room</th><th>Room Value</th><th>Posts/day</th><th>Median comments</th>
+                    <th>Members</th><th>Rules</th><th>Last scraped</th><th></th>
+                </tr></thead><tbody>
+                ${groups.map(g => `<tr>
+                    <td><input type="checkbox" data-pick="${esc(g.id)}" ${selected.has(g.id) ? 'checked' : ''}></td>
+                    <td><strong>${esc(g.name)}</strong><br>
+                        <span class="empty" style="font-size:0.75rem;">${esc(g.location_label || '')}${g.niche ? ' · ' + esc(g.niche) : ''}</span>
+                        ${g.last_scrape_posts === 0 && g.last_scrape_note ? `<br><span class="badge b-warn" title="${esc(g.last_scrape_note)}">0 posts last scrape</span>` : ''}</td>
+                    <td>${rvCell(g.room_value_score || 0)}</td>
+                    <td>${g.posts_per_day ?? '—'}</td>
+                    <td>${g.median_comments ?? '—'}</td>
+                    <td>${g.member_count ? num(g.member_count) : '<span class="empty" title="Facebook does not expose this to the posts scraper. Click Edit and type it once; scrapes will not overwrite it.">—</span>'}</td>
+                    <td><span class="badge ${g.promo_allowed ? 'b-ok' : 'b-warn'}">${g.promo_allowed ? 'promo ok' : 'no promo'}</span>
+                        ${g.approval_required ? '<span class="badge b-warn">approval</span>' : ''}</td>
+                    <td>${dateStr(g.last_scraped_at)}</td>
+                    <td style="white-space:nowrap;">
+                        <button class="btn-secondary" type="button" data-edit="${esc(g.id)}">Edit</button>
+                        <button class="btn-danger" type="button" data-del="${esc(g.id)}">×</button>
+                    </td>
+                </tr>`).join('')}
+                </tbody></table>`;
+
+            box.querySelectorAll('[data-pick]').forEach(cb => cb.addEventListener('change', () => {
+                cb.checked ? selected.add(cb.dataset.pick) : selected.delete(cb.dataset.pick);
+                updateCount();
+            }));
+            $('sel-all').addEventListener('change', e => {
+                box.querySelectorAll('[data-pick]').forEach(cb => {
+                    cb.checked = e.target.checked;
+                    e.target.checked ? selected.add(cb.dataset.pick) : selected.delete(cb.dataset.pick);
+                });
+                updateCount();
+            });
+            box.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+                if (!confirm('Remove this room? Its stored posts and demand signals go with it.')) return;
+                await EL.api(`/api/fb/groups/${b.dataset.del}`, { method: 'DELETE' });
+                selected.delete(b.dataset.del);
+                loadSaved();
+            }));
+            box.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => editRoom(b.dataset.edit)));
+            updateCount();
+        } catch (err) {
+            box.innerHTML = `<p class="empty">Could not load rooms: ${esc(err.message)}</p>`;
+        }
+    }
+
+    function updateCount() {
+        $('sel-count').textContent = `${selected.size} selected`;
+    }
+
+    async function editRoom(id) {
+        const g = savedGroups.find(x => x.id === id);
+        if (!g) return;
+        const name = prompt('Display name', g.name || '');
+        if (name === null) return;
+        const niche = prompt('Niche', g.niche || '') ?? g.niche;
+        const location = prompt('Location label', g.location_label || '') ?? g.location_label;
+        const rules = prompt('Stated group rules (the advisor reads these)', g.rules_text || '') ?? g.rules_text;
+        const promo = confirm('Does this room ALLOW promotional posts?\n\nOK = allowed · Cancel = not allowed');
+        const approval = confirm('Do posts go through an admin approval queue?\n\nOK = yes · Cancel = no');
+        try {
+            await EL.api(`/api/fb/groups/${id}`, {
+                method: 'PATCH',
+                body: { name, niche, location_label: location, rules_text: rules,
+                        promo_allowed: promo, approval_required: approval }
+            });
+            loadSaved();
+        } catch (err) { alert(err.message); }
+    }
+
+    $('save-set').addEventListener('click', async () => {
+        if (!selected.size) return alert('Tick at least one room.');
+        const first = savedGroups.find(g => selected.has(g.id));
+        try {
+            const res = await EL.api('/api/fb/group-sets', {
+                method: 'POST',
+                body: {
+                    name: $('set-name').value.trim() || null,
+                    groupIds: Array.from(selected),
+                    location: first?.location_label || null,
+                    niche: first?.niche || null
+                }
+            });
+            alert(`Saved "${res.set.name}" with ${selected.size} rooms. Re-run it later from the audit page and the snapshots line up into a trend.`);
+            $('set-name').value = '';
+        } catch (err) { alert(err.message); }
+    });
+
+    $('to-audit').addEventListener('click', () => {
+        if (!selected.size) return alert('Tick at least one room.');
+        sessionStorage.setItem('el_fb_pick', JSON.stringify(Array.from(selected)));
+        window.location.href = 'fb-audit.html';
+    });
+
+    loadSaved();
+})();
+</script>
+</body>
+</html>
