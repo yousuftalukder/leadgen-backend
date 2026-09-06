@@ -69,7 +69,7 @@ require('dotenv').config();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase3';
+const APP_VERSION = process.env.APP_VERSION || 'phase7';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -3704,7 +3704,10 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
                 platform: 'instagram',
-                report_type: rivalAudits.length ? 'compare' : 'single',
+                // Stable per-worker type. The old 'single'/'compare' collided
+                // with deep_audit's 'single', so the two vaults could not be told
+                // apart. Legacy rows are backfilled by schema-phase7.sql.
+                report_type: 'ig_report',
                 target_handle: main.handle,
                 competitor_handles: rivalAudits.map(r => r.handle),
                 grade: main.grade,
@@ -3803,7 +3806,7 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
                 platform: 'instagram',
-                report_type: rivalAudits.length ? 'competitor' : 'single',
+                report_type: 'deep_audit',
                 set_id: activeSetId,
                 target_handle: main.handle,
                 competitor_handles: rivalAudits.map(r => r.handle),
@@ -5884,7 +5887,18 @@ app.get('/api/reports-history', async (req, res) => {
             .eq('user_id', ctx.user.id)
             .eq('platform', 'instagram');
 
-        if (type) q = q.eq('report_type', type);
+        // Legacy rows (pre phase 7) wrote 'single'/'compare' for audits and
+        // 'single'/'competitor' for cohorts. set_id is the reliable tell:
+        // deep_audit always creates a competitor_set, ig_report never does.
+        // The fallback keeps both vaults correct even if the backfill has not
+        // run yet; after it runs, only the first term ever matches.
+        if (type === 'ig_report') {
+            q = q.or('report_type.eq.ig_report,report_type.eq.compare,and(report_type.eq.single,set_id.is.null)');
+        } else if (type === 'deep_audit') {
+            q = q.or('report_type.eq.deep_audit,report_type.eq.competitor,and(report_type.eq.single,set_id.not.is.null)');
+        } else if (type) {
+            q = q.eq('report_type', type);
+        }
 
         const { data: reports, error } = await q
             .order('created_at', { ascending: false })
@@ -7586,9 +7600,19 @@ app.get('/api/fb/demand-feed', async (req, res) => {
         if (req.query.since)     q = q.gte('posted_at', req.query.since);
         if (req.query.min_score) q = q.gte('lead_score', parseInt(req.query.min_score, 10));
 
+        // Free-text search over what the person asked for and the trigger
+        // phrase. Sanitised the same way as search-leads: PostgREST's .or()
+        // is a DSL, so commas, dots and parens must not survive from input.
+        const text = String(req.query.q || '')
+            .trim().replace(/[@,().\\%*]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (text) q = q.or(`snippet.ilike.*${text}*,matched_phrase.ilike.*${text}*`);
+
+        // sort=recent → newest post first; anything else → lead score first.
+        q = req.query.sort === 'recent'
+            ? q.order('posted_at', { ascending: false, nullsFirst: false }).order('lead_score', { ascending: false })
+            : q.order('lead_score', { ascending: false }).order('detected_at', { ascending: false });
+
         const { data, error } = await q
-            .order('lead_score', { ascending: false })
-            .order('detected_at', { ascending: false })
             .limit(Math.min(parseInt(req.query.limit || '200', 10), 500));
         if (error) throw error;
 
@@ -7638,8 +7662,16 @@ app.get(['/api/fb/demand-export', '/api/fb/demand-export.csv'], async (req, res)
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
         let q = supabase.from('fb_demand_signals')
             .select('group_name, category, urgency, lead_score, matched_phrase, snippet, source_url, posted_at, status')
-            .eq('user_id', ctx.user.id).neq('status', 'dismissed');
+            .eq('user_id', ctx.user.id);
+        // Same filter set as /api/fb/demand-feed, so the CSV is what is on screen.
         if (req.query.group_id) q = q.eq('group_id', req.query.group_id);
+        if (req.query.category) q = q.eq('category', req.query.category);
+        if (req.query.urgency)  q = q.eq('urgency', req.query.urgency);
+        if (req.query.status)   q = q.eq('status', req.query.status);
+        else                    q = q.neq('status', 'dismissed');
+        const text = String(req.query.q || '')
+            .trim().replace(/[@,().\\%*]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (text) q = q.or(`snippet.ilike.*${text}*,matched_phrase.ilike.*${text}*`);
         const { data } = await q.order('lead_score', { ascending: false }).limit(2000);
 
         const cell = v => `"${String(v ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
@@ -9534,4 +9566,3 @@ module.exports = {
     // caches
     invalidateAuth, invalidateEngineAccess
 };
-Z
