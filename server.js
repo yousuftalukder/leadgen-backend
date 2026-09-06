@@ -69,7 +69,7 @@ require('dotenv').config();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase7';
+const APP_VERSION = process.env.APP_VERSION || 'phase8';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -3845,22 +3845,24 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
 
 registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, ck) => {
 
-    const refs = (input.groups || []).map(id => ({
+    const names = Array.isArray(input.groupNames) ? input.groupNames : [];
+    const refs = (input.groups || []).map((id, i) => ({
         groupId: String(id),
         url: `https://www.facebook.com/groups/${id}/`,
         rowId: null,
-        name: String(id)
+        name: names[i] || String(id)
     }));
     const auditMode      = input.mode === 'individual' ? 'individual' : 'combined';
     const limit          = input.postsPerGroup || FB_DEFAULT_POSTS;
     const window         = input.days || FB_DEFAULT_DAYS;
     const sampleComments = !!input.sampleComments;
+    const commentPosts   = sampleComments ? (input.commentSamplePosts ?? 20) : 0;
     const activeSetId    = input.setId || null;
     const niche          = input.niche || null;
     const location       = input.location || null;
     const since          = input.since || null;
-    const estimate       = fbEstimateCredits(refs.length, limit, sampleComments);
-    const perGroup       = fbEstimateCredits(1, limit, sampleComments);
+    const estimate       = fbEstimateCredits(refs.length, limit, sampleComments, commentPosts);
+    const perGroup       = fbEstimateCredits(1, limit, sampleComments, commentPosts);
 
             const step = Math.floor(65 / refs.length);
             const audits = [];
@@ -3887,7 +3889,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                         { needUsd: perGroup, jobId });
 
                     const { meta, rows, demand } = await fbProcessGroup(client, userId, refs[i], {
-                        limit, days: window, sampleComments, niche, location,
+                        limit, days: window, sampleComments, commentPosts, niche, location,
                         source: 'audit', since, jobId
                     });
 
@@ -3970,7 +3972,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                         engagement_rate: a.medianComments,
                         posts_analyzed: a.postsAnalyzed,
                         snapshot_date: new Date().toISOString().slice(0, 10),
-                        credits_estimate: fbEstimateCredits(1, limit, sampleComments),
+                        credits_estimate: fbEstimateCredits(1, limit, sampleComments, commentPosts),
                         ai_summary: ai?.executive_summary || null,
                         ai_json: ai || null,
                         ai_status: aiStatus,
@@ -6318,12 +6320,40 @@ function urgencyOf(text) {
  * Pulls buying intent out of one post. Returns [] for most posts, which is
  * correct — a room where every post is a demand signal is a room of spam.
  */
+/**
+ * Is this the seller talking, not the buyer? A vendor advert routinely
+ * contains "looking for a reliable plumber?" as a hook, which is why the
+ * demand patterns alone let ads into the lead feed. Any two vendor cues, or
+ * one hard cue (phone number, "our services include"), and the post is not
+ * demand — it is competition.
+ */
+const FB_VENDOR_HARD = [
+    /\b(our services? (include|are)|services? (we )?(offer|provide)|we (offer|provide|specialise|specialize|install|repair|deliver)|we are (a|an|the) (team|company|business))\b/i,
+    /\b(book (now|today|your)|order now|call (us|now|today)|dm (us|me) for (price|rate|details|order)|inbox (us|me) for)\b/i,
+    /(\+?880|\b0?1[3-9]\d{8}\b|\(\d{3}\) ?\d{3}-\d{4}|\b\d{3}[-. ]\d{3}[-. ]\d{4}\b)/,          // phone numbers, BD + US forms
+    /(কল করুন|অর্ডার করুন|ইনবক্স করুন|আমাদের সার্ভিস|আমরা দিচ্ছি|হোম ডেলিভারি)/
+];
+const FB_VENDOR_SOFT = [
+    /\b(llc|ltd|inc|co\.|pvt|enterprise|solutions|services)\b/i,
+    /\b(free (quote|estimate|consultation)|licensed|insured|years? of experience|satisfaction guaranteed|affordable|best price|special offer|discount)\b/i,
+    /\b(whatsapp|contact us|visit (our|us)|website|www\.|http)\b/i,
+    /\b(price|rate|tk|৳|\$)\s*\d/i,
+    /(\p{Extended_Pictographic}[^\p{Extended_Pictographic}\n]{2,40}){5,}/u   // emoji-bulleted service list
+];
+
+function looksLikeVendor(text) {
+    const t = String(text || '');
+    if (FB_VENDOR_HARD.some(re => re.test(t))) return true;
+    return FB_VENDOR_SOFT.filter(re => re.test(t)).length >= 2;
+}
+
 function mineDemand(text, ctx = {}) {
     const t = String(text || '');
     if (t.length < 12) return [];
 
     const hits = FB_DEMAND_PATTERNS.filter(p => p.re.test(t));
     if (!hits.length) return [];
+    if (looksLikeVendor(t)) return [];
 
     // One signal per post, built from the strongest phrase. Multiple rows for
     // the same post would inflate the feed and double-count the same lead.
@@ -6492,21 +6522,34 @@ async function fbScrapeGroup(client, groupRef, opts = {}) {
     const onlyPostsNewerThan = opts.since ||
         new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-    const { items } = await callActor(client, FB_GROUP_POSTS_ACTOR, {
+    const wantComments = !!opts.sampleComments && (opts.commentPosts == null || opts.commentPosts > 0);
+    const actorInput = {
         startUrls: [{ url }],
         resultsLimit: limit,
         maxPosts: limit,
-        onlyPostsNewerThan,
-        commentsMode: 'RANKED_THREADED',
-        maxComments: opts.sampleComments ? 10 : 0,
-        scrapeComments: !!opts.sampleComments
-    }, {
+        onlyPostsNewerThan
+    };
+    if (wantComments) {
+        actorInput.commentsMode = 'RANKED_THREADED';
+        actorInput.maxComments = 10;
+        actorInput.scrapeComments = true;
+    }
+
+    const { items } = await callActor(client, FB_GROUP_POSTS_ACTOR, actorInput, {
         maxItems: limit,
         jobId: opts.jobId,
-        estimateUsd: fbEstimateCredits(1, limit, opts.sampleComments)
+        estimateUsd: fbEstimateCredits(1, limit, opts.sampleComments, opts.commentPosts)
     });
 
-    return { raw: items || [], groupId, url };
+    const raw = items || [];
+    // What the actor actually returned is the only thing that explains a
+    // zero-post room, so it is logged every time, not just on failure.
+    logger.info('fb_group_scraped', {
+        groupId, count: raw.length, wantComments,
+        keys: Object.keys(raw[0] || {}).slice(0, 30)
+    });
+
+    return { raw, groupId, url };
 }
 
 /** Group-level metadata, harvested from whatever the post payload carries. */
@@ -6520,12 +6563,20 @@ function fbGroupMeta(rawItems, groupRef) {
 
     const privacyRaw = String(first.groupPrivacy || g.privacy || first.privacy || 'public').toLowerCase();
 
+    const memberCount = firstNum(
+        first.groupMembersCount, first.groupMemberCount, first.membersCount, first.memberCount,
+        g.memberCount, g.membersCount, g.members, groupRef.hintMembers, 0
+    );
+    const hasPrivacy = !!(first.groupPrivacy || g.privacy || first.privacy);
+
     return {
         group_id: groupRef.groupId,
-        name: first.groupTitle || first.groupName || g.name || groupRef.groupId,
+        name: first.groupTitle || first.groupName || g.name || groupRef.hintName || groupRef.name || groupRef.groupId,
         url: groupRef.url,
-        member_count: firstNum(first.groupMembersCount, g.memberCount, first.memberCount, 0),
+        member_count: memberCount,
         privacy: privacyRaw.includes('private') || privacyRaw.includes('closed') ? 'private' : 'public',
+        privacy_known: hasPrivacy,
+        rules_known: !!rulesText,
         ...parseRules(rulesText)
     };
 }
@@ -6974,8 +7025,10 @@ Produce ${count} drafts. Reply with ONLY valid JSON:
   "predicted_index":1.8
 }]}`;
 
-    const out = await geminiJSON(prompt, 6000, 0.75);
+    const ai = await geminiCallDetailed(prompt, { temperature: 0.75, maxOutputTokens: 6000, tag: 'Gemini FB' });
+    const out = ai.ok ? ai.data : null;
     let drafts = Array.isArray(out?.drafts) ? out.drafts : [];
+    const produced = drafts.length;
 
     // Belt and braces: the compliance gate is enforced in code as well as in
     // the prompt. A model that ignores the instruction must not reach the user.
@@ -6984,26 +7037,33 @@ Produce ${count} drafts. Reply with ONLY valid JSON:
         drafts = drafts.filter(d => !banned.test(String(d.draft_text || '')));
     }
 
-    return { drafts, complianceMode: mode, promoAllowed };
+    return { drafts, complianceMode: mode, promoAllowed, ai, removed: produced - drafts.length };
 }
 
 // ===========================================================================
 // FB PERSISTENCE
 // ===========================================================================
 
-async function fbUpsertGroup(userId, meta, extra = {}) {
+async function fbUpsertGroup(userId, meta, extra = {}, { preserve = false } = {}) {
+    // preserve=true is the scrape path. The posts actor does not return
+    // member counts or rules, so a scrape must never overwrite what the user
+    // typed in the Edit modal with 0 / null / defaults. ON CONFLICT DO UPDATE
+    // only touches the columns supplied, so unknown values are simply omitted.
     const row = {
         user_id: userId,
         group_id: meta.group_id,
-        name: meta.name,
         url: meta.url,
-        member_count: meta.member_count || 0,
-        privacy: meta.privacy || 'public',
-        rules_text: meta.rules_text || null,
-        promo_allowed: meta.promo_allowed !== false,
-        approval_required: !!meta.approval_required,
         ...extra
     };
+    const nameIsId = !meta.name || String(meta.name) === String(meta.group_id);
+    if (!preserve || !nameIsId) row.name = meta.name || meta.group_id;
+    if (!preserve || (meta.member_count || 0) > 0) row.member_count = meta.member_count || 0;
+    if (!preserve || meta.privacy === 'private' || meta.privacy_known) row.privacy = meta.privacy || 'public';
+    if (!preserve || meta.rules_known) {
+        row.rules_text = meta.rules_text || null;
+        row.promo_allowed = meta.promo_allowed !== false;
+        row.approval_required = !!meta.approval_required;
+    }
     const { data, error } = await supabase.from('fb_groups')
         .upsert(row, { onConflict: 'user_id,group_id' })
         .select('id, group_id, name, url, member_count, room_value_score, promo_allowed, approval_required, privacy, niche, location_label')
@@ -7038,10 +7098,16 @@ async function fbSaveDemand(rows) {
     return saved;
 }
 
-function fbEstimateCredits(groups, postsPerGroup, sampleComments) {
+function fbEstimateCredits(groups, postsPerGroup, sampleComments, commentPosts = null) {
     const posts = groups * postsPerGroup;
-    const commentMultiplier = sampleComments ? 1.6 : 1;
-    return +(((posts / 1000) * COST_PER_1K_FB_POSTS * commentMultiplier)).toFixed(4);
+    // The comment surcharge applies to the posts whose comments are pulled,
+    // not to every post in the run. commentPosts === null keeps the old
+    // "all posts" behaviour for callers that have not been told a count.
+    const sampled = sampleComments
+        ? (commentPosts == null ? postsPerGroup : Math.min(Math.max(commentPosts, 0), postsPerGroup))
+        : 0;
+    const surcharge = (groups * sampled / 1000) * COST_PER_1K_FB_POSTS * 0.6;
+    return +(((posts / 1000) * COST_PER_1K_FB_POSTS) + surcharge).toFixed(4);
 }
 
 /**
@@ -7052,12 +7118,20 @@ async function fbProcessGroup(client, userId, groupRef, opts) {
     const { raw } = await fbScrapeGroup(client, groupRef, opts);
     const meta = fbGroupMeta(raw, groupRef);
 
+    const scrapeNote = raw.length
+        ? null
+        : (meta.privacy === 'private'
+            ? 'Group is private — no public posts.'
+            : 'Actor returned 0 posts. Check the URL form and that the group is public; see fb_group_scraped in server logs.');
+
     const groupRow = await fbUpsertGroup(userId, meta, {
         niche: opts.niche || null,
         location_label: opts.location || null,
         source: opts.source || 'manual',
-        last_scraped_at: new Date().toISOString()
-    });
+        last_scraped_at: new Date().toISOString(),
+        last_scrape_posts: raw.length,
+        last_scrape_note: scrapeNote
+    }, { preserve: true });
 
     const rows = raw
         .map(item => fbNormalisePost(item, meta.group_id, groupRow?.id, userId))
@@ -7065,25 +7139,79 @@ async function fbProcessGroup(client, userId, groupRef, opts) {
 
     fbIndexPosts(rows);
 
+    const now = new Date().toISOString();
     const demand = [];
+    const base = r => ({
+        user_id: userId,
+        group_id: meta.group_id,
+        group_name: meta.name,
+        source_url: r.post_url,
+        posted_at: r.posted_at,
+        detected_at: now
+    });
+
     rows.forEach(r => {
         mineDemand(r.content, { engagement: r.engagement_raw, postedAt: r.posted_at }).forEach(d => {
             demand.push({
-                user_id: userId,
-                group_id: meta.group_id,
-                group_name: meta.name,
+                ...base(r),
                 source_post_id: r.post_id,
-                source_url: r.post_url,
                 author_hash: r.author_hash,
                 engagement: Math.round(r.engagement_raw),
-                posted_at: r.posted_at,
-                detected_at: new Date().toISOString(),
+                source_type: 'post',
                 ...d
             });
         });
     });
 
+    // Comment mining. Only the top-N posts by engagement, because that is
+    // what the surcharge in fbEstimateCredits was charged for. Comments are
+    // where "me too, who did you use?" lives — a second demand layer that
+    // the post text alone never shows.
+    const commentPosts = opts.sampleComments ? (opts.commentPosts ?? 20) : 0;
+    if (commentPosts > 0 && rows.length) {
+        const byPostId = new Map(raw.map(item => [fbPostId(item), item]));
+        const top = [...rows].sort((a, b) => b.engagement_raw - a.engagement_raw).slice(0, commentPosts);
+        for (const r of top) {
+            const item = byPostId.get(r.post_id);
+            const comments = fbCommentsOf(item);
+            comments.forEach((c, i) => {
+                if (!c.text || c.text.length < 12) return;
+                mineDemand(c.text, { engagement: c.likes || 0, postedAt: c.postedAt || r.posted_at }).forEach(d => {
+                    demand.push({
+                        ...base(r),
+                        source_post_id: `${r.post_id}#c${i}`,
+                        author_hash: authorHash(c.author || null, meta.group_id),
+                        engagement: Math.round(c.likes || 0),
+                        source_type: 'comment',
+                        ...d
+                    });
+                });
+            });
+        }
+    }
+
     return { meta, groupRow, rows, demand };
+}
+
+/**
+ * Comment payload of one raw group post, normalised to {text, author, likes,
+ * postedAt}. The groups actor has shipped comments under several keys over
+ * time; every known one is read.
+ */
+function fbCommentsOf(item) {
+    if (!item) return [];
+    const arr = [item.comments, item.latestComments, item.topComments, item.commentsList]
+        .find(Array.isArray) || [];
+    return arr.map(c => {
+        if (!c) return null;
+        if (typeof c === 'string') return { text: c, author: null, likes: 0, postedAt: null };
+        return {
+            text: String(c.text || c.message || c.commentText || '').trim(),
+            author: c.profileName || c.authorName || c.name || c.author?.name || c.user?.name || null,
+            likes: firstNum(c.likesCount, c.likes, c.reactionsCount, 0),
+            postedAt: c.date || c.timestamp || c.time || null
+        };
+    }).filter(Boolean);
 }
 
 // ===========================================================================
@@ -7095,11 +7223,13 @@ app.get('/api/fb/estimate-credits', async (req, res) => {
     const groups = Math.min(parseInt(req.query.groups || '1', 10), FB_MAX_GROUPS);
     const posts = Math.min(parseInt(req.query.posts || FB_DEFAULT_POSTS, 10), FB_MAX_POSTS);
     const sampleComments = req.query.comments === 'true' || req.query.comments === '1';
-    const estimatedUsd = fbEstimateCredits(groups, posts, sampleComments);
+    const commentPosts = req.query.cposts != null
+        ? Math.min(Math.max(parseInt(req.query.cposts, 10) || 0, 0), 40) : null;
+    const estimatedUsd = fbEstimateCredits(groups, posts, sampleComments, commentPosts);
     res.json({
         groups, postsPerGroup: posts,
         totalPosts: groups * posts,
-        sampleComments,
+        sampleComments, commentPosts,
         estimatedUsd,
         budget: await budgetSnapshot('fb_community', ctx.user.id, estimatedUsd),
         note: 'Estimate only. Facebook group runs cost more per post than Instagram — comment sampling is the expensive part.'
@@ -7409,7 +7539,7 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
 
         const {
             groupIds = [], groupUrls = [], mode = 'combined',
-            days, postsPerGroup, sampleComments = false,
+            days, postsPerGroup, sampleComments = false, commentSamplePosts,
             setId, setName, niche, location
         } = req.body;
 
@@ -7450,7 +7580,12 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
         const auditMode = mode === 'individual' ? 'individual' : 'combined';
         const limit = Math.min(parseInt(postsPerGroup || FB_DEFAULT_POSTS, 10), FB_MAX_POSTS);
         const window = Math.min(parseInt(days || FB_DEFAULT_DAYS, 10), 90);
-        const estimate = fbEstimateCredits(refs.length, limit, sampleComments);
+        // How many posts (per room, by engagement) get their comments pulled
+        // and mined. 0 with sampleComments=true means "count only".
+        const commentPosts = sampleComments
+            ? Math.min(Math.max(parseInt(commentSamplePosts ?? 20, 10) || 0, 0), 40)
+            : 0;
+        const estimate = fbEstimateCredits(refs.length, limit, sampleComments, commentPosts);
 
         // Re-runnable set, same pattern as competitor_sets
         let activeSetId = setId || null;
@@ -7472,7 +7607,8 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
 
         const job = await createJob(ctx.user.id, 'fb_community_audit', 'fb_community', {
             groups: refs.map(r => r.groupId), mode: auditMode,
-            days: window, postsPerGroup: limit, sampleComments, setId: activeSetId,
+            days: window, postsPerGroup: limit, sampleComments, commentSamplePosts: commentPosts,
+            setId: activeSetId, groupNames: refs.map(r => r.name || r.groupId),
             niche: niche || null, location: location || null, since
         }, estimate);
 
@@ -7480,7 +7616,8 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
 
         res.status(202).json({
             success: true, jobId: job.id, mode: auditMode, setId: activeSetId,
-            groups: refs.length, postsPerGroup: limit, days: window,
+            groups: refs.length, groupNames: refs.map(r => r.name || r.groupId),
+            postsPerGroup: limit, days: window, commentSamplePosts: commentPosts,
             estimatedUsd: estimate,
             budget: await budgetSnapshot('fb_community', ctx.user.id, estimate)
         });
@@ -7712,9 +7849,34 @@ app.post('/api/fb/suggest-posts', spendLimit, async (req, res) => {
 
         if (!GEMINI_API_KEY) return res.status(503).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
 
-        const { drafts, complianceMode, promoAllowed } = await fbGenerateDrafts(audit, { count, brief });
+        // The report is frozen at audit time. The fb_groups row is what the
+        // user edits (promo ok / no promo, rules pasted in), so it wins.
+        const { data: groupRow } = await supabase.from('fb_groups')
+            .select('promo_allowed, approval_required, rules_text, member_count, name')
+            .eq('user_id', ctx.user.id).eq('group_id', audit.groupId).maybeSingle();
+        if (groupRow) {
+            audit.promoAllowed = groupRow.promo_allowed !== false;
+            audit.approvalRequired = !!groupRow.approval_required;
+            if (groupRow.rules_text) audit.rulesText = groupRow.rules_text;
+            if (groupRow.member_count && !audit.memberCount) audit.memberCount = groupRow.member_count;
+        }
+
+        const { drafts, complianceMode, promoAllowed, ai, removed } = await fbGenerateDrafts(audit, { count, brief });
         if (!drafts.length) {
-            return res.status(502).json({ error: 'No compliant drafts were produced. This group bans promotion — try again with a value-first brief.' });
+            if (ai && !ai.ok) {
+                const retryable = ai.reason === 'exhausted' || ai.reason === 'network' || String(ai.reason).startsWith('http_5');
+                return res.status(retryable ? 503 : 502).json({
+                    error: `Drafts could not be generated: ${aiReasonText(ai.reason)}${retryable ? ' Try again in a minute.' : ''}`,
+                    aiStatus: ai
+                });
+            }
+            if (removed > 0) {
+                return res.status(422).json({
+                    error: `The model produced ${removed} draft(s) but every one contained a pitch, and this room is marked "no promo". Give a value-first brief (what you know, not what you sell), or mark the room "promo ok" on the Communities page if its rules allow it.`,
+                    removed, complianceMode
+                });
+            }
+            return res.status(502).json({ error: 'The model returned no drafts. Try again, or reduce the count.' });
         }
 
         const rows = drafts.map(d => ({
