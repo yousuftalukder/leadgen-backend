@@ -60,7 +60,12 @@ const cors = require('cors');
 const { ApifyClient } = require('apify-client');
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 require('dotenv').config();
+
+// Per-request / per-job context. Lets deep helpers (the Gemini pool) know
+// which user a call is for without threading userId through every signature.
+const ELS = new AsyncLocalStorage();
 
 // ===========================================================================
 // OBSERVABILITY
@@ -69,7 +74,7 @@ require('dotenv').config();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase8';
+const APP_VERSION = process.env.APP_VERSION || 'phase9';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -294,6 +299,8 @@ app.use('/api/', readLimit);
 
 // Request accounting. Method and path only — request bodies carry Apify tokens
 // and must never reach a log line.
+app.use((req, res, next) => ELS.run({ userId: null }, () => next()));
+
 app.use((req, res, next) => {
     const t0 = Date.now();
     res.on('finish', () => {
@@ -324,11 +331,13 @@ const supabase = createClient(
 // ---------------------------------------------------------------------------
 const MASTER_ADMIN_EMAIL     = (process.env.MASTER_ADMIN_EMAIL || '').toLowerCase().trim();
 const GEMINI_API_KEY         = process.env.GEMINI_API_KEY || '';
+// Default only. The pool discovers what the key can actually call (models.list)
+// and prefers the newest flash line; a 404 here is no longer fatal.
 const GEMINI_MODEL           = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_COMPETITORS        = parseInt(process.env.MAX_COMPETITORS || '10', 10);
 const DEFAULT_POSTS_PER_ACC  = parseInt(process.env.DEFAULT_POSTS_PER_ACCOUNT || '30', 10);
 const MAX_POSTS_PER_ACC      = parseInt(process.env.MAX_POSTS_PER_ACCOUNT || '100', 10);
-const ENGINES                = ['leadgen', 'report', 'fb_community', 'fb_page'];
+const ENGINES                = ['leadgen', 'report', 'fb_community', 'fb_page', 'meta_owned', 'content_plan'];
 
 // --- Facebook community engine ---------------------------------------------
 // Actor IDs are env-overridable on purpose: Apify's Facebook actors get
@@ -514,6 +523,7 @@ async function auth(req, res) {
             res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
             return null;
         }
+        const st0 = ELS.getStore(); if (st0) st0.userId = hit.ctx.user.id;
         return hit.ctx;
     }
     METRICS.authCache.miss += 1;
@@ -528,6 +538,7 @@ async function auth(req, res) {
     const profile = await ensureProfile(data.user);
     const ctx = { user: data.user, profile: profile || { role: 'user' } };
     _authCache.set(ck, { ctx, t: Date.now() });
+    const st1 = ELS.getStore(); if (st1) st1.userId = ctx.user.id;
 
     if (profile && profile.is_active === false) {
         res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
@@ -2788,139 +2799,283 @@ function budgetedJson(payload, { maxChars = 40000, keep = [] } = {}) {
     return { json: out, dropped, chars: out.length };
 }
 
+// ---------------------------------------------------------------------------
+// GEMINI KEY POOL + MODEL DISCOVERY (phase 9)
+//
+// Before this, every narrative in the system went through one env key and one
+// hard-coded model name. A free-tier 429 on that key stalled every report at
+// once, and a retired model name turned into a 404 that was never retried.
+//
+// Resolution order for a call made on behalf of a user:
+//   1. that user's own active gemini_keys rows
+//   2. the shared pool (owner_user_id null), least recently used first
+//   3. GEMINI_API_KEY from the environment
+//
+// A 429 puts the key on a short cooldown and the call moves to the next key
+// immediately. A model 404 marks that model dead for an hour and moves on.
+//
+// Model names are not guessed: at first use the pool asks the API which models
+// this key can call (models.list) and prefers the newest "flash" line, then
+// "flash-lite", then "pro". GEMINI_MODEL, if set, always goes first, and
+// GEMINI_MODEL_FALLBACKS is the static safety net if discovery fails.
+// ---------------------------------------------------------------------------
+const GEMINI_MODEL_FALLBACKS = (process.env.GEMINI_MODEL_FALLBACKS ||
+    'gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash')
+    .split(',').map(s => s.trim()).filter(Boolean);
+const GEMINI_DISCOVERY_TTL_MS = 3600000;
+const _geminiDiscovered = { models: [], t: 0 };
+
+/** Rank a model id: newer flash first, then flash-lite, then pro. Previews/experimental last. */
+function geminiRank(name) {
+    const m = String(name).match(/gemini-(\d+(?:\.\d+)?)-(flash-lite|flash|pro)/i);
+    if (!m) return null;
+    const ver = parseFloat(m[1]);
+    const line = m[2].toLowerCase();
+    const penalty = /preview|exp|latest|tts|image|audio|live|thinking/i.test(name) ? 1000 : 0;
+    const lineScore = line === 'flash' ? 0 : line === 'flash-lite' ? 100 : 200;
+    return penalty + lineScore - ver;   // lower is better
+}
+
+async function geminiDiscoverModels(key) {
+    if (Date.now() - _geminiDiscovered.t < GEMINI_DISCOVERY_TTL_MS) return _geminiDiscovered.models;
+    _geminiDiscovered.t = Date.now();
+    try {
+        const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } });
+        if (!r.ok) throw new Error('models.list ' + r.status);
+        const data = await r.json();
+        const names = (data.models || [])
+            .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+            .map(m => String(m.name || '').replace(/^models\//, ''))
+            .filter(n => geminiRank(n) !== null)
+            .sort((a, b) => geminiRank(a) - geminiRank(b));
+        _geminiDiscovered.models = names.slice(0, 6);
+        logger.info('gemini_models_discovered', { preferred: _geminiDiscovered.models.slice(0, 3) });
+    } catch (err) {
+        logger.warn('gemini_model_discovery_failed', { message: err.message });
+        _geminiDiscovered.models = [];
+    }
+    return _geminiDiscovered.models;
+}
+
+const GEMINI_KEY_COOLDOWN_MS = parseInt(process.env.GEMINI_KEY_COOLDOWN_MS || '90000', 10);
+const GEMINI_DEAD_MODEL_MS   = 3600000;
+
+const _geminiDeadModels = new Map();     // model -> ts
+const _geminiPool = { rows: [], t: 0 };  // cached gemini_keys rows (decrypted lazily)
+const _geminiCoolLocal = new Map();      // key id -> cooldown until (ms); survives a stale pool cache
+const GEMINI_POOL_TTL_MS = 60000;
+
+async function geminiModelChain(key) {
+    const discovered = key ? await geminiDiscoverModels(key) : [];
+    const envFirst = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : [];
+    const chain = [...envFirst, ...discovered, GEMINI_MODEL, ...GEMINI_MODEL_FALLBACKS].filter((m, i, a) => m && a.indexOf(m) === i);
+    const now = Date.now();
+    const live = chain.filter(m => !(_geminiDeadModels.get(m) && now - _geminiDeadModels.get(m) < GEMINI_DEAD_MODEL_MS));
+    return live.length ? live : chain;
+}
+
+async function loadGeminiPool(force = false) {
+    if (!force && Date.now() - _geminiPool.t < GEMINI_POOL_TTL_MS) return _geminiPool.rows;
+    try {
+        const { data, error } = await supabase.from('gemini_keys')
+            .select('id, owner_user_id, key_enc, status, cooldown_until, last_used_at, fail_count')
+            .neq('status', 'invalid')
+            .order('last_used_at', { ascending: true, nullsFirst: true });
+        if (error) throw error;
+        _geminiPool.rows = data || [];
+    } catch (err) {
+        // Table missing (migration not run) or transient. Env key still works.
+        if (!/relation .* does not exist/i.test(err.message || '')) logger.warn('gemini_pool_load_failed', { message: err.message });
+        _geminiPool.rows = [];
+    }
+    _geminiPool.t = Date.now();
+    return _geminiPool.rows;
+}
+function invalidateGeminiPool() { _geminiPool.t = 0; }
+
+/** Is any narrative source configured at all? Sync, from the cached pool. */
+function geminiAvailable() {
+    return !!GEMINI_API_KEY || _geminiPool.rows.length > 0;
+}
+
+/** Ordered candidate keys for a user. Each: { id, key, source }. */
+async function geminiCandidates(userId) {
+    const rows = await loadGeminiPool();
+    const now = Date.now();
+    const usable = rows.filter(r => !(r.status === 'cooldown' && r.cooldown_until && new Date(r.cooldown_until).getTime() > now))
+                       .filter(r => !(_geminiCoolLocal.get(r.id) > now));
+    const own = usable.filter(r => userId && r.owner_user_id === userId);
+    const shared = usable.filter(r => !r.owner_user_id);
+    const out = [];
+    for (const r of [...own, ...shared]) {
+        try { out.push({ id: r.id, key: decryptSecret(r.key_enc), source: r.owner_user_id ? 'personal' : 'pool' }); }
+        catch (err) { logger.warn('gemini_key_undecryptable', { id: r.id }); }
+    }
+    if (GEMINI_API_KEY) out.push({ id: null, key: GEMINI_API_KEY, source: 'env' });
+    return out;
+}
+
+async function geminiMarkKey(id, patch) {
+    if (!id) return;
+    try { await supabase.from('gemini_keys').update(patch).eq('id', id); } catch (_) {}
+    invalidateGeminiPool();
+}
+
+function geminiIsThinkingLevelModel(model) { return /gemini-3/i.test(model); }
+
 /**
  * One call to Gemini. Returns a status object, never a bare null.
  *
- *   { ok: true,  data: {...}, reason: 'ok' }
+ *   { ok: true,  data: {...}, reason: 'ok', model, keySource }
  *   { ok: false, data: null,  reason: 'no_key' | 'http_4xx' | 'max_tokens' |
  *                                     'blocked' | 'empty' | 'unparseable' |
- *                                     'network' }
- *
- * Three things the old version got wrong:
- *
- *   1. maxOutputTokens 4096 against a thinking model. Thinking tokens are
- *      spent from the same budget, so the model could exhaust the cap before
- *      emitting a character of JSON. thinkingBudget bounds that separately.
- *   2. finishReason was never read, so MAX_TOKENS looked identical to a
- *      malformed response and to a missing API key.
- *   3. An unparseable body was retried with the byte-identical prompt, three
- *      times, at full price, for the same failure. Now it is retried once with
- *      a repair instruction, and only once.
+ *                                     'network' | 'exhausted' }
  */
 async function geminiCallDetailed(prompt, {
     temperature = 0.5,
     maxOutputTokens = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '8192', 10),
     thinkingBudget = parseInt(process.env.GEMINI_THINKING_BUDGET || '2048', 10),
     tag = 'gemini',
-    retries = 3
+    retries = 3,
+    userId = null
 } = {}) {
-    if (!GEMINI_API_KEY) return { ok: false, data: null, reason: 'no_key' };
+    const uid = userId || ELS.getStore()?.userId || null;
+    const candidates = await geminiCandidates(uid);
+    if (!candidates.length) return { ok: false, data: null, reason: 'no_key' };
+
     METRICS.gemini.calls += 1;
     METRICS.ai.promptChars += prompt.length;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-    const buildBody = (text) => JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text }] }],
-        generationConfig: {
-            temperature,
-            maxOutputTokens,
-            responseMimeType: 'application/json',
-            // Ignored by models that do not think; bounds the budget on the
-            // ones that do, which is what stops MAX_TOKENS before any output.
-            thinkingConfig: { thinkingBudget }
+    const buildBody = (text, model, withThinking) => {
+        const generationConfig = { temperature, maxOutputTokens, responseMimeType: 'application/json' };
+        if (withThinking) {
+            generationConfig.thinkingConfig = geminiIsThinkingLevelModel(model)
+                ? { thinkingLevel: 'low' }
+                : { thinkingBudget };
         }
-    });
+        return JSON.stringify({ contents: [{ role: 'user', parts: [{ text }] }], generationConfig });
+    };
 
     let text = prompt;
     let repairUsed = false;
+    let keyIdx = 0;
+    let withThinking = true;
+    const models = await geminiModelChain(candidates[0].key);
+    let modelIdx = 0;
+    let lastReason = 'exhausted';
+    const maxAttempts = retries + candidates.length + models.length;
 
-    for (let attempt = 0; attempt < retries; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (keyIdx >= candidates.length) { keyIdx = 0; await new Promise(r => setTimeout(r, Math.min(2000 * Math.pow(2, attempt), 15000))); }
+        if (modelIdx >= models.length) break;
+        const cand = candidates[keyIdx];
+        const model = models[modelIdx];
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
         try {
             const r = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: buildBody(text)
+                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cand.key },
+                body: buildBody(text, model, withThinking)
             });
 
-            if (r.status === 429 || r.status >= 500) {
-                const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+            if (r.status === 429) {
                 METRICS.gemini.retries += 1;
-                logger.warn('gemini_retry', { tag, status: r.status, attempt: attempt + 1, waitMs });
-                await new Promise(res => setTimeout(res, waitMs));
+                logger.warn('gemini_rate_limited', { tag, model, keySource: cand.source, keyId: cand.id });
+                if (cand.id) _geminiCoolLocal.set(cand.id, Date.now() + GEMINI_KEY_COOLDOWN_MS);
+                await geminiMarkKey(cand.id, { status: 'cooldown', cooldown_until: new Date(Date.now() + GEMINI_KEY_COOLDOWN_MS).toISOString(), last_error: '429' });
+                keyIdx += 1; lastReason = 'exhausted';
                 continue;
             }
 
+            if (r.status === 404 || r.status === 400 || r.status === 403 || r.status >= 500) {
+                const body = (await r.text()).slice(0, 400);
+                const isModelProblem = r.status === 404 || /model|not found|no longer available|not supported/i.test(body);
+                const isThinkingProblem = r.status === 400 && /thinking/i.test(body);
+                const isKeyProblem = (r.status === 400 || r.status === 403) && /api key|API_KEY|permission|not valid/i.test(body);
+
+                if (isThinkingProblem && withThinking) { withThinking = false; logger.warn('gemini_thinking_config_rejected', { tag, model }); continue; }
+                if (isKeyProblem) {
+                    logger.warn('gemini_key_invalid', { tag, keySource: cand.source, keyId: cand.id, body });
+                    await geminiMarkKey(cand.id, { status: 'invalid', last_error: body.slice(0, 200), fail_count: 99 });
+                    keyIdx += 1; lastReason = 'http_' + r.status;
+                    continue;
+                }
+                if (isModelProblem && r.status !== 403) {
+                    _geminiDeadModels.set(model, Date.now());
+                    logger.warn('gemini_model_unavailable', { tag, model, status: r.status, body });
+                    alertOnce('gemini_model:' + model, `Gemini model ${model} is unavailable (${r.status}); falling back.`, { tag });
+                    modelIdx += 1; lastReason = 'http_' + r.status;
+                    continue;
+                }
+                if (r.status >= 500) {
+                    METRICS.gemini.retries += 1;
+                    logger.warn('gemini_retry', { tag, status: r.status, attempt: attempt + 1 });
+                    await new Promise(res => setTimeout(res, Math.min(2000 * Math.pow(2, attempt), 15000)));
+                    continue;
+                }
+                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
+                logger.error('gemini_failed', { tag, status: r.status, body });
+                return { ok: false, data: null, reason: 'http_' + r.status, detail: body, model };
+            }
+
             if (!r.ok) {
-                METRICS.gemini.failed += 1;
-                METRICS.ai.failed += 1;
+                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
                 const body = (await r.text()).slice(0, 300);
                 logger.error('gemini_failed', { tag, status: r.status, body });
                 alertOnce('gemini_failed', `Gemini returned ${r.status}. Reports will ship without their narrative layer.`, { tag });
-                return { ok: false, data: null, reason: 'http_' + r.status, detail: body };
+                return { ok: false, data: null, reason: 'http_' + r.status, detail: body, model };
             }
 
+            await geminiMarkKey(cand.id, { last_used_at: new Date().toISOString(), status: 'active', cooldown_until: null });
+
             const data = await r.json();
-            const cand = data?.candidates?.[0];
-            const finish = String(cand?.finishReason || '').toUpperCase();
-            const raw = (cand?.content?.parts || []).map(x => x.text || '').join('');
+            const c0 = data?.candidates?.[0];
+            const finish = String(c0?.finishReason || '').toUpperCase();
+            const raw = (c0?.content?.parts || []).filter(p => !p.thought).map(x => x.text || '').join('');
 
             if (finish === 'SAFETY' || finish === 'PROHIBITED_CONTENT' || finish === 'RECITATION') {
                 METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
                 logger.warn('gemini_blocked', { tag, finishReason: finish });
-                return { ok: false, data: null, reason: 'blocked', detail: finish };
+                return { ok: false, data: null, reason: 'blocked', detail: finish, model };
             }
-
             if (finish === 'MAX_TOKENS') {
-                METRICS.gemini.failed += 1;
-                METRICS.ai.truncated += 1;
-                logger.warn('gemini_max_tokens', {
-                    tag, maxOutputTokens, thinkingBudget,
-                    promptChars: text.length, chars: raw.length
-                });
-                alertOnce('gemini_max_tokens',
-                    'Gemini hit its output cap before finishing the JSON. Raise GEMINI_MAX_OUTPUT_TOKENS ' +
-                    'or lower GEMINI_THINKING_BUDGET.', { tag });
-                return { ok: false, data: null, reason: 'max_tokens' };
+                METRICS.gemini.failed += 1; METRICS.ai.truncated += 1;
+                logger.warn('gemini_max_tokens', { tag, model, maxOutputTokens, promptChars: text.length, chars: raw.length });
+                alertOnce('gemini_max_tokens', 'Gemini hit its output cap before finishing the JSON. Raise GEMINI_MAX_OUTPUT_TOKENS.', { tag });
+                return { ok: false, data: null, reason: 'max_tokens', model };
             }
-
             if (!raw.trim()) {
                 METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
                 logger.warn('gemini_empty', { tag, finishReason: finish || 'none' });
-                return { ok: false, data: null, reason: 'empty', detail: finish || null };
+                return { ok: false, data: null, reason: 'empty', detail: finish || null, model };
             }
 
             try {
                 const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-                METRICS.gemini.ok += 1;
-                METRICS.ai.ok += 1;
-                return { ok: true, data: parsed, reason: 'ok' };
+                METRICS.gemini.ok += 1; METRICS.ai.ok += 1;
+                return { ok: true, data: parsed, reason: 'ok', model, keySource: cand.source };
             } catch (parseErr) {
                 if (repairUsed) {
                     METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
                     logger.error('gemini_unparseable', { tag, chars: raw.length, head: raw.slice(0, 200) });
-                    return { ok: false, data: null, reason: 'unparseable' };
+                    return { ok: false, data: null, reason: 'unparseable', model };
                 }
                 repairUsed = true;
                 METRICS.gemini.retries += 1;
-                logger.warn('gemini_repair_retry', { tag, chars: raw.length });
                 text = prompt +
                     '\n\nYour previous reply was not valid JSON. Reply again with ONLY the JSON object, ' +
                     'no markdown fences, no commentary, and make sure every bracket and quote is closed.';
                 continue;
             }
         } catch (err) {
-            const waitMs = Math.min(2000 * Math.pow(2, attempt), 15000);
             logger.error('gemini_error', { tag, attempt: attempt + 1, message: err.message });
-            if (attempt === retries - 1) {
-                METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
-                return { ok: false, data: null, reason: 'network', detail: err.message };
-            }
-            await new Promise(res => setTimeout(res, waitMs));
+            lastReason = 'network';
+            await new Promise(res => setTimeout(res, Math.min(2000 * Math.pow(2, attempt), 15000)));
         }
     }
     METRICS.gemini.failed += 1; METRICS.ai.failed += 1;
-    return { ok: false, data: null, reason: 'exhausted' };
+    return { ok: false, data: null, reason: lastReason };
 }
 
 /** Back-compat shape: the parsed object, or null. */
@@ -3103,7 +3258,7 @@ function fbPageAiSlim(p) {
 }
 
 async function geminiNarrative(payload) {
-    if (!GEMINI_API_KEY) {
+    if (!geminiAvailable()) {
         return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
     }
 
@@ -3153,6 +3308,7 @@ ${json}`;
 async function createJob(userId, type, engine, input, creditsEstimate) {
     const { data, error } = await supabase.from('jobs').insert([{
         user_id: userId, type, engine, input,
+        client_id: (input && UUID_RE.test(String(input.clientId || ''))) ? input.clientId : null,
         credits_estimate: creditsEstimate || null,
         status: 'queued', progress: 0, log: [],
         completed_units: []
@@ -3363,7 +3519,7 @@ function runJob(jobId, worker, opts = {}) {
             }
 
             const { data: row } = await supabase.from('jobs')
-                .select('completed_units, partials').eq('id', jobId).maybeSingle();
+                .select('completed_units, partials, user_id').eq('id', jobId).maybeSingle();
             const units = Array.isArray(row?.completed_units) ? row.completed_units.slice() : [];
             const partials = (row?.partials && typeof row.partials === 'object') ? { ...row.partials } : {};
 
@@ -3405,7 +3561,7 @@ function runJob(jobId, worker, opts = {}) {
             // why workers get this for free without knowing about it.
             const progressFn = (progress, step) => jobTick(jobId, progress, step);
 
-            const result = await worker(progressFn, ck);
+            const result = await ELS.run({ userId: row?.user_id || null }, () => worker(progressFn, ck));
 
             METRICS.jobs.done += 1;
             logger.info('job_done', { jobId, ms: Date.now() - jobT0, units: units.length });
@@ -3703,6 +3859,7 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
             await progress(96, 'Saving report');
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
+                client_id: input.clientId || null,
                 platform: 'instagram',
                 // Stable per-worker type. The old 'single'/'compare' collided
                 // with deep_audit's 'single', so the two vaults could not be told
@@ -3805,6 +3962,7 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
             await progress(96, 'Saving report');
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
+                client_id: input.clientId || null,
                 platform: 'instagram',
                 report_type: 'deep_audit',
                 set_id: activeSetId,
@@ -3958,6 +4116,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
 
                     const { data: saved } = await supabase.from('reports').insert([{
                         user_id: userId,
+                        client_id: input.clientId || null,
                         platform: 'facebook',
                         report_type: 'fb_group',
                         audit_mode: 'individual',
@@ -4011,6 +4170,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
             await progress(94, 'Saving report');
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
+                client_id: input.clientId || null,
                 platform: 'facebook',
                 report_type: 'fb_community',
                 audit_mode: 'combined',
@@ -4131,6 +4291,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             await progress(95, 'Saving report to the vault');
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
+                client_id: input.clientId || null,
                 platform: 'facebook',
                 report_type: 'fb_page',
                 audit_mode: rivalAudit ? 'versus' : 'single',
@@ -4529,7 +4690,7 @@ app.get('/api/health', (req, res) => res.json({
     rotationPending: !!ENC_KEY_OLD,
     keepAlive: !!SELF_URL,
     igScoreVersion: IG_SCORE_VERSION,
-    ai: { model: GEMINI_MODEL, configured: !!GEMINI_API_KEY, ok: METRICS.ai.ok, failed: METRICS.ai.failed, truncated: METRICS.ai.truncated },
+    ai: { model: GEMINI_MODEL, discovered: _geminiDiscovered.models.slice(0, 3), poolKeys: _geminiPool.rows.length, envKey: !!GEMINI_API_KEY, configured: geminiAvailable(), ok: METRICS.ai.ok, failed: METRICS.ai.failed, truncated: METRICS.ai.truncated },
     budgetMode: BUDGET_MODE
 }));
 
@@ -5302,6 +5463,7 @@ app.post('/api/run-campaign', spendLimit, async (req, res) => {
         // jobs.input alone.
         const { data: newCmp, error: cmpErr } = await supabase.from('campaigns').insert([{
             user_id: ctx.user.id,
+            client_id: await resolveClientId(req, ctx),
             name: campaignName || 'Discovery Campaign',
             location: location || null,
             keywords: [...method1_keywords, ...method3_1_keywords],
@@ -5312,7 +5474,7 @@ app.post('/api/run-campaign', spendLimit, async (req, res) => {
         const estimate = +(units.length * LEADGEN_UNIT_USD).toFixed(4);
 
         const job = await createJob(ctx.user.id, 'leadgen_campaign', 'leadgen',
-            { ...input, campaignId: newCmp.id }, estimate);
+            { clientId: await resolveClientId(req, ctx), ...input, campaignId: newCmp.id }, estimate);
 
         runJob(job.id, JOB_WORKERS['leadgen_campaign'](ctx.user.id, job.input, job.id));
 
@@ -5432,7 +5594,7 @@ app.post('/api/enrich-campaign', spendLimit, async (req, res) => {
         const estimate = +((size / 1000) * COST_PER_1K_PROFILE).toFixed(4);
 
         const job = await createJob(ctx.user.id, 'leadgen_enrich', 'leadgen',
-            { campaignId, batchSize: size }, estimate);
+            { clientId: await resolveClientId(req, ctx), campaignId, batchSize: size }, estimate);
 
         runJob(job.id, JOB_WORKERS['leadgen_enrich'](ctx.user.id, job.input, job.id));
 
@@ -5539,7 +5701,7 @@ app.post('/api/generate-ig-report', spendLimit, async (req, res) => {
         // tag posts with a set_id. Saved, re-runnable cohorts and trend tracking
         // stay exclusive to /api/deep-audit (Competitor Intel).
         const job = await createJob(ctx.user.id, 'ig_report', 'report',
-            { target: cleanTarget, rivals, postsPerAccount: limit }, estimate);
+            { clientId: await resolveClientId(req, ctx), target: cleanTarget, rivals, postsPerAccount: limit }, estimate);
 
         runJob(job.id, JOB_WORKERS['ig_report'](ctx.user.id, job.input, job.id));
 
@@ -5605,6 +5767,7 @@ app.post('/api/deep-audit', spendLimit, async (req, res) => {
         if (!activeSetId) {
             const { data: set } = await supabase.from('competitor_sets').insert([{
                 user_id: ctx.user.id,
+                client_id: await resolveClientId(req, ctx),
                 name: setName || `${cleanTarget} vs ${rivals.length} rivals`,
                 target_handle: cleanTarget,
                 competitor_handles: rivals,
@@ -5614,7 +5777,7 @@ app.post('/api/deep-audit', spendLimit, async (req, res) => {
         }
 
         const job = await createJob(ctx.user.id, 'deep_audit', 'report',
-            { target: cleanTarget, competitors: rivals, postsPerAccount: limit, setId: activeSetId },
+            { clientId: await resolveClientId(req, ctx), target: cleanTarget, competitors: rivals, postsPerAccount: limit, setId: activeSetId },
             estimate
         );
 
@@ -5886,8 +6049,8 @@ app.get('/api/reports-history', async (req, res) => {
             .select('id, platform, report_type, target_handle, competitor_handles, grade, score, ' +
                     'score_version, score_v1, engagement_rate, posts_analyzed, snapshot_date, ' +
                     'created_at, ai_summary, ai_status, set_id, credits_estimate')
-            .eq('user_id', ctx.user.id)
             .eq('platform', 'instagram');
+        q = await applyReportScope(req, ctx, q);
 
         // Legacy rows (pre phase 7) wrote 'single'/'compare' for audits and
         // 'single'/'competitor' for cohorts. set_id is the reliable tell:
@@ -5914,8 +6077,8 @@ app.get('/api/report/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
         const { data } = await supabase.from('reports')
-            .select('*').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
-        if (!data) return res.status(404).json({ error: 'Report not found' });
+            .select('*').eq('id', req.params.id).maybeSingle();
+        if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -6912,7 +7075,7 @@ async function geminiJSON(prompt, maxTokens = 4096, temperature = 0.5) {
 }
 
 async function fbNarrative(payload) {
-    if (!GEMINI_API_KEY) {
+    if (!geminiAvailable()) {
         return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
     }
 
@@ -7270,7 +7433,7 @@ app.post('/api/fb/discover-groups', spendLimit, async (req, res) => {
         const estimate = fbEstimateCredits(seeds.length || cap, sample, false);
 
         const job = await createJob(ctx.user.id, 'fb_discovery', 'fb_community',
-            { location, niche, keywords, seeds, sampleSize: sample, maxGroups: cap }, estimate);
+            { clientId: await resolveClientId(req, ctx), location, niche, keywords, seeds, sampleSize: sample, maxGroups: cap }, estimate);
 
         runJob(job.id, JOB_WORKERS['fb_discovery'](ctx.user.id, job.input, job.id));
 
@@ -7592,6 +7755,7 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
         if (!activeSetId && refs.length > 1) {
             const { data: set } = await supabase.from('fb_group_sets').insert([{
                 user_id: ctx.user.id,
+                client_id: await resolveClientId(req, ctx),
                 name: setName || `${niche || 'Community'} — ${refs.length} rooms`,
                 location_label: location || null, niche: niche || null,
                 group_ids: refs.map(r => r.groupId),
@@ -7605,7 +7769,7 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
         // silently compares unlike things.
         const since = new Date(Date.now() - window * 86400000).toISOString().slice(0, 10);
 
-        const job = await createJob(ctx.user.id, 'fb_community_audit', 'fb_community', {
+        const job = await createJob(ctx.user.id, 'fb_community_audit', 'fb_community', { clientId: await resolveClientId(req, ctx),
             groups: refs.map(r => r.groupId), mode: auditMode,
             days: window, postsPerGroup: limit, sampleComments, commentSamplePosts: commentPosts,
             setId: activeSetId, groupNames: refs.map(r => r.name || r.groupId),
@@ -7631,9 +7795,11 @@ app.post('/api/fb/audit-community', spendLimit, async (req, res) => {
 app.get('/api/fb/reports', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
-        const { data, error } = await supabase.from('reports')
-            .select('id, target_handle, fb_group_names, fb_group_ids, audit_mode, grade, score, posts_analyzed, snapshot_date, created_at, ai_summary, location_label, niche, set_id, report_type')
-            .eq('user_id', ctx.user.id).eq('platform', 'facebook')
+        let q = supabase.from('reports')
+            .select('id, user_id, client_id, target_handle, fb_group_names, fb_group_ids, audit_mode, grade, score, posts_analyzed, snapshot_date, created_at, ai_summary, location_label, niche, set_id, report_type')
+            .eq('platform', 'facebook');
+        q = await applyReportScope(req, ctx, q);
+        const { data, error } = await q
             // Page reports share the vault but are a different engine. Without
             // this they showed up in the community list and 404'd on open.
             .neq('report_type', 'fb_page')
@@ -7647,8 +7813,8 @@ app.get('/api/fb/report/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_community'); if (!ctx) return;
         const { data } = await supabase.from('reports').select('*')
-            .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
-        if (!data) return res.status(404).json({ error: 'Report not found' });
+            .eq('id', req.params.id).maybeSingle();
+        if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -7847,7 +8013,7 @@ app.post('/api/fb/suggest-posts', spendLimit, async (req, res) => {
         if (!audit) return res.status(400).json({ error: 'That group is not in this report.' });
         if (!audit.postsAnalyzed) return res.status(400).json({ error: 'No post data for that room — nothing to condition drafts on.' });
 
-        if (!GEMINI_API_KEY) return res.status(503).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+        if (!geminiAvailable()) return res.status(503).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
 
         // The report is frozen at audit time. The fb_groups row is what the
         // user edits (promo ok / no promo, rules pasted in), so it wins.
@@ -7879,8 +8045,10 @@ app.post('/api/fb/suggest-posts', spendLimit, async (req, res) => {
             return res.status(502).json({ error: 'The model returned no drafts. Try again, or reduce the count.' });
         }
 
+        const suggClientId = await resolveClientId(req, ctx);
         const rows = drafts.map(d => ({
             user_id: ctx.user.id,
+            client_id: suggClientId,
             group_id: audit.groupId,
             group_name: audit.name,
             report_id: report.id,
@@ -7965,7 +8133,7 @@ app.post('/api/fb/suggestions/:id/verify', async (req, res) => {
         }
 
         const job = await createJob(ctx.user.id, 'fb_verify', 'fb_community',
-            { suggestionId: sug.id, groupId: sug.group_id }, fbEstimateCredits(1, 60, false));
+            { clientId: await resolveClientId(req, ctx), suggestionId: sug.id, groupId: sug.group_id }, fbEstimateCredits(1, 60, false));
 
         runJob(job.id, JOB_WORKERS['fb_verify'](ctx.user.id, job.input, job.id));
 
@@ -8873,7 +9041,7 @@ function fbPageRecommendations(a, benchmark) {
 // AI NARRATIVE
 // ---------------------------------------------------------------------------
 async function fbPageNarrative(payload) {
-    if (!GEMINI_API_KEY) {
+    if (!geminiAvailable()) {
         return { ai: null, aiStatus: { ok: false, reason: 'no_key', message: aiReasonText('no_key') } };
     }
 
@@ -9137,6 +9305,7 @@ app.post('/api/fb/page-report', spendLimit, async (req, res) => {
         if (!activeSetId && setName) {
             const { data: set } = await supabase.from('fb_page_sets').insert([{
                 user_id: ctx.user.id,
+                client_id: await resolveClientId(req, ctx),
                 name: setName,
                 target_page: targetRef.pageId,
                 target_url: targetRef.url,
@@ -9150,7 +9319,7 @@ app.post('/api/fb/page-report', spendLimit, async (req, res) => {
 
         const since = new Date(Date.now() - window * 86400000).toISOString().slice(0, 10);
 
-        const job = await createJob(ctx.user.id, 'fb_page_report', 'fb_page', {
+        const job = await createJob(ctx.user.id, 'fb_page_report', 'fb_page', { clientId: await resolveClientId(req, ctx),
             target: targetRef.url, rival: rivalRef?.url || null,
             postsPerPage: limit, days: window, includeReviews, setId: activeSetId,
             brief: brief ? String(brief).slice(0, 600) : null, since
@@ -9180,10 +9349,11 @@ app.post('/api/fb/page-report', spendLimit, async (req, res) => {
 app.get('/api/fb/page-reports', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_page'); if (!ctx) return;
-        const { data, error } = await supabase.from('reports')
-            .select('id, target_handle, competitor_handles, fb_page_ids, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, set_id, credits_estimate')
-            .eq('user_id', ctx.user.id)
-            .eq('platform', 'facebook')
+        let q = supabase.from('reports')
+            .select('id, user_id, client_id, target_handle, competitor_handles, fb_page_ids, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, set_id, credits_estimate')
+            .eq('platform', 'facebook');
+        q = await applyReportScope(req, ctx, q);
+        const { data, error } = await q
             .eq('report_type', 'fb_page')
             .order('created_at', { ascending: false })
             .limit(200);
@@ -9196,8 +9366,8 @@ app.get('/api/fb/page-report/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_page'); if (!ctx) return;
         const { data } = await supabase.from('reports').select('*')
-            .eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
-        if (!data) return res.status(404).json({ error: 'Report not found' });
+            .eq('id', req.params.id).maybeSingle();
+        if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -9337,6 +9507,1203 @@ app.get('/api/fb/page-posts', async (req, res) => {
  * answers with an HTML page. EL.api() then failed inside JSON.parse and the
  * user saw "Unexpected token <" instead of "no such endpoint".
  */
+// ===========================================================================
+// PHASE 9 :: CLIENT WORKSPACE
+//
+// A client is the unit of work. Every report, job, set and suggestion carries
+// a nullable client_id. Runs without a client keep the per-user rule that has
+// always applied; runs with one land in that client's timeline and are
+// visible to every member of that client.
+// ===========================================================================
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Return the client row when the user may act on it, else null.
+ * need: 'viewer' (owner or any member) | 'editor' (owner or editor member) | 'owner'
+ */
+async function clientAccess(userId, clientId, need = 'viewer') {
+    if (!userId || !clientId || !UUID_RE.test(String(clientId))) return null;
+    const { data: c } = await supabase.from('clients').select('*').eq('id', clientId).maybeSingle();
+    if (!c) return null;
+    if (c.owner_user_id === userId) return { ...c, access: 'owner' };
+    if (need === 'owner') return null;
+    const { data: m } = await supabase.from('client_members')
+        .select('role').eq('client_id', clientId).eq('user_id', userId).maybeSingle();
+    if (!m) return null;
+    if (need === 'editor' && m.role !== 'editor') return null;
+    return { ...c, access: m.role };
+}
+
+/** Read clientId from a request body, validate it, or throw 403. */
+async function resolveClientId(req, ctx) {
+    const raw = req.body?.clientId || req.body?.client_id || req.query?.client_id || null;
+    if (!raw) return null;
+    const c = await clientAccess(ctx.user.id, raw, 'editor');
+    if (!c) { const e = new Error('You do not have edit access to that client.'); e.statusCode = 403; throw e; }
+    return c.id;
+}
+
+/** Scope a reports query: by client (membership) when asked, else by user. */
+async function applyReportScope(req, ctx, q) {
+    const cid = req.query?.client_id;
+    if (cid) {
+        const c = await clientAccess(ctx.user.id, cid, 'viewer');
+        if (!c) { const e = new Error('No access to that client.'); e.statusCode = 403; throw e; }
+        return q.eq('client_id', c.id);
+    }
+    return q.eq('user_id', ctx.user.id);
+}
+
+/** May this user open this single report row? */
+async function canReadReport(ctx, row) {
+    if (!row) return false;
+    if (row.user_id === ctx.user.id) return true;
+    if (ctx.profile?.role === 'admin') return true;
+    if (row.client_id && await clientAccess(ctx.user.id, row.client_id, 'viewer')) return true;
+    return false;
+}
+
+function cleanClientBody(b = {}) {
+    const s = v => (v === undefined || v === null) ? undefined : String(v).trim().slice(0, 300) || null;
+    return {
+        name: s(b.name), brand: s(b.brand),
+        ig_handle: b.ig_handle !== undefined ? (s(b.ig_handle) || '').replace('@', '').toLowerCase() || null : undefined,
+        fb_page: s(b.fb_page), fb_page_id: s(b.fb_page_id),
+        niche: s(b.niche), location: s(b.location),
+        notes: b.notes !== undefined ? String(b.notes || '').slice(0, 4000) || null : undefined,
+        archived: typeof b.archived === 'boolean' ? b.archived : undefined
+    };
+}
+
+app.get('/api/clients', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const includeArchived = String(req.query.archived || '') === '1';
+        const { data: owned } = await supabase.from('clients').select('*')
+            .eq('owner_user_id', ctx.user.id).order('created_at', { ascending: false });
+        const { data: mem } = await supabase.from('client_members').select('client_id, role').eq('user_id', ctx.user.id);
+        let shared = [];
+        if (mem?.length) {
+            const { data } = await supabase.from('clients').select('*').in('id', mem.map(m => m.client_id));
+            shared = (data || []).map(c => ({ ...c, access: (mem.find(m => m.client_id === c.id) || {}).role || 'viewer' }));
+        }
+        let rows = [...(owned || []).map(c => ({ ...c, access: 'owner' })), ...shared];
+        if (!includeArchived) rows = rows.filter(c => !c.archived);
+        rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+
+        // Counts per client so the list is a real overview rather than names.
+        const ids = rows.map(r => r.id);
+        const counts = {};
+        if (ids.length) {
+            const { data: reps } = await supabase.from('reports').select('client_id, report_type').in('client_id', ids);
+            for (const r of (reps || [])) {
+                counts[r.client_id] = counts[r.client_id] || { total: 0, byType: {} };
+                counts[r.client_id].total += 1;
+                counts[r.client_id].byType[r.report_type] = (counts[r.client_id].byType[r.report_type] || 0) + 1;
+            }
+        }
+        res.json({ clients: rows.map(c => ({ ...c, reports: counts[c.id] || { total: 0, byType: {} } })) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/clients', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const body = cleanClientBody(req.body);
+        if (!body.name) return res.status(400).json({ error: 'Client name is required.' });
+        const row = { owner_user_id: ctx.user.id };
+        for (const [k, v] of Object.entries(body)) if (v !== undefined) row[k] = v;
+        const { data, error } = await supabase.from('clients').insert([row]).select().maybeSingle();
+        if (error) throw error;
+        res.status(201).json({ client: { ...data, access: 'owner' } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/clients/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        const body = cleanClientBody(req.body);
+        const patch = { updated_at: new Date().toISOString() };
+        for (const [k, v] of Object.entries(body)) if (v !== undefined) patch[k] = v;
+        if (patch.name === null) delete patch.name;
+        const { data, error } = await supabase.from('clients').update(patch).eq('id', c.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ client: { ...data, access: c.access } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/clients/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        // Reports are kept (client_id set null by the FK). Only the workspace goes.
+        const { error } = await supabase.from('clients').delete().eq('id', c.id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/clients/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'viewer');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        const { data: members } = await supabase.from('client_members').select('user_id, role, created_at').eq('client_id', c.id);
+        const ids = [c.owner_user_id, ...(members || []).map(m => m.user_id)];
+        const { data: users } = await supabase.from('app_users').select('id, email').in('id', ids);
+        const email = id => (users || []).find(u => u.id === id)?.email || id;
+        const { data: conns } = await supabase.from('meta_connections')
+            .select('id, page_id, page_name, ig_user_id, ig_username, status, last_sync_at, last_error, token_expires_at, scopes')
+            .eq('client_id', c.id);
+        res.json({
+            client: c,
+            owner: { id: c.owner_user_id, email: email(c.owner_user_id) },
+            members: (members || []).map(m => ({ ...m, email: email(m.user_id) })),
+            metaConnections: conns || []
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/clients/:id/timeline', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'viewer');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        const { data: reports } = await supabase.from('reports')
+            .select('id, user_id, platform, report_type, target_handle, competitor_handles, fb_group_names, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, credits_estimate, source_report_ids')
+            .eq('client_id', c.id).order('created_at', { ascending: false }).limit(300);
+        const { data: jobs } = await supabase.from('jobs')
+            .select('id, type, engine, status, progress, credits_estimate, created_at, finished_at, error, result_report_id')
+            .eq('client_id', c.id).order('created_at', { ascending: false }).limit(50);
+        const { data: sugg } = await supabase.from('fb_suggestions')
+            .select('id, group_name, format, predicted_band, posted_at, verified_band, created_at')
+            .eq('client_id', c.id).order('created_at', { ascending: false }).limit(50);
+        res.json({ client: c, reports: reports || [], jobs: jobs || [], suggestions: sugg || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/clients/:id/members', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        const email = String(req.body.email || '').trim().toLowerCase();
+        const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
+        if (!email) return res.status(400).json({ error: 'Email is required.' });
+        const { data: u } = await supabase.from('app_users').select('id, email').eq('email', email).maybeSingle();
+        if (!u) return res.status(404).json({ error: 'No EdgeLead account with that email. They need to sign up first.' });
+        if (u.id === c.owner_user_id) return res.status(400).json({ error: 'That is the owner.' });
+        const { error } = await supabase.from('client_members')
+            .upsert([{ client_id: c.id, user_id: u.id, role, added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
+        if (error) throw error;
+        res.json({ success: true, member: { user_id: u.id, email: u.email, role } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/clients/:id/members/:userId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        const self = req.params.userId === ctx.user.id;
+        if (!c && !self) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        const { error } = await supabase.from('client_members').delete()
+            .eq('client_id', req.params.id).eq('user_id', req.params.userId);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 9 :: GEMINI KEYS (personal + shared pool)
+// ===========================================================================
+
+app.get('/api/gemini-keys', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const isAdmin = ctx.profile.role === 'admin';
+        let q = supabase.from('gemini_keys')
+            .select('id, owner_user_id, label, status, cooldown_until, fail_count, calls_total, last_used_at, last_error, created_at')
+            .order('created_at', { ascending: false });
+        q = isAdmin ? q : q.eq('owner_user_id', ctx.user.id);
+        const { data, error } = await q;
+        if (error) throw error;
+        res.json({
+            keys: (data || []).map(k => ({ ...k, scope: k.owner_user_id ? 'personal' : 'pool' })),
+            envConfigured: !!GEMINI_API_KEY,
+            envKey: !!GEMINI_API_KEY,
+            poolKeys: (data || []).filter(k => !k.owner_user_id && k.status !== 'invalid').length,
+            discovered: _geminiDiscovered.models.slice(0, 3),
+            model: GEMINI_MODEL,
+            fallbacks: GEMINI_MODEL_FALLBACKS,
+            deadModels: [..._geminiDeadModels.keys()]
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/gemini-keys', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const key = String(req.body.key || req.body.token || '').trim();
+        if (!/^AIza[0-9A-Za-z_-]{20,}$/.test(key)) return res.status(400).json({ error: 'That does not look like a Gemini API key (they start with AIza).' });
+        const isGlobal = !!req.body.global && ctx.profile.role === 'admin';
+
+        // Verify with one tiny call before storing anything.
+        const probe = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1`, { headers: { 'x-goog-api-key': key } });
+        if (probe.status === 400 || probe.status === 403) return res.status(400).json({ error: 'Google rejected that key.' });
+
+        const row = {
+            owner_user_id: isGlobal ? null : ctx.user.id,
+            label: String(req.body.label || '').slice(0, 80) || (isGlobal ? 'pool key' : 'my key'),
+            key_enc: encryptSecret(key),
+            key_hash: tokenHash(key),
+            status: 'active'
+        };
+        const { data, error } = await supabase.from('gemini_keys').insert([row]).select('id, owner_user_id, label, status, created_at').maybeSingle();
+        if (error) {
+            if (/duplicate|unique/i.test(error.message)) return res.status(409).json({ error: 'That key is already stored.' });
+            throw error;
+        }
+        invalidateGeminiPool(); await loadGeminiPool(true);
+        res.status(201).json({ key: { ...data, scope: data.owner_user_id ? 'personal' : 'pool' } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/gemini-keys/:id/reset', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let q = supabase.from('gemini_keys').update({ status: 'active', cooldown_until: null, fail_count: 0, last_error: null }).eq('id', req.params.id);
+        if (ctx.profile.role !== 'admin') q = q.eq('owner_user_id', ctx.user.id);
+        const { error } = await q;
+        if (error) throw error;
+        invalidateGeminiPool();
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/gemini-keys/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let q = supabase.from('gemini_keys').delete().eq('id', req.params.id);
+        if (ctx.profile.role !== 'admin') q = q.eq('owner_user_id', ctx.user.id);
+        const { error } = await q;
+        if (error) throw error;
+        invalidateGeminiPool(); await loadGeminiPool(true);
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 9 :: META OWNER DATA  (OAuth + Graph API, read-only scopes)
+//
+// Scraping shows what the public sees. This shows what only the owner sees:
+// reach, saves, shares, views, demographics. The two are never blended: every
+// number carries a source tag, and competitors are always 'scraped'.
+// ===========================================================================
+
+const META_APP_ID        = (process.env.META_APP_ID || '').trim();
+const META_APP_SECRET    = (process.env.META_APP_SECRET || '').trim();
+const META_GRAPH_VERSION = (process.env.META_GRAPH_VERSION || 'v24.0').trim();
+const META_SCOPES        = (process.env.META_SCOPES ||
+    'pages_show_list,pages_read_engagement,read_insights,instagram_basic,instagram_manage_insights,business_management')
+    .split(',').map(s => s.trim()).filter(Boolean);
+const FRONTEND_URL       = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+const BACKEND_URL_ENV    = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
+const META_MEDIA_LIMIT   = parseInt(process.env.META_MEDIA_LIMIT || '50', 10);
+
+function metaConfigured() { return !!(META_APP_ID && META_APP_SECRET); }
+function backendBase(req) {
+    if (BACKEND_URL_ENV) return BACKEND_URL_ENV;
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0];
+    return `${proto}://${req.get('host')}`;
+}
+function metaRedirectUri(req) { return `${backendBase(req)}/api/meta/oauth/callback`; }
+
+/** GET against the Graph API. Throws { code, type, message, subcode } on API error. */
+async function graphGet(path, params = {}, token) {
+    const u = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${String(path).replace(/^\/+/, '')}`);
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, String(v));
+    if (token) u.searchParams.set('access_token', token);
+    const r = await fetch(u.toString());
+    let body = null;
+    try { body = await r.json(); } catch (_) { body = null; }
+    if (!r.ok || body?.error) {
+        const e = new Error(body?.error?.message || `Graph ${r.status}`);
+        e.graph = body?.error || { code: r.status };
+        e.statusCode = r.status === 401 || body?.error?.code === 190 ? 401 : 502;
+        throw e;
+    }
+    return body;
+}
+
+/**
+ * Insights with metric-name resilience. Graph renames and retires metrics per
+ * version. Ask for the whole list; if it complains, drop the metric it names
+ * and try again; finally probe one at a time. Returns { values, unsupported }.
+ */
+async function graphInsights(path, metrics, params, token) {
+    const values = {};
+    const unsupported = [];
+    let list = metrics.slice();
+    for (let i = 0; i < 6 && list.length; i++) {
+        try {
+            const out = await graphGet(`${path}/insights`, { ...params, metric: list.join(',') }, token);
+            for (const m of (out.data || [])) {
+                const tv = m.total_value?.value;
+                values[m.name] = tv !== undefined ? tv : (m.values || []).map(v => ({ end_time: v.end_time, value: v.value }));
+            }
+            return { values, unsupported };
+        } catch (err) {
+            const msg = String(err.message || '');
+            const named = list.find(m => new RegExp(`\\b${m}\\b`).test(msg));
+            if (named) { unsupported.push(named); list = list.filter(m => m !== named); continue; }
+            if (err.statusCode === 401) throw err;
+            break;
+        }
+    }
+    // Probe individually for whatever is left.
+    for (const m of list) {
+        try {
+            const out = await graphGet(`${path}/insights`, { ...params, metric: m }, token);
+            for (const d of (out.data || [])) {
+                const tv = d.total_value?.value;
+                values[d.name] = tv !== undefined ? tv : (d.values || []).map(v => ({ end_time: v.end_time, value: v.value }));
+            }
+        } catch (err) { if (err.statusCode === 401) throw err; unsupported.push(m); }
+    }
+    return { values, unsupported };
+}
+
+function igShortcodeFromPermalink(p) {
+    const m = String(p || '').match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    return m ? m[1] : null;
+}
+
+app.get('/api/meta/status', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        res.json({ configured: metaConfigured(), scopes: META_SCOPES, graphVersion: META_GRAPH_VERSION, redirectUri: metaRedirectUri(req) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/meta/oauth/start', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        if (!metaConfigured()) return res.status(503).json({ error: 'META_APP_ID / META_APP_SECRET are not set on the server.' });
+        const clientId = req.query.client_id ? (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null : null;
+        if (req.query.client_id && !clientId) return res.status(403).json({ error: 'No edit access to that client.' });
+
+        const state = crypto.randomBytes(24).toString('hex');
+        const { error } = await supabase.from('meta_oauth_states').insert([{
+            state, user_id: ctx.user.id, client_id: clientId,
+            expires_at: new Date(Date.now() + 15 * 60000).toISOString()
+        }]);
+        if (error) throw error;
+
+        const u = new URL(`https://www.facebook.com/${META_GRAPH_VERSION}/dialog/oauth`);
+        u.searchParams.set('client_id', META_APP_ID);
+        u.searchParams.set('redirect_uri', metaRedirectUri(req));
+        u.searchParams.set('state', state);
+        u.searchParams.set('scope', META_SCOPES.join(','));
+        u.searchParams.set('response_type', 'code');
+        res.json({ url: u.toString(), redirectUri: metaRedirectUri(req) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Public: Facebook redirects the browser here. State row is the auth. */
+app.get('/api/meta/oauth/callback', async (req, res) => {
+    const back = (q) => {
+        const base = FRONTEND_URL ? `${FRONTEND_URL}/clients.html` : '/clients.html';
+        res.redirect(`${base}?${new URLSearchParams(q).toString()}`);
+    };
+    try {
+        const { code, state, error: fbErr, error_description } = req.query;
+        if (fbErr) return back({ meta: 'error', message: String(error_description || fbErr).slice(0, 200) });
+        if (!code || !state) return back({ meta: 'error', message: 'Missing code or state.' });
+
+        const { data: st } = await supabase.from('meta_oauth_states').select('*').eq('state', String(state)).maybeSingle();
+        await supabase.from('meta_oauth_states').delete().eq('state', String(state));
+        if (!st || new Date(st.expires_at).getTime() < Date.now()) return back({ meta: 'error', message: 'Login link expired. Try again.' });
+
+        const shortTok = await graphGet('oauth/access_token', {
+            client_id: META_APP_ID, client_secret: META_APP_SECRET,
+            redirect_uri: metaRedirectUri(req), code: String(code)
+        });
+        const longTok = await graphGet('oauth/access_token', {
+            grant_type: 'fb_exchange_token', client_id: META_APP_ID,
+            client_secret: META_APP_SECRET, fb_exchange_token: shortTok.access_token
+        });
+        const userToken = longTok.access_token;
+        const expiresAt = longTok.expires_in ? new Date(Date.now() + longTok.expires_in * 1000).toISOString() : null;
+
+        let granted = [];
+        try {
+            const dbg = await graphGet('debug_token', { input_token: userToken, access_token: `${META_APP_ID}|${META_APP_SECRET}` });
+            granted = dbg?.data?.scopes || [];
+        } catch (_) {}
+
+        const pages = await graphGet('me/accounts', {
+            fields: 'id,name,access_token,instagram_business_account{id,username}', limit: 100
+        }, userToken);
+
+        let saved = 0;
+        for (const p of (pages.data || [])) {
+            const row = {
+                user_id: st.user_id, client_id: st.client_id,
+                page_id: String(p.id), page_name: p.name || null,
+                page_token_enc: encryptSecret(p.access_token),
+                ig_user_id: p.instagram_business_account?.id || null,
+                ig_username: p.instagram_business_account?.username || null,
+                user_token_enc: encryptSecret(userToken),
+                token_expires_at: expiresAt, scopes: granted,
+                status: 'active', last_error: null
+            };
+            const { error } = await supabase.from('meta_connections').upsert([row], { onConflict: 'user_id,page_id' });
+            if (!error) saved += 1;
+        }
+        if (!saved) return back({ meta: 'error', message: 'Login worked but no Facebook Page was returned. Make sure you selected a Page in the dialog.' });
+        back({ meta: 'ok', pages: saved, client: st.client_id || '' });
+    } catch (err) {
+        logger.error('meta_oauth_callback', { message: err.message });
+        back({ meta: 'error', message: String(err.message || 'OAuth failed').slice(0, 200) });
+    }
+});
+
+app.get('/api/meta/connections', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let q = supabase.from('meta_connections')
+            .select('id, user_id, client_id, page_id, page_name, ig_user_id, ig_username, token_expires_at, scopes, status, last_sync_at, last_error, created_at')
+            .order('created_at', { ascending: false });
+        if (req.query.client_id) {
+            const c = await clientAccess(ctx.user.id, req.query.client_id, 'viewer');
+            if (!c) return res.status(403).json({ error: 'No access to that client.' });
+            q = q.eq('client_id', c.id);
+        } else {
+            q = q.eq('user_id', ctx.user.id);
+        }
+        const { data, error } = await q;
+        if (error) throw error;
+        res.json({ connections: data || [], configured: metaConfigured() });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/meta/connections/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: conn } = await supabase.from('meta_connections').select('id, user_id').eq('id', req.params.id).maybeSingle();
+        if (!conn || conn.user_id !== ctx.user.id) return res.status(404).json({ error: 'Connection not found.' });
+        const clientId = req.body.clientId === null ? null : (await clientAccess(ctx.user.id, req.body.clientId, 'editor'))?.id;
+        if (req.body.clientId && !clientId) return res.status(403).json({ error: 'No edit access to that client.' });
+        const { error } = await supabase.from('meta_connections').update({ client_id: clientId }).eq('id', conn.id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/meta/connections/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { error } = await supabase.from('meta_connections').delete().eq('id', req.params.id).eq('user_id', ctx.user.id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+async function metaLoadConnection(userId, id) {
+    const { data: conn } = await supabase.from('meta_connections').select('*').eq('id', id).maybeSingle();
+    if (!conn) return null;
+    if (conn.user_id !== userId) {
+        // A member of the client may sync on the owner's behalf.
+        if (!conn.client_id || !(await clientAccess(userId, conn.client_id, 'editor'))) return null;
+    }
+    return conn;
+}
+
+app.post('/api/meta/sync', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
+        const conn = await metaLoadConnection(ctx.user.id, req.body.connectionId);
+        if (!conn) return res.status(404).json({ error: 'Connection not found.' });
+        const days = Math.min(Math.max(parseInt(req.body.days || '28', 10) || 28, 7), 90);
+        const job = await createJob(ctx.user.id, 'meta_insights', 'meta_owned',
+            { connectionId: conn.id, days, clientId: conn.client_id || null, brief: String(req.body.brief || '').slice(0, 600) || null }, 0);
+        runJob(job.id, JOB_WORKERS['meta_insights'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ success: true, jobId: job.id, estimatedUsd: 0 });
+    } catch (err) { sendErr(res, err); }
+});
+
+function seriesSum(arr) { return Array.isArray(arr) ? arr.reduce((s, v) => s + (Number(v.value) || 0), 0) : Number(arr) || 0; }
+function seriesLast(arr) { return Array.isArray(arr) && arr.length ? Number(arr[arr.length - 1].value) || 0 : Number(arr) || 0; }
+
+registerWorker('meta_insights', (userId, input, jobId) => async (progress, ck) => {
+    const conn = await supabase.from('meta_connections').select('*').eq('id', input.connectionId).maybeSingle().then(r => r.data);
+    if (!conn) throw new Error('Connection no longer exists.');
+    const pageToken = decryptSecret(conn.page_token_enc);
+    const days = input.days || 28;
+    const until = Math.floor(Date.now() / 1000);
+    const since = until - days * 86400;
+    const today = new Date().toISOString().slice(0, 10);
+    const gaps = [];
+    const warnings = [];
+
+    const fail = async (err) => {
+        await supabase.from('meta_connections').update({
+            status: err.statusCode === 401 ? 'expired' : 'error',
+            last_error: String(err.message || '').slice(0, 300)
+        }).eq('id', conn.id);
+        throw err;
+    };
+
+    try {
+        // --- Page account -------------------------------------------------
+        await progress(5, `Reading Page insights for ${conn.page_name || conn.page_id}`);
+        let page = ck.get('page');
+        if (!page) {
+            const meta = await graphGet(conn.page_id, { fields: 'id,name,fan_count,followers_count,category,link,about' }, pageToken);
+            const ins = await graphInsights(conn.page_id,
+                ['page_impressions_unique', 'page_post_engagements', 'page_views_total', 'page_fan_adds_unique', 'page_daily_follows_unique', 'page_media_view'],
+                { period: 'day', since, until }, pageToken);
+            gaps.push(...ins.unsupported.map(m => `page:${m}`));
+            page = {
+                id: meta.id, name: meta.name, fans: meta.fan_count ?? null, followers: meta.followers_count ?? null,
+                category: meta.category || null, link: meta.link || null,
+                series: ins.values,
+                totals: Object.fromEntries(Object.entries(ins.values).map(([k, v]) => [k, seriesSum(v)]))
+            };
+            await supabase.from('meta_snapshots').upsert([{
+                connection_id: conn.id, user_id: conn.user_id, snapshot_date: today, level: 'page',
+                metrics: { fans: page.fans, followers: page.followers, totals: page.totals, days }
+            }], { onConflict: 'connection_id,level,snapshot_date' });
+            await ck.done('page', page);
+        }
+
+        // --- Page posts ----------------------------------------------------
+        await progress(25, 'Reading Page posts');
+        let pagePosts = ck.get('page_posts');
+        if (!pagePosts) {
+            pagePosts = [];
+            const out = await graphGet(`${conn.page_id}/posts`, {
+                fields: 'id,message,created_time,permalink_url,shares,reactions.summary(total_count),comments.summary(total_count),attachments{media_type}',
+                since, until, limit: META_MEDIA_LIMIT
+            }, pageToken);
+            const items = out.data || [];
+            const postMetrics = ['post_impressions_unique', 'post_engaged_users', 'post_clicks', 'post_reactions_by_type_total'];
+            let unsupportedPost = null;
+            for (let i = 0; i < items.length; i++) {
+                const p = items[i];
+                let insights = {}, unsupported = [];
+                if (!unsupportedPost) {
+                    const r = await graphInsights(p.id, postMetrics, {}, pageToken);
+                    insights = r.values; unsupported = r.unsupported;
+                    if (unsupported.length === postMetrics.length) unsupportedPost = unsupported;
+                }
+                const row = {
+                    connection_id: conn.id, user_id: conn.user_id, platform: 'facebook',
+                    media_id: String(p.id), shortcode: null,
+                    media_type: p.attachments?.data?.[0]?.media_type || null, product_type: 'page_post',
+                    caption: (p.message || '').slice(0, 4000) || null, permalink: p.permalink_url || null,
+                    posted_at: p.created_time || null,
+                    like_count: p.reactions?.summary?.total_count ?? null,
+                    comments_count: p.comments?.summary?.total_count ?? null,
+                    insights: { ...Object.fromEntries(Object.entries(insights).map(([k, v]) => [k, Array.isArray(v) ? seriesLast(v) : v])), shares: p.shares?.count ?? null, source: 'insights' }
+                };
+                pagePosts.push(row);
+                if (i % 10 === 9) await progress(25 + Math.round(15 * (i / items.length)), `Page posts ${i + 1}/${items.length}`);
+            }
+            if (unsupportedPost) gaps.push(...unsupportedPost.map(m => `post:${m}`));
+            if (pagePosts.length) await supabase.from('meta_media').upsert(pagePosts, { onConflict: 'connection_id,media_id' });
+            await ck.done('page_posts', pagePosts);
+        }
+
+        // --- Instagram account --------------------------------------------
+        let ig = ck.get('ig');
+        let igMedia = ck.get('ig_media');
+        if (conn.ig_user_id) {
+            await progress(45, `Reading Instagram insights for @${conn.ig_username || conn.ig_user_id}`);
+            if (!ig) {
+                const meta = await graphGet(conn.ig_user_id, { fields: 'id,username,name,followers_count,follows_count,media_count,biography,website' }, pageToken);
+                const day = await graphInsights(conn.ig_user_id,
+                    ['reach', 'views', 'accounts_engaged', 'total_interactions', 'profile_views', 'website_clicks', 'follower_count'],
+                    { period: 'day', metric_type: 'total_value', since, until }, pageToken);
+                gaps.push(...day.unsupported.map(m => `ig:${m}`));
+                const demo = {};
+                for (const bd of ['age', 'gender', 'city', 'country']) {
+                    try {
+                        const d = await graphGet(`${conn.ig_user_id}/insights`, { metric: 'follower_demographics', period: 'lifetime', metric_type: 'total_value', breakdown: bd }, pageToken);
+                        const res0 = d.data?.[0]?.total_value?.breakdowns?.[0]?.results || [];
+                        demo[bd] = res0.map(r => ({ key: (r.dimension_values || []).join(' '), value: r.value })).sort((a, b) => b.value - a.value).slice(0, 12);
+                    } catch (err) { if (err.statusCode === 401) throw err; gaps.push(`ig:follower_demographics:${bd}`); }
+                }
+                ig = {
+                    id: meta.id, username: meta.username, name: meta.name || null,
+                    followers: meta.followers_count ?? null, following: meta.follows_count ?? null, mediaCount: meta.media_count ?? null,
+                    bio: meta.biography || null, website: meta.website || null,
+                    totals: Object.fromEntries(Object.entries(day.values).map(([k, v]) => [k, Array.isArray(v) ? seriesSum(v) : v])),
+                    series: day.values, demographics: demo
+                };
+                await supabase.from('meta_snapshots').upsert([{
+                    connection_id: conn.id, user_id: conn.user_id, snapshot_date: today, level: 'ig',
+                    metrics: { followers: ig.followers, following: ig.following, mediaCount: ig.mediaCount, totals: ig.totals, days, demographics: demo }
+                }], { onConflict: 'connection_id,level,snapshot_date' });
+                await ck.done('ig', ig);
+            }
+
+            await progress(60, 'Reading Instagram media insights');
+            if (!igMedia) {
+                igMedia = [];
+                const out = await graphGet(`${conn.ig_user_id}/media`, {
+                    fields: 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,shortcode,thumbnail_url,media_url',
+                    limit: META_MEDIA_LIMIT
+                }, pageToken);
+                const items = out.data || [];
+                const unsupportedByKind = {};
+                for (let i = 0; i < items.length; i++) {
+                    const m = items[i];
+                    const kind = m.media_product_type === 'REELS' ? 'reel' : (m.media_type === 'CAROUSEL_ALBUM' ? 'carousel' : 'still');
+                    const want = kind === 'reel'
+                        ? ['reach', 'saved', 'shares', 'views', 'total_interactions', 'ig_reels_avg_watch_time', 'likes', 'comments']
+                        : ['reach', 'saved', 'shares', 'views', 'total_interactions', 'likes', 'comments'];
+                    const list = want.filter(x => !(unsupportedByKind[kind] || []).includes(x));
+                    let insights = {};
+                    if (list.length) {
+                        const r = await graphInsights(m.id, list, {}, pageToken);
+                        insights = Object.fromEntries(Object.entries(r.values).map(([k, v]) => [k, Array.isArray(v) ? seriesLast(v) : v]));
+                        if (r.unsupported.length) unsupportedByKind[kind] = [...new Set([...(unsupportedByKind[kind] || []), ...r.unsupported])];
+                    }
+                    igMedia.push({
+                        connection_id: conn.id, user_id: conn.user_id, platform: 'instagram',
+                        media_id: String(m.id), shortcode: m.shortcode || igShortcodeFromPermalink(m.permalink),
+                        media_type: m.media_type || null, product_type: m.media_product_type || null,
+                        caption: (m.caption || '').slice(0, 4000) || null, permalink: m.permalink || null,
+                        posted_at: m.timestamp || null, like_count: m.like_count ?? null, comments_count: m.comments_count ?? null,
+                        insights: { ...insights, kind, source: 'insights' }
+                    });
+                    if (i % 10 === 9) await progress(60 + Math.round(25 * (i / items.length)), `Instagram media ${i + 1}/${items.length}`);
+                }
+                for (const [k, v] of Object.entries(unsupportedByKind)) gaps.push(...v.map(m => `ig_media:${k}:${m}`));
+                if (igMedia.length) await supabase.from('meta_media').upsert(igMedia, { onConflict: 'connection_id,media_id' });
+                await ck.done('ig_media', igMedia);
+            }
+        } else {
+            warnings.push('This Page has no Instagram professional account linked, so only Page data was read.');
+        }
+
+        // --- Summary + narrative -------------------------------------------
+        await progress(88, 'Building owner view');
+        const byReach = (igMedia || []).filter(m => m.insights?.reach).sort((a, b) => (b.insights.reach || 0) - (a.insights.reach || 0));
+        const bySaves = (igMedia || []).filter(m => m.insights?.saved).sort((a, b) => (b.insights.saved || 0) - (a.insights.saved || 0));
+        const card = m => ({ id: m.media_id, shortcode: m.shortcode, kind: m.insights?.kind, permalink: m.permalink, postedAt: m.posted_at, caption: (m.caption || '').slice(0, 160), likes: m.like_count, comments: m.comments_count, reach: m.insights?.reach ?? null, saved: m.insights?.saved ?? null, shares: m.insights?.shares ?? null, views: m.insights?.views ?? null, interactions: m.insights?.total_interactions ?? null });
+        const kindAgg = {};
+        for (const m of (igMedia || [])) {
+            const k = m.insights?.kind || 'unknown';
+            const a = kindAgg[k] = kindAgg[k] || { n: 0, reach: [], saved: [], shares: [], views: [] };
+            a.n += 1;
+            for (const f of ['reach', 'saved', 'shares', 'views']) if (typeof m.insights?.[f] === 'number') a[f].push(m.insights[f]);
+        }
+        const kinds = Object.fromEntries(Object.entries(kindAgg).map(([k, a]) => [k, { n: a.n, medianReach: median(a.reach), medianSaved: median(a.saved), medianShares: median(a.shares), medianViews: median(a.views) }]));
+
+        const summary = {
+            page: page ? { name: page.name, fans: page.fans, followers: page.followers, totals: page.totals } : null,
+            ig: ig ? { username: ig.username, followers: ig.followers, following: ig.following, mediaCount: ig.mediaCount, totals: ig.totals, demographics: ig.demographics } : null,
+            windowDays: days,
+            media: { count: (igMedia || []).length, kinds, topByReach: byReach.slice(0, 8).map(card), topBySaves: bySaves.slice(0, 5).map(card) },
+            pagePosts: { count: (pagePosts || []).length, top: (pagePosts || []).slice().sort((a, b) => (b.insights?.post_impressions_unique || 0) - (a.insights?.post_impressions_unique || 0)).slice(0, 5).map(p => ({ id: p.media_id, permalink: p.permalink, caption: (p.caption || '').slice(0, 160), impressions: p.insights?.post_impressions_unique ?? null, engaged: p.insights?.post_engaged_users ?? null, reactions: p.like_count, comments: p.comments_count, shares: p.insights?.shares ?? null })) },
+            gaps: [...new Set(gaps)],
+            sources: { page: 'insights', ig: 'insights', media: 'insights', competitors: 'not available via Meta — use the scraped audit' }
+        };
+
+        await progress(92, 'Generating narrative');
+        let ai = null, aiStatus = { ok: false, reason: 'no_key' };
+        if (geminiAvailable()) {
+            const { json } = budgetedJson(summary, { maxChars: 30000, keep: ['ig', 'page', 'gaps'] });
+            const prompt =
+`You are a social media strategist reading OWNER-SIDE Meta Insights for one account (numbers the public cannot see: reach, saves, shares, views, demographics). Window: last ${days} days.
+${input.brief ? `Owner brief: ${input.brief}\n` : ''}
+Data (JSON):
+${json}
+
+Reply with ONLY a JSON object:
+{
+ "executive_summary": "3-4 sentences, specific numbers, no fluff",
+ "what_is_working": ["...", "..."],
+ "what_is_not": ["...", "..."],
+ "audience": "1-2 sentences from demographics, or 'not enough data' if empty",
+ "saves_and_shares": "what the saved/shared posts have in common; name the post types",
+ "next_30_days": ["action 1", "action 2", "action 3", "action 4"],
+ "data_gaps": "one sentence on what could not be read (see gaps) and what that means"
+}`;
+            const r = await geminiCallDetailed(prompt, { temperature: 0.4, tag: 'Gemini Meta', userId });
+            aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
+            ai = r.ok ? r.data : null;
+        } else {
+            aiStatus = { ok: false, reason: 'no_key', message: aiReasonText('no_key') };
+        }
+        if (!aiStatus.ok) warnings.push(`Narrative unavailable: ${aiStatus.message}`);
+
+        await progress(96, 'Saving report');
+        const payload = { summary, warnings, ai, aiStatus, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
+        const { data: saved } = await supabase.from('reports').insert([{
+            user_id: userId,
+            client_id: input.clientId || null,
+            meta_connection_id: conn.id,
+            platform: 'meta',
+            report_type: 'meta_owned',
+            target_handle: conn.ig_username || conn.page_name || conn.page_id,
+            posts_analyzed: (igMedia || []).length + (pagePosts || []).length,
+            snapshot_date: today,
+            credits_estimate: 0,
+            ai_summary: ai?.executive_summary || null,
+            ai_json: ai || null,
+            ai_status: aiStatus,
+            report_json: payload
+        }]).select('id').maybeSingle();
+
+        await supabase.from('meta_connections').update({ status: 'active', last_sync_at: new Date().toISOString(), last_error: null }).eq('id', conn.id);
+        return { reportId: saved?.id || null, reportRef: saved?.id || null, aiStatus, gaps: summary.gaps };
+    } catch (err) {
+        if (err.graph || err.statusCode === 401 || err.statusCode === 502) await fail(err);
+        throw err;
+    }
+});
+
+app.get('/api/meta/reports', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        let q = supabase.from('reports')
+            .select('id, user_id, client_id, meta_connection_id, target_handle, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status')
+            .eq('platform', 'meta').eq('report_type', 'meta_owned');
+        q = await applyReportScope(req, ctx, q);
+        const { data, error } = await q.order('created_at', { ascending: false }).limit(100);
+        if (error) throw error;
+        res.json({ reports: data || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/meta/report/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        const { data } = await supabase.from('reports').select('*').eq('id', req.params.id).maybeSingle();
+        if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
+        res.json({ report: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 9 :: CONTENT PLAN  (derived engine, zero Apify)
+//
+// Competitor Intel computes exemplars and displays them. This turns the same
+// rows into a plan: which format cells rivals win and the target is absent
+// from (gaps), which the target already wins (double down), which it posts
+// and loses (stop), and a brief for each. Gemini writes only inside the cells
+// the scorecard supplies; the evidence and the predicted band are computed.
+// ===========================================================================
+
+const CP_POSTS_PER_HANDLE = parseInt(process.env.CONTENT_PLAN_POSTS_PER_HANDLE || '120', 10);
+const CP_MIN_CELL = 2;
+
+function cpFormat(r) {
+    if (r.post_type === 'Reel' || (r.is_video && r.post_type !== 'Sidecar')) return 'Reel';
+    if (r.post_type === 'Sidecar' || (r.carousel_count || 0) > 1) return 'Carousel';
+    return 'Still';
+}
+function cpBand(idx) {
+    if (idx == null || isNaN(idx)) return 'typical';
+    if (idx >= 1.5) return 'top';
+    if (idx >= 1.15) return 'above';
+    if (idx >= 0.8) return 'typical';
+    return 'below';
+}
+function cpHashtagBand(n) { return n === 0 ? '0' : n <= 5 ? '1-5' : n <= 15 ? '6-15' : '16+'; }
+function cpHook(caption) {
+    const first = String(caption || '').split(/\r?\n/).map(s => s.trim()).find(Boolean) || '';
+    return first.slice(0, 90);
+}
+function cpFeature(r) {
+    const caption = r.caption || '';
+    const words = caption.split(/\s+/).filter(Boolean).length;
+    const tags = topicTags(caption, 3);
+    const hashtags = Array.isArray(r.hashtags) ? r.hashtags.length : 0;
+    const format = cpFormat(r);
+    return {
+        ...r,
+        format,
+        opening: openingPattern(caption),
+        lengthBand: lengthBand(words),
+        topic: tags[0] || 'general',
+        topics: tags,
+        hook: cpHook(caption),
+        hashtagBand: cpHashtagBand(hashtags),
+        hasQuestion: FB_QUESTION_RE.test(caption),
+        hasCta: FB_CTA_RE.test(caption),
+        hasOffer: FB_OFFER_RE.test(caption),
+        hasEmoji: FB_EMOJI_RE.test(caption),
+        hasLink: IG_URL_RE.test(caption),
+        hasFirstComment: !!r.first_comment,
+        audioOriginal: r.audio ? !!(r.audio.original) : null,
+        aspect: r.aspect_ratio || null,
+        slides: r.carousel_count || null,
+        playsRatio: (r.views && r.likes) ? +(r.views / Math.max(1, r.likes)).toFixed(1) : null,
+        hour: r.hour_local, dow: r.dow_local
+    };
+}
+function cpCellKey(f) { return `${f.format}|${f.opening}|${f.lengthBand}|${f.topic}`; }
+
+/** Sample-damped median index for a group of features. */
+function cpScore(rows) {
+    const idx = rows.map(r => r.performance_index).filter(v => typeof v === 'number');
+    if (!idx.length) return { n: 0, medianIndex: null, winRate: 0, confidence: 0 };
+    const med = median(idx);
+    const wins = idx.filter(v => v >= 1.15).length / idx.length;
+    const confidence = Math.min(1, idx.length / 6);
+    // Shrink toward 1.0 (the account's own median) when the sample is thin.
+    const damped = 1 + (med - 1) * confidence;
+    return { n: idx.length, medianIndex: +med.toFixed(2), dampedIndex: +damped.toFixed(2), winRate: +wins.toFixed(2), confidence: +confidence.toFixed(2) };
+}
+
+function cpGroupBy(rows, keyFn) {
+    const m = {};
+    for (const r of rows) { const k = keyFn(r); if (k == null) continue; (m[k] = m[k] || []).push(r); }
+    return m;
+}
+
+function cpLeaderboard(rows, keyFn, label, min = CP_MIN_CELL) {
+    return Object.entries(cpGroupBy(rows, keyFn))
+        .map(([k, g]) => ({ [label]: k, ...cpScore(g) }))
+        .filter(x => x.n >= min)
+        .sort((a, b) => (b.dampedIndex || 0) - (a.dampedIndex || 0));
+}
+
+function cpExemplars(rows, n = 3) {
+    return rows.slice().sort((a, b) => (b.performance_index || 0) - (a.performance_index || 0)).slice(0, n)
+        .map(r => ({ handle: r.handle, url: r.post_url, index: r.performance_index, band: cpBand(r.performance_index), hook: r.hook, likes: r.likes, comments: r.comments, views: r.views, postedAt: r.posted_at, owner: r.owner || null }));
+}
+
+async function cpLoadHandle(userId, handle) {
+    const { data } = await supabase.from('posts')
+        .select('handle, shortcode, post_url, post_type, caption, hashtags, likes, comments, views, is_video, video_duration, thumbnail_url, posted_at, carousel_count, aspect_ratio, is_sponsored, audio, first_comment, engagement_raw, hour_local, dow_local, is_provisional, scraped_at')
+        .eq('user_id', userId).eq('platform', 'instagram').eq('handle', handle)
+        .order('posted_at', { ascending: false }).limit(CP_POSTS_PER_HANDLE);
+    return (data || []).filter(r => !r.is_sponsored);
+}
+
+registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) => {
+    const target = String(input.target || '').toLowerCase();
+    const rivals = (input.rivals || []).map(h => String(h).toLowerCase()).filter(h => h && h !== target);
+    const counts = { reels: 4, carousels: 3, stills: 3, ...(input.counts || {}) };
+
+    await progress(5, `Loading posts for @${target}`);
+    const targetRows = await cpLoadHandle(userId, target);
+    if (targetRows.length < 6) {
+        const e = new Error(`Only ${targetRows.length} posts stored for @${target}. Run a Performance Audit or Competitor Intel on it first — the content plan is built from those rows and costs nothing extra.`);
+        e.statusCode = 422; throw e;
+    }
+    const rivalRows = {};
+    for (const r of rivals) { rivalRows[r] = await cpLoadHandle(userId, r); }
+    const missingRivals = rivals.filter(r => (rivalRows[r] || []).length < 6);
+
+    // --- owner layer: Meta media by shortcode -----------------------------
+    await progress(15, 'Attaching owner metrics where available');
+    let ownerMap = {};
+    let ownerConnection = null;
+    if (input.clientId) {
+        const { data: conns } = await supabase.from('meta_connections').select('id, ig_username, last_sync_at').eq('client_id', input.clientId).eq('status', 'active');
+        ownerConnection = (conns || []).find(c => (c.ig_username || '').toLowerCase() === target) || null;
+        if (ownerConnection) {
+            const { data: mm } = await supabase.from('meta_media').select('shortcode, insights').eq('connection_id', ownerConnection.id).eq('platform', 'instagram');
+            for (const m of (mm || [])) if (m.shortcode) ownerMap[m.shortcode] = m.insights || {};
+        }
+    }
+
+    // --- features + index ----------------------------------------------------
+    await progress(25, 'Indexing and classifying');
+    const all = [];
+    const push = (rows, role) => rows.forEach(r => {
+        const f = cpFeature(r);
+        f.role = role;
+        if (role === 'target' && ownerMap[r.shortcode]) {
+            const o = ownerMap[r.shortcode];
+            f.owner = { reach: o.reach ?? null, saved: o.saved ?? null, shares: o.shares ?? null, views: o.views ?? null, interactions: o.total_interactions ?? null, source: 'insights' };
+        }
+        all.push(f);
+    });
+    push(targetRows, 'target');
+    for (const r of rivals) push(rivalRows[r] || [], 'rival');
+    igIndexPosts(all);
+    const settled = all.filter(r => !r.is_provisional);
+    const T = settled.filter(r => r.role === 'target');
+    const R = settled.filter(r => r.role === 'rival');
+
+    // --- format cells -------------------------------------------------------
+    const cellsT = cpGroupBy(T, cpCellKey);
+    const cellsR = cpGroupBy(R, cpCellKey);
+    const keys = [...new Set([...Object.keys(cellsT), ...Object.keys(cellsR)])];
+    const cells = keys.map(k => {
+        const [format, opening, lengthBand, topic] = k.split('|');
+        const t = cpScore(cellsT[k] || []);
+        const r = cpScore(cellsR[k] || []);
+        let verdict = 'filler';
+        if (t.n === 0 && r.n >= CP_MIN_CELL && (r.dampedIndex || 0) >= 1.15) verdict = 'gap';
+        else if (t.n >= CP_MIN_CELL && (t.dampedIndex || 0) >= 1.15) verdict = 'double_down';
+        else if (t.n >= CP_MIN_CELL && (t.dampedIndex || 0) < 0.85) verdict = 'stop';
+        else if (t.n === 0 && r.n >= CP_MIN_CELL) verdict = 'rival_only';
+        return { key: k, format, opening, lengthBand, topic, target: t, rivals: r, verdict,
+                 exemplars: cpExemplars([...(cellsR[k] || []), ...(cellsT[k] || [])], 3) };
+    });
+    const byVerdict = v => cells.filter(c => c.verdict === v).sort((a, b) => ((b.rivals.dampedIndex || b.target.dampedIndex || 0) - (a.rivals.dampedIndex || a.target.dampedIndex || 0)));
+    const lists = { gaps: byVerdict('gap').slice(0, 10), doubleDown: byVerdict('double_down').slice(0, 10), stop: byVerdict('stop').slice(0, 10), filler: byVerdict('filler').slice(0, 6) };
+
+    // --- per-format analysis --------------------------------------------------
+    await progress(45, 'Analysing reels, carousels, stills');
+    const fmt = f => ({ target: T.filter(r => r.format === f), rivals: R.filter(r => r.format === f), all: settled.filter(r => r.format === f) });
+    const reels = fmt('Reel'), cars = fmt('Carousel'), stills = fmt('Still');
+    const wonLost = rows => ({
+        won: cpExemplars(rows.filter(r => cpBand(r.performance_index) === 'top' || cpBand(r.performance_index) === 'above'), 5),
+        average: cpExemplars(rows.filter(r => cpBand(r.performance_index) === 'typical'), 3),
+        lost: rows.filter(r => cpBand(r.performance_index) === 'below').slice().sort((a, b) => (a.performance_index || 0) - (b.performance_index || 0)).slice(0, 4)
+                 .map(r => ({ handle: r.handle, url: r.post_url, index: r.performance_index, hook: r.hook, likes: r.likes, comments: r.comments, views: r.views }))
+    });
+    const formats = {
+        reels: {
+            share: { target: T.length ? +(reels.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(reels.rivals.length / R.length).toFixed(2) : 0 },
+            score: { target: cpScore(reels.target), rivals: cpScore(reels.rivals) },
+            target: wonLost(reels.target), rivals: wonLost(reels.rivals),
+            byHook: cpLeaderboard(reels.all, r => r.opening, 'opening'),
+            byAudio: cpLeaderboard(reels.all.filter(r => r.audioOriginal !== null), r => r.audioOriginal ? 'original audio' : 'reused audio', 'audio'),
+            byAspect: cpLeaderboard(reels.all, r => r.aspect, 'aspect'),
+            byHour: cpLeaderboard(reels.all, r => r.hour == null ? null : `${String(r.hour).padStart(2, '0')}:00`, 'hour'),
+            playsRatio: { target: median(reels.target.map(r => r.playsRatio).filter(v => v)), rivals: median(reels.rivals.map(r => r.playsRatio).filter(v => v)) }
+        },
+        carousels: {
+            share: { target: T.length ? +(cars.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(cars.rivals.length / R.length).toFixed(2) : 0 },
+            score: { target: cpScore(cars.target), rivals: cpScore(cars.rivals) },
+            target: wonLost(cars.target), rivals: wonLost(cars.rivals),
+            bySlides: cpLeaderboard(cars.all, r => r.slides == null ? null : (r.slides <= 3 ? '2-3 slides' : r.slides <= 6 ? '4-6 slides' : '7+ slides'), 'slides'),
+            byHook: cpLeaderboard(cars.all, r => r.opening, 'opening')
+        },
+        stills: {
+            share: { target: T.length ? +(stills.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(stills.rivals.length / R.length).toFixed(2) : 0 },
+            score: { target: cpScore(stills.target), rivals: cpScore(stills.rivals) },
+            target: wonLost(stills.target), rivals: wonLost(stills.rivals),
+            byAspect: cpLeaderboard(stills.all, r => r.aspect, 'aspect'),
+            byHook: cpLeaderboard(stills.all, r => r.opening, 'opening')
+        }
+    };
+
+    // --- caption analysis ----------------------------------------------------
+    const flag = (rows, f, on, off) => {
+        const a = cpScore(rows.filter(r => r[f])), b = cpScore(rows.filter(r => !r[f]));
+        return { on, off, with: a, without: b, lift: (a.dampedIndex != null && b.dampedIndex != null) ? +(a.dampedIndex - b.dampedIndex).toFixed(2) : null };
+    };
+    const captions = {
+        target: ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink', 'hasFirstComment'].map(f => ({ flag: f, ...flag(T, f, 'with', 'without') })),
+        rivals: ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink', 'hasFirstComment'].map(f => ({ flag: f, ...flag(R, f, 'with', 'without') })),
+        lengthBand: { target: cpLeaderboard(T, r => r.lengthBand, 'band'), rivals: cpLeaderboard(R, r => r.lengthBand, 'band') },
+        hashtagBand: { target: cpLeaderboard(T, r => r.hashtagBand, 'band'), rivals: cpLeaderboard(R, r => r.hashtagBand, 'band') },
+        opening: { target: cpLeaderboard(T, r => r.opening, 'opening'), rivals: cpLeaderboard(R, r => r.opening, 'opening') },
+        topics: { target: cpLeaderboard(T, r => r.topic, 'topic'), rivals: cpLeaderboard(R, r => r.topic, 'topic') }
+    };
+
+    // --- owner view ----------------------------------------------------------
+    const ownerRows = T.filter(r => r.owner);
+    const owner = ownerConnection ? {
+        connection: ownerConnection.id, matched: ownerRows.length, lastSync: ownerConnection.last_sync_at,
+        byFormat: Object.fromEntries(['Reel', 'Carousel', 'Still'].map(f => {
+            const g = ownerRows.filter(r => r.format === f);
+            return [f, { n: g.length, medianReach: median(g.map(r => r.owner.reach).filter(v => v != null)), medianSaved: median(g.map(r => r.owner.saved).filter(v => v != null)), medianShares: median(g.map(r => r.owner.shares).filter(v => v != null)) }];
+        })),
+        mostSaved: ownerRows.slice().sort((a, b) => (b.owner.saved || 0) - (a.owner.saved || 0)).slice(0, 5).map(r => ({ url: r.post_url, format: r.format, hook: r.hook, saved: r.owner.saved, reach: r.owner.reach, index: r.performance_index })),
+        // Where public index and owner reach disagree, the public number is lying.
+        hiddenWinners: ownerRows.filter(r => cpBand(r.performance_index) === 'below' && r.owner.reach).sort((a, b) => b.owner.reach - a.owner.reach).slice(0, 3).map(r => ({ url: r.post_url, format: r.format, hook: r.hook, reach: r.owner.reach, saved: r.owner.saved, index: r.performance_index }))
+    } : null;
+
+    const trueness = {
+        scraped: 'Likes, comments, views, captions, timing for every account. Same basis for target and rivals.',
+        insights: owner ? `Reach, saves, shares, views for ${owner.matched} of ${T.length} target posts via the connected Meta account.` : 'Not connected — no owner-side numbers. Connect the client\'s Meta account to add reach, saves and shares.',
+        derived: 'Performance index (post vs. own monthly median), bands, cells, win rates and predictions are computed from the scraped numbers.',
+        unavailable: 'Competitor reach, saves, shares, impressions and demographics cannot be obtained from any source.'
+    };
+
+    // --- briefs ------------------------------------------------------------
+    await progress(65, 'Writing briefs');
+    const candidates = [...lists.gaps.map(c => ({ ...c, why: 'gap' })), ...lists.doubleDown.map(c => ({ ...c, why: 'double_down' }))];
+    const pick = (format, n) => candidates.filter(c => c.format === format).slice(0, Math.max(n, 1) + 2);
+    const cellPack = c => ({
+        cell: c.key, why: c.why, opening: c.opening, lengthBand: c.lengthBand, topic: c.topic,
+        rivalIndex: c.rivals.dampedIndex, targetIndex: c.target.dampedIndex, rivalWinRate: c.rivals.winRate,
+        evidence: c.exemplars.map(e => ({ url: e.url, hook: e.hook, index: e.index, handle: e.handle }))
+    });
+    const evidence = {
+        target, rivals, brief: input.brief || null,
+        counts,
+        reelCells: pick('Reel', counts.reels).map(cellPack),
+        carouselCells: pick('Carousel', counts.carousels).map(cellPack),
+        stillCells: pick('Still', counts.stills).map(cellPack),
+        stop: lists.stop.slice(0, 5).map(c => ({ cell: c.key, targetIndex: c.target.dampedIndex, n: c.target.n })),
+        captionRules: {
+            target: captions.target.filter(c => c.lift != null).map(c => ({ flag: c.flag, lift: c.lift })),
+            rivals: captions.rivals.filter(c => c.lift != null).map(c => ({ flag: c.flag, lift: c.lift })),
+            bestLength: captions.lengthBand.rivals[0]?.band || captions.lengthBand.target[0]?.band || null,
+            bestHashtags: captions.hashtagBand.rivals[0]?.band || null
+        },
+        reels: { targetShare: formats.reels.share.target, rivalShare: formats.reels.share.rivals, bestHooks: formats.reels.byHook.slice(0, 3), audio: formats.reels.byAudio, bestHours: formats.reels.byHour.slice(0, 3) },
+        owner: owner ? { mostSaved: owner.mostSaved.slice(0, 3), hiddenWinners: owner.hiddenWinners } : null
+    };
+
+    let ai = null, aiStatus = { ok: false, reason: 'no_key' };
+    if (geminiAvailable()) {
+        const { json } = budgetedJson(evidence, { maxChars: 32000, keep: ['reelCells', 'carouselCells', 'stillCells', 'counts', 'target'] });
+        const prompt =
+`You are a content strategist. Below is a computed scorecard for Instagram account @${target} against rivals ${rivals.map(r => '@' + r).join(', ') || '(none)'}.
+Each "cell" is a content format x opening pattern x caption length x topic. Cells marked why=gap are ones rivals win and the target has never used. why=double_down are ones the target already wins.
+
+RULES:
+- Write briefs ONLY for the cells given. Do not invent formats, topics or hooks outside them.
+- Each brief must name its cell and cite at least one evidence URL from that cell.
+- Hooks must follow the cell's opening pattern. Captions must follow the cell's length band.
+- Never claim reach, saves or impressions unless the owner block supplies them.
+- Write in the language the evidence hooks are in (English or Bangla as seen).
+
+Scorecard (JSON):
+${json}
+
+Reply with ONLY this JSON:
+{
+ "summary": "3 sentences: the biggest gap, the biggest strength, the one thing to stop",
+ "reels": [ { "cell": "...", "concept": "what the reel shows, shot by shot in 2-3 lines", "hook": "first line on screen / first caption line", "caption": "full caption in the cell's length band", "evidence": ["url"], "slot": "day + hour if bestHours suggests one", "why": "one line" } ],
+ "carousels": [ { "cell": "...", "concept": "slide-by-slide outline", "hook": "...", "caption": "...", "evidence": ["url"], "slot": "...", "why": "..." } ],
+ "stills": [ { "cell": "...", "concept": "the single image", "hook": "...", "caption": "...", "evidence": ["url"], "slot": "...", "why": "..." } ],
+ "stop_doing": ["one line per stop cell, with the number"],
+ "caption_rules": ["3-5 rules with the lift numbers"]
+}
+Produce exactly ${counts.reels} reels, ${counts.carousels} carousels, ${counts.stills} stills (fewer only if there are not enough cells).`;
+        const r = await geminiCallDetailed(prompt, { temperature: 0.55, maxOutputTokens: 12000, tag: 'Gemini Content Plan', userId });
+        aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
+        ai = r.ok ? r.data : null;
+    } else {
+        aiStatus = { ok: false, reason: 'no_key', message: aiReasonText('no_key') };
+    }
+
+    // Gate: a brief must sit in a cell we handed the model (gap or double
+    // down). Anything else is invented and is dropped, the same way the FB
+    // advisor drops a pitch in a no-promo room. Predicted band comes from the
+    // cell's computed index, never from the model.
+    const allowed = Object.fromEntries(candidates.map(c => [c.key, c]));
+    let removed = 0;
+    const stamp = (list, format) => (Array.isArray(list) ? list : []).flatMap(b => {
+        const c = allowed[String(b.cell || '')];
+        if (!c || c.format !== format) { removed += 1; return []; }
+        const idx = c.target.n >= CP_MIN_CELL ? c.target.dampedIndex : c.rivals.dampedIndex;
+        const evidence = (Array.isArray(b.evidence) ? b.evidence : []).filter(u => c.exemplars.some(e => e.url === u));
+        return [{ ...b, evidence: evidence.length ? evidence : c.exemplars.map(e => e.url), predicted_band: cpBand(idx), predicted_index: idx,
+                  sources: { evidence: 'scraped', prediction: 'derived', owner: owner ? 'insights' : null } }];
+    });
+    const briefs = ai ? { summary: ai.summary, reels: stamp(ai.reels, 'Reel'), carousels: stamp(ai.carousels, 'Carousel'), stills: stamp(ai.stills, 'Still'),
+                          stopDoing: ai.stop_doing || [], captionRules: ai.caption_rules || [], removed } : null;
+    if (removed) logger.warn('content_plan_briefs_removed', { jobId, removed });
+
+    await progress(92, 'Saving plan');
+    const warnings = [];
+    if (missingRivals.length) warnings.push(`Rivals with fewer than 6 stored posts were ignored: ${missingRivals.map(r => '@' + r).join(', ')}.`);
+    if (!aiStatus.ok) warnings.push(`Briefs unavailable: ${aiStatus.message}. The scorecard below is still complete.`);
+    if (briefs?.removed) warnings.push(`${briefs.removed} draft brief(s) named a cell that is not in the evidence and were dropped.`);
+    const payload = {
+        target, rivals, counts,
+        sample: { target: T.length, rivals: R.length, provisionalDropped: all.length - settled.length },
+        lists, formats, captions, owner, trueness, briefs, aiStatus, warnings,
+        generatedAt: new Date().toISOString()
+    };
+    const { data: saved } = await supabase.from('reports').insert([{
+        user_id: userId,
+        client_id: input.clientId || null,
+        platform: 'instagram',
+        report_type: 'content_plan',
+        target_handle: target,
+        competitor_handles: rivals,
+        posts_analyzed: settled.length,
+        snapshot_date: new Date().toISOString().slice(0, 10),
+        credits_estimate: 0,
+        source_report_ids: Array.isArray(input.sourceReportIds) ? input.sourceReportIds.filter(x => UUID_RE.test(String(x))) : [],
+        ai_summary: briefs?.summary || null,
+        ai_json: briefs || null,
+        ai_status: aiStatus,
+        report_json: payload
+    }]).select('id').maybeSingle();
+    return { reportId: saved?.id || null, reportRef: saved?.id || null, aiStatus };
+});
+
+app.post('/api/content-plan', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
+        const clean = h => String(h || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
+        let target = clean(req.body.target);
+        let rivals = (Array.isArray(req.body.rivals) ? req.body.rivals : String(req.body.rivals || '').split(/[\s,]+/)).map(clean).filter(Boolean);
+        const sourceReportIds = [];
+
+        // Start from an existing report: reuse its target and rivals.
+        if (req.body.reportId) {
+            const { data: rep } = await supabase.from('reports').select('id, user_id, client_id, target_handle, competitor_handles, report_type').eq('id', req.body.reportId).maybeSingle();
+            if (!rep || !(await canReadReport(ctx, rep))) return res.status(404).json({ error: 'Source report not found.' });
+            target = target || clean(rep.target_handle);
+            if (!rivals.length) rivals = (rep.competitor_handles || []).map(clean);
+            sourceReportIds.push(rep.id);
+        }
+        if (!target) return res.status(400).json({ error: 'Target handle required.' });
+        rivals = [...new Set(rivals.filter(h => h !== target))].slice(0, MAX_COMPETITORS);
+        const n = (v, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, 0), 8);
+        const counts = { reels: n(req.body.reels, 4), carousels: n(req.body.carousels, 3), stills: n(req.body.stills, 3) };
+        const clientId = await resolveClientId(req, ctx);
+
+        const job = await createJob(ctx.user.id, 'content_plan', 'content_plan',
+            { target, rivals, counts, clientId, sourceReportIds, brief: String(req.body.brief || '').slice(0, 600) || null }, 0);
+        runJob(job.id, JOB_WORKERS['content_plan'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ success: true, jobId: job.id, estimatedUsd: 0, target, rivals });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/content-plans', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        let q = supabase.from('reports')
+            .select('id, user_id, client_id, target_handle, competitor_handles, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status, source_report_ids')
+            .eq('platform', 'instagram').eq('report_type', 'content_plan');
+        q = await applyReportScope(req, ctx, q);
+        const { data, error } = await q.order('created_at', { ascending: false }).limit(100);
+        if (error) throw error;
+        res.json({ reports: data || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Handles this user has stored posts for — what the content plan can be built on. */
+app.get('/api/content-plan/sources', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        const { data } = await supabase.from('reports')
+            .select('id, report_type, target_handle, competitor_handles, created_at, client_id')
+            .eq('user_id', ctx.user.id).eq('platform', 'instagram').in('report_type', ['ig_report', 'deep_audit'])
+            .order('created_at', { ascending: false }).limit(60);
+        res.json({ sources: data || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/content-plan/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        const { data } = await supabase.from('reports').select('*').eq('id', req.params.id).maybeSingle();
+        if (!data || data.report_type !== 'content_plan' || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Plan not found' });
+        res.json({ report: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+// Boot: warm the Gemini pool so geminiAvailable() is truthful from the start.
+loadGeminiPool(true).then(rows => logger.info('gemini_pool', { keys: rows.length, env: !!GEMINI_API_KEY, model: GEMINI_MODEL }));
+setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
+
 app.use('/api', (req, res) => {
     res.status(404).json({
         error: `No such endpoint: ${req.method} ${req.path}`,
@@ -9546,7 +10913,15 @@ async function schemaProbe() {
         { table: 'reports', column: 'followers_snapshot', migration: 'schema-phase5.sql',
           impact: 'Trend snapshots fall back to nulls for followers, cadence and rank.' },
         { table: 'jobs',    column: 'partials',          migration: 'schema-phase1.sql',
-          impact: 'Job checkpoints cannot be stored — a paused run will re-scrape and re-charge on resume.' }
+          impact: 'Job checkpoints cannot be stored — a paused run will re-scrape and re-charge on resume.' },
+        { table: 'reports', column: 'client_id',         migration: 'schema-phase9.sql',
+          impact: 'Every report insert will fail — clients, content plans and Meta syncs cannot save.' },
+        { table: 'clients', column: 'id',                migration: 'schema-phase9.sql',
+          impact: 'Client workspace routes will 500.' },
+        { table: 'gemini_keys', column: 'key_enc',       migration: 'schema-phase9.sql',
+          impact: 'Only the env Gemini key can be used; no pool, no per-user keys.' },
+        { table: 'meta_connections', column: 'page_token_enc', migration: 'schema-phase9.sql',
+          impact: 'Meta OAuth callback cannot store a connection.' }
     ];
 
     const missing = [];
@@ -9592,7 +10967,8 @@ function preflight() {
     if (!process.env.SUPABASE_URL) problems.push('SUPABASE_URL is not set');
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY is not set');
     if (!ENC_KEY) problems.push('APP_ENCRYPTION_KEY is not set — Apify tokens will be stored in plaintext');
-    if (!GEMINI_API_KEY) problems.push('GEMINI_API_KEY is not set — reports will ship without their narrative layer');
+    if (!geminiAvailable()) problems.push('No Gemini key anywhere (env or pool) — reports will ship without their narrative layer');
+    if (!(process.env.META_APP_ID && process.env.META_APP_SECRET)) problems.push('META_APP_ID / META_APP_SECRET not set — Meta owner-data connections are disabled');
     if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
     if (!ALERT_WEBHOOK) problems.push('ALERT_WEBHOOK_URL is not set — failures will only appear in the logs');
     if (!SELF_URL) problems.push(
@@ -9708,7 +11084,7 @@ if (require.main === module) {
 // Exported so the test suite can exercise the pure logic without booting a
 // server or touching Supabase. Nothing here changes runtime behaviour.
 module.exports = {
-    app, start,
+    app, start, JOB_WORKERS, __geminiTest: (prompt, userId) => geminiCallDetailed(prompt, { userId, tag: 'test' }), cpFeature, cpScore, cpBand, geminiRank, graphInsights, clientAccess,
     // secrets
     encryptSecret, decryptSecret, isEncrypted, maskSecret, tokenHash,
     // budget + keys
