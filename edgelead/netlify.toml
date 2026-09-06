@@ -1,5 +1,0 @@
-# Repo-root Netlify config: the site is the frontend/ folder, nothing is built.
-[build]
-  base    = "frontend"
-  publish = "."
-  command = ""
