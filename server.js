@@ -6177,7 +6177,7 @@ app.get('/api/reports-history', async (req, res) => {
                     'score_version, score_v1, engagement_rate, posts_analyzed, snapshot_date, ' +
                     'created_at, ai_summary, ai_status, set_id, credits_estimate, client_id, user_id')
             .eq('platform', 'instagram');
-        q = await applyReportScope(req, ctx, q);
+        q = (await applyReportScope(req, ctx))(q);
 
         // Legacy rows (pre phase 7) wrote 'single'/'compare' for audits and
         // 'single'/'competitor' for cohorts. set_id is the reliable tell:
@@ -7929,7 +7929,7 @@ app.get('/api/fb/reports', async (req, res) => {
         let q = supabase.from('reports')
             .select('id, user_id, client_id, target_handle, fb_group_names, fb_group_ids, audit_mode, grade, score, posts_analyzed, snapshot_date, created_at, ai_summary, location_label, niche, set_id, report_type')
             .eq('platform', 'facebook');
-        q = await applyReportScope(req, ctx, q);
+        q = (await applyReportScope(req, ctx))(q);
         const { data, error } = await q
             // Page reports share the vault but are a different engine. Without
             // this they showed up in the community list and 404'd on open.
@@ -9484,7 +9484,7 @@ app.get('/api/fb/page-reports', async (req, res) => {
         let q = supabase.from('reports')
             .select('id, user_id, client_id, target_handle, competitor_handles, fb_page_ids, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, set_id, credits_estimate')
             .eq('platform', 'facebook');
-        q = await applyReportScope(req, ctx, q);
+        q = (await applyReportScope(req, ctx))(q);
         const { data, error } = await q
             .eq('report_type', 'fb_page')
             .order('created_at', { ascending: false })
@@ -9677,14 +9677,21 @@ async function resolveClientId(req, ctx) {
 }
 
 /** Scope a reports query: by client (membership) when asked, else by user. */
-async function applyReportScope(req, ctx, q) {
+/**
+ * Resolves whose rows the caller may list and returns a function to apply to
+ * a query builder — deliberately NOT the builder itself. PostgREST builders
+ * are thenables, so returning one from an async function makes `await`
+ * execute the query: the caller received `{ data, error }` instead of a
+ * builder, and every vault list died with "q.order is not a function".
+ */
+async function applyReportScope(req, ctx) {
     const cid = req.query?.client_id;
     if (cid) {
         const c = await clientAccess(ctx.user.id, cid, 'viewer');
         if (!c) { const e = new Error('No access to that client.'); e.statusCode = 403; throw e; }
-        return q.eq('client_id', c.id);
+        return q => q.eq('client_id', c.id);
     }
-    return q.eq('user_id', ctx.user.id);
+    return q => q.eq('user_id', ctx.user.id);
 }
 
 /** May this user open this single report row? */
@@ -10409,7 +10416,7 @@ app.get('/api/meta/reports', async (req, res) => {
         let q = supabase.from('reports')
             .select('id, user_id, client_id, meta_connection_id, target_handle, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status')
             .eq('platform', 'meta').eq('report_type', 'meta_owned');
-        q = await applyReportScope(req, ctx, q);
+        q = (await applyReportScope(req, ctx))(q);
         const { data, error } = await q.order('created_at', { ascending: false }).limit(100);
         if (error) throw error;
         res.json({ reports: data || [] });
@@ -11037,7 +11044,7 @@ app.get('/api/content-plans', async (req, res) => {
         let q = supabase.from('reports')
             .select('id, user_id, client_id, platform, target_handle, competitor_handles, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status, source_report_ids')
             .eq('report_type', 'content_plan');
-        q = await applyReportScope(req, ctx, q);
+        q = (await applyReportScope(req, ctx))(q);
         const { data, error } = await q.order('created_at', { ascending: false }).limit(100);
         if (error) throw error;
         res.json({ reports: data || [] });
