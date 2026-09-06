@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — Facebook Page Report</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* fb-report.html — page-specific only. Shared rules live in app.css. */
+    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 14px 16px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem; font-family: inherit; }
+    .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
+    .mode-card { background: var(--input-bg); border: 2px solid var(--card-border); border-radius: 12px; padding: 18px; cursor: pointer; }
+    .mode-card.is-on { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.18); }
+    .mode-card strong { display: block; font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
+    .mode-card span { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
+    .mode-card input { display: none; }
+    .picker { max-height: 340px; overflow-y: auto; border: 1px solid var(--card-border); border-radius: 12px; margin-top: 10px; }
+    .pick-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--card-border); }
+    .pick-row:last-child { border-bottom: none; }
+    .pick-row:hover { background: rgba(255,255,255,0.03); }
+    .pick-row input { width: auto; }
+    .pick-main { flex: 1; min-width: 0; }
+    .pick-main strong { font-size: 0.9rem; color: #fff; }
+    .pick-main .meta { font-size: 0.76rem; color: var(--text-muted); margin-top: 3px; }
+    .heat { display: grid; grid-template-columns: 42px repeat(24, 1fr); gap: 2px; margin-top: 14px; min-width: 700px; }
+    .heat .lab { font-size: 0.66rem; color: var(--text-muted); font-weight: 700; display: flex; align-items: center; }
+    .heat .cell { aspect-ratio: 1; border-radius: 3px; background: rgba(255,255,255,0.04); }
+    .heat-legend { font-size: 0.75rem; color: var(--text-muted); margin-top: 10px; }
+    .works { background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.28); border-radius: 12px; padding: 20px; margin-top: 20px; }
+    .works li { font-size: 0.87rem; line-height: 1.75; }
+    .works ul { padding-left: 20px; }
+    .group-block { border: 1px solid var(--card-border); border-radius: 14px; padding: 26px; margin-top: 24px; background: rgba(6,9,19,0.55); }
+    .score-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+        flex-wrap: wrap; padding-bottom: 22px; border-bottom: 1px solid var(--card-border); }
+    .score-hero h2 { font-size: 1.55rem; font-weight: 800; color: #fff; }
+    .score-hero .sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 7px; line-height: 1.6; }
+    .score-dial { text-align: center; min-width: 128px; }
+    .score-dial .val { font-size: 2.9rem; font-weight: 800; color: #fff; line-height: 1; }
+    .score-dial .val small { font-size: 1rem; color: var(--text-muted); font-weight: 700; }
+    .score-dial .grade { font-size: 0.78rem; font-weight: 800; color: var(--accent-solid); margin-top: 6px; }
+    .score-dial .verdict { font-size: 0.74rem; color: var(--text-muted); margin-top: 4px; max-width: 210px; line-height: 1.5; }
+    .pillar { display: grid; grid-template-columns: 1fr 96px 46px; gap: 12px; align-items: center;
+        padding: 9px 0; border-bottom: 1px solid var(--card-border); font-size: 0.85rem; }
+    .pillar:last-child { border-bottom: none; }
+    .pillar .pname strong { color: #fff; font-weight: 700; display: block; }
+    .pillar .pname span { color: var(--text-muted); font-size: 0.76rem; }
+    .pillar .ptrack { height: 7px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; }
+    .pillar .ptrack > div { height: 100%; background: var(--accent-glow); }
+    .pillar .ppts { text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.8rem; }
+    .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 8px; margin-top: 14px; }
+    .chk { display: flex; align-items: center; gap: 9px; font-size: 0.83rem; padding: 9px 12px;
+        background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 9px; }
+    .chk.no { border-color: rgba(245,158,11,0.35); color: #fcd34d; }
+    .chk.yes { color: var(--text-muted); }
+    .chk b { font-size: 0.9rem; }
+    .mixbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; margin: 14px 0 10px; }
+    .mixbar > div { height: 100%; }
+    .mixkey { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.78rem; color: var(--text-muted); }
+    .mixkey span i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; font-style: normal; }
+    .monthbars { display: flex; align-items: flex-end; gap: 8px; height: 130px; margin-top: 16px; }
+    .monthbars > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+        align-items: center; gap: 7px; height: 100%; }
+    .monthbars .mb { width: 100%; background: var(--accent-glow); border-radius: 5px 5px 0 0; min-height: 3px; }
+    .monthbars .ml { font-size: 0.7rem; color: var(--text-muted); font-weight: 700; }
+    .h2h th.col-t, .h2h td.col-t { background: rgba(96,165,250,0.07); }
+    .h2h td.win { color: var(--success); font-weight: 800; }
+    .h2h td.lose { color: #fca5a5; font-weight: 700; }
+    .rec { border-left: 3px solid var(--accent-solid); background: var(--input-bg); border-radius: 0 12px 12px 0;
+        padding: 16px 20px; margin-top: 12px; }
+    .rec.critical { border-left-color: var(--danger); }
+    .rec.high { border-left-color: var(--warn); }
+    .rec.medium { border-left-color: var(--accent-solid); }
+    .rec.low { border-left-color: #475569; }
+    .rec strong { display: block; color: #fff; font-size: 0.95rem; font-weight: 800; margin-bottom: 5px; }
+    .rec p { font-size: 0.84rem; color: var(--text-muted); line-height: 1.65; margin-bottom: 6px; }
+    .rec .do { font-size: 0.84rem; color: #a7f3d0; line-height: 1.65; }
+    .pri { display: inline-block; padding: 2px 8px; border-radius: 5px; font-size: 0.66rem; font-weight: 800;
+        text-transform: uppercase; letter-spacing: 0.05em; margin-right: 8px; vertical-align: 1px; }
+    .pri.critical { background: rgba(239,68,68,0.18); color: #fca5a5; }
+    .pri.high { background: rgba(245,158,11,0.18); color: #fcd34d; }
+    .pri.medium { background: rgba(96,165,250,0.18); color: #93c5fd; }
+    .pri.low { background: rgba(148,163,184,0.16); color: var(--text-muted); }
+    details.sub-audit { border: 1px solid var(--card-border); border-radius: 14px; margin-top: 22px; overflow: hidden; }
+    details.sub-audit > summary { cursor: pointer; padding: 16px 22px; font-weight: 800; color: #fff; font-size: 0.95rem; }
+    details.sub-audit > summary::-webkit-details-marker { display: none; }
+    details.sub-audit[open] > summary { border-bottom: 1px solid var(--card-border); }
+    details.sub-audit .inner { padding: 4px 22px 24px; }
+
+    .est-warn { margin: 10px 0 0; font-size: 0.8rem; font-weight: 700; line-height: 1.5; padding: 10px 12px;
+        border-radius: 8px; }
+    .est-warn.hidden { display: none; }
+    .est-warn.is-over { color: #fca5a5; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.35); }
+    .est-warn.is-tight { color: #fcd34d; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); }
+</style>
+</head>
+<body>
+
+<main class="el-page">
+
+    <details class="explainer" open>
+        <summary><span class="ex-dot"></span>How the Facebook Page Report works — read this first</summary>
+        <div class="ex-body">
+
+            <div class="ex-note info" style="margin-top:0;">
+                <b>What this page is.</b> Every other Facebook page in Edgelead works on <b>groups</b>. This one works on
+                <b>Pages</b> — a business Page, yours or anyone's. Give it a Page URL and it pulls the profile and the
+                posting history, takes both apart, scores the Page out of 100, and writes the report. Add a rival Page
+                and you get a head-to-head as well. It runs on its own engine, <code>fb_page</code>, so an admin has to
+                grant you that engine and a token has to be saved against it.
+            </div>
+
+            <h3>The idea</h3>
+            <p class="ex-lead">Raw likes are meaningless across pages of different sizes. Every post here is scored
+                against <strong>that Page's own median for that month</strong>.</p>
+            <p>An index of 1.8x means the post did 1.8 times what a typical post on that Page does. That number is
+                directly comparable between a 900-follower shop and a 900,000-follower brand, and it does not get
+                distorted when a Page grows during the window.</p>
+
+            <h3>How you use it</h3>
+            <ol class="ex-steps">
+                <li>Paste the <strong>Page URL or handle</strong> of the business you want reported on.</li>
+                <li>Optionally paste <strong>one rival Page</strong>. Leave it empty for a solo report.</li>
+                <li>Set how many posts and how far back to look. Check the estimate before you run.</li>
+                <li>Press <strong>Generate report</strong> and watch the live progress.</li>
+                <li>Read it, export it to <strong>PDF</strong>, and it stays in the <strong>Report vault</strong> tab
+                    for good.</li>
+            </ol>
+
+            <h3>Everything the report measures</h3>
+            <div class="ex-grid">
+                <div class="ex-tile"><b>Page Score /100</b><span>Six weighted pillars — engagement per follower,
+                    cadence, consistency, conversation, amplification, profile completeness — with the points shown
+                    pillar by pillar so you can see where they went.</span></div>
+                <div class="ex-tile"><b>Profile completeness</b><span>Category, about, website, phone, email, address,
+                    hours, photos, CTA button, reviews. The cheapest wins on the whole page.</span></div>
+                <div class="ex-tile"><b>Cadence and consistency</b><span>Posts per week, median gap, longest silence,
+                    days since the last post, and a rhythm score that separates steady from bursty.</span></div>
+                <div class="ex-tile"><b>Format leaderboard</b><span>Photo, album, video, link, text and poll, each as a
+                    multiple of the Page's own median — including the format the audience suppresses.</span></div>
+                <div class="ex-tile"><b>Reaction sentiment</b><span>The full reaction mix. What share is a plain Like,
+                    what share took real effort, and whether anything is drawing angry or sad.</span></div>
+                <div class="ex-tile"><b>Conversation and amplification</b><span>Comments per 100 reactions and shares
+                    per 100 reactions — the two ratios that actually predict reach.</span></div>
+                <div class="ex-tile"><b>Timing heatmap</b><span>Hour by day-of-week, built from real performance in
+                    local time rather than a generic "best time to post" chart.</span></div>
+                <div class="ex-tile"><b>Copy patterns</b><span>Caption length bands, opening lines, questions, calls to
+                    action, offers, emoji and outbound links — each measured for lift.</span></div>
+                <div class="ex-tile"><b>Momentum</b><span>Month-by-month trajectory plus a newest-third against
+                    oldest-third comparison, so a slide shows up before it becomes a crisis.</span></div>
+                <div class="ex-tile"><b>Top and bottom posts</b><span>The ten best and ten worst with links, so you can
+                    read what worked instead of guessing.</span></div>
+            </div>
+
+            <h3>Adding a rival</h3>
+            <p>With a rival Page supplied you get a metric-by-metric table with an explicit winner on every row, the
+                share of voice split, the formats and intents the rival uses that you do not, hashtags they own, their
+                five best posts, and the gaps turned into dated actions.</p>
+
+            <hr class="ex-hr">
+
+            <div class="ex-note warn">
+                <b>Cost control.</b> Cost scales with pages &times; posts per page. Two pages at 100 posts each is 200
+                posts of scraping. The estimate box updates live before you run anything.
+            </div>
+
+            <div class="ex-note bad">
+                <b>Limits.</b> Public Pages only. A personal profile or a group URL will be rejected — groups belong on
+                the <b>Community Audit</b> page. Some fields depend on what the Page has chosen to publish: if follower
+                count or the reaction breakdown is not returned, the report says so rather than inventing a number.
+            </div>
+
+        </div>
+    </details>
+
+    <div class="segment-bar el-owner-only">
+        <button class="segment-btn active" type="button" data-tab="run">Run a report</button>
+        <button class="segment-btn" type="button" data-tab="pairs">Saved pairs</button>
+        <button class="segment-btn" type="button" data-tab="vault">Report vault</button>
+    </div>
+
+    <!-- ================= RUN ================= -->
+    <section id="tab-run">
+        <div class="card el-owner-only">
+            <h2 class="card-title">Report on a Facebook Page</h2>
+            <p class="card-subtitle">Any public business Page. The profile, the posting history, and every dimension the
+                public payload will give up — indexed against that Page's own median so the numbers mean something.</p>
+
+            <label for="target">Target Page <span style="color:var(--text-muted); font-weight:600;">— URL or handle</span></label>
+            <input type="text" id="target" placeholder="https://www.facebook.com/yourbusiness  or  @yourbusiness" autocomplete="off">
+
+            <label for="rival">Rival Page <span style="color:var(--text-muted); font-weight:600;">— optional, one competitor</span></label>
+            <input type="text" id="rival" placeholder="Leave empty for a solo report" autocomplete="off">
+
+            <div class="grid-2">
+                <div>
+                    <label for="posts">Posts per Page</label>
+                    <input type="number" id="posts" value="50" min="10" max="300" step="10">
+                </div>
+                <div>
+                    <label for="days">History window (days)</label>
+                    <input type="number" id="days" value="90" min="7" max="365" step="7">
+                </div>
+            </div>
+
+            <label class="check"><input type="checkbox" id="reviews">
+                Also sample public reviews and recommendations (extra cost, and only works where the Page has reviews on)</label>
+
+            <label for="brief">What does this business sell, and what do you want from the Page? <span style="color:var(--text-muted); font-weight:600;">— optional, sharpens the AI section</span></label>
+            <textarea id="brief" placeholder="e.g. Home appliance repair in Rangpur. We want more phone enquiries, not follower count."></textarea>
+
+            <label for="setname">Save this match-up as a pair (optional)</label>
+            <input type="text" id="setname" placeholder="My Cafe vs Rival Cafe — quarterly" autocomplete="off">
+
+            <div class="estimate">
+                <div><span>Pages</span><strong id="est-pages">1</strong></div>
+                <div><span>Posts total</span><strong id="est-posts">50</strong></div>
+                <div><span>Window</span><strong id="est-days">90d</strong></div>
+                <div><span>Estimated Apify spend</span><strong id="est-usd">$0.00</strong></div>
+                <div><span>Credit available</span><strong id="est-left">—</strong></div>
+            </div>
+            <p id="est-warn" class="est-warn hidden"></p>
+
+            <button class="btn-primary" type="button" id="run">Generate report</button>
+        </div>
+
+        <div id="job" class="job-panel hidden">
+            <div class="job-head">
+                <strong id="job-step">Starting…</strong>
+                <span id="job-pct" style="font-size:0.8rem; color:var(--accent-solid); font-weight:700;">0%</span>
+            </div>
+            <div class="bar"><div id="job-bar"></div></div>
+            <div class="job-logs" id="job-logs"></div>
+        </div>
+
+        <div id="report-card" class="card hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <h2 class="card-title" style="margin:0;">Page report</h2>
+                <button class="btn-secondary" type="button" id="export">Download PDF</button>
+            </div>
+            <div id="report-actions"></div>
+            <div id="paper" class="report-paper"></div>
+        </div>
+    </section>
+
+    <!-- ================= SAVED PAIRS ================= -->
+    <section id="tab-pairs" class="hidden el-owner-only">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+                <div>
+                    <h2 class="card-title">Saved pairs</h2>
+                    <p class="card-subtitle" style="margin:0;">Re-run the same target and rival later and the two snapshots line up into a drift comparison.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-pairs">Refresh</button>
+            </div>
+            <div id="pairs-list" class="empty">Loading pairs…</div>
+        </div>
+        <div id="trend-card" class="card hidden">
+            <h2 class="card-title" id="trend-title">Trend</h2>
+            <div id="trend-body"></div>
+        </div>
+    </section>
+
+    <!-- ================= VAULT ================= -->
+    <section id="tab-vault" class="hidden el-owner-only">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+                <div>
+                    <h2 class="card-title">Report vault</h2>
+                    <p class="card-subtitle" style="margin:0;">Every Page report you have run, newest first. Open one to read it again or export it.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-vault">Refresh</button>
+            </div>
+            <div id="vault-list" class="empty">Loading reports…</div>
+        </div>
+
+        <div id="vault-report" class="card hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <h2 class="card-title" style="margin:0;" id="vault-title">Saved report</h2>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn-secondary" type="button" id="vault-export">Download PDF</button>
+                    <button class="btn-secondary" type="button" id="vault-close">Close</button>
+                </div>
+            </div>
+            <div id="vault-paper" class="report-paper"></div>
+        </div>
+    </section>
+
+</main>
+
+<script src="header.js"></script>
+<script>
+(async function () {
+    await EL.init({ engine: 'fb_page', page: 'fb-report.html' });
+
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /**
+     * esc() stops an attribute breakout but leaves `javascript:` intact, and
+     * every URL on this page came from a scraped post. Only http(s) is let
+     * through; anything else becomes an inert '#'.
+     */
+    const safeUrl = u => {
+        const v = String(u == null ? '' : u).trim();
+        return /^https?:\/\//i.test(v) ? esc(v) : '#';
+    };
+
+    const num = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
+    const dec = (v, n = 1) => (v === null || v === undefined || isNaN(v)) ? '—' : Number(v).toFixed(n);
+    const dateStr = d => d ? new Date(d).toLocaleDateString() : '—';
+    const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    let currentReport = null, vaultReport = null;
+
+    // ---------- tabs ----------
+    document.querySelectorAll('.segment-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            ['run', 'pairs', 'vault'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'pairs') loadPairs();
+            if (btn.dataset.tab === 'vault') loadVault();
+        });
+    });
+
+
+    /**
+     * Turn the estimate response into a plain answer: can this run finish on
+     * the credit that exists right now? A job that pauses at room six is
+     * recoverable, but being told before pressing Run is strictly better.
+     */
+    function showBudget(d, costUsd) {
+        const box = $('est-left'), warn = $('est-warn');
+        if (!box) return;
+        const b = d && d.budget;
+        if (!b) { box.textContent = '—'; if (warn) warn.classList.add('hidden'); return; }
+
+        const left = Number(b.totalRemainingUsd || 0);
+        box.textContent = '$' + left.toFixed(2);
+        box.style.color = left < costUsd ? '#ef4444' : (left - costUsd < costUsd ? '#f59e0b' : '#10b981');
+
+        if (!warn) return;
+        if (b.willPause) {
+            warn.className = 'est-warn is-over';
+            warn.textContent = `This run needs about $${costUsd.toFixed(2)} but only $${left.toFixed(2)} is available. ` +
+                `It will start, save what it can, then pause and wait for a key with credit.`;
+        } else if (left - costUsd < costUsd) {
+            warn.className = 'est-warn is-tight';
+            warn.textContent = `This run fits, but it leaves under one more run's worth of credit this cycle.`;
+        } else {
+            warn.className = 'est-warn hidden';
+        }
+    }
+
+    // ---------- estimate ----------
+    let estTimer = null;
+    function estimate() {
+        const pages = $('rival').value.trim() ? 2 : 1;
+        const posts = Math.max(10, Math.min(300, parseInt($('posts').value || '50', 10)));
+        $('est-pages').textContent = pages;
+        $('est-posts').textContent = (pages * posts).toLocaleString();
+        $('est-days').textContent = (parseInt($('days').value || '90', 10)) + 'd';
+        clearTimeout(estTimer);
+        estTimer = setTimeout(async () => {
+            try {
+                const d = await EL.api(`/api/fb/page/estimate-credits?pages=${pages}&posts=${posts}&reviews=${$('reviews').checked}`);
+                const cost = Number(d.estimatedUsd);
+                $('est-usd').textContent = '$' + cost.toFixed(2);
+                showBudget(d, cost);
+            } catch { $('est-usd').textContent = '—'; }
+        }, 350);
+    }
+    ['target', 'rival', 'posts', 'days'].forEach(id => $(id).addEventListener('input', estimate));
+    $('reviews').addEventListener('change', estimate);
+    estimate();
+
+    // ---------- run ----------
+    function setProgress(pct, step) {
+        $('job-bar').style.width = `${pct}%`;
+        $('job-pct').textContent = `${pct}%`;
+        $('job-step').textContent = step || '';
+    }
+    function log(line) {
+        const box = $('job-logs');
+        box.innerHTML += `<div>&gt; ${esc(line)}</div>`;
+        box.scrollTop = box.scrollHeight;
+    }
+
+    $('run').addEventListener('click', () => startRun());
+
+    async function startRun(setId, preset) {
+        const target = (preset?.target || $('target').value).trim();
+        if (!target) return alert('Paste the Page URL or handle you want reported on.');
+
+        $('run').disabled = true;
+        $('report-card').classList.add('hidden');
+        $('job').classList.remove('hidden');
+        $('job-logs').innerHTML = '';
+        setProgress(1, 'Queueing job…');
+
+        try {
+            const res = await EL.api('/api/fb/page-report', {
+                method: 'POST',
+                body: {
+                    target,
+                    rival: (preset?.rival || $('rival').value).trim() || null,
+                    postsPerPage: parseInt($('posts').value || '50', 10),
+                    days: parseInt($('days').value || '90', 10),
+                    includeReviews: $('reviews').checked,
+                    brief: $('brief').value.trim() || null,
+                    setName: setId ? null : ($('setname').value.trim() || null),
+                    setId: setId || null
+                }
+            });
+            log(`Job ${res.jobId} queued — ${res.pages} page(s), ${res.postsPerPage} posts each, ${res.days}-day window, ~$${Number(res.estimatedUsd).toFixed(2)}.`);
+            log(`Target: ${res.target}${res.rival ? ` · Rival: ${res.rival}` : ' · no rival'}`);
+            poll(res.jobId);
+        } catch (err) {
+            log('Could not start: ' + err.message);
+            setProgress(0, 'Failed to start');
+            $('run').disabled = false;
+        }
+    }
+
+    /**
+     * Follows a job to the end.
+     *
+     * Delegates to EL.pollJob, which unwraps the response correctly and knows
+     * about every state a run can stop in. The hand-rolled loop this replaced
+     * only understood 'done' and 'failed', so a run that paused for credit —
+     * or was interrupted by a restart — span this progress bar forever with
+     * no way to resume it.
+     */
+    function poll(jobId) {
+        EL._renderCancel(jobId, 'results', () => log('Cancelling after the current step…'));
+
+        EL.pollJob(jobId, {
+            mount: 'results',
+            onLog: m => log(m),
+            onProgress: job => setProgress(job.progress || 0, job.current_step || job.status),
+
+            onDone: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(100, 'Report ready');
+                if (job.result?.report) {
+                    currentReport = job.result.report;
+                    $('paper').innerHTML = renderReport(currentReport);
+                    $('report-card').classList.remove('hidden');
+                    $('report-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    EL.reportActions('report-actions', { reportId: job.result.reportId || job.result_report_id || null, jobId: job.id });
+                }
+                loadVault();
+            },
+
+            onPaused: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(job.progress || 0, job.status === 'cancelled' ? 'Cancelled' : 'Paused — resume below');
+                log(job.error || 'Run stopped. Everything already scraped was saved.');
+            },
+
+            onFailed: job => {
+                EL._clearCancel('results');
+                $('run').disabled = false;
+                setProgress(0, 'Run failed');
+                log(job.error || 'Unknown error');
+            }
+        });
+    }
+
+    // =====================================================================
+    // RENDERING
+    // =====================================================================
+    const kpi = (label, value, color) =>
+        `<div class="kpi-box"><span>${label}</span><div class="kpi-num" ${color ? `style="color:${color}"` : ''}>${value}</div></div>`;
+
+    const idxCell = v => `<span class="idx ${v >= 1.3 ? 'hot' : v < 0.8 ? 'cold' : ''}">${v == null ? '—' : v + 'x'}</span>`;
+
+    function board(title, rows, note) {
+        if (!rows || !rows.length) return '';
+        return `<h3 class="block-title">${title}</h3>
+        ${note ? `<p class="card-subtitle" style="margin:0 0 6px;">${note}</p>` : ''}
+        <div class="table-wrap"><table><thead><tr><th>Pattern</th><th>Posts</th><th>Share</th>
+            <th>Avg index</th><th>Avg engagement</th><th>Avg comments</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td><strong>${esc(String(r.key).replace(/_/g, ' '))}</strong>
+            ${r.posts < 3 ? '<span class="badge b-mute">thin sample</span>' : ''}</td>
+            <td>${r.posts}</td><td>${esc(r.share || '—')}</td>
+            <td>${idxCell(r.avgIndex)}</td><td>${num(r.avgEngagement)}</td><td>${num(r.avgComments)}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+
+    function flagTable(flags) {
+        const live = (flags || []).filter(f => f.with.posts > 0 && f.without.posts > 0);
+        if (!live.length) return '';
+        return `<h3 class="block-title">What the copy itself does</h3>
+        <p class="card-subtitle" style="margin:0 0 6px;">Each row splits every post into two groups and compares them. A thin sample is flagged rather than hidden.</p>
+        <div class="table-wrap"><table><thead><tr><th>Pattern</th><th>Posts with</th><th>Index with</th>
+            <th>Posts without</th><th>Index without</th><th>Lift</th></tr></thead><tbody>
+        ${live.map(f => `<tr><td><strong>${esc(f.with.label)}</strong>
+            ${f.reliable ? '' : '<span class="badge b-mute">thin sample</span>'}</td>
+            <td>${f.with.posts} <span style="color:var(--text-muted)">(${f.with.share}%)</span></td>
+            <td>${idxCell(f.with.avgIndex)}</td>
+            <td>${f.without.posts}</td>
+            <td>${idxCell(f.without.avgIndex)}</td>
+            <td>${f.lift == null ? '—' : `<span class="idx ${f.lift > 10 ? 'hot' : f.lift < -10 ? 'cold' : ''}">${f.lift > 0 ? '+' : ''}${f.lift}%</span>`}</td>
+        </tr>`).join('')}
+        </tbody></table></div>`;
+    }
+
+    function heatmapBlock(hm) {
+        if (!hm?.cells?.length) return '';
+        const max = Math.max(...hm.cells.map(c => c.avgIndex), 1);
+        const lookup = {};
+        hm.cells.forEach(c => { lookup[`${c.dow}-${c.hour}`] = c; });
+
+        let grid = '<div class="lab"></div>' + Array.from({ length: 24 }, (_, h) =>
+            `<div class="lab" style="justify-content:center;">${h % 3 === 0 ? h : ''}</div>`).join('');
+
+        for (let d = 0; d < 7; d++) {
+            grid += `<div class="lab">${DOW[d]}</div>`;
+            for (let h = 0; h < 24; h++) {
+                const c = lookup[`${d}-${h}`];
+                const a = c ? Math.min(1, c.avgIndex / max) : 0;
+                grid += `<div class="cell" title="${DOW[d]} ${h}:00 — ${c ? c.avgIndex + 'x over ' + c.posts + ' posts' : 'no posts'}"
+                    style="background:${c ? `rgba(96,165,250,${0.15 + a * 0.85})` : 'rgba(255,255,255,0.04)'}"></div>`;
+            }
+        }
+        return `<h3 class="block-title">When posts land best (local time)</h3>
+            <div class="table-wrap"><div class="heat">${grid}</div></div>
+            <p class="heat-legend">Darker = higher performance index. Best windows:
+                ${(hm.bestHours || []).slice(0, 4).map(b => `<strong>${String(b.hour).padStart(2, '0')}:00</strong> (${b.avgIndex}x)`).join(' · ') || '—'}
+                ${(hm.bestDays || []).length ? ` · Best days: ${hm.bestDays.slice(0, 3).map(d => `<strong>${d.dowName}</strong> (${d.avgIndex}x)`).join(' · ')}` : ''}</p>`;
+    }
+
+    function postTable(title, posts, note) {
+        if (!posts || !posts.length) return '';
+        return `<h3 class="block-title">${title}</h3>
+        ${note ? `<p class="card-subtitle" style="margin:0 0 6px;">${note}</p>` : ''}
+        <div class="table-wrap"><table><thead><tr><th>Index</th><th>Post</th><th>Format</th>
+            <th>Reactions</th><th>Comments</th><th>Shares</th><th>When</th><th></th></tr></thead><tbody>
+        ${posts.map(p => `<tr>
+            <td>${idxCell(p.index)}</td>
+            <td style="max-width:340px;">${esc(p.excerpt || '(no text)')}${p.provisional ? ' <span class="badge b-warn">still settling</span>' : ''}
+                ${p.hasLink ? ' <span class="badge b-mute">link</span>' : ''}${p.hasCta ? ' <span class="badge b-mute">CTA</span>' : ''}</td>
+            <td>${esc(p.format || '—')}</td>
+            <td>${num(p.reactions)}</td><td>${num(p.comments)}</td><td>${num(p.shares)}</td>
+            <td>${p.dowName || '—'} ${p.hour != null ? String(p.hour).padStart(2, '0') + ':00' : ''}<br>
+                <span style="color:var(--text-muted); font-size:0.75rem;">${dateStr(p.postedAt)}</span></td>
+            <td>${p.url ? `<a class="btn-secondary" href="${safeUrl(p.url)}" target="_blank" rel="noopener">Open</a>` : ''}</td>
+        </tr>`).join('')}
+        </tbody></table></div>`;
+    }
+
+    function pillars(sb) {
+        if (!sb?.breakdown?.length) return '';
+        return `<h3 class="block-title">Where the score came from</h3>
+        <div>${sb.breakdown.map(p => `
+            <div class="pillar">
+                <div class="pname"><strong>${esc(p.pillar)}</strong><span>${esc(p.detail || '')}</span></div>
+                <div class="ptrack"><div style="width:${Math.max(0, Math.min(100, (p.points / p.max) * 100))}%"></div></div>
+                <div class="ppts">${p.points}/${p.max}</div>
+            </div>`).join('')}</div>`;
+    }
+
+    function completenessBlock(c) {
+        if (!c?.checks?.length) return '';
+        return `<h3 class="block-title">Profile completeness — ${c.score}%</h3>
+        <p class="card-subtitle" style="margin:0 0 6px;">Every unticked row is a fix that takes minutes in Page Settings.</p>
+        <div class="checks">${c.checks.map(k => `
+            <div class="chk ${k.ok ? 'yes' : 'no'}"><b>${k.ok ? '✓' : '✕'}</b> ${esc(k.label)}</div>`).join('')}</div>`;
+    }
+
+    const REACT_COLORS = { like: '#3b82f6', love: '#ef4444', care: '#f59e0b', haha: '#facc15',
+                           wow: '#a78bfa', sad: '#64748b', angry: '#dc2626' };
+
+    function sentimentBlock(s) {
+        if (!s?.available) return `<h3 class="block-title">Reaction sentiment</h3>
+            <p class="empty">${esc(s?.note || 'No reaction breakdown was returned for this Page.')}</p>`;
+        return `<h3 class="block-title">Reaction sentiment</h3>
+        <p class="card-subtitle" style="margin:0 0 6px;">Anything other than a plain Like took deliberate effort from the reader — that share is the real affection signal.</p>
+        <div class="mixbar">${s.mix.map(m => `<div style="width:${m.share}%; background:${REACT_COLORS[m.type] || '#475569'}" title="${esc(m.type)} ${m.share}%"></div>`).join('')}</div>
+        <div class="mixkey">${s.mix.map(m => `<span><i style="background:${REACT_COLORS[m.type] || '#475569'}"></i>${esc(m.type)} ${m.share}% (${num(m.count)})</span>`).join('')}</div>
+        <div class="kpi-grid">
+            ${kpi('Beyond a plain Like', s.highEffortShare + '%', 'var(--success)')}
+            ${kpi('Positive reactions', s.positiveShare + '%')}
+            ${kpi('Angry or sad', s.negativeShare + '%', s.negativeShare > 5 ? 'var(--danger)' : undefined)}
+            ${kpi('Reactions counted', num(s.grandTotal))}
+        </div>`;
+    }
+
+    function momentumBlock(m) {
+        if (!m?.months?.length) return '';
+        const max = Math.max(...m.months.map(x => x.avgEngagement), 1);
+        return `<h3 class="block-title">Momentum</h3>
+        <p class="card-subtitle" style="margin:0 0 6px;">Average engagement per post, by month. Posts under 24 hours old are left out so the newest month is not unfairly punished.</p>
+        <div class="monthbars">${m.months.map(x => `
+            <div><div class="mb" style="height:${Math.max(3, (x.avgEngagement / max) * 100)}%" title="${x.posts} posts · avg ${num(x.avgEngagement)}"></div>
+            <div class="ml">${esc(x.month.slice(5))}/${esc(x.month.slice(2, 4))}</div></div>`).join('')}</div>
+        <p class="heat-legend">${m.direction ? `Direction: <strong>${esc(m.direction)}</strong>${m.changePct != null ? ` (${m.changePct > 0 ? '+' : ''}${m.changePct}% month over month)` : ''}.` : 'Not enough months to read a direction yet.'}
+            ${m.halfSplit?.changePct != null ? ` Newest third of posts vs oldest third: ${m.halfSplit.changePct > 0 ? '+' : ''}${m.halfSplit.changePct}%.` : ''}</p>`;
+    }
+
+    function tagBlock(title, rows, unit, note) {
+        if (!rows || !rows.length) return '';
+        return `<h3 class="block-title">${title}</h3>
+        ${note ? `<p class="card-subtitle" style="margin:0 0 6px;">${note}</p>` : ''}
+        <div class="table-wrap"><table><thead><tr><th>${unit}</th><th>Uses</th><th>Avg index</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td>${esc(r.key)}</td><td>${r.uses}</td><td>${idxCell(r.avgIndex)}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+
+    function h2hBlock(b) {
+        if (!b) return '';
+        return `
+        <h3 class="block-title">Head to head — ${esc(b.target.name)} vs ${esc(b.rival.name)}</h3>
+        <div class="kpi-grid">
+            ${kpi('Measures won', `${b.wins} / ${b.rows.length}`, b.wins > b.losses ? 'var(--success)' : '#fca5a5')}
+            ${kpi('Measures lost', b.losses)}
+            ${kpi('Share of engagement', b.shareOfVoice ? b.shareOfVoice.target + '%' : '—')}
+            ${kpi('Their page score', b.rival.score)}
+        </div>
+        <div class="warnbox" style="background:rgba(96,165,250,0.08); border-color:rgba(96,165,250,0.3); color:#bfdbfe;">${esc(b.verdict)}</div>
+
+        <div class="table-wrap"><table class="h2h"><thead><tr>
+            <th>Measure</th><th class="col-t">${esc(b.target.name)}</th><th>${esc(b.rival.name)}</th><th>Gap</th></tr></thead><tbody>
+        ${b.rows.map(r => `<tr>
+            <td><strong>${esc(r.metric)}</strong></td>
+            <td class="col-t ${r.winner === 'target' ? 'win' : r.winner === 'rival' ? 'lose' : ''}">${r.target == null ? '—' : num(r.target)}</td>
+            <td class="${r.winner === 'rival' ? 'win' : ''}">${r.rival == null ? '—' : num(r.rival)}</td>
+            <td>${r.gapPct == null ? '—' : `${r.gapPct > 0 ? '+' : ''}${r.gapPct}%`}</td>
+        </tr>`).join('')}
+        </tbody></table></div>
+
+        ${b.formatGaps?.length ? `<h3 class="block-title">Formats they use and you do not</h3>
+            <div class="table-wrap"><table><thead><tr><th>Format</th><th>Their index</th><th>Their posts</th></tr></thead><tbody>
+            ${b.formatGaps.map(g => `<tr><td>${esc(g.format)}</td><td>${idxCell(g.rivalIndex)}</td><td>${g.rivalPosts}</td></tr>`).join('')}
+            </tbody></table></div>` : ''}
+
+        ${b.intentGaps?.length ? `<h3 class="block-title">Angles they use and you do not</h3>
+            <div class="table-wrap"><table><thead><tr><th>Intent</th><th>Their index</th><th>Their posts</th></tr></thead><tbody>
+            ${b.intentGaps.map(g => `<tr><td>${esc(String(g.intent).replace(/_/g, ' '))}</td><td>${idxCell(g.rivalIndex)}</td><td>${g.rivalPosts}</td></tr>`).join('')}
+            </tbody></table></div>` : ''}
+
+        ${b.rivalHashtags?.length ? `<h3 class="block-title">Hashtags they own</h3>
+            <p class="empty">${b.rivalHashtags.map(h => `#${esc(h.key)} <span style="color:var(--text-muted)">(${h.uses})</span>`).join(' &nbsp; ')}</p>` : ''}
+
+        ${postTable('Their five strongest posts', b.rivalTopPosts, 'Read these before writing anything new.')}`;
+    }
+
+    function recsBlock(recs) {
+        if (!recs?.length) return '';
+        return `<h3 class="block-title">What to do about it</h3>
+        ${recs.map(r => `<div class="rec ${esc(r.priority)}">
+            <strong><span class="pri ${esc(r.priority)}">${esc(r.priority)}</span>${esc(r.title)}</strong>
+            <p>${esc(r.why)}</p>
+            <div class="do">→ ${esc(r.action)}</div>
+        </div>`).join('')}`;
+    }
+
+    function aiBlock(ai) {
+        if (!ai) return `<div class="warnbox" style="margin-top:26px;">The AI strategy layer did not return anything for this run. Every number and recommendation above is produced by the analysis engine and is unaffected.</div>`;
+        const list = (title, arr) => (!arr || !arr.length) ? '' :
+            `<h4>${title}</h4><ul>${arr.map(x => `<li>${esc(typeof x === 'string' ? x : JSON.stringify(x))}</li>`).join('')}</ul>`;
+
+        return `<div class="ai-panel">
+            <h4>Executive summary</h4><p>${esc(ai.executive_summary || '—')}</p>
+            ${list('State of the page', ai.state_of_the_page)}
+            ${list('What is working', ai.what_is_working)}
+            ${list('What is failing', ai.what_is_failing)}
+            ${ai.content_playbook?.length ? `<h4>Content playbook</h4><ul>${ai.content_playbook.map(p =>
+                `<li><strong>${esc(p.format || '')}</strong> · ${esc(p.intent || '')} · ${esc(p.best_time || '')} — ${esc(p.angle || '')} <span style="color:var(--text-muted)">${esc(p.why || '')}</span></li>`).join('')}</ul>` : ''}
+            ${list('Competitor read', ai.competitor_read)}
+            ${list('Quick wins', ai.quick_wins)}
+            ${ai.thirty_day_plan?.length ? `<h4>Next 30 days</h4><ul>${ai.thirty_day_plan.map(w =>
+                `<li><strong>${esc(w.week || '')}</strong>: ${(w.actions || []).map(esc).join(' · ')}</li>`).join('')}</ul>` : ''}
+            ${ai.kpis_to_watch?.length ? `<h4>KPIs to watch</h4><ul>${ai.kpis_to_watch.map(k =>
+                `<li><strong>${esc(k.kpi || '')}</strong> — now ${esc(k.current || '?')}, target ${esc(k.target || '?')}</li>`).join('')}</ul>` : ''}
+            ${list('Risks', ai.risks)}
+        </div>`;
+    }
+
+    function auditBody(a, opts = {}) {
+        if (!a) return '';
+        if (!a.postsAnalyzed) {
+            return `<div class="warnbox">${esc(a.scoreBreakdown?.verdict || 'No posts were returned for this Page.')}</div>`;
+        }
+        const p = a.profile || {};
+        return `
+        <div class="kpi-grid">
+            ${kpi('Posts analysed', a.postsAnalyzed)}
+            ${kpi('Followers', num(a.followers))}
+            ${kpi('Engagement rate', a.engagementRate ? a.engagementRate + '%' : '—', 'var(--accent-solid)')}
+            ${kpi('Posts per week', a.cadence.postsPerWeek)}
+            ${kpi('Avg reactions', num(a.averages.reactions))}
+            ${kpi('Avg comments', num(a.averages.comments))}
+            ${kpi('Avg shares', num(a.averages.shares))}
+            ${kpi('Comments / 100 reactions', dec(a.conversationRate, 1), a.conversationRate < 2 ? '#fca5a5' : 'var(--success)')}
+            ${kpi('Shares / 100 reactions', dec(a.amplificationRate, 1))}
+            ${kpi('Consistency', a.cadence.consistency == null ? '—' : a.cadence.consistency + '/100')}
+            ${kpi('Longest silence', a.cadence.longestGapDays == null ? '—' : a.cadence.longestGapDays + 'd', a.cadence.longestGapDays > 14 ? 'var(--warn)' : undefined)}
+            ${kpi('Last post', a.cadence.lastPostDaysAgo == null ? '—' : a.cadence.lastPostDaysAgo + 'd ago', a.cadence.silent ? 'var(--danger)' : undefined)}
+        </div>
+
+        ${a.findings?.length ? `<div class="works"><h3 class="block-title" style="margin-top:0;">What the data says</h3>
+            <ul>${a.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul></div>` : ''}
+
+        ${opts.skipPillars ? '' : pillars(a.scoreBreakdown)}
+        ${completenessBlock(a.completeness)}
+        ${momentumBlock(a.momentum)}
+        ${sentimentBlock(a.sentiment)}
+        ${board('Format leaderboard', a.formats, "Indexed against this Page's own median, so a photo and a video are compared fairly.")}
+        ${board('Intent leaderboard', a.intents, 'How the post is framed, which usually matters more than what it is about.')}
+        ${board('Caption length', a.lengths)}
+        ${board('Opening line patterns', a.openings)}
+        ${flagTable(a.flags)}
+        ${heatmapBlock(a.heatmap)}
+        ${a.video ? `<h3 class="block-title">Video</h3><div class="kpi-grid">
+            ${kpi('Video posts', a.video.posts)}
+            ${kpi('Share of output', a.video.share + '%')}
+            ${kpi('Avg views', num(a.video.avgViews))}
+            ${kpi('Avg index', a.video.avgIndex + 'x')}
+            ${kpi('Reactions per 100 views', a.video.viewToReactionRatio == null ? '—' : a.video.viewToReactionRatio)}
+        </div>` : ''}
+        ${tagBlock('Hashtags used', a.hashtags, 'Hashtag')}
+        ${tagBlock('Recurring topics', a.topics, 'Term', 'Words that show up across multiple posts, with how those posts performed.')}
+        ${tagBlock('Outbound domains', a.domains, 'Domain', 'Where this Page sends people, and what it costs in reach.')}
+        ${a.reviews ? `<h3 class="block-title">Public reviews sampled</h3><div class="kpi-grid">
+            ${kpi('Reviews read', a.reviews.sampled)}
+            ${kpi('Positive', a.reviews.positive, 'var(--success)')}
+            ${kpi('Negative', a.reviews.negative, a.reviews.negative ? '#fca5a5' : undefined)}
+            ${kpi('Positive share', a.reviews.positiveShare + '%')}
+        </div>` : ''}
+        ${postTable('Ten strongest posts', a.topPosts)}
+        ${postTable('Ten weakest posts', a.bottomPosts, 'What not to repeat.')}`;
+    }
+
+    function renderReport(r) {
+        const a = r.target;
+        const p = a.profile || {};
+        const meta = [
+            p.category, a.verified ? 'verified' : null,
+            a.followers ? num(a.followers) + ' followers' : null,
+            a.likes ? num(a.likes) + ' likes' : null,
+            a.rating ? `rated ${a.rating}${a.reviewsCount ? ` from ${num(a.reviewsCount)} reviews` : ''}` : null,
+            `${a.postsAnalyzed} posts over ${r.windowDays} days`
+        ].filter(Boolean).map(esc).join(' · ');
+
+        return `
+        <div class="score-hero">
+            <div>
+                <h2>${esc(a.name || a.pageId)}</h2>
+                <div class="sub">${meta}</div>
+                <div class="sub">${a.url ? `<a href="${safeUrl(a.url)}" target="_blank" rel="noopener" style="color:var(--accent-solid)">${esc(a.url)}</a>` : ''}
+                    · generated ${dateStr(r.generatedAt)}</div>
+            </div>
+            <div class="score-dial">
+                <div class="val">${a.score}<small>/100</small></div>
+                <div class="grade">Grade ${esc(a.grade)}</div>
+                <div class="verdict">${esc(a.scoreBreakdown?.verdict || '')}</div>
+            </div>
+        </div>
+
+        ${a.scoreBreakdown?.lowConfidence ? `<div class="warnbox">Only ${a.postsAnalyzed} posts were returned in this window. Everything below is directionally useful but statistically thin — widen the window or raise the post limit for a firmer read.</div>` : ''}
+        ${a.provisionalPosts ? `<div class="warnbox">${a.provisionalPosts} post(s) are under 24 hours old and still collecting engagement. They are excluded from the medians and the momentum trend.</div>` : ''}
+
+        ${auditBody(a)}
+
+        ${r.benchmark ? h2hBlock(r.benchmark) : ''}
+
+        ${r.rival && r.rival.postsAnalyzed ? `
+        <details class="sub-audit">
+            <summary>Full breakdown of the rival — ${esc(r.rival.name)} (score ${r.rival.score}, grade ${esc(r.rival.grade)})</summary>
+            <div class="inner">${auditBody(r.rival, { skipPillars: false })}</div>
+        </details>` : ''}
+
+        ${recsBlock(r.recommendations)}
+        ${aiBlock(r.ai)}`;
+    }
+
+    // ---------- PDF ----------
+    function exportPdf(node, name) {
+        if (!node || !node.innerHTML.trim()) return alert('Nothing to export yet.');
+        html2pdf().set({
+            margin: 8,
+            filename: `${name}.pdf`,
+            image: { type: 'jpeg', quality: 0.95 },
+            html2canvas: { scale: 2, backgroundColor: '#0b1329', useCORS: true },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+        }).from(node).save();
+    }
+    $('export').addEventListener('click', () =>
+        exportPdf($('paper'), `edgelead-fb-page-${(currentReport?.target?.pageId || 'report')}`));
+    $('vault-export').addEventListener('click', () =>
+        exportPdf($('vault-paper'), `edgelead-fb-page-${(vaultReport?.target?.pageId || 'report')}`));
+
+    // =====================================================================
+    // VAULT
+    // =====================================================================
+    $('reload-vault').addEventListener('click', loadVault);
+    $('vault-close').addEventListener('click', () => $('vault-report').classList.add('hidden'));
+
+    async function loadVault() {
+        const box = $('vault-list');
+        box.textContent = 'Loading reports…';
+        try {
+            const { reports } = await EL.api('/api/fb/page-reports');
+            if (!reports.length) {
+                box.innerHTML = '<p class="empty">No Page reports yet. Run one from the first tab and it will appear here permanently.</p>';
+                return;
+            }
+            box.innerHTML = reports.map(r => `
+                <div class="row-card">
+                    <div style="flex:1; min-width:220px;">
+                        <strong>${esc(r.target_handle || '—')}</strong>
+                        ${(r.competitor_handles || []).length ? `<span class="badge b-mute">vs ${esc(r.competitor_handles[0])}</span>` : '<span class="badge b-mute">solo</span>'}
+                        <span class="badge ${r.grade === 'A' ? 'b-ok' : r.grade === 'F' || r.grade === 'D' ? 'b-bad' : 'b-warn'}">${esc(r.grade || '?')} · ${r.score ?? '—'}</span>
+                        <div class="meta">${dateStr(r.snapshot_date || r.created_at)} · ${r.posts_analyzed || 0} posts ·
+                            ER ${r.engagement_rate ?? '—'}%${r.credits_estimate ? ` · ~$${Number(r.credits_estimate).toFixed(2)}` : ''}</div>
+                        ${r.ai_summary ? `<div class="meta" style="margin-top:7px; max-width:760px;">${esc(String(r.ai_summary).slice(0, 260))}${String(r.ai_summary).length > 260 ? '…' : ''}</div>` : ''}
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-secondary" type="button" data-open="${esc(r.id)}">Open</button>
+                        <button class="btn-danger" type="button" data-del="${esc(r.id)}">Delete</button>
+                    </div>
+                </div>`).join('');
+
+            box.querySelectorAll('[data-open]').forEach(b =>
+                b.addEventListener('click', () => openVaultReport(b.dataset.open)));
+            box.querySelectorAll('[data-del]').forEach(b =>
+                b.addEventListener('click', async () => {
+                    if (!confirm('Delete this report permanently?')) return;
+                    try {
+                        await EL.api(`/api/fb/page-report/${b.dataset.del}`, { method: 'DELETE' });
+                        loadVault();
+                        $('vault-report').classList.add('hidden');
+                    } catch (err) { alert(err.message); }
+                }));
+        } catch (err) {
+            box.innerHTML = `<p class="empty">Could not load the vault: ${esc(err.message)}</p>`;
+        }
+    }
+
+    async function openVaultReport(id) {
+        $('vault-report').classList.remove('hidden');
+        $('vault-paper').innerHTML = '<p class="empty">Loading…</p>';
+        try {
+            const { report } = await EL.api(`/api/fb/page-report/${id}`);
+            vaultReport = report.report_json;
+            $('vault-title').textContent = `${report.target_handle || 'Saved report'} — ${dateStr(report.snapshot_date || report.created_at)}`;
+            $('vault-paper').innerHTML = vaultReport?.target
+                ? renderReport(vaultReport)
+                : '<p class="empty">This report was saved in an older format and cannot be re-rendered.</p>';
+            $('vault-report').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (err) {
+            $('vault-paper').innerHTML = `<p class="empty">Could not open: ${esc(err.message)}</p>`;
+        }
+    }
+
+    // =====================================================================
+    // SAVED PAIRS + TREND
+    // =====================================================================
+    $('reload-pairs').addEventListener('click', loadPairs);
+
+    async function loadPairs() {
+        const box = $('pairs-list');
+        box.textContent = 'Loading pairs…';
+        try {
+            const { sets } = await EL.api('/api/fb/page-sets');
+            if (!sets.length) {
+                box.innerHTML = '<p class="empty">No saved pairs yet. Type a name into “Save this match-up as a pair” before you run a report and it will be stored here.</p>';
+                return;
+            }
+            box.innerHTML = sets.map(s => `
+                <div class="row-card">
+                    <div style="flex:1; min-width:220px;">
+                        <strong>${esc(s.name || s.target_page)}</strong>
+                        <div class="meta">${esc(s.target_page)}${s.rival_page ? ` vs ${esc(s.rival_page)}` : ' · solo'} ·
+                            ${s.posts_per_page} posts · ${s.days_window}-day window ·
+                            ${s.last_run_at ? 'last run ' + dateStr(s.last_run_at) : 'never run'}</div>
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-secondary" type="button" data-run="${esc(s.id)}">Re-run</button>
+                        <button class="btn-secondary" type="button" data-trend="${esc(s.id)}">Trend</button>
+                        <button class="btn-danger" type="button" data-delset="${esc(s.id)}">Delete</button>
+                    </div>
+                </div>`).join('');
+
+            box.querySelectorAll('[data-run]').forEach(b => b.addEventListener('click', () => {
+                const s = sets.find(x => x.id === b.dataset.run);
+                document.querySelector('.segment-btn[data-tab="run"]').click();
+                $('target').value = s.target_url || s.target_page;
+                $('rival').value = s.rival_url || s.rival_page || '';
+                $('posts').value = s.posts_per_page || 50;
+                $('days').value = s.days_window || 90;
+                estimate();
+                startRun(s.id, { target: s.target_url || s.target_page, rival: s.rival_url || s.rival_page || '' });
+            }));
+
+            box.querySelectorAll('[data-trend]').forEach(b => b.addEventListener('click', () => {
+                const s = sets.find(x => x.id === b.dataset.trend);
+                showTrend(s);
+            }));
+
+            box.querySelectorAll('[data-delset]').forEach(b => b.addEventListener('click', async () => {
+                if (!confirm('Delete this saved pair? The reports it produced are kept.')) return;
+                try { await EL.api(`/api/fb/page-sets/${b.dataset.delset}`, { method: 'DELETE' }); loadPairs(); }
+                catch (err) { alert(err.message); }
+            }));
+        } catch (err) {
+            box.innerHTML = `<p class="empty">Could not load pairs: ${esc(err.message)}</p>`;
+        }
+    }
+
+    async function showTrend(set) {
+        $('trend-card').classList.remove('hidden');
+        $('trend-title').textContent = `Trend — ${set.name || set.target_page}`;
+        $('trend-body').innerHTML = '<p class="empty">Loading…</p>';
+        try {
+            const { runs, delta } = await EL.api(`/api/fb/page-trend/${set.id}`);
+            if (!runs.length) {
+                $('trend-body').innerHTML = '<p class="empty">No snapshots yet for this pair. Run it twice and the drift shows up here.</p>';
+                return;
+            }
+            $('trend-body').innerHTML = `
+                ${delta ? `<div class="kpi-grid">
+                    ${kpi(`Score change (${delta.days}d)`, (delta.score > 0 ? '+' : '') + delta.score, delta.score >= 0 ? 'var(--success)' : '#fca5a5')}
+                    ${kpi('Engagement rate change', (delta.engagementRate > 0 ? '+' : '') + delta.engagementRate + '%')}
+                    ${kpi('Follower change', (delta.followers > 0 ? '+' : '') + num(delta.followers))}
+                    ${kpi('Posts/week change', (delta.postsPerWeek > 0 ? '+' : '') + delta.postsPerWeek)}
+                    ${delta.gapToRival == null ? '' : kpi('Gap to rival', (delta.gapToRival > 0 ? '+' : '') + delta.gapToRival, delta.gapToRival >= 0 ? 'var(--success)' : '#fca5a5')}
+                </div>` : ''}
+                <div class="table-wrap"><table><thead><tr><th>Date</th><th>Score</th><th>Grade</th>
+                    <th>Engagement rate</th><th>Posts/week</th><th>Followers</th><th>Their score</th><th></th></tr></thead><tbody>
+                ${runs.map(r => `<tr>
+                    <td>${dateStr(r.date)}</td><td>${r.score ?? '—'}</td><td>${esc(r.grade || '—')}</td>
+                    <td>${r.engagementRate ?? '—'}%</td><td>${r.postsPerWeek ?? '—'}</td>
+                    <td>${num(r.followers)}</td><td>${r.rivalScore ?? '—'}</td>
+                    <td><button class="btn-secondary" type="button" data-vopen="${esc(r.reportId)}">Open</button></td>
+                </tr>`).join('')}
+                </tbody></table></div>`;
+
+            $('trend-body').querySelectorAll('[data-vopen]').forEach(b => b.addEventListener('click', () => {
+                document.querySelector('.segment-btn[data-tab="vault"]').click();
+                openVaultReport(b.dataset.vopen);
+            }));
+        } catch (err) {
+            $('trend-body').innerHTML = `<p class="empty">Could not load the trend: ${esc(err.message)}</p>`;
+        }
+    }
+
+    // ---------- boot ----------
+    // ---------- share mode / deep link (phase 10/11) ----------
+    function showRow(report) {
+        currentReport = report.report_json;
+        $('paper').innerHTML = currentReport?.target ? renderReport(currentReport)
+            : '<p class="empty">This report was saved in an older format and cannot be re-rendered.</p>';
+        $('report-card').classList.remove('hidden');
+        $('report-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        EL.reportActions('report-actions', { reportId: report.id });
+    }
+    if (EL.isShared()) {
+        try { const d = await EL.loadShared(); showRow(d.report); }
+        catch (err) { $('paper').innerHTML = `<p class="empty">${esc(err.message)}</p>`; $('report-card').classList.remove('hidden'); }
+        return;
+    }
+    EL.refreshStatus();
+    loadVault();
+    if (EL.reportParam()) {
+        EL.api(`/api/fb/page-report/${EL.reportParam()}`).then(({ report }) => showRow(report))
+            .catch(err => alert('Could not open the report: ' + err.message));
+    }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgelead — Clients</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* clients.html — page-specific only. */
+    .layout { display: grid; grid-template-columns: 320px 1fr; gap: 22px; align-items: start; }
+    @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+    .client-list { display: flex; flex-direction: column; gap: 8px; }
+    .client-row { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--card-border); background: rgba(15,23,42,0.6);
+        cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .client-row:hover, .client-row.is-active { border-color: var(--accent-solid); background: rgba(59,130,246,0.08); }
+    .client-row b { display: block; color: #fff; font-size: 0.92rem; }
+    .client-row small { color: var(--text-muted); font-size: 0.75rem; }
+    .count { font-size: 0.72rem; font-weight: 800; color: #93c5fd; background: rgba(59,130,246,0.12); padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+    label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin: 12px 0 6px; }
+    input[type="text"], input[type="email"], select, textarea { width: 100%; padding: 11px 13px; background: var(--input-bg);
+        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
+    textarea { min-height: 80px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); }
+    .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 16px; }
+    .btn-primary { width: auto; padding: 12px 22px; font-size: 0.9rem; margin-top: 16px; }
+    .row-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    .note { font-size: 0.82rem; margin-top: 10px; min-height: 1.2em; font-weight: 600; color: var(--text-muted); }
+    .timeline { display: flex; flex-direction: column; gap: 8px; }
+    .t-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 12px; align-items: center; padding: 11px 13px;
+        border: 1px solid var(--card-border); border-radius: 10px; background: rgba(15,23,42,0.5); font-size: 0.85rem; }
+    .t-row .type { font-size: 0.7rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; text-align: center; }
+    .type.ig_report, .type.deep_audit, .type.content_plan { background: rgba(236,72,153,0.15); color: #f9a8d4; }
+    .type.fb_community, .type.fb_group, .type.fb_page { background: rgba(59,130,246,0.15); color: #93c5fd; }
+    .type.meta_owned { background: rgba(16,185,129,0.15); color: #6ee7b7; }
+    .t-row small { color: var(--text-muted); display: block; margin-top: 2px; }
+    .member { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border: 1px solid var(--card-border); border-radius: 8px; margin: 6px 0; font-size: 0.85rem; }
+    .conn { border: 1px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06); border-radius: 10px; padding: 12px 14px; margin: 8px 0; font-size: 0.85rem; }
+    .conn.is-bad { border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.06); }
+    .conn b { color: #fff; }
+    .hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
+    .empty { padding: 26px; text-align: center; color: var(--text-muted); border: 1px dashed var(--card-border); border-radius: 10px; }
+    .is-hidden { display: none !important; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tab { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; font-size: 0.8rem; font-family: inherit; }
+    .tab.is-on { background: var(--accent-glow); color: #fff; border-color: transparent; }
+</style>
+</head>
+<body>
+<main class="el-page">
+
+<div class="card">
+    <h2 class="card-title">Clients</h2>
+    <p class="card-subtitle" style="margin-bottom:0">
+        A client is the unit of work. Pick one in the header and every audit, report, lead run and draft you start lands in
+        its timeline. Share a client with a co-worker and they see the same history. Connect the client's Meta account to add
+        owner-side numbers (reach, saves, shares, demographics) that scraping can never show.
+    </p>
+</div>
+
+<div class="layout">
+    <div>
+        <div class="card" style="padding:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <h3 class="card-title" style="font-size:1rem;margin:0">Your clients</h3>
+                <button class="btn-secondary btn-mini" id="btn-new" type="button">+ New</button>
+            </div>
+            <div class="client-list" id="client-list"><div class="empty">Loading…</div></div>
+            <label style="margin-top:14px"><input type="checkbox" id="show-archived" style="width:auto;margin-right:6px">Show archived</label>
+        </div>
+    </div>
+
+    <div id="detail">
+        <div class="card" id="form-card">
+            <h3 class="card-title" id="form-title">New client</h3>
+            <p class="card-subtitle">Only the name is required. Handles fill the audit forms automatically when this client is selected.</p>
+            <div class="field-grid">
+                <div><label>Client name *</label><input type="text" id="f-name" placeholder="e.g. Rangpur Solar Ltd"></div>
+                <div><label>Brand / product</label><input type="text" id="f-brand" placeholder="optional"></div>
+                <div><label>Instagram handle</label><input type="text" id="f-ig" placeholder="@handle"></div>
+                <div><label>Facebook Page (name or URL)</label><input type="text" id="f-fb" placeholder="facebook.com/page"></div>
+                <div><label>Niche</label><input type="text" id="f-niche" placeholder="e.g. home solar"></div>
+                <div><label>Location</label><input type="text" id="f-location" placeholder="e.g. Rangpur"></div>
+            </div>
+            <label>Notes</label>
+            <textarea id="f-notes" placeholder="Brief, goals, what the client cares about, what to avoid."></textarea>
+            <div class="row-actions">
+                <button class="btn-primary" id="btn-save" type="button">Save client</button>
+                <button class="btn-secondary" id="btn-select" type="button">Use in header</button>
+                <button class="btn-secondary" id="btn-archive" type="button">Archive</button>
+                <button class="btn-danger" id="btn-delete" type="button">Delete</button>
+            </div>
+            <div class="note" id="form-note"></div>
+        </div>
+
+        <div id="extras" class="is-hidden">
+            <div class="card">
+                <div class="tabs">
+                    <button class="tab is-on" data-tab="timeline" type="button">Timeline</button>
+                    <button class="tab" data-tab="meta" type="button">Meta connection</button>
+                    <button class="tab" data-tab="members" type="button">Sharing</button>
+                    <button class="tab" data-tab="auto" type="button">Automation</button>
+                </div>
+
+                <div data-pane="timeline">
+                    <p class="hint" style="margin-bottom:12px">Everything produced under this client, newest first. Click a row to open it in its engine.</p>
+                    <div class="timeline" id="timeline"><div class="empty">Nothing yet.</div></div>
+                </div>
+
+                <div data-pane="meta" class="is-hidden">
+                    <p class="hint">
+                        Connects the client's Facebook Page and the Instagram professional account linked to it, read-only.
+                        Scopes: page list, page engagement, insights, Instagram basic + insights. Nothing is posted, no messages
+                        are read, no ads are touched. The client must be an admin of the Page and logs in themselves.
+                    </p>
+                    <div id="conn-list" style="margin-top:12px"></div>
+                    <div class="row-actions">
+                        <button class="btn-secondary" id="btn-connect" type="button">Connect Meta account</button>
+                        <button class="btn-secondary" id="btn-sync" type="button">Pull owner data (28 days)</button>
+                        <span class="hint" id="meta-cfg"></span>
+                    </div>
+                    <div class="note" id="meta-note"></div>
+                    <div id="meta-progress"></div>
+                </div>
+
+                <div data-pane="auto" class="is-hidden">
+                    <p class="hint">Scheduled runs filed under this client, and the read-only links that have been handed out. Schedules are created from a finished report ("Repeat on a schedule"); links from "Share link".</p>
+                    <h4 style="color:#fff;font-size:.9rem;margin:14px 0 6px">Schedules</h4>
+                    <div id="auto-schedules"><div class="empty">Loading…</div></div>
+                    <h4 style="color:#fff;font-size:.9rem;margin:18px 0 6px">Share links</h4>
+                    <div id="auto-shares"><div class="empty">Loading…</div></div>
+                    <div class="note" id="auto-note"></div>
+                </div>
+
+                <div data-pane="members" class="is-hidden">
+                    <p class="hint">Members see this client's timeline and every report in it, and can start runs under it. Only the owner can add or remove members.</p>
+                    <div id="member-list" style="margin-top:10px"></div>
+                    <div class="field-grid" style="margin-top:8px">
+                        <div><label>Add by email</label><input type="email" id="m-email" placeholder="coworker@example.com"></div>
+                        <div><label>Role</label><select id="m-role"><option value="editor">Editor — can run and edit</option><option value="viewer">Viewer — read only</option></select></div>
+                    </div>
+                    <div class="row-actions"><button class="btn-secondary" id="btn-add-member" type="button">Add member</button></div>
+                    <div class="note" id="member-note"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</main>
+
+<script src="header.js"></script>
+<script>
+(async () => {
+    document.body.dataset.elNoReload = '1';
+    const me = await EL.init({ engine: null, page: 'clients.html' });
+    const $ = id => document.getElementById(id);
+    const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const fmtDate = d => d ? new Date(d).toLocaleString() : '';
+
+    let clients = [];
+    let current = null;      // full client row
+    let detail = null;       // { client, owner, members, metaConnections }
+
+    const TYPE_LABEL = { ig_report: 'IG audit', deep_audit: 'Competitor intel', content_plan: 'Content plan', fb_community: 'Community audit', fb_group: 'Room audit', fb_page: 'FB page report', meta_owned: 'Meta owner data' };
+    const TYPE_PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', content_plan: 'content-plan.html', fb_community: 'fb-audit.html', fb_group: 'fb-audit.html', fb_page: 'fb-report.html', meta_owned: 'content-plan.html' };
+
+    async function loadList() {
+        const archived = $('show-archived').checked ? '?archived=1' : '';
+        const d = await EL.api('/api/clients' + archived);
+        clients = d.clients || [];
+        EL._clients = clients.filter(c => !c.archived);
+        const host = $('client-list');
+        if (!clients.length) { host.innerHTML = '<div class="empty">No clients yet. Create the first one.</div>'; return; }
+        host.innerHTML = clients.map(c => `
+            <div class="client-row ${current && current.id === c.id ? 'is-active' : ''}" data-id="${c.id}">
+                <div><b>${esc(c.name)}${c.archived ? ' <small>(archived)</small>' : ''}</b>
+                     <small>${esc([c.ig_handle ? '@' + c.ig_handle : '', c.fb_page, c.niche].filter(Boolean).join(' · ') || '—')}${c.access !== 'owner' ? ' · shared with you' : ''}</small></div>
+                <span class="count">${c.reports.total} report${c.reports.total === 1 ? '' : 's'}</span>
+            </div>`).join('');
+        host.querySelectorAll('.client-row').forEach(r => r.addEventListener('click', () => open(r.dataset.id)));
+    }
+
+    function fillForm(c) {
+        $('form-title').textContent = c ? c.name : 'New client';
+        $('f-name').value = c?.name || ''; $('f-brand').value = c?.brand || '';
+        $('f-ig').value = c?.ig_handle ? '@' + c.ig_handle : ''; $('f-fb').value = c?.fb_page || '';
+        $('f-niche').value = c?.niche || ''; $('f-location').value = c?.location || '';
+        $('f-notes').value = c?.notes || '';
+        const owner = !c || c.access === 'owner';
+        const editor = !c || c.access === 'owner' || c.access === 'editor';
+        $('btn-archive').classList.toggle('is-hidden', !c || !owner);
+        $('btn-delete').classList.toggle('is-hidden', !c || !owner);
+        $('btn-select').classList.toggle('is-hidden', !c || c.archived);
+        $('btn-save').disabled = !editor;
+        $('btn-archive').textContent = c?.archived ? 'Unarchive' : 'Archive';
+        $('extras').classList.toggle('is-hidden', !c);
+        $('form-note').textContent = '';
+    }
+
+    async function open(id) {
+        if (!id) { current = null; detail = null; fillForm(null); await loadList(); return; }
+        try {
+            detail = await EL.api(`/api/clients/${id}`);
+            current = { ...detail.client };
+        } catch (err) { $('form-note').textContent = err.message; return; }
+        fillForm(current);
+        await loadList();
+        renderMembers(); renderConnections(); loadTimeline(); loadAutomation();
+        history.replaceState(null, '', `clients.html?client=${id}`);
+    }
+
+    function readForm() {
+        return {
+            name: $('f-name').value.trim(), brand: $('f-brand').value.trim() || null,
+            ig_handle: $('f-ig').value.trim().replace('@', '') || null, fb_page: $('f-fb').value.trim() || null,
+            niche: $('f-niche').value.trim() || null, location: $('f-location').value.trim() || null,
+            notes: $('f-notes').value.trim() || null
+        };
+    }
+
+    $('btn-new').addEventListener('click', () => open(null));
+    $('show-archived').addEventListener('change', loadList);
+
+    $('btn-save').addEventListener('click', async () => {
+        const body = readForm();
+        if (!body.name) { $('form-note').textContent = 'Name is required.'; return; }
+        $('form-note').textContent = 'Saving…';
+        try {
+            if (current) { await EL.api(`/api/clients/${current.id}`, { method: 'PATCH', body }); await open(current.id); }
+            else { const d = await EL.api('/api/clients', { method: 'POST', body }); await open(d.client.id); EL.setClientId(d.client.id); }
+            $('form-note').textContent = 'Saved.';
+            EL._clients = null; await EL.clients(true);
+            const sel = document.getElementById('el-client-select');
+            if (sel) { const cur = EL.clientId(); sel.innerHTML = '<option value="">— no client —</option>' + (EL._clients || []).map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${esc(c.name)}</option>`).join('') + '<option value="__new">+ New client…</option>'; }
+        } catch (err) { $('form-note').textContent = err.message; }
+    });
+
+    $('btn-select').addEventListener('click', () => { if (current) { EL.setClientId(current.id); $('form-note').textContent = `"${current.name}" is now selected in the header. New runs will land here.`; } });
+
+    $('btn-archive').addEventListener('click', async () => {
+        if (!current) return;
+        try { await EL.api(`/api/clients/${current.id}`, { method: 'PATCH', body: { archived: !current.archived } }); if (!current.archived && EL.clientId() === current.id) EL.setClientId(null); await open(current.id); }
+        catch (err) { $('form-note').textContent = err.message; }
+    });
+
+    $('btn-delete').addEventListener('click', async () => {
+        if (!current || !confirm(`Delete "${current.name}"? Reports are kept but lose their client link. This cannot be undone.`)) return;
+        try { await EL.api(`/api/clients/${current.id}`, { method: 'DELETE' }); if (EL.clientId() === current.id) EL.setClientId(null); await open(null); }
+        catch (err) { $('form-note').textContent = err.message; }
+    });
+
+    // ---- tabs --------------------------------------------------------------
+    document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.toggle('is-on', x === t));
+        document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('is-hidden', p.dataset.pane !== t.dataset.tab));
+    }));
+
+    // ---- timeline ------------------------------------------------------------
+    async function loadTimeline() {
+        const host = $('timeline');
+        host.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+            const d = await EL.api(`/api/clients/${current.id}/timeline`);
+            const rows = [];
+            for (const j of (d.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status))) {
+                rows.push({ when: j.created_at, type: 'job', label: `${j.type} · ${j.status} · ${j.progress || 0}%`, sub: j.error || '', href: null });
+            }
+            for (const r of (d.reports || [])) {
+                const label = r.target_handle ? (r.platform === 'instagram' ? '@' + r.target_handle : r.target_handle) : (r.fb_group_names || r.fb_page_names || []).join(', ');
+                rows.push({ when: r.created_at, type: r.report_type, label, sub: r.ai_summary ? r.ai_summary.slice(0, 160) : `${r.posts_analyzed || 0} posts analysed${r.grade ? ' · grade ' + r.grade : ''}`, href: `${TYPE_PAGE[r.report_type] || '#'}?report=${r.id}` });
+            }
+            rows.sort((a, b) => String(b.when).localeCompare(String(a.when)));
+            host.innerHTML = rows.length ? rows.map(r => `
+                <div class="t-row" ${r.href ? `style="cursor:pointer" onclick="location.href='${r.href}'"` : ''}>
+                    <span class="type ${esc(r.type)}">${esc(TYPE_LABEL[r.type] || r.type)}</span>
+                    <div><b style="color:#fff">${esc(r.label || '—')}</b><small>${esc(r.sub)}</small></div>
+                    <small>${fmtDate(r.when)}</small>
+                </div>`).join('') : '<div class="empty">Nothing under this client yet. Select it in the header and start a run.</div>';
+        } catch (err) { host.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
+    }
+
+    // ---- automation (phase 11) ---------------------------------------------------
+    async function loadAutomation() {
+        const sh = $('auto-schedules'), ln = $('auto-shares'), note = $('auto-note');
+        try {
+            const { schedules } = await EL.api(`/api/schedules?client_id=${current.id}`);
+            sh.innerHTML = (schedules || []).length ? schedules.map(s => `
+                <div class="t-row">
+                    <span class="type ${esc(s.job_type)}">${esc(s.cadence)}</span>
+                    <div><b style="color:#fff">${esc(s.label || s.summary)}</b><small>${esc(EL.scheduleWhen(s))} · next ${fmtDate(s.next_run_at)}${s.paused ? ' · paused' : ''}${s.last_status ? ' · last: ' + esc(s.last_status) : ''}${s.last_error ? ' — ' + esc(s.last_error.slice(0, 120)) : ''}</small></div>
+                    <span style="display:flex;gap:6px">
+                        ${s.last_report_id ? `<a class="btn-secondary btn-mini" href="${TYPE_PAGE[{ig_report:'ig_report',deep_audit:'deep_audit',fb_community_audit:'fb_community',fb_page_report:'fb_page',meta_insights:'meta_owned'}[s.job_type]] || '#'}?report=${s.last_report_id}">Last report</a>` : ''}
+                        <button class="btn-secondary btn-mini" data-pause="${s.id}" data-val="${s.paused ? 'false' : 'true'}" type="button">${s.paused ? 'Resume' : 'Pause'}</button>
+                        <button class="btn-secondary btn-mini" data-del-s="${s.id}" type="button">Delete</button>
+                    </span>
+                </div>`).join('') : '<div class="empty">No schedules under this client.</div>';
+            sh.querySelectorAll('[data-pause]').forEach(b => b.addEventListener('click', async () => {
+                b.disabled = true;
+                try { await EL.api(`/api/schedules/${b.dataset.pause}`, { method: 'PATCH', body: { paused: b.dataset.val === 'true' } }); loadAutomation(); }
+                catch (err) { note.textContent = err.message; b.disabled = false; }
+            }));
+            sh.querySelectorAll('[data-del-s]').forEach(b => b.addEventListener('click', async () => {
+                if (!confirm('Delete this schedule? Reports it already produced stay.')) return;
+                try { await EL.api(`/api/schedules/${b.dataset.delS}`, { method: 'DELETE' }); loadAutomation(); }
+                catch (err) { note.textContent = err.message; }
+            }));
+        } catch (err) { sh.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
+        try {
+            const { shares } = await EL.api(`/api/shares?client_id=${current.id}`);
+            const live = (shares || []).filter(x => x.active);
+            ln.innerHTML = live.length ? live.map(x => `
+                <div class="t-row">
+                    <span class="type ${esc(x.reports?.report_type || '')}">${esc(TYPE_LABEL[x.reports?.report_type] || x.reports?.report_type || 'report')}</span>
+                    <div><b style="color:#fff">${esc(x.reports?.target_handle || '')}${x.label ? ' · ' + esc(x.label) : ''}</b><small>${x.views || 0} view(s) · until ${fmtDate(x.expires_at)} · <code style="font-size:.7rem">${esc(x.url)}</code></small></div>
+                    <span style="display:flex;gap:6px">
+                        <button class="btn-secondary btn-mini" data-copy="${esc(x.url)}" type="button">Copy</button>
+                        <button class="btn-secondary btn-mini" data-revoke="${x.id}" type="button">Turn off</button>
+                    </span>
+                </div>`).join('') : '<div class="empty">No active links.</div>';
+            ln.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => navigator.clipboard.writeText(b.dataset.copy).then(() => { note.textContent = 'Copied.'; })));
+            ln.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
+                try { await EL.api(`/api/share/${b.dataset.revoke}`, { method: 'DELETE' }); loadAutomation(); }
+                catch (err) { note.textContent = err.message; }
+            }));
+        } catch (err) { ln.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
+    }
+
+    // ---- members ---------------------------------------------------------------
+    function renderMembers() {
+        const host = $('member-list');
+        const isOwner = current.access === 'owner';
+        const rows = [`<div class="member"><span><b>${esc(detail.owner.email)}</b> · owner</span></div>`];
+        for (const m of (detail.members || [])) {
+            rows.push(`<div class="member"><span>${esc(m.email)} · ${esc(m.role)}</span>${isOwner || m.user_id === me.id ? `<button class="btn-danger btn-mini" data-rm="${m.user_id}" type="button">${m.user_id === me.id ? 'Leave' : 'Remove'}</button>` : ''}</div>`);
+        }
+        host.innerHTML = rows.join('');
+        host.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', async () => {
+            try { await EL.api(`/api/clients/${current.id}/members/${b.dataset.rm}`, { method: 'DELETE' }); if (b.dataset.rm === me.id) return open(null); await open(current.id); }
+            catch (err) { $('member-note').textContent = err.message; }
+        }));
+        $('btn-add-member').disabled = !isOwner;
+        $('m-email').disabled = !isOwner;
+    }
+    $('btn-add-member').addEventListener('click', async () => {
+        const email = $('m-email').value.trim();
+        if (!email) return;
+        $('member-note').textContent = 'Adding…';
+        try { await EL.api(`/api/clients/${current.id}/members`, { method: 'POST', body: { email, role: $('m-role').value } }); $('m-email').value = ''; $('member-note').textContent = 'Added.'; await open(current.id); }
+        catch (err) { $('member-note').textContent = err.message; }
+    });
+
+    // ---- meta ----------------------------------------------------------------------
+    let metaStatus = null;
+    async function renderConnections() {
+        const host = $('conn-list');
+        const conns = detail.metaConnections || [];
+        host.innerHTML = conns.length ? conns.map(c => `
+            <div class="conn ${c.status !== 'active' ? 'is-bad' : ''}">
+                <b>${esc(c.page_name || c.page_id)}</b>${c.ig_username ? ` · Instagram <b>@${esc(c.ig_username)}</b>` : ' · no Instagram account linked to this Page'}
+                <div class="hint">status ${esc(c.status)}${c.last_sync_at ? ' · last pull ' + fmtDate(c.last_sync_at) : ' · never pulled'}${c.token_expires_at ? ' · token until ' + new Date(c.token_expires_at).toLocaleDateString() : ''}${c.last_error ? ' · ' + esc(c.last_error) : ''}</div>
+                <div class="row-actions" style="margin-top:8px"><button class="btn-danger btn-mini" data-disc="${c.id}" type="button">Disconnect</button></div>
+            </div>`).join('') : '<div class="empty">No Meta account connected to this client.</div>';
+        host.querySelectorAll('[data-disc]').forEach(b => b.addEventListener('click', async () => {
+            if (!confirm('Disconnect this Page? Pulled data stays; nothing new will be read.')) return;
+            try { await EL.api(`/api/meta/connections/${b.dataset.disc}`, { method: 'DELETE' }); await open(current.id); } catch (err) { $('meta-note').textContent = err.message; }
+        }));
+        if (!metaStatus) { try { metaStatus = await EL.api('/api/meta/status'); } catch { metaStatus = { configured: false }; } }
+        $('meta-cfg').textContent = metaStatus.configured ? '' : 'Server has no META_APP_ID / META_APP_SECRET yet — connecting is disabled until an admin sets them.';
+        $('btn-connect').disabled = !metaStatus.configured;
+        $('btn-sync').disabled = !conns.some(c => c.status === 'active');
+    }
+    $('btn-connect').addEventListener('click', async () => {
+        try { const d = await EL.api(`/api/meta/oauth/start?client_id=${current.id}`); window.location.href = d.url; }
+        catch (err) { $('meta-note').textContent = err.message; }
+    });
+    $('btn-sync').addEventListener('click', async () => {
+        const conn = (detail.metaConnections || []).find(c => c.status === 'active');
+        if (!conn) return;
+        $('meta-note').textContent = 'Pulling owner data… this costs no Apify credit.';
+        try {
+            await EL.runJob('/api/meta/sync', { connectionId: conn.id, days: 28 }, {
+                mount: $('meta-progress'),
+                onProgress: j => { $('meta-note').textContent = `${j.progress || 0}% · ${j.step || j.current_step || ''}`; },
+                onDone: j => { $('meta-note').textContent = 'Done. The owner report is in the timeline and feeds the content plan.'; open(current.id); },
+                onFailed: j => { $('meta-note').textContent = 'Failed: ' + (j.error || 'unknown'); }
+            });
+        } catch (err) { $('meta-note').textContent = err.message; }
+    });
+
+    // ---- boot --------------------------------------------------------------------
+    await loadList();
+    const q = new URLSearchParams(location.search);
+    if (q.get('meta') === 'ok') { $('form-note').textContent = `Meta connected (${q.get('pages')} page(s)).`; }
+    if (q.get('meta') === 'error') { $('form-note').textContent = 'Meta connection failed: ' + (q.get('message') || ''); }
+    const want = q.get('client') || EL.clientId();
+    if (q.get('new')) open(null);
+    else if (want && clients.some(c => c.id === want)) { await open(want); if (q.get('meta')) document.querySelector('[data-tab="meta"]').click(); }
+    else fillForm(null);
+})();
+</script>
+</body>
+</html>
