@@ -74,7 +74,7 @@ const ELS = new AsyncLocalStorage();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase9';
+const APP_VERSION = process.env.APP_VERSION || 'phase10';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -2288,6 +2288,7 @@ async function savePosts(userId, handle, posts, meta = {}) {
             posted_at: row.posted_at,
             report_id: row.report_id,
             set_id: row.set_id,
+            client_id: (meta.clientId && UUID_RE.test(String(meta.clientId))) ? meta.clientId : null,   // phase 10
             scraped_at: row.scraped_at,
 
             // --- phase 4 columns ---------------------------------------------
@@ -3817,7 +3818,7 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
                 await progress(5, `@${cleanTarget} already analysed — reusing saved data`);
             } else {
                 await progress(5, `Auditing target @${cleanTarget}`);
-                main = await auditHandle(await grab(), userId, cleanTarget, limit, { jobId });
+                main = await auditHandle(await grab(), userId, cleanTarget, limit, { jobId, clientId: input.clientId || null });
                 if (!main) throw new Error('Target profile could not be scraped.');
                 if (main.persistence?.error) {
                     warnings.push('Posts could not be written to the database, so this run adds nothing to post history. ' +
@@ -3833,7 +3834,7 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
 
                 await progress(5 + step * (i + 1), `Auditing rival @${rivals[i]} (${i + 1}/${rivals.length})`);
                 try {
-                    const a = await auditHandle(await grab(), userId, rivals[i], limit, { jobId });
+                    const a = await auditHandle(await grab(), userId, rivals[i], limit, { jobId, clientId: input.clientId || null });
                     if (a) { rivalAudits.push(a); await ck.done(rivals[i], a); }
                 } catch (e) {
                     if (e.code === 'NO_CREDIT') throw e;   // pause cleanly, keep the checkpoint
@@ -3908,7 +3909,7 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
     const estimate     = estimateCredits(accounts, limit);
     const perAccount   = estimateCredits(1, limit);
 
-            const meta = { setId: activeSetId, jobId };
+            const meta = { setId: activeSetId, jobId, clientId: input.clientId || null };
             const step = Math.floor(80 / accounts);
             const warnings = [];
 
@@ -4059,7 +4060,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                         continue;
                     }
 
-                    await fbSavePosts(rows);
+                    await fbSavePosts(rows, input.clientId || null);
                     await fbSaveDemand(demand);
                     allDemand.push(...demand);
                     totalPosts += rows.length;
@@ -4231,7 +4232,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             } else {
                 await progress(6, `Reading the Page profile for ${targetRef.pageId}`);
                 const r = await fbAuditPage(await grab(), userId, targetRef, {
-                    limit, days: window, includeReviews, since, jobId
+                    limit, days: window, includeReviews, since, jobId, clientId: input.clientId || null
                 });
                 main = r.audit;
                 if (!main) throw new Error('The target Page could not be read.');
@@ -4250,7 +4251,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
                     await progress(48, `Reading the rival Page ${rivalRef.pageId}`);
                     try {
                         const r = await fbAuditPage(await grab(), userId, rivalRef, {
-                            limit, days: window, includeReviews, since, jobId
+                            limit, days: window, includeReviews, since, jobId, clientId: input.clientId || null
                         });
                         rivalAudit = r.audit;
                         await ck.done(rivalRef.pageId, rivalAudit);
@@ -4436,7 +4437,7 @@ registerWorker('fb_discovery', (userId, input, jobId) => async (progress, ck) =>
                 continue;
             }
 
-            await fbSavePosts(rows);
+            await fbSavePosts(rows, input.clientId || null);
             await fbSaveDemand(demand);
 
             const audit = computeGroupAudit(meta, rows, demand);
@@ -4506,7 +4507,7 @@ registerWorker('fb_verify', (userId, input, jobId) => async (progress, ck) => {
         const r = await fbProcessGroup(client, userId, ref,
             { limit: 80, days: 14, sampleComments: false, source: 'verify' });
         rows = r.rows;
-        await fbSavePosts(rows);
+        await fbSavePosts(rows, input.clientId || null);
         await ck.done('scrape', rows);
     }
 
@@ -7235,11 +7236,14 @@ async function fbUpsertGroup(userId, meta, extra = {}, { preserve = false } = {}
     return data;
 }
 
-async function fbSavePosts(rows) {
+async function fbSavePosts(rows, clientId = null) {
     if (!rows.length) return 0;
+    // phase 10: rows are filed under the client the run was started for,
+    // so every member of that client can build on them.
+    const cid = (clientId && UUID_RE.test(String(clientId))) ? clientId : null;
     let saved = 0;
     for (let i = 0; i < rows.length; i += 200) {
-        const chunk = rows.slice(i, i + 200);
+        const chunk = rows.slice(i, i + 200).map(r => ({ ...r, client_id: cid }));
         const { error } = await supabase.from('fb_posts')
             .upsert(chunk, { onConflict: 'user_id,group_id,post_id' });
         if (error) console.error('[fbSavePosts]', error.message);
@@ -7503,6 +7507,7 @@ app.post('/api/fb/groups', spendLimit, async (req, res) => {
 
         const ref = parseGroupRef(url);
         if (!ref) return res.status(400).json({ error: 'That is not a Facebook group URL. It should look like facebook.com/groups/…' });
+        const probeClientId = await resolveClientId(req, ctx);   // phase 10: probe rows filed under the client
 
         // Stated rules win over the checkboxes when they contradict them: a
         // group that writes "no promotion" in its rules bans promotion no
@@ -7548,7 +7553,7 @@ app.post('/api/fb/groups', spendLimit, async (req, res) => {
                 if (scraped?.privacy) meta.privacy = scraped.privacy;
 
                 if (rows?.length) {
-                    await fbSavePosts(rows);
+                    await fbSavePosts(rows, probeClientId);
                     await fbSaveDemand(demand);
                     // Scored the same way discovery scores a room, so a
                     // hand-added group is directly comparable to a found one.
@@ -9195,11 +9200,12 @@ async function fbUpsertPage(userId, profile) {
     return data;
 }
 
-async function fbSavePagePosts(rows) {
+async function fbSavePagePosts(rows, clientId = null) {
     if (!rows.length) return 0;
+    const cid = (clientId && UUID_RE.test(String(clientId))) ? clientId : null;   // phase 10
     let saved = 0;
     for (let i = 0; i < rows.length; i += 200) {
-        const chunk = rows.slice(i, i + 200);
+        const chunk = rows.slice(i, i + 200).map(r => ({ ...r, client_id: cid }));
         const { error } = await supabase.from('fb_page_posts')
             .upsert(chunk, { onConflict: 'user_id,page_id,post_id' });
         if (error) console.error('[fbSavePagePosts]', error.message);
@@ -9230,7 +9236,7 @@ async function fbAuditPage(client, userId, ref, opts = {}) {
     const unique = rows.filter(r => (seen.has(r.post_id) ? false : (seen.add(r.post_id), true)));
 
     fbPageIndexPosts(unique);
-    await fbSavePagePosts(unique);
+    await fbSavePagePosts(unique, opts.clientId || null);
 
     let reviews = null;
     if (opts.includeReviews) reviews = await fbScrapePageReviews(client, ref, 30);
@@ -10294,22 +10300,78 @@ app.get('/api/meta/report/:id', async (req, res) => {
 });
 
 // ===========================================================================
-// PHASE 9 :: CONTENT PLAN  (derived engine, zero Apify)
+// PHASE 10 :: CONTENT PLAN  (derived engine, zero Apify — Instagram + FB Page)
 //
-// Competitor Intel computes exemplars and displays them. This turns the same
-// rows into a plan: which format cells rivals win and the target is absent
-// from (gaps), which the target already wins (double down), which it posts
-// and loses (stop), and a brief for each. Gemini writes only inside the cells
-// the scorecard supplies; the evidence and the predicted band are computed.
+// Performance Audit / Competitor Intel / FB Page Report each store the rows
+// they scraped. This turns those rows into a plan: which format cells rivals
+// win and the target is absent from (gaps), which the target already wins
+// (double down), which it posts and loses (stop), and a brief for each.
+// Gemini writes only inside the cells the scorecard supplies; the evidence
+// and the predicted band are computed.
+//
+// Phase 10 changes:
+//   - rows are read for the selected client AND the caller's own vault, so a
+//     teammate's run on a shared client feeds the plan (dedup by post, most
+//     recently scraped copy wins). Reads are never blended across clients.
+//   - Facebook Pages are a first-class platform (fb_page_posts), with the
+//     same cell scoring and their own format set.
+//   - freshness is measured and reported; stale data raises a warning and is
+//     printed in the "how true is this" panel rather than silently used.
 // ===========================================================================
 
 const CP_POSTS_PER_HANDLE = parseInt(process.env.CONTENT_PLAN_POSTS_PER_HANDLE || '120', 10);
-const CP_MIN_CELL = 2;
+const CP_MIN_CELL  = 2;
+const CP_MIN_ROWS  = 6;
+const CP_STALE_DAYS = parseInt(process.env.CONTENT_PLAN_STALE_DAYS || '45', 10);
+
+const CP_PLATFORMS = {
+    instagram: {
+        key: 'instagram', label: 'Instagram', unit: 'account', prefix: '@',
+        sourceTypes: ['ig_report', 'deep_audit'],
+        sourceEngines: 'a Performance Audit or Competitor Intel',
+        formats: [
+            { key: 'Reel',     plural: 'reels',     label: 'Reels',     defaultCount: 4, conceptHint: 'what the reel shows, shot by shot in 2-3 lines' },
+            { key: 'Carousel', plural: 'carousels', label: 'Carousels', defaultCount: 3, conceptHint: 'slide-by-slide outline' },
+            { key: 'Still',    plural: 'stills',    label: 'Stills',    defaultCount: 3, conceptHint: 'the single image' }
+        ],
+        unavailable: 'Competitor reach, saves, shares, impressions and demographics cannot be obtained from any source.'
+    },
+    facebook: {
+        key: 'facebook', label: 'Facebook Page', unit: 'Page', prefix: '',
+        sourceTypes: ['fb_page'],
+        sourceEngines: 'an FB Page Report',
+        formats: [
+            { key: 'Video', plural: 'videos', label: 'Videos',     defaultCount: 3, conceptHint: 'what the video shows, shot by shot in 2-3 lines' },
+            { key: 'Photo', plural: 'photos', label: 'Photos',     defaultCount: 3, conceptHint: 'the single image' },
+            { key: 'Album', plural: 'albums', label: 'Albums',     defaultCount: 2, conceptHint: 'image-by-image outline' },
+            { key: 'Link',  plural: 'links',  label: 'Link posts', defaultCount: 1, conceptHint: 'what is linked and how the post frames it' },
+            { key: 'Text',  plural: 'texts',  label: 'Text posts', defaultCount: 1, conceptHint: 'the post text, structure only' }
+        ],
+        unavailable: 'Competitor reach, impressions, clicks and demographics cannot be obtained from any source. Video views are only present when Facebook shows them publicly.'
+    }
+};
+function cpPlatform(p) { return CP_PLATFORMS[p] || CP_PLATFORMS.instagram; }
+function cpCounts(platform, raw = {}) {
+    const out = {};
+    for (const f of cpPlatform(platform).formats) {
+        const v = parseInt(raw[f.plural], 10);
+        out[f.plural] = Number.isFinite(v) ? Math.min(Math.max(v, 0), 8) : f.defaultCount;
+    }
+    return out;
+}
 
 function cpFormat(r) {
     if (r.post_type === 'Reel' || (r.is_video && r.post_type !== 'Sidecar')) return 'Reel';
     if (r.post_type === 'Sidecar' || (r.carousel_count || 0) > 1) return 'Carousel';
     return 'Still';
+}
+function cpFbFormat(r) {
+    const m = String(r.media_type || '').toLowerCase();
+    if (m === 'video') return 'Video';
+    if (m === 'album') return 'Album';
+    if (m === 'photo') return 'Photo';
+    if (m === 'link')  return 'Link';
+    return 'Text';                                   // text | poll | unknown
 }
 function cpBand(idx) {
     if (idx == null || isNaN(idx)) return 'typical';
@@ -10323,6 +10385,8 @@ function cpHook(caption) {
     const first = String(caption || '').split(/\r?\n/).map(s => s.trim()).find(Boolean) || '';
     return first.slice(0, 90);
 }
+
+/** Instagram row (posts table) -> scorecard feature. */
 function cpFeature(r) {
     const caption = r.caption || '';
     const words = caption.split(/\s+/).filter(Boolean).length;
@@ -10348,6 +10412,40 @@ function cpFeature(r) {
         aspect: r.aspect_ratio || null,
         slides: r.carousel_count || null,
         playsRatio: (r.views && r.likes) ? +(r.views / Math.max(1, r.likes)).toFixed(1) : null,
+        hour: r.hour_local, dow: r.dow_local
+    };
+}
+
+/** Facebook Page row (fb_page_posts table) -> the same feature shape. */
+function cpFbFeature(r) {
+    const caption = r.content || '';
+    const words = r.word_count || caption.split(/\s+/).filter(Boolean).length;
+    const tags = (Array.isArray(r.topic_tags) && r.topic_tags.length) ? r.topic_tags.slice(0, 3) : topicTags(caption, 3);
+    const hashtags = Array.isArray(r.hashtags) ? r.hashtags.length : 0;
+    return {
+        ...r,
+        handle: r.page_id,
+        shortcode: r.post_id,
+        caption,
+        likes: r.reactions_total || 0,
+        format: cpFbFormat(r),
+        opening: r.opening_pattern || openingPattern(caption),
+        lengthBand: r.length_band || lengthBand(words),
+        topic: tags[0] || 'general',
+        topics: tags,
+        hook: cpHook(caption),
+        hashtagBand: cpHashtagBand(hashtags),
+        hasQuestion: !!r.has_question,
+        hasCta: !!r.has_cta,
+        hasOffer: !!r.has_offer,
+        hasEmoji: !!r.has_emoji,
+        hasLink: !!r.has_link,
+        hasFirstComment: false,
+        audioOriginal: null,
+        aspect: null,
+        slides: null,
+        linkDomain: r.link_domain || null,
+        playsRatio: (r.views && r.reactions_total) ? +(r.views / Math.max(1, r.reactions_total)).toFixed(1) : null,
         hour: r.hour_local, dow: r.dow_local
     };
 }
@@ -10380,65 +10478,153 @@ function cpLeaderboard(rows, keyFn, label, min = CP_MIN_CELL) {
 
 function cpExemplars(rows, n = 3) {
     return rows.slice().sort((a, b) => (b.performance_index || 0) - (a.performance_index || 0)).slice(0, n)
-        .map(r => ({ handle: r.handle, url: r.post_url, index: r.performance_index, band: cpBand(r.performance_index), hook: r.hook, likes: r.likes, comments: r.comments, views: r.views, postedAt: r.posted_at, owner: r.owner || null }));
+        .map(r => ({ handle: r.handle, name: r.displayName || null, url: r.post_url, index: r.performance_index, band: cpBand(r.performance_index), hook: r.hook, likes: r.likes, comments: r.comments, views: r.views, postedAt: r.posted_at, owner: r.owner || null }));
 }
 
-async function cpLoadHandle(userId, handle) {
-    const { data } = await supabase.from('posts')
-        .select('handle, shortcode, post_url, post_type, caption, hashtags, likes, comments, views, is_video, video_duration, thumbnail_url, posted_at, carousel_count, aspect_ratio, is_sponsored, audio, first_comment, engagement_raw, hour_local, dow_local, is_provisional, scraped_at')
-        .eq('user_id', userId).eq('platform', 'instagram').eq('handle', handle)
-        .order('posted_at', { ascending: false }).limit(CP_POSTS_PER_HANDLE);
-    return (data || []).filter(r => !r.is_sponsored);
+const CP_IG_COLS = 'user_id, client_id, handle, shortcode, post_url, post_type, caption, hashtags, likes, comments, views, is_video, video_duration, thumbnail_url, posted_at, carousel_count, aspect_ratio, is_sponsored, audio, first_comment, engagement_raw, hour_local, dow_local, is_provisional, scraped_at';
+const CP_FB_COLS = 'user_id, client_id, page_id, post_id, post_url, content, word_count, media_type, link_url, link_domain, reactions_total, comments, shares, views, posted_at, hour_local, dow_local, engagement_raw, performance_index, topic_tags, hashtags, opening_pattern, length_band, has_link, has_question, has_cta, has_offer, has_emoji, is_provisional, scraped_at';
+
+/**
+ * Stored posts for one handle: the caller's own rows plus, when a client is
+ * selected, rows any teammate filed under that client. The same post scraped
+ * twice keeps the most recent copy. Returns the rows and where they came
+ * from, so the plan can print its own provenance.
+ */
+async function cpLoadRows(platform, userId, clientId, handle) {
+    const fb = platform === 'facebook';
+    const table = fb ? 'fb_page_posts' : 'posts';
+    const idKey = fb ? 'post_id' : 'shortcode';
+    const base = () => {
+        let q = supabase.from(table).select(fb ? CP_FB_COLS : CP_IG_COLS);
+        q = fb ? q.eq('page_id', handle) : q.eq('platform', 'instagram').eq('handle', handle);
+        return q.order('posted_at', { ascending: false }).limit(CP_POSTS_PER_HANDLE);
+    };
+    const own = (await base().eq('user_id', userId)).data || [];
+    let team = [];
+    if (clientId && UUID_RE.test(String(clientId))) {
+        team = (await base().eq('client_id', clientId).neq('user_id', userId)).data || [];
+    }
+    const byId = new Map();
+    for (const r of [...own, ...team]) {
+        const k = r[idKey]; if (!k) continue;
+        const prev = byId.get(k);
+        if (!prev || String(r.scraped_at || '') > String(prev.scraped_at || '')) byId.set(k, r);
+    }
+    const rows = [...byId.values()]
+        .filter(r => !(platform === 'instagram' && r.is_sponsored))
+        .sort((a, b) => String(b.posted_at || '').localeCompare(String(a.posted_at || '')))
+        .slice(0, CP_POSTS_PER_HANDLE);
+    const lastScraped = rows.reduce((m, r) => (r.scraped_at && r.scraped_at > m) ? r.scraped_at : m, '') || null;
+    const newestPost  = rows.reduce((m, r) => (r.posted_at && r.posted_at > m) ? r.posted_at : m, '') || null;
+    const ageDays = lastScraped ? Math.max(0, Math.round((Date.now() - new Date(lastScraped).getTime()) / 86400000)) : null;
+    return {
+        rows,
+        source: { own: own.length, team: team.length, merged: rows.length,
+                  lastScrapedAt: lastScraped, newestPostAt: newestPost, ageDays,
+                  stale: ageDays == null ? true : ageDays > CP_STALE_DAYS }
+    };
+}
+
+/** Display names for Facebook page ids (fb_pages is per user; any copy will do). */
+async function cpPageNames(pageIds) {
+    if (!pageIds.length) return {};
+    const { data } = await supabase.from('fb_pages').select('page_id, name, username').in('page_id', pageIds);
+    const out = {};
+    for (const p of (data || [])) if (p.page_id && !out[p.page_id]) out[p.page_id] = p.name || p.username || p.page_id;
+    return out;
+}
+
+/**
+ * Owner-side metrics for the target from the client's connected Meta account.
+ * IG media are keyed by shortcode; Page posts by the post id after the
+ * "pageid_" prefix. Everything here carries source:'insights' and is never
+ * folded into the scraped index.
+ */
+async function cpOwnerMap(platform, clientId, target, targetName) {
+    if (!clientId || !UUID_RE.test(String(clientId))) return { map: {}, connection: null };
+    const { data: conns } = await supabase.from('meta_connections')
+        .select('id, page_id, page_name, ig_username, last_sync_at').eq('client_id', clientId).eq('status', 'active');
+    let conn = null;
+    if (platform === 'instagram') {
+        conn = (conns || []).find(c => (c.ig_username || '').toLowerCase() === target) || null;
+    } else {
+        const want = [String(target).toLowerCase(), String(targetName || '').toLowerCase()].filter(Boolean);
+        conn = (conns || []).find(c => want.includes(String(c.page_id || '').toLowerCase()) || want.includes(String(c.page_name || '').toLowerCase())) || null;
+    }
+    if (!conn) return { map: {}, connection: null };
+    const { data: mm } = await supabase.from('meta_media').select('media_id, shortcode, insights').eq('connection_id', conn.id).eq('platform', platform);
+    const map = {};
+    for (const m of (mm || [])) {
+        const ins = m.insights || {};
+        if (platform === 'instagram') {
+            if (m.shortcode) map[m.shortcode] = { reach: ins.reach ?? null, saved: ins.saved ?? null, shares: ins.shares ?? null, views: ins.views ?? null, interactions: ins.total_interactions ?? null, source: 'insights' };
+        } else {
+            // Graph ids are "pageid_postid"; scrapers store the numeric post id,
+            // sometimes the full pair. Register every form so either matches.
+            const mid = String(m.media_id || '');
+            const rec = { reach: ins.post_impressions_unique ?? null, engaged: ins.post_engaged_users ?? null, clicks: ins.post_clicks ?? null, shares: ins.shares ?? null, saved: null, views: null, source: 'insights' };
+            const keys = new Set([mid, mid.slice(mid.indexOf('_') + 1), mid.split('_').pop()].filter(Boolean));
+            for (const k of keys) map[k] = rec;
+        }
+    }
+    return { map, connection: conn };
 }
 
 registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) => {
-    const target = String(input.target || '').toLowerCase();
-    const rivals = (input.rivals || []).map(h => String(h).toLowerCase()).filter(h => h && h !== target);
-    const counts = { reels: 4, carousels: 3, stills: 3, ...(input.counts || {}) };
+    const platform = input.platform === 'facebook' ? 'facebook' : 'instagram';
+    const spec     = cpPlatform(platform);
+    const target   = String(input.target || '').toLowerCase();
+    const rivals   = (input.rivals || []).map(h => String(h).toLowerCase()).filter(h => h && h !== target);
+    const counts   = cpCounts(platform, input.counts || {});
+    const clientId = (input.clientId && UUID_RE.test(String(input.clientId))) ? input.clientId : null;
+    const featureOf = platform === 'facebook' ? cpFbFeature : cpFeature;
 
-    await progress(5, `Loading posts for @${target}`);
-    const targetRows = await cpLoadHandle(userId, target);
-    if (targetRows.length < 6) {
-        const e = new Error(`Only ${targetRows.length} posts stored for @${target}. Run a Performance Audit or Competitor Intel on it first — the content plan is built from those rows and costs nothing extra.`);
+    // --- load --------------------------------------------------------------
+    await progress(5, `Loading stored posts for ${spec.prefix}${target}`);
+    const tLoad = await cpLoadRows(platform, userId, clientId, target);
+    if (tLoad.rows.length < CP_MIN_ROWS) {
+        const e = new Error(`Only ${tLoad.rows.length} posts stored for ${spec.prefix}${target}${clientId ? ' under this client or your vault' : ''}. ` +
+                            `Run ${spec.sourceEngines} on it first — the content plan is built from those rows and costs nothing extra.`);
         e.statusCode = 422; throw e;
     }
-    const rivalRows = {};
-    for (const r of rivals) { rivalRows[r] = await cpLoadHandle(userId, r); }
-    const missingRivals = rivals.filter(r => (rivalRows[r] || []).length < 6);
+    const rivalLoads = {};
+    for (const r of rivals) rivalLoads[r] = await cpLoadRows(platform, userId, clientId, r);
+    const missingRivals = rivals.filter(r => rivalLoads[r].rows.length < CP_MIN_ROWS);
+    const usedRivals = rivals.filter(r => !missingRivals.includes(r));
 
-    // --- owner layer: Meta media by shortcode -----------------------------
+    let names = {};
+    if (platform === 'facebook') names = await cpPageNames([target, ...rivals]);
+    const display = h => platform === 'facebook' ? (names[h] || h) : `@${h}`;
+
+    const freshness = {
+        staleAfterDays: CP_STALE_DAYS,
+        target: { handle: target, name: display(target), ...tLoad.source },
+        rivals: usedRivals.map(r => ({ handle: r, name: display(r), ...rivalLoads[r].source })),
+        scope: clientId ? 'client+own' : 'own'
+    };
+
+    // --- owner layer -------------------------------------------------------
     await progress(15, 'Attaching owner metrics where available');
-    let ownerMap = {};
-    let ownerConnection = null;
-    if (input.clientId) {
-        const { data: conns } = await supabase.from('meta_connections').select('id, ig_username, last_sync_at').eq('client_id', input.clientId).eq('status', 'active');
-        ownerConnection = (conns || []).find(c => (c.ig_username || '').toLowerCase() === target) || null;
-        if (ownerConnection) {
-            const { data: mm } = await supabase.from('meta_media').select('shortcode, insights').eq('connection_id', ownerConnection.id).eq('platform', 'instagram');
-            for (const m of (mm || [])) if (m.shortcode) ownerMap[m.shortcode] = m.insights || {};
-        }
-    }
+    const { map: ownerMap, connection: ownerConnection } = await cpOwnerMap(platform, clientId, target, names[target]);
 
-    // --- features + index ----------------------------------------------------
+    // --- features + index --------------------------------------------------
     await progress(25, 'Indexing and classifying');
     const all = [];
     const push = (rows, role) => rows.forEach(r => {
-        const f = cpFeature(r);
+        const f = featureOf(r);
         f.role = role;
-        if (role === 'target' && ownerMap[r.shortcode]) {
-            const o = ownerMap[r.shortcode];
-            f.owner = { reach: o.reach ?? null, saved: o.saved ?? null, shares: o.shares ?? null, views: o.views ?? null, interactions: o.total_interactions ?? null, source: 'insights' };
-        }
+        f.displayName = display(f.handle);
+        if (role === 'target' && ownerMap[f.shortcode]) f.owner = ownerMap[f.shortcode];
         all.push(f);
     });
-    push(targetRows, 'target');
-    for (const r of rivals) push(rivalRows[r] || [], 'rival');
-    igIndexPosts(all);
+    push(tLoad.rows, 'target');
+    for (const r of usedRivals) push(rivalLoads[r].rows, 'rival');
+    igIndexPosts(all);                                  // keyed on handle + month; page_id stands in for handle on FB
     const settled = all.filter(r => !r.is_provisional);
     const T = settled.filter(r => r.role === 'target');
     const R = settled.filter(r => r.role === 'rival');
 
-    // --- format cells -------------------------------------------------------
+    // --- format cells ------------------------------------------------------
     const cellsT = cpGroupBy(T, cpCellKey);
     const cellsR = cpGroupBy(R, cpCellKey);
     const keys = [...new Set([...Object.keys(cellsT), ...Object.keys(cellsR)])];
@@ -10457,75 +10643,95 @@ registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) =>
     const byVerdict = v => cells.filter(c => c.verdict === v).sort((a, b) => ((b.rivals.dampedIndex || b.target.dampedIndex || 0) - (a.rivals.dampedIndex || a.target.dampedIndex || 0)));
     const lists = { gaps: byVerdict('gap').slice(0, 10), doubleDown: byVerdict('double_down').slice(0, 10), stop: byVerdict('stop').slice(0, 10), filler: byVerdict('filler').slice(0, 6) };
 
-    // --- per-format analysis --------------------------------------------------
-    await progress(45, 'Analysing reels, carousels, stills');
-    const fmt = f => ({ target: T.filter(r => r.format === f), rivals: R.filter(r => r.format === f), all: settled.filter(r => r.format === f) });
-    const reels = fmt('Reel'), cars = fmt('Carousel'), stills = fmt('Still');
+    // --- per-format analysis -----------------------------------------------
+    await progress(45, `Analysing ${spec.formats.map(f => f.label.toLowerCase()).join(', ')}`);
+    const fmtRows = k => ({ target: T.filter(r => r.format === k), rivals: R.filter(r => r.format === k), all: settled.filter(r => r.format === k) });
+    const lostRow = r => ({ handle: r.handle, name: r.displayName || null, url: r.post_url, index: r.performance_index, hook: r.hook, likes: r.likes, comments: r.comments, views: r.views });
     const wonLost = rows => ({
         won: cpExemplars(rows.filter(r => cpBand(r.performance_index) === 'top' || cpBand(r.performance_index) === 'above'), 5),
         average: cpExemplars(rows.filter(r => cpBand(r.performance_index) === 'typical'), 3),
-        lost: rows.filter(r => cpBand(r.performance_index) === 'below').slice().sort((a, b) => (a.performance_index || 0) - (b.performance_index || 0)).slice(0, 4)
-                 .map(r => ({ handle: r.handle, url: r.post_url, index: r.performance_index, hook: r.hook, likes: r.likes, comments: r.comments, views: r.views }))
+        lost: rows.filter(r => cpBand(r.performance_index) === 'below').slice().sort((a, b) => (a.performance_index || 0) - (b.performance_index || 0)).slice(0, 4).map(lostRow)
     });
-    const formats = {
-        reels: {
-            share: { target: T.length ? +(reels.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(reels.rivals.length / R.length).toFixed(2) : 0 },
-            score: { target: cpScore(reels.target), rivals: cpScore(reels.rivals) },
-            target: wonLost(reels.target), rivals: wonLost(reels.rivals),
-            byHook: cpLeaderboard(reels.all, r => r.opening, 'opening'),
-            byAudio: cpLeaderboard(reels.all.filter(r => r.audioOriginal !== null), r => r.audioOriginal ? 'original audio' : 'reused audio', 'audio'),
-            byAspect: cpLeaderboard(reels.all, r => r.aspect, 'aspect'),
-            byHour: cpLeaderboard(reels.all, r => r.hour == null ? null : `${String(r.hour).padStart(2, '0')}:00`, 'hour'),
-            playsRatio: { target: median(reels.target.map(r => r.playsRatio).filter(v => v)), rivals: median(reels.rivals.map(r => r.playsRatio).filter(v => v)) }
-        },
-        carousels: {
-            share: { target: T.length ? +(cars.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(cars.rivals.length / R.length).toFixed(2) : 0 },
-            score: { target: cpScore(cars.target), rivals: cpScore(cars.rivals) },
-            target: wonLost(cars.target), rivals: wonLost(cars.rivals),
-            bySlides: cpLeaderboard(cars.all, r => r.slides == null ? null : (r.slides <= 3 ? '2-3 slides' : r.slides <= 6 ? '4-6 slides' : '7+ slides'), 'slides'),
-            byHook: cpLeaderboard(cars.all, r => r.opening, 'opening')
-        },
-        stills: {
-            share: { target: T.length ? +(stills.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(stills.rivals.length / R.length).toFixed(2) : 0 },
-            score: { target: cpScore(stills.target), rivals: cpScore(stills.rivals) },
-            target: wonLost(stills.target), rivals: wonLost(stills.rivals),
-            byAspect: cpLeaderboard(stills.all, r => r.aspect, 'aspect'),
-            byHook: cpLeaderboard(stills.all, r => r.opening, 'opening')
+    const hourKey = r => r.hour == null ? null : `${String(r.hour).padStart(2, '0')}:00`;
+    const formats = {};
+    for (const f of spec.formats) {
+        const g = fmtRows(f.key);
+        const block = {
+            key: f.key, label: f.label,
+            share: { target: T.length ? +(g.target.length / T.length).toFixed(2) : 0, rivals: R.length ? +(g.rivals.length / R.length).toFixed(2) : 0 },
+            score: { target: cpScore(g.target), rivals: cpScore(g.rivals) },
+            target: wonLost(g.target), rivals: wonLost(g.rivals),
+            byHook: cpLeaderboard(g.all, r => r.opening, 'opening'),
+            byHour: cpLeaderboard(g.all, hourKey, 'hour'),
+            byLength: cpLeaderboard(g.all, r => r.lengthBand, 'band')
+        };
+        if (platform === 'instagram') {
+            if (f.key === 'Reel') {
+                block.byAudio = cpLeaderboard(g.all.filter(r => r.audioOriginal !== null), r => r.audioOriginal ? 'original audio' : 'reused audio', 'audio');
+                block.byAspect = cpLeaderboard(g.all, r => r.aspect, 'aspect');
+                block.playsRatio = { target: median(g.target.map(r => r.playsRatio).filter(v => v)), rivals: median(g.rivals.map(r => r.playsRatio).filter(v => v)) };
+            }
+            if (f.key === 'Carousel') block.bySlides = cpLeaderboard(g.all, r => r.slides == null ? null : (r.slides <= 3 ? '2-3 slides' : r.slides <= 6 ? '4-6 slides' : '7+ slides'), 'slides');
+            if (f.key === 'Still') block.byAspect = cpLeaderboard(g.all, r => r.aspect, 'aspect');
+        } else {
+            if (f.key === 'Video') block.playsRatio = { target: median(g.target.map(r => r.playsRatio).filter(v => v)), rivals: median(g.rivals.map(r => r.playsRatio).filter(v => v)) };
+            if (f.key === 'Link')  block.byDomain = cpLeaderboard(g.all, r => r.linkDomain, 'domain');
         }
-    };
+        formats[f.plural] = block;
+    }
 
-    // --- caption analysis ----------------------------------------------------
+    // --- caption analysis --------------------------------------------------
     const flag = (rows, f, on, off) => {
         const a = cpScore(rows.filter(r => r[f])), b = cpScore(rows.filter(r => !r[f]));
         return { on, off, with: a, without: b, lift: (a.dampedIndex != null && b.dampedIndex != null) ? +(a.dampedIndex - b.dampedIndex).toFixed(2) : null };
     };
+    const flags = platform === 'instagram'
+        ? ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink', 'hasFirstComment']
+        : ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink'];
     const captions = {
-        target: ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink', 'hasFirstComment'].map(f => ({ flag: f, ...flag(T, f, 'with', 'without') })),
-        rivals: ['hasQuestion', 'hasCta', 'hasOffer', 'hasEmoji', 'hasLink', 'hasFirstComment'].map(f => ({ flag: f, ...flag(R, f, 'with', 'without') })),
+        target: flags.map(f => ({ flag: f, ...flag(T, f, 'with', 'without') })),
+        rivals: flags.map(f => ({ flag: f, ...flag(R, f, 'with', 'without') })),
         lengthBand: { target: cpLeaderboard(T, r => r.lengthBand, 'band'), rivals: cpLeaderboard(R, r => r.lengthBand, 'band') },
         hashtagBand: { target: cpLeaderboard(T, r => r.hashtagBand, 'band'), rivals: cpLeaderboard(R, r => r.hashtagBand, 'band') },
         opening: { target: cpLeaderboard(T, r => r.opening, 'opening'), rivals: cpLeaderboard(R, r => r.opening, 'opening') },
         topics: { target: cpLeaderboard(T, r => r.topic, 'topic'), rivals: cpLeaderboard(R, r => r.topic, 'topic') }
     };
 
-    // --- owner view ----------------------------------------------------------
+    // --- owner view --------------------------------------------------------
     const ownerRows = T.filter(r => r.owner);
+    const med = (rows, k) => median(rows.map(r => r.owner[k]).filter(v => v != null));
+    const ownerRow = r => ({ url: r.post_url, format: r.format, hook: r.hook, reach: r.owner.reach, saved: r.owner.saved, shares: r.owner.shares, engaged: r.owner.engaged ?? null, clicks: r.owner.clicks ?? null, index: r.performance_index });
     const owner = ownerConnection ? {
         connection: ownerConnection.id, matched: ownerRows.length, lastSync: ownerConnection.last_sync_at,
-        byFormat: Object.fromEntries(['Reel', 'Carousel', 'Still'].map(f => {
-            const g = ownerRows.filter(r => r.format === f);
-            return [f, { n: g.length, medianReach: median(g.map(r => r.owner.reach).filter(v => v != null)), medianSaved: median(g.map(r => r.owner.saved).filter(v => v != null)), medianShares: median(g.map(r => r.owner.shares).filter(v => v != null)) }];
+        byFormat: Object.fromEntries(spec.formats.map(f => {
+            const g = ownerRows.filter(r => r.format === f.key);
+            return [f.key, { n: g.length, medianReach: med(g, 'reach'), medianSaved: med(g, 'saved'), medianShares: med(g, 'shares'), medianEngaged: med(g, 'engaged'), medianClicks: med(g, 'clicks') }];
         })),
-        mostSaved: ownerRows.slice().sort((a, b) => (b.owner.saved || 0) - (a.owner.saved || 0)).slice(0, 5).map(r => ({ url: r.post_url, format: r.format, hook: r.hook, saved: r.owner.saved, reach: r.owner.reach, index: r.performance_index })),
+        // IG: saves are the strongest owner-side signal. FB Pages have no saves; reach is the ranking metric.
+        mostSaved: platform === 'instagram' ? ownerRows.slice().sort((a, b) => (b.owner.saved || 0) - (a.owner.saved || 0)).slice(0, 5).map(ownerRow) : [],
+        topReach: ownerRows.slice().sort((a, b) => (b.owner.reach || 0) - (a.owner.reach || 0)).slice(0, 5).map(ownerRow),
         // Where public index and owner reach disagree, the public number is lying.
-        hiddenWinners: ownerRows.filter(r => cpBand(r.performance_index) === 'below' && r.owner.reach).sort((a, b) => b.owner.reach - a.owner.reach).slice(0, 3).map(r => ({ url: r.post_url, format: r.format, hook: r.hook, reach: r.owner.reach, saved: r.owner.saved, index: r.performance_index }))
+        hiddenWinners: ownerRows.filter(r => cpBand(r.performance_index) === 'below' && r.owner.reach).sort((a, b) => b.owner.reach - a.owner.reach).slice(0, 3).map(ownerRow)
     } : null;
 
+    // --- provenance --------------------------------------------------------
+    const staleNames = [freshness.target, ...freshness.rivals].filter(x => x.stale).map(x => `${x.name} (${x.ageDays == null ? 'unknown age' : x.ageDays + 'd'})`);
+    const teamRows = tLoad.source.team + usedRivals.reduce((n, r) => n + rivalLoads[r].source.team, 0);
     const trueness = {
-        scraped: 'Likes, comments, views, captions, timing for every account. Same basis for target and rivals.',
-        insights: owner ? `Reach, saves, shares, views for ${owner.matched} of ${T.length} target posts via the connected Meta account.` : 'Not connected — no owner-side numbers. Connect the client\'s Meta account to add reach, saves and shares.',
+        scraped: platform === 'instagram'
+            ? 'Likes, comments, views, captions, timing for every account. Same basis for target and rivals.'
+            : 'Reactions, comments, shares, views (when public), post text, timing for every Page. Same basis for target and rivals.',
+        insights: owner
+            ? `${platform === 'instagram' ? 'Reach, saves, shares, views' : 'Reach, engaged users, clicks, shares'} for ${owner.matched} of ${T.length} target posts via the connected Meta account.`
+            : 'Not connected — no owner-side numbers. Connect the client\'s Meta account to add owner metrics.',
         derived: 'Performance index (post vs. own monthly median), bands, cells, win rates and predictions are computed from the scraped numbers.',
-        unavailable: 'Competitor reach, saves, shares, impressions and demographics cannot be obtained from any source.'
+        unavailable: spec.unavailable,
+        freshness: `Target data last scraped ${tLoad.source.ageDays == null ? 'at an unknown time' : tLoad.source.ageDays + ' day(s) ago'}; ` +
+                   `newest target post ${tLoad.source.newestPostAt ? tLoad.source.newestPostAt.slice(0, 10) : 'unknown'}. ` +
+                   (staleNames.length ? `Older than ${CP_STALE_DAYS} days: ${staleNames.join(', ')}. Re-run the source audit before acting on those cells.` : `Everything is within ${CP_STALE_DAYS} days.`),
+        provenance: clientId
+            ? `${teamRows ? teamRows + ' row(s) came from teammates\' runs filed under this client; ' : ''}the rest are from your own vault. Rows from other clients are never read.`
+            : 'No client selected — only your own vault was read.'
     };
 
     // --- briefs ------------------------------------------------------------
@@ -10535,14 +10741,14 @@ registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) =>
     const cellPack = c => ({
         cell: c.key, why: c.why, opening: c.opening, lengthBand: c.lengthBand, topic: c.topic,
         rivalIndex: c.rivals.dampedIndex, targetIndex: c.target.dampedIndex, rivalWinRate: c.rivals.winRate,
-        evidence: c.exemplars.map(e => ({ url: e.url, hook: e.hook, index: e.index, handle: e.handle }))
+        evidence: c.exemplars.map(e => ({ url: e.url, hook: e.hook, index: e.index, handle: e.name || e.handle }))
     });
+    const cellSets = {};
+    for (const f of spec.formats) cellSets[f.plural] = pick(f.key, counts[f.plural]).map(cellPack);
     const evidence = {
-        target, rivals, brief: input.brief || null,
+        platform, target: display(target), rivals: usedRivals.map(display), brief: input.brief || null,
         counts,
-        reelCells: pick('Reel', counts.reels).map(cellPack),
-        carouselCells: pick('Carousel', counts.carousels).map(cellPack),
-        stillCells: pick('Still', counts.stills).map(cellPack),
+        ...cellSets,
         stop: lists.stop.slice(0, 5).map(c => ({ cell: c.key, targetIndex: c.target.dampedIndex, n: c.target.n })),
         captionRules: {
             target: captions.target.filter(c => c.lift != null).map(c => ({ flag: c.flag, lift: c.lift })),
@@ -10550,22 +10756,28 @@ registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) =>
             bestLength: captions.lengthBand.rivals[0]?.band || captions.lengthBand.target[0]?.band || null,
             bestHashtags: captions.hashtagBand.rivals[0]?.band || null
         },
-        reels: { targetShare: formats.reels.share.target, rivalShare: formats.reels.share.rivals, bestHooks: formats.reels.byHook.slice(0, 3), audio: formats.reels.byAudio, bestHours: formats.reels.byHour.slice(0, 3) },
-        owner: owner ? { mostSaved: owner.mostSaved.slice(0, 3), hiddenWinners: owner.hiddenWinners } : null
+        bestHours: Object.fromEntries(spec.formats.map(f => [f.plural, (formats[f.plural].byHour || []).slice(0, 3)])),
+        owner: owner ? { top: (owner.mostSaved.length ? owner.mostSaved : owner.topReach).slice(0, 3), hiddenWinners: owner.hiddenWinners } : null,
+        freshnessNote: staleNames.length ? `Data for ${staleNames.join(', ')} is older than ${CP_STALE_DAYS} days.` : null
     };
 
     let ai = null, aiStatus = { ok: false, reason: 'no_key' };
     if (geminiAvailable()) {
-        const { json } = budgetedJson(evidence, { maxChars: 32000, keep: ['reelCells', 'carouselCells', 'stillCells', 'counts', 'target'] });
+        const { json } = budgetedJson(evidence, { maxChars: 32000, keep: [...spec.formats.map(f => f.plural), 'counts', 'target'] });
+        const formatLines = spec.formats.map(f =>
+            ` "${f.plural}": [ { "cell": "...", "concept": "${f.conceptHint}", "hook": "first line on screen / first line of the post", "caption": "full ${platform === 'instagram' ? 'caption' : 'post text'} in the cell's length band", "evidence": ["url"], "slot": "day + hour if bestHours suggests one", "why": "one line" } ]`
+        ).join(',\n');
+        const countLine = spec.formats.map(f => `${counts[f.plural]} ${f.plural}`).join(', ');
         const prompt =
-`You are a content strategist. Below is a computed scorecard for Instagram account @${target} against rivals ${rivals.map(r => '@' + r).join(', ') || '(none)'}.
-Each "cell" is a content format x opening pattern x caption length x topic. Cells marked why=gap are ones rivals win and the target has never used. why=double_down are ones the target already wins.
+`You are a content strategist. Below is a computed scorecard for ${spec.label} ${spec.unit} ${display(target)} against rivals ${usedRivals.map(display).join(', ') || '(none)'}.
+Each "cell" is a content format x opening pattern x caption length x topic. The cell lists are keyed by format: ${spec.formats.map(f => `${f.plural} = ${f.label}`).join(', ')}. Cells marked why=gap are ones rivals win and the target has never used. why=double_down are ones the target already wins.
 
 RULES:
 - Write briefs ONLY for the cells given. Do not invent formats, topics or hooks outside them.
 - Each brief must name its cell and cite at least one evidence URL from that cell.
 - Hooks must follow the cell's opening pattern. Captions must follow the cell's length band.
-- Never claim reach, saves or impressions unless the owner block supplies them.
+- Never claim reach, saves, clicks or impressions unless the owner block supplies them.
+- If freshnessNote is present, say so once in the summary; do not pretend the data is current.
 - Write in the language the evidence hooks are in (English or Bangla as seen).
 
 Scorecard (JSON):
@@ -10574,13 +10786,11 @@ ${json}
 Reply with ONLY this JSON:
 {
  "summary": "3 sentences: the biggest gap, the biggest strength, the one thing to stop",
- "reels": [ { "cell": "...", "concept": "what the reel shows, shot by shot in 2-3 lines", "hook": "first line on screen / first caption line", "caption": "full caption in the cell's length band", "evidence": ["url"], "slot": "day + hour if bestHours suggests one", "why": "one line" } ],
- "carousels": [ { "cell": "...", "concept": "slide-by-slide outline", "hook": "...", "caption": "...", "evidence": ["url"], "slot": "...", "why": "..." } ],
- "stills": [ { "cell": "...", "concept": "the single image", "hook": "...", "caption": "...", "evidence": ["url"], "slot": "...", "why": "..." } ],
+${formatLines},
  "stop_doing": ["one line per stop cell, with the number"],
  "caption_rules": ["3-5 rules with the lift numbers"]
 }
-Produce exactly ${counts.reels} reels, ${counts.carousels} carousels, ${counts.stills} stills (fewer only if there are not enough cells).`;
+Produce exactly ${countLine} (fewer only if there are not enough cells).`;
         const r = await geminiCallDetailed(prompt, { temperature: 0.55, maxOutputTokens: 12000, tag: 'Gemini Content Plan', userId });
         aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
         ai = r.ok ? r.data : null;
@@ -10598,32 +10808,40 @@ Produce exactly ${counts.reels} reels, ${counts.carousels} carousels, ${counts.s
         const c = allowed[String(b.cell || '')];
         if (!c || c.format !== format) { removed += 1; return []; }
         const idx = c.target.n >= CP_MIN_CELL ? c.target.dampedIndex : c.rivals.dampedIndex;
-        const evidence = (Array.isArray(b.evidence) ? b.evidence : []).filter(u => c.exemplars.some(e => e.url === u));
-        return [{ ...b, evidence: evidence.length ? evidence : c.exemplars.map(e => e.url), predicted_band: cpBand(idx), predicted_index: idx,
+        const ev = (Array.isArray(b.evidence) ? b.evidence : []).filter(u => c.exemplars.some(e => e.url === u));
+        return [{ ...b, evidence: ev.length ? ev : c.exemplars.map(e => e.url), predicted_band: cpBand(idx), predicted_index: idx,
                   sources: { evidence: 'scraped', prediction: 'derived', owner: owner ? 'insights' : null } }];
     });
-    const briefs = ai ? { summary: ai.summary, reels: stamp(ai.reels, 'Reel'), carousels: stamp(ai.carousels, 'Carousel'), stills: stamp(ai.stills, 'Still'),
-                          stopDoing: ai.stop_doing || [], captionRules: ai.caption_rules || [], removed } : null;
+    let briefs = null;
+    if (ai) {
+        briefs = { summary: ai.summary, stopDoing: ai.stop_doing || [], captionRules: ai.caption_rules || [] };
+        for (const f of spec.formats) briefs[f.plural] = stamp(ai[f.plural], f.key);
+        briefs.removed = removed;
+    }
     if (removed) logger.warn('content_plan_briefs_removed', { jobId, removed });
 
     await progress(92, 'Saving plan');
     const warnings = [];
-    if (missingRivals.length) warnings.push(`Rivals with fewer than 6 stored posts were ignored: ${missingRivals.map(r => '@' + r).join(', ')}.`);
+    if (missingRivals.length) warnings.push(`Rivals with fewer than ${CP_MIN_ROWS} stored posts were ignored: ${missingRivals.map(display).join(', ')}. Run ${spec.sourceEngines} on them to include them.`);
+    if (staleNames.length) warnings.push(`Stored data is older than ${CP_STALE_DAYS} days for: ${staleNames.join(', ')}. The plan reflects that period, not today.`);
     if (!aiStatus.ok) warnings.push(`Briefs unavailable: ${aiStatus.message}. The scorecard below is still complete.`);
     if (briefs?.removed) warnings.push(`${briefs.removed} draft brief(s) named a cell that is not in the evidence and were dropped.`);
     const payload = {
-        target, rivals, counts,
+        platform, formatSpec: spec.formats.map(f => ({ key: f.key, plural: f.plural, label: f.label })),
+        target, targetName: display(target), rivals: usedRivals, rivalNames: usedRivals.map(display), names, counts,
         sample: { target: T.length, rivals: R.length, provisionalDropped: all.length - settled.length },
-        lists, formats, captions, owner, trueness, briefs, aiStatus, warnings,
+        freshness, lists, formats, captions, owner, trueness, briefs, aiStatus, warnings,
         generatedAt: new Date().toISOString()
     };
-    const { data: saved } = await supabase.from('reports').insert([{
+    const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
         user_id: userId,
-        client_id: input.clientId || null,
-        platform: 'instagram',
+        client_id: clientId,
+        platform,
         report_type: 'content_plan',
-        target_handle: target,
-        competitor_handles: rivals,
+        target_handle: platform === 'facebook' ? display(target) : target,
+        competitor_handles: usedRivals.map(display),
+        fb_page_ids: platform === 'facebook' ? [target, ...usedRivals] : null,
+        fb_page_names: platform === 'facebook' ? [target, ...usedRivals].map(display) : null,
         posts_analyzed: settled.length,
         snapshot_date: new Date().toISOString().slice(0, 10),
         credits_estimate: 0,
@@ -10633,36 +10851,57 @@ Produce exactly ${counts.reels} reels, ${counts.carousels} carousels, ${counts.s
         ai_status: aiStatus,
         report_json: payload
     }]).select('id').maybeSingle();
-    return { reportId: saved?.id || null, reportRef: saved?.id || null, aiStatus };
+    if (saveErr) { const e = new Error(`Plan computed but could not be saved: ${saveErr.message}`); e.statusCode = 500; throw e; }
+    return { reportId: saved?.id || null, reportRef: saved?.id || null, aiStatus, platform };
 });
 
 app.post('/api/content-plan', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
         await assertJobSlot(ctx.user.id);
-        const clean = h => String(h || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
-        let target = clean(req.body.target);
-        let rivals = (Array.isArray(req.body.rivals) ? req.body.rivals : String(req.body.rivals || '').split(/[\s,]+/)).map(clean).filter(Boolean);
+        let platform = req.body.platform === 'facebook' ? 'facebook' : (req.body.platform === 'instagram' ? 'instagram' : null);
+        const cleanIg = h => String(h || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
+        const cleanFb = h => { const r = parsePageRef(h); return r ? r.pageId : ''; };
+        const splitList = v => Array.isArray(v) ? v : String(v || '').split(/[\s,]+/);
         const sourceReportIds = [];
+        let rep = null;
 
-        // Start from an existing report: reuse its target and rivals.
+        // Start from an existing report: reuse its platform, target and rivals.
         if (req.body.reportId) {
-            const { data: rep } = await supabase.from('reports').select('id, user_id, client_id, target_handle, competitor_handles, report_type').eq('id', req.body.reportId).maybeSingle();
+            const { data } = await supabase.from('reports')
+                .select('id, user_id, client_id, platform, target_handle, competitor_handles, fb_page_ids, report_type')
+                .eq('id', req.body.reportId).maybeSingle();
+            rep = data;
             if (!rep || !(await canReadReport(ctx, rep))) return res.status(404).json({ error: 'Source report not found.' });
-            target = target || clean(rep.target_handle);
-            if (!rivals.length) rivals = (rep.competitor_handles || []).map(clean);
+            if (!platform) platform = rep.report_type === 'fb_page' ? 'facebook' : 'instagram';
             sourceReportIds.push(rep.id);
         }
-        if (!target) return res.status(400).json({ error: 'Target handle required.' });
-        rivals = [...new Set(rivals.filter(h => h !== target))].slice(0, MAX_COMPETITORS);
-        const n = (v, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, 0), 8);
-        const counts = { reels: n(req.body.reels, 4), carousels: n(req.body.carousels, 3), stills: n(req.body.stills, 3) };
+        if (!platform) platform = 'instagram';
+        const clean = platform === 'facebook' ? cleanFb : cleanIg;
+
+        let target = clean(req.body.target);
+        let rivals = splitList(req.body.rivals).map(clean).filter(Boolean);
+        if (rep) {
+            if (platform === 'facebook') {
+                const ids = Array.isArray(rep.fb_page_ids) ? rep.fb_page_ids : [];
+                target = target || ids[0] || '';
+                if (!rivals.length) rivals = ids.slice(1);
+            } else {
+                target = target || cleanIg(rep.target_handle);
+                if (!rivals.length) rivals = (rep.competitor_handles || []).map(cleanIg);
+            }
+        }
+        if (!target) return res.status(400).json({ error: platform === 'facebook' ? 'Target Page URL or slug required.' : 'Target handle required.' });
+        rivals = [...new Set(rivals.filter(h => h && h !== target))].slice(0, MAX_COMPETITORS);
+
+        // Counts arrive either as { counts: { reels: 4, ... } } or flat keys (older page build).
+        const counts = cpCounts(platform, { ...(req.body || {}), ...(req.body.counts || {}) });
         const clientId = await resolveClientId(req, ctx);
 
         const job = await createJob(ctx.user.id, 'content_plan', 'content_plan',
-            { target, rivals, counts, clientId, sourceReportIds, brief: String(req.body.brief || '').slice(0, 600) || null }, 0);
+            { platform, target, rivals, counts, clientId, sourceReportIds, brief: String(req.body.brief || '').slice(0, 600) || null }, 0);
         runJob(job.id, JOB_WORKERS['content_plan'](ctx.user.id, job.input, job.id));
-        res.status(202).json({ success: true, jobId: job.id, estimatedUsd: 0, target, rivals });
+        res.status(202).json({ success: true, jobId: job.id, estimatedUsd: 0, platform, target, rivals, counts });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -10670,8 +10909,8 @@ app.get('/api/content-plans', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
         let q = supabase.from('reports')
-            .select('id, user_id, client_id, target_handle, competitor_handles, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status, source_report_ids')
-            .eq('platform', 'instagram').eq('report_type', 'content_plan');
+            .select('id, user_id, client_id, platform, target_handle, competitor_handles, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status, source_report_ids')
+            .eq('report_type', 'content_plan');
         q = await applyReportScope(req, ctx, q);
         const { data, error } = await q.order('created_at', { ascending: false }).limit(100);
         if (error) throw error;
@@ -10679,15 +10918,29 @@ app.get('/api/content-plans', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
-/** Handles this user has stored posts for — what the content plan can be built on. */
+/**
+ * Reports the content plan can be built on: the caller's own IG audits,
+ * Competitor Intel and FB Page Reports, plus anything filed under the selected
+ * client by a teammate. Each carries platform so the page can pick the right
+ * format set.
+ */
 app.get('/api/content-plan/sources', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
-        const { data } = await supabase.from('reports')
-            .select('id, report_type, target_handle, competitor_handles, created_at, client_id')
-            .eq('user_id', ctx.user.id).eq('platform', 'instagram').in('report_type', ['ig_report', 'deep_audit'])
-            .order('created_at', { ascending: false }).limit(60);
-        res.json({ sources: data || [] });
+        let q = supabase.from('reports')
+            .select('id, user_id, platform, report_type, target_handle, competitor_handles, fb_page_ids, fb_page_names, created_at, client_id')
+            .in('report_type', ['ig_report', 'deep_audit', 'fb_page']);
+        const cid = req.query?.client_id;
+        if (cid) {
+            const c = await clientAccess(ctx.user.id, cid, 'viewer');
+            if (!c) return res.status(403).json({ error: 'No access to that client.' });
+            q = q.or(`client_id.eq.${c.id},user_id.eq.${ctx.user.id}`);
+        } else {
+            q = q.eq('user_id', ctx.user.id);
+        }
+        const { data, error } = await q.order('created_at', { ascending: false }).limit(80);
+        if (error) throw error;
+        res.json({ sources: (data || []).map(s => ({ ...s, platform: s.report_type === 'fb_page' ? 'facebook' : 'instagram', mine: s.user_id === ctx.user.id })) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -10921,7 +11174,13 @@ async function schemaProbe() {
         { table: 'gemini_keys', column: 'key_enc',       migration: 'schema-phase9.sql',
           impact: 'Only the env Gemini key can be used; no pool, no per-user keys.' },
         { table: 'meta_connections', column: 'page_token_enc', migration: 'schema-phase9.sql',
-          impact: 'Meta OAuth callback cannot store a connection.' }
+          impact: 'Meta OAuth callback cannot store a connection.' },
+        { table: 'posts',         column: 'client_id', migration: 'schema-phase10.sql',
+          impact: 'Instagram post upserts will fail on an unknown column — audits render but post history stops; content plans starve.' },
+        { table: 'fb_page_posts', column: 'client_id', migration: 'schema-phase10.sql',
+          impact: 'FB Page post upserts will fail — page reports render but the FB content plan has nothing to read.' },
+        { table: 'fb_posts',      column: 'client_id', migration: 'schema-phase10.sql',
+          impact: 'FB group post upserts will fail — community audits and the demand feed stop accumulating.' }
     ];
 
     const missing = [];
