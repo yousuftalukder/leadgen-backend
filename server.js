@@ -74,7 +74,7 @@ const ELS = new AsyncLocalStorage();
 // waking someone up for. No new dependency: everything here is node builtins.
 // ===========================================================================
 const BOOT_TS   = Date.now();
-const APP_VERSION = process.env.APP_VERSION || 'phase10';
+const APP_VERSION = process.env.APP_VERSION || 'phase11';
 const LOG_LEVELS  = { debug: 10, info: 20, warn: 30, error: 40 };
 const LOG_LEVEL   = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
 const SLOW_REQUEST_MS = parseInt(process.env.SLOW_REQUEST_MS || '4000', 10);
@@ -1040,6 +1040,71 @@ function getViews(i) {
     return i.videoPlayCount || i.playCount || i.videoViewCount || i.viewCount || i.reelsCount || 0;
 }
 
+/**
+ * PHASE 11 — plays vs views.
+ * getViews() collapses videoPlayCount and videoViewCount into one number,
+ * which is what a grade needs. The audit also wants them apart: "views" is
+ * what Instagram counts on autoplay, "plays" is a person who kept watching.
+ * A reel with many views and few plays is scrolled past, not watched.
+ */
+function getPlays(i) {
+    const v = i.videoPlayCount ?? i.playCount ?? i.plays ?? null;
+    return typeof v === 'number' && v > 0 ? v : 0;
+}
+function getVideoViews(i) {
+    const v = i.videoViewCount ?? i.viewCount ?? i.views ?? null;
+    return typeof v === 'number' && v > 0 ? v : 0;
+}
+
+/**
+ * PHASE 11 — bio contact extraction.
+ * The profile scraper returns businessEmail / businessPhoneNumber only for
+ * accounts that filled in the business fields. Most small accounts put the
+ * email, the phone or a wa.me link straight into the bio or the link field,
+ * and those were thrown away. Zero Apify cost: it is already in the payload.
+ */
+const BIO_EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const BIO_PHONE_RE = /(?:\+?\d[\d\s().-]{7,}\d)/;
+const BIO_WA_RE    = /(?:wa\.me|api\.whatsapp\.com\/send|whatsapp\.com\/send)[^\s"'<>]*?(?:\/|phone=)\+?(\d{7,15})/i;
+
+function extractBioContacts(profile = {}) {
+    const bio = String(profile.biography || '');
+    const links = []
+        .concat(profile.externalUrl || [], profile.website || [])
+        .concat(Array.isArray(profile.bioLinks) ? profile.bioLinks.map(l => (l && (l.url || l.link)) || l) : [])
+        .concat(Array.isArray(profile.externalUrls) ? profile.externalUrls.map(l => (l && (l.url || l.link)) || l) : [])
+        .map(x => String(x || '')).filter(Boolean);
+    const haystack = [bio, ...links].join('\n');
+
+    const email = profile.businessEmail || profile.biographyEmail || profile.publicEmail || profile.email
+        || (haystack.match(BIO_EMAIL_RE) || [null])[0] || null;
+
+    let whatsapp = null;
+    for (const l of links) { const m = l.match(BIO_WA_RE); if (m) { whatsapp = '+' + m[1]; break; } }
+    if (!whatsapp) { const m = haystack.match(BIO_WA_RE); if (m) whatsapp = '+' + m[1]; }
+    if (!whatsapp && /whats\s?app/i.test(bio)) {
+        const m = bio.match(BIO_PHONE_RE); if (m) whatsapp = m[0].replace(/[^\d+]/g, '');
+    }
+
+    let phone = profile.businessPhoneNumber || profile.publicPhoneNumber || profile.contactPhoneNumber || profile.phone || null;
+    if (!phone) {
+        const m = bio.match(BIO_PHONE_RE);
+        if (m) {
+            const digits = m[0].replace(/[^\d+]/g, '');
+            if (digits.replace(/\D/g, '').length >= 8) phone = digits;
+        }
+    }
+    if (!phone && whatsapp) phone = whatsapp;
+
+    const website = links.find(l => /^https?:\/\//i.test(l) && !BIO_WA_RE.test(l)) || null;
+    const sources = [];
+    if (email && !(profile.businessEmail || profile.biographyEmail || profile.publicEmail)) sources.push('email:bio');
+    if (phone && !(profile.businessPhoneNumber || profile.publicPhoneNumber || profile.contactPhoneNumber)) sources.push('phone:bio');
+    if (whatsapp) sources.push('whatsapp:bio');
+
+    return { email: email ? String(email).toLowerCase() : null, phone, whatsapp, website, sources };
+}
+
 function extractPosts(items) {
     const posts = [];
     (items || []).forEach(item => {
@@ -1539,6 +1604,7 @@ function igNormalisePost(item, handle, userId = null, meta = {}) {
     const likes    = item.likesCount || 0;
     const comments = item.commentsCount || 0;
     const views    = getViews(item);
+    const plays    = getPlays(item);           // phase 11: kept apart from views
     const words    = caption ? caption.split(/\s+/).filter(Boolean).length : 0;
 
     const { hour, dow } = localParts(d, IG_TZ_OFFSET_MINS);
@@ -1574,6 +1640,7 @@ function igNormalisePost(item, handle, userId = null, meta = {}) {
         likes,
         comments,
         views,
+        plays,
         is_video: !!(item.isVideo || item.videoUrl),
         video_duration: item.videoDuration || item.duration || null,
         thumbnail_url: item.displayUrl || item.thumbnailUrl || null,
@@ -1675,6 +1742,10 @@ function igDistribution(rows) {
     const comments = pick(r => r.comments);
     const views = pick(r => r.views).filter(v => v > 0);
     const eng = pick(r => r.engagement_raw);
+    // phase 11: reels that report both numbers. plays/views < 1 means most
+    // "views" were autoplay scrolls that never became a watch.
+    const both = rows.filter(r => (r.plays || 0) > 0 && (r.views || 0) > 0 && r.plays !== r.views);
+    const plays = pick(r => r.plays).filter(v => v > 0);
 
     const stat = arr => {
         if (!arr.length) return { mean: 0, median: 0, max: 0, min: 0, p90: 0 };
@@ -1698,7 +1769,14 @@ function igDistribution(rows) {
         // is describing the outlier, not the account.
         skew: e.median > 0 ? +(e.mean / e.median).toFixed(2) : null,
         outlierDriven: e.median > 0 && (e.mean / e.median) > 1.6,
-        viewsAvailable: views.length > 0
+        viewsAvailable: views.length > 0,
+        plays: stat(plays),
+        playback: {
+            playsAvailable: plays.length > 0,
+            distinguishable: both.length,
+            medianPlaysPerView: both.length
+                ? +median(both.map(r => r.plays / r.views)).toFixed(2) : null
+        }
     };
 }
 
@@ -2366,8 +2444,10 @@ function computeAudit(handle, profile, posts) {
         category: profile.businessCategoryName || profile.categoryName || null,
         isBusiness: !!profile.isBusinessAccount,
         isVerified: !!profile.verified || !!profile.isVerified,
-        email: profile.businessEmail || profile.biographyEmail || null,
-        phone: profile.businessPhoneNumber || null,
+        email: extractBioContacts(profile).email,
+        phone: extractBioContacts(profile).phone,
+        whatsapp: extractBioContacts(profile).whatsapp,
+        contactSources: extractBioContacts(profile).sources,
         city: profile.city || profile.cityName || null,
         address: profile.addressStreet || null,
         profilePic: profile.profilePicUrlHD || profile.profilePicUrl || null,
@@ -3505,6 +3585,7 @@ async function updateJob(jobId, patch, logLine) {
 function runJob(jobId, worker, opts = {}) {
     (async () => {
         let beat = null;
+        let row = null;
         try {
             // Claim BEFORE reading the checkpoint. Losing the claim means some
             // other process already owns this job, and the correct action is to
@@ -3519,8 +3600,8 @@ function runJob(jobId, worker, opts = {}) {
                 return;
             }
 
-            const { data: row } = await supabase.from('jobs')
-                .select('completed_units, partials, user_id').eq('id', jobId).maybeSingle();
+            row = (await supabase.from('jobs')
+                .select('completed_units, partials, user_id, input').eq('id', jobId).maybeSingle()).data;
             const units = Array.isArray(row?.completed_units) ? row.completed_units.slice() : [];
             const partials = (row?.partials && typeof row.partials === 'object') ? { ...row.partials } : {};
 
@@ -3572,6 +3653,7 @@ function runJob(jobId, worker, opts = {}) {
                 result, result_report_id: result?.reportId || null,
                 finished_at: new Date().toISOString()
             }, 'Job complete');
+            if (row?.input?.scheduleId) scheduleNoteOutcome(row.input.scheduleId, { status: 'done', reportId: result?.reportId || null });
         } catch (err) {
             if (err && err.code === 'CANCELLED') {
                 METRICS.jobs.cancelled += 1;
@@ -3591,6 +3673,7 @@ function runJob(jobId, worker, opts = {}) {
                     status: 'paused_no_credit',
                     error: err.message
                 }, 'Paused: ' + err.message);
+                if (row?.input?.scheduleId) scheduleNoteOutcome(row.input.scheduleId, { status: 'paused_no_credit', error: err.message });
                 return;
             }
             METRICS.jobs.failed += 1;
@@ -3601,6 +3684,7 @@ function runJob(jobId, worker, opts = {}) {
                 status: 'failed', error: err.message,
                 finished_at: new Date().toISOString()
             }, 'Failed: ' + err.message);
+            if (row?.input?.scheduleId) scheduleNoteOutcome(row.input.scheduleId, { status: 'failed', error: err.message });
         } finally {
             if (beat) clearInterval(beat);
         }
@@ -4691,6 +4775,9 @@ app.get('/api/health', (req, res) => res.json({
     rotationPending: !!ENC_KEY_OLD,
     keepAlive: !!SELF_URL,
     igScoreVersion: IG_SCORE_VERSION,
+    instance: INSTANCE_ID,
+    instances: METRICS.instances || null,
+    scheduler: SCHEDULER_ENABLED,
     ai: { model: GEMINI_MODEL, discovered: _geminiDiscovered.models.slice(0, 3), poolKeys: _geminiPool.rows.length, envKey: !!GEMINI_API_KEY, configured: geminiAvailable(), ok: METRICS.ai.ok, failed: METRICS.ai.failed, truncated: METRICS.ai.truncated },
     budgetMode: BUDGET_MODE
 }));
@@ -5199,6 +5286,23 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 // again — the contract every other engine already had.
 // ===========================================================================
 
+/** Map place-search rows to explore/locations URLs. Every id/url key the
+ *  search actor has been seen to emit is accepted; nothing is invented. */
+function igPlaceUrls(items) {
+    const out = [];
+    (items || []).forEach(it => {
+        if (!it) return;
+        const cands = [it, it.location, it.place].filter(Boolean);
+        for (const c of cands) {
+            const url = String(c.url || c.locationUrl || c.link || '');
+            if (/instagram\.com\/explore\/locations\//i.test(url)) { out.push(url.split('?')[0]); return; }
+            const id = c.locationId || c.id || c.pk || c.location_id;
+            if (id && /^\d{3,}$/.test(String(id))) { out.push(`https://www.instagram.com/explore/locations/${id}/`); return; }
+        }
+    });
+    return [...new Set(out)];
+}
+
 function leadgenUnits(input) {
     const {
         location = '', hashtags = [], method3_1_keywords = [],
@@ -5279,13 +5383,33 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
         let rows = [];
         try {
             if (u.kind === 'locations') {
-                const directUrls = String(location).split(',').map(c => c.trim())
-                    .filter(loc => loc.includes('instagram.com/explore/locations'));
+                // PHASE 11 — a pasted explore URL still works; a plain place name
+                // ("Rangpur", "Gulshan Dhaka") is resolved through the search
+                // scraper's place search first. Field names on the search
+                // output are read defensively: the actor is verified for
+                // searchType 'user' (Method 6) but its place rows have not been
+                // checked against live output, so every plausible id/url key
+                // is accepted and a miss is reported, not guessed.
+                const terms = String(location).split(',').map(c => c.trim()).filter(Boolean);
+                const directUrls = terms.filter(loc => loc.includes('instagram.com/explore/locations'));
+                const names = terms.filter(loc => !/instagram\.com/i.test(loc));
+                if (names.length) {
+                    const { items: places } = await callActor(client, 'apify/instagram-search-scraper',
+                        { searchQueries: names.slice(0, 3), searchType: 'place' },
+                        { estimateUsd: COST_PER_1K_PROFILE / 20, maxItems: 30, jobId });
+                    const found = igPlaceUrls(places);
+                    if (found.length) {
+                        directUrls.push(...found.slice(0, 3 * names.length));
+                        warnings.push(`Method 1: "${names.join('", "')}" resolved to ${found.length} location page(s).`);
+                    } else {
+                        warnings.push(`Method 1: no Instagram location matched "${names.join('", "')}" — paste an explore/locations URL instead.`);
+                    }
+                }
                 if (!directUrls.length) {
-                    warnings.push('METHOD 1 SKIPPED: Location requires a direct Instagram explore URL.');
+                    warnings.push('METHOD 1 SKIPPED: no location could be resolved.');
                 } else {
                     const items = await runActor('apify/instagram-scraper',
-                        { directUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
+                        { directUrls: [...new Set(directUrls)], resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
                         warnings, 'Method 1 (Locations)', client, { jobId });
                     rows = collect(items, method1_keywords);
                 }
@@ -5549,10 +5673,12 @@ registerWorker('leadgen_enrich', (userId, input, jobId) => async (progress, ck) 
             const username = String(p.username || p.ownerUsername || '').toLowerCase().trim();
             if (!username) continue;
 
+            const contacts = extractBioContacts(p);
             const { error: updErr } = await supabase.from('leads').update({
                 full_name: p.fullName || p.full_name || p.name || null,
-                email: p.businessEmail || p.biographyEmail || p.email || p.inputEmail || null,
-                phone: p.businessPhoneNumber || p.phone || p.phoneNumber || null,
+                email: contacts.email || p.inputEmail || null,
+                phone: contacts.phone || p.phoneNumber || null,
+                whatsapp: contacts.whatsapp,
                 followers_count: p.followersCount ?? p.followers ?? 0,
                 following_count: p.followsCount ?? null,
                 posts_count: p.postsCount ?? null,
@@ -6049,7 +6175,7 @@ app.get('/api/reports-history', async (req, res) => {
         let q = supabase.from('reports')
             .select('id, platform, report_type, target_handle, competitor_handles, grade, score, ' +
                     'score_version, score_v1, engagement_rate, posts_analyzed, snapshot_date, ' +
-                    'created_at, ai_summary, ai_status, set_id, credits_estimate')
+                    'created_at, ai_summary, ai_status, set_id, credits_estimate, client_id, user_id')
             .eq('platform', 'instagram');
         q = await applyReportScope(req, ctx, q);
 
@@ -10953,6 +11079,483 @@ app.get('/api/content-plan/:id', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+// ===========================================================================
+// PHASE 11 :: SCHEDULED RUNS
+//
+// A monthly report a human has to remember to click is a report that gets
+// forgotten. A schedule is "re-run this job's input every week / month". It
+// stores the job's *validated* input verbatim, so no engine needs a second
+// validation path, and it runs through the same createJob → runJob engine as
+// a click does — same budget gate, same checkpoint, same cancel/resume.
+//
+// Claiming a due schedule is one compare-and-set UPDATE on next_run_at (the
+// job-level pattern claimJob already uses), so a second instance polling the
+// same table cannot fire the same schedule twice.
+// ===========================================================================
+
+const SCHEDULER_POLL_MS   = parseInt(process.env.SCHEDULER_POLL_MS || '60000', 10);
+const SCHEDULER_ENABLED   = String(process.env.SCHEDULER_ENABLED || 'true') !== 'false';
+const SCHEDULE_MAX_PER_USER = parseInt(process.env.SCHEDULE_MAX_PER_USER || '25', 10);
+/** Job types that are safe to re-run from their stored input alone. */
+const SCHEDULABLE_TYPES = {
+    ig_report:          'report',
+    deep_audit:         'report',
+    fb_community_audit: 'fb_community',
+    fb_page_report:     'fb_page',
+    meta_insights:      'content_plan'
+};
+
+/**
+ * Next fire time strictly after `from`. Weekly = next `dayOfWeek` at
+ * `hourUtc`; monthly = `dayOfMonth` (1–28 so every month has it) at `hourUtc`.
+ * Pure, so the test suite can pin it.
+ */
+function scheduleNextRun(s, from = new Date()) {
+    const hour = Math.min(23, Math.max(0, parseInt(s.hour_utc ?? 6, 10) || 0));
+    const f = new Date(from.getTime());
+    if (s.cadence === 'weekly') {
+        const dow = Math.min(6, Math.max(0, parseInt(s.day_of_week ?? 1, 10) || 0));
+        const d = new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth(), f.getUTCDate(), hour, 0, 0, 0));
+        let delta = (dow - d.getUTCDay() + 7) % 7;
+        if (delta === 0 && d.getTime() <= f.getTime()) delta = 7;
+        d.setUTCDate(d.getUTCDate() + delta);
+        return d;
+    }
+    // monthly
+    const dom = Math.min(28, Math.max(1, parseInt(s.day_of_month ?? 1, 10) || 1));
+    let d = new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth(), dom, hour, 0, 0, 0));
+    if (d.getTime() <= f.getTime()) d = new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth() + 1, dom, hour, 0, 0, 0));
+    return d;
+}
+
+/**
+ * The stored input is what the user validated when they clicked Run, with two
+ * exceptions: a frozen window boundary (`since`) has to move with the calendar
+ * or every monthly FB report would measure the same month forever, and the
+ * schedule id is stamped so the finished job can be linked back.
+ */
+function scheduleInputForRun(s) {
+    const input = { ...(s.input || {}) };
+    if (input.days && Number(input.days) > 0) {
+        input.since = new Date(Date.now() - Number(input.days) * 86400000).toISOString().slice(0, 10);
+    }
+    input.scheduleId = s.id;
+    input.clientId = s.client_id || null;
+    return input;
+}
+
+function cleanScheduleBody(b = {}) {
+    const out = {};
+    if (b.cadence !== undefined) {
+        if (!['weekly', 'monthly'].includes(b.cadence)) throw Object.assign(new Error('cadence must be weekly or monthly'), { statusCode: 400 });
+        out.cadence = b.cadence;
+    }
+    if (b.dayOfWeek !== undefined)  out.day_of_week  = Math.min(6, Math.max(0, parseInt(b.dayOfWeek, 10) || 0));
+    if (b.dayOfMonth !== undefined) out.day_of_month = Math.min(28, Math.max(1, parseInt(b.dayOfMonth, 10) || 1));
+    if (b.hourUtc !== undefined)    out.hour_utc     = Math.min(23, Math.max(0, parseInt(b.hourUtc, 10) || 0));
+    if (b.label !== undefined)      out.label        = String(b.label || '').trim().slice(0, 120) || null;
+    if (typeof b.paused === 'boolean') out.paused = b.paused;
+    return out;
+}
+
+async function scheduleCanRead(ctx, row) {
+    if (!row) return false;
+    if (row.user_id === ctx.user.id) return true;
+    if (row.client_id && await clientAccess(ctx.user.id, row.client_id, 'viewer')) return true;
+    return false;
+}
+async function scheduleCanEdit(ctx, row) {
+    if (!row) return false;
+    if (row.user_id === ctx.user.id) return true;
+    if (row.client_id && await clientAccess(ctx.user.id, row.client_id, 'editor')) return true;
+    return false;
+}
+
+/** Called from runJob when a job carrying input.scheduleId settles. */
+async function scheduleNoteOutcome(scheduleId, { status, reportId = null, error = null } = {}) {
+    if (!scheduleId || !UUID_RE.test(String(scheduleId))) return;
+    try {
+        const patch = { last_status: status, updated_at: new Date().toISOString() };
+        if (reportId) patch.last_report_id = reportId;
+        if (error) patch.last_error = String(error).slice(0, 500);
+        else if (status === 'done') patch.last_error = null;
+        await supabase.from('schedules').update(patch).eq('id', scheduleId);
+    } catch (e) { logger.warn('schedule_note_failed', { scheduleId, message: e.message }); }
+}
+
+/**
+ * Fire one schedule now. Every guard a click gets, a schedule gets:
+ * account still active, engine still granted, job slot free, key can pay.
+ * A guard that fails records why on the row and moves on — nothing is queued.
+ */
+async function fireSchedule(s, { manual = false } = {}) {
+    const engine = SCHEDULABLE_TYPES[s.job_type];
+    const factory = JOB_WORKERS[s.job_type];
+    if (!engine || !factory) {
+        await supabase.from('schedules').update({ last_status: 'skipped', last_error: `"${s.job_type}" cannot be scheduled.`, paused: true }).eq('id', s.id);
+        return { ok: false, reason: 'unschedulable' };
+    }
+
+    const { data: profile } = await supabase.from('app_users').select('id, role, is_active').eq('id', s.user_id).maybeSingle();
+    if (!profile || profile.is_active === false) {
+        await supabase.from('schedules').update({ last_status: 'skipped', last_error: 'Owner account is disabled.', paused: true }).eq('id', s.id);
+        return { ok: false, reason: 'owner_disabled' };
+    }
+    if (profile.role !== 'admin') {
+        const { data: grant } = await supabase.from('user_engine_access').select('id').eq('user_id', s.user_id).eq('engine', engine).maybeSingle();
+        if (!grant) {
+            await supabase.from('schedules').update({ last_status: 'skipped', last_error: `Owner no longer has the ${engine} engine.`, paused: true }).eq('id', s.id);
+            return { ok: false, reason: 'no_engine' };
+        }
+    }
+    if (s.client_id) {
+        const access = await clientAccess(s.user_id, s.client_id, 'editor');
+        if (!access) {
+            await supabase.from('schedules').update({ last_status: 'skipped', last_error: 'Owner lost edit access to the client.', paused: true }).eq('id', s.id);
+            return { ok: false, reason: 'no_client' };
+        }
+    }
+
+    const { count } = await supabase.from('jobs').select('id', { count: 'exact', head: true })
+        .eq('user_id', s.user_id).in('status', ['queued', 'running']);
+    if ((count || 0) >= MAX_ACTIVE_JOBS) {
+        // Not a failure: try again in ten minutes rather than next month.
+        await supabase.from('schedules').update({
+            last_status: 'deferred', last_error: `${count} job(s) already running; retrying in 10 minutes.`,
+            next_run_at: new Date(Date.now() + 600000).toISOString(), updated_at: new Date().toISOString()
+        }).eq('id', s.id);
+        return { ok: false, reason: 'busy' };
+    }
+
+    const input = scheduleInputForRun(s);
+    const estimate = Number(s.credits_estimate || 0);
+    const perUnit = estimate / Math.max(1, jobUnitCount({ type: s.job_type, input }));
+    try {
+        await getWorkingClient(engine, s.user_id, { needUsd: perUnit });
+    } catch (e) {
+        await supabase.from('schedules').update({
+            last_status: 'skipped_no_credit', last_error: e.message, updated_at: new Date().toISOString()
+        }).eq('id', s.id);
+        alertOnce('schedule_no_credit:' + s.id, `Scheduled run "${s.label || s.job_type}" skipped: ${e.message}`, { scheduleId: s.id });
+        return { ok: false, reason: 'no_credit' };
+    }
+
+    const job = await createJob(s.user_id, s.job_type, engine, input, estimate);
+    runJob(job.id, factory(s.user_id, job.input, job.id));
+    await supabase.from('schedules').update({
+        last_job_id: job.id, last_status: 'started', last_error: null,
+        runs: (s.runs || 0) + 1, updated_at: new Date().toISOString()
+    }).eq('id', s.id);
+    METRICS.jobs.scheduled = (METRICS.jobs.scheduled || 0) + 1;
+    logger.info('schedule_fired', { scheduleId: s.id, jobId: job.id, type: s.job_type, manual });
+    return { ok: true, jobId: job.id };
+}
+
+let _schedulerBusy = false;
+async function schedulerTick() {
+    if (!SCHEDULER_ENABLED || _schedulerBusy || _shuttingDown) return;
+    _schedulerBusy = true;
+    try {
+        const nowIso = new Date().toISOString();
+        const { data: due, error } = await supabase.from('schedules').select('*')
+            .eq('paused', false).lte('next_run_at', nowIso)
+            .order('next_run_at', { ascending: true }).limit(5);
+        if (error) { logger.warn('scheduler_read_failed', { message: error.message }); return; }
+        for (const s of (due || [])) {
+            // Compare-and-set claim: whoever advances next_run_at owns this fire.
+            const next = scheduleNextRun(s, new Date()).toISOString();
+            const { data: claimed } = await supabase.from('schedules')
+                .update({ next_run_at: next, last_run_at: nowIso, updated_at: nowIso })
+                .eq('id', s.id).eq('next_run_at', s.next_run_at)
+                .select('id').maybeSingle();
+            if (!claimed) continue;
+            try { await fireSchedule(s); }
+            catch (e) {
+                logger.error('schedule_fire_failed', { scheduleId: s.id, message: e.message });
+                await supabase.from('schedules').update({ last_status: 'failed', last_error: e.message }).eq('id', s.id);
+            }
+        }
+    } catch (e) {
+        logger.error('scheduler_tick_failed', { message: e.message });
+    } finally { _schedulerBusy = false; }
+}
+
+/** Create a schedule from a job the caller ran (by job id, or the report it produced). */
+app.post('/api/schedules', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { jobId, reportId } = req.body || {};
+        let q = supabase.from('jobs').select('id, user_id, type, engine, input, client_id, credits_estimate, status').eq('user_id', ctx.user.id);
+        if (jobId && UUID_RE.test(String(jobId))) q = q.eq('id', jobId);
+        else if (reportId && UUID_RE.test(String(reportId))) q = q.eq('result_report_id', reportId);
+        else return res.status(400).json({ error: 'jobId or reportId required.' });
+        const { data: job } = await q.order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (!job) return res.status(404).json({ error: 'That run was not found in your jobs. Only runs you started can be scheduled.' });
+        if (!SCHEDULABLE_TYPES[job.type]) return res.status(400).json({ error: `"${job.type}" runs cannot be scheduled.` });
+
+        const { count } = await supabase.from('schedules').select('id', { count: 'exact', head: true }).eq('user_id', ctx.user.id);
+        if ((count || 0) >= SCHEDULE_MAX_PER_USER) return res.status(429).json({ error: `You already have ${count} schedules. Delete one first.` });
+
+        const fields = cleanScheduleBody(req.body || {});
+        const row = {
+            user_id: ctx.user.id,
+            client_id: job.client_id || null,
+            job_type: job.type, engine: job.engine,
+            input: (() => { const i = { ...(job.input || {}) }; delete i.scheduleId; return i; })(),
+            credits_estimate: job.credits_estimate || 0,
+            cadence: fields.cadence || 'monthly',
+            day_of_week: fields.day_of_week ?? 1,
+            day_of_month: fields.day_of_month ?? 1,
+            hour_utc: fields.hour_utc ?? 6,
+            label: fields.label || null,
+            source_job_id: job.id,
+            paused: false
+        };
+        row.next_run_at = scheduleNextRun(row).toISOString();
+        const { data, error } = await supabase.from('schedules').insert([row]).select().single();
+        if (error) throw error;
+        res.status(201).json({ success: true, schedule: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/schedules', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let q = supabase.from('schedules').select('*');
+        const cid = req.query?.client_id;
+        if (cid) {
+            const c = await clientAccess(ctx.user.id, cid, 'viewer');
+            if (!c) return res.status(403).json({ error: 'No access to that client.' });
+            q = q.eq('client_id', c.id);
+        } else {
+            q = q.eq('user_id', ctx.user.id);
+        }
+        const { data, error } = await q.order('next_run_at', { ascending: true }).limit(200);
+        if (error) throw error;
+        res.json({ schedules: (data || []).map(s => ({ ...s, mine: s.user_id === ctx.user.id, input: undefined, summary: scheduleSummary(s) })) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** A one-line description of what a schedule re-runs, built from its input. */
+function scheduleSummary(s) {
+    const i = s.input || {};
+    switch (s.job_type) {
+        case 'ig_report':          return `IG audit @${i.target}${(i.rivals || []).length ? ' vs ' + i.rivals.map(r => '@' + r).join(', ') : ''}`;
+        case 'deep_audit':         return `Competitor Intel @${i.target} vs ${(i.competitors || []).length} rival(s)`;
+        case 'fb_community_audit': return `Community audit · ${(i.groupNames || i.groups || []).length} room(s) · ${i.days}d`;
+        case 'fb_page_report':     return `FB Page report · ${i.target}${i.rival ? ' vs ' + i.rival : ''} · ${i.days}d`;
+        case 'meta_insights':      return `Meta owner sync`;
+        default:                   return s.job_type;
+    }
+}
+
+app.patch('/api/schedules/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: row } = await supabase.from('schedules').select('*').eq('id', req.params.id).maybeSingle();
+        if (!row || !(await scheduleCanEdit(ctx, row))) return res.status(404).json({ error: 'Schedule not found.' });
+        const patch = cleanScheduleBody(req.body || {});
+        const merged = { ...row, ...patch };
+        if (patch.cadence || patch.day_of_week !== undefined || patch.day_of_month !== undefined || patch.hour_utc !== undefined || patch.paused === false) {
+            patch.next_run_at = scheduleNextRun(merged).toISOString();
+        }
+        patch.updated_at = new Date().toISOString();
+        const { data, error } = await supabase.from('schedules').update(patch).eq('id', row.id).select().single();
+        if (error) throw error;
+        res.json({ success: true, schedule: { ...data, input: undefined, summary: scheduleSummary(data) } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/schedules/:id/run-now', spendLimit, async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: row } = await supabase.from('schedules').select('*').eq('id', req.params.id).maybeSingle();
+        if (!row || !(await scheduleCanEdit(ctx, row))) return res.status(404).json({ error: 'Schedule not found.' });
+        const r = await fireSchedule(row, { manual: true });
+        if (!r.ok) {
+            const { data: after } = await supabase.from('schedules').select('last_error').eq('id', row.id).maybeSingle();
+            return res.status(r.reason === 'no_credit' ? 402 : 409).json({ error: after?.last_error || 'Could not start.', reason: r.reason });
+        }
+        res.status(202).json({ success: true, jobId: r.jobId });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/schedules/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: row } = await supabase.from('schedules').select('id, user_id, client_id').eq('id', req.params.id).maybeSingle();
+        if (!row || !(await scheduleCanEdit(ctx, row))) return res.status(404).json({ error: 'Schedule not found.' });
+        await supabase.from('schedules').delete().eq('id', row.id);
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 11 :: READ-ONLY REPORT SHARE LINKS
+//
+// A link the client can open beats a PDF attachment. The token is the whole
+// secret: 192 random bits, base64url, stored plain (it is not a password —
+// anyone holding it can already read the report). Links expire, can be
+// revoked, and count views so a freelancer can see whether the client looked.
+// The public route returns the report row with ownership fields stripped and
+// nothing else — no client list, no vault, no job state.
+// ===========================================================================
+
+const SHARE_DEFAULT_DAYS = parseInt(process.env.SHARE_DEFAULT_DAYS || '30', 10);
+const SHARE_MAX_DAYS     = parseInt(process.env.SHARE_MAX_DAYS || '365', 10);
+const publicLimit = rateLimit({ windowMs: 60000, max: 30 });   // per IP: no bearer on public routes
+
+/** Which page renders which report type. Server is the contract; pages conform. */
+const REPORT_PAGE = {
+    ig_report: 'ig-report.html', single: 'ig-report.html', compare: 'ig-report.html',
+    deep_audit: 'ig-competitors.html', competitor: 'ig-competitors.html',
+    fb_page: 'fb-report.html',
+    fb_community: 'fb-audit.html', fb_group: 'fb-audit.html',
+    content_plan: 'content-plan.html', meta_owned: 'content-plan.html'
+};
+
+function shareUrlFor(row, token) {
+    const page = REPORT_PAGE[row.report_type] || 'ig-report.html';
+    const base = FRONTEND_URL || '';
+    return `${base}/${page}?share=${encodeURIComponent(token)}`;
+}
+
+function shareToken() { return crypto.randomBytes(24).toString('base64url'); }
+
+function publicReportView(row) {
+    const {
+        user_id, client_id, set_id, job_id, source_report_ids, credits_estimate, ...rest
+    } = row || {};
+    return rest;
+}
+
+app.post('/api/share', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { reportId, expiresDays, label } = req.body || {};
+        if (!reportId || !UUID_RE.test(String(reportId))) return res.status(400).json({ error: 'reportId required.' });
+        const { data: rep } = await supabase.from('reports').select('id, user_id, client_id, report_type, target_handle').eq('id', reportId).maybeSingle();
+        if (!rep || !(await canReadReport(ctx, rep))) return res.status(404).json({ error: 'Report not found.' });
+
+        const days = Math.min(SHARE_MAX_DAYS, Math.max(1, parseInt(expiresDays || SHARE_DEFAULT_DAYS, 10) || SHARE_DEFAULT_DAYS));
+        const token = shareToken();
+        const { data, error } = await supabase.from('report_shares').insert([{
+            token, report_id: rep.id, user_id: ctx.user.id, client_id: rep.client_id || null,
+            label: String(label || '').trim().slice(0, 120) || null,
+            expires_at: new Date(Date.now() + days * 86400000).toISOString()
+        }]).select().single();
+        if (error) throw error;
+        res.status(201).json({ success: true, share: data, url: shareUrlFor(rep, token) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/shares', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let q = supabase.from('report_shares').select('*, reports!inner(id, report_type, target_handle, created_at, client_id)');
+        const cid = req.query?.client_id;
+        const rid = req.query?.report_id;
+        if (rid && UUID_RE.test(String(rid))) {
+            const { data: rep } = await supabase.from('reports').select('id, user_id, client_id').eq('id', rid).maybeSingle();
+            if (!rep || !(await canReadReport(ctx, rep))) return res.status(404).json({ error: 'Report not found.' });
+            q = q.eq('report_id', rep.id);
+        } else if (cid) {
+            const c = await clientAccess(ctx.user.id, cid, 'viewer');
+            if (!c) return res.status(403).json({ error: 'No access to that client.' });
+            q = q.eq('client_id', c.id);
+        } else {
+            q = q.eq('user_id', ctx.user.id);
+        }
+        const { data, error } = await q.order('created_at', { ascending: false }).limit(200);
+        if (error) throw error;
+        const now = Date.now();
+        res.json({ shares: (data || []).map(s => ({
+            ...s, mine: s.user_id === ctx.user.id,
+            active: !s.revoked_at && new Date(s.expires_at).getTime() > now,
+            url: shareUrlFor(s.reports || {}, s.token)
+        })) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/share/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: s } = await supabase.from('report_shares').select('id, user_id, client_id').eq('id', req.params.id).maybeSingle();
+        const may = s && (s.user_id === ctx.user.id || (s.client_id && await clientAccess(ctx.user.id, s.client_id, 'editor')));
+        if (!may) return res.status(404).json({ error: 'Share not found.' });
+        await supabase.from('report_shares').update({ revoked_at: new Date().toISOString() }).eq('id', s.id);
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** PUBLIC. No auth. The token is the credential. */
+app.get('/api/public/share/:token', publicLimit, async (req, res) => {
+    try {
+        const token = String(req.params.token || '');
+        if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) return res.status(404).json({ error: 'Link not found.' });
+        const { data: s } = await supabase.from('report_shares').select('*').eq('token', token).maybeSingle();
+        if (!s || s.revoked_at) return res.status(404).json({ error: 'This link has been turned off.' });
+        if (new Date(s.expires_at).getTime() < Date.now()) return res.status(410).json({ error: 'This link has expired. Ask for a new one.' });
+        const { data: rep } = await supabase.from('reports').select('*').eq('id', s.report_id).maybeSingle();
+        if (!rep) return res.status(404).json({ error: 'The report behind this link was deleted.' });
+        let client = null;
+        if (rep.client_id) {
+            const { data: c } = await supabase.from('clients').select('name, brand').eq('id', rep.client_id).maybeSingle();
+            client = c || null;
+        }
+        supabase.from('report_shares').update({ views: (s.views || 0) + 1, last_viewed_at: new Date().toISOString() })
+            .eq('id', s.id).then(() => {}, () => {});
+        res.set('Cache-Control', 'no-store');
+        res.json({ report: publicReportView(rep), client, shared: { expiresAt: s.expires_at, label: s.label, page: REPORT_PAGE[rep.report_type] || null } });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 11 :: SINGLE-INSTANCE GUARD
+//
+// Rate-limit buckets, the auth cache, Gemini cooldowns and the auto-resume
+// tracker are per-process Maps. That is fine on one Render instance and wrong
+// on two. Rather than silently degrade, every instance heartbeats into
+// system_settings and alarms if it sees another live heartbeat. This does not
+// make two instances safe; it makes the mistake visible within a minute.
+// ===========================================================================
+
+const INSTANCE_ID = crypto.randomBytes(6).toString('hex');
+const INSTANCE_BEAT_MS = 30000;
+let _multiInstanceSeen = false;
+
+async function instanceHeartbeat() {
+    try {
+        const now = Date.now();
+        await supabase.from('system_settings').upsert({
+            key: 'instance_heartbeat:' + INSTANCE_ID,
+            value: JSON.stringify({ t: now, version: APP_VERSION, pid: process.pid }),
+            updated_at: new Date(now).toISOString()
+        }, { onConflict: 'key' });
+
+        const { data } = await supabase.from('system_settings').select('key, value').like('key', 'instance_heartbeat:%');
+        const others = (data || []).filter(r => r.key !== 'instance_heartbeat:' + INSTANCE_ID).map(r => {
+            try { return { key: r.key, ...(JSON.parse(r.value || '{}')) }; } catch { return { key: r.key, t: 0 }; }
+        });
+        const live = others.filter(o => now - Number(o.t || 0) < INSTANCE_BEAT_MS * 3);
+        const stale = others.filter(o => now - Number(o.t || 0) > 86400000);
+        if (stale.length) {
+            await supabase.from('system_settings').delete().in('key', stale.map(s => s.key));
+        }
+        METRICS.instances = { self: INSTANCE_ID, live: 1 + live.length };
+        if (live.length && !_multiInstanceSeen) {
+            _multiInstanceSeen = true;
+            logger.error('multiple_instances', { self: INSTANCE_ID, others: live.map(o => o.key) });
+            alertOnce('multiple_instances',
+                `${1 + live.length} server instances are running. Rate limits, Gemini cooldowns and cancel/resume state are per-process — scale back to one instance.`,
+                { self: INSTANCE_ID, others: live.map(o => o.key) });
+        } else if (!live.length) {
+            _multiInstanceSeen = false;
+        }
+    } catch (e) { logger.warn('instance_heartbeat_failed', { message: e.message }); }
+}
+
+
 // Boot: warm the Gemini pool so geminiAvailable() is truthful from the start.
 loadGeminiPool(true).then(rows => logger.info('gemini_pool', { keys: rows.length, env: !!GEMINI_API_KEY, model: GEMINI_MODEL }));
 setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
@@ -11180,7 +11783,15 @@ async function schemaProbe() {
         { table: 'fb_page_posts', column: 'client_id', migration: 'schema-phase10.sql',
           impact: 'FB Page post upserts will fail — page reports render but the FB content plan has nothing to read.' },
         { table: 'fb_posts',      column: 'client_id', migration: 'schema-phase10.sql',
-          impact: 'FB group post upserts will fail — community audits and the demand feed stop accumulating.' }
+          impact: 'FB group post upserts will fail — community audits and the demand feed stop accumulating.' },
+        { table: 'posts',         column: 'plays',     migration: 'schema-phase11.sql',
+          impact: 'Instagram post upserts will fail on an unknown column — audits render but post history stops.' },
+        { table: 'leads',         column: 'whatsapp',  migration: 'schema-phase11.sql',
+          impact: 'Lead enrichment updates will fail on an unknown column.' },
+        { table: 'schedules',     column: 'next_run_at', migration: 'schema-phase11.sql',
+          impact: 'Scheduled runs cannot be created or fired.' },
+        { table: 'report_shares', column: 'token',     migration: 'schema-phase11.sql',
+          impact: 'Report share links cannot be created.' }
     ];
 
     const missing = [];
@@ -11271,7 +11882,9 @@ async function start() {
             rotationPending: !!ENC_KEY_OLD,
             keepAlive: !!SELF_URL,
             autoResume: AUTO_RESUME,
-            alerts: !!ALERT_WEBHOOK
+            alerts: !!ALERT_WEBHOOK,
+            instance: INSTANCE_ID,
+            scheduler: SCHEDULER_ENABLED
         });
 
         await schemaProbe();
@@ -11287,6 +11900,16 @@ async function start() {
         setInterval(sweepStaleReservations, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(reviveStaleKeys, 3600000).unref?.();
         if (SELF_URL) setInterval(keepAwakeIfBusy, KEEPALIVE_MS).unref?.();
+
+        // Phase 11: heartbeat first so a second instance is visible at once,
+        // then the scheduler, which stays quiet until a schedule is due.
+        await instanceHeartbeat();
+        setInterval(instanceHeartbeat, INSTANCE_BEAT_MS).unref?.();
+        if (SCHEDULER_ENABLED) {
+            setTimeout(() => schedulerTick().catch(() => {}), 15000).unref?.();
+            setInterval(schedulerTick, Math.max(15000, SCHEDULER_POLL_MS)).unref?.();
+        }
+        logger.info('phase11_ready', { instance: INSTANCE_ID, scheduler: SCHEDULER_ENABLED, pollMs: SCHEDULER_POLL_MS });
     });
 
     return server;
@@ -11361,5 +11984,9 @@ module.exports = {
     METRICS, RECENT_EVENTS, logger, preflight, schemaProbe, migrateSecretsAtRest,
     sweepStaleJobs, sweepStaleReservations, keepAwakeIfBusy,
     // caches
-    invalidateAuth, invalidateEngineAccess
+    invalidateAuth, invalidateEngineAccess,
+    // phase 11
+    scheduleNextRun, scheduleInputForRun, cleanScheduleBody, scheduleSummary, SCHEDULABLE_TYPES,
+    shareToken, shareUrlFor, publicReportView, REPORT_PAGE,
+    extractBioContacts, getPlays, getVideoViews, igPlaceUrls, igDistribution, igNormalisePost
 };
