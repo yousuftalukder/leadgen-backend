@@ -51,6 +51,28 @@
     </p>
 </div>
 
+<!-- =====================================================================
+     PAGES YOU MANAGE
+     The agency path onto this page. You are already a manager on the
+     client's Business Suite, so one Meta login hands back every Page you
+     look after — and each of those can become a client without retyping
+     the name, the Page or the Instagram handle Meta just told us.
+     Hidden entirely when there is nothing unfiled, so it does not sit
+     there as furniture once onboarding is done.
+     ===================================================================== -->
+<div class="card is-hidden" id="inbox-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div>
+            <h3 class="card-title" style="font-size:1.05rem;margin:0">Pages you manage</h3>
+            <p class="card-subtitle" style="margin:6px 0 0">Every Page your Meta login can reach. Turn one into a client and its
+               Page, Instagram handle and owner data come with it.</p>
+        </div>
+        <button class="btn-secondary btn-mini" id="btn-connect-manager" type="button">Connect Meta</button>
+    </div>
+    <div id="inbox-list" style="margin-top:14px"></div>
+    <div class="note" id="inbox-note"></div>
+</div>
+
 <div class="layout">
     <div>
         <div class="card" style="padding:20px">
@@ -91,6 +113,7 @@
                 <div class="tabs">
                     <button class="tab is-on" data-tab="timeline" type="button">Timeline</button>
                     <button class="tab" data-tab="meta" type="button">Meta connection</button>
+                    <button class="tab" data-tab="rivals" type="button">Comparison set</button>
                     <button class="tab" data-tab="members" type="button">Sharing</button>
                     <button class="tab" data-tab="auto" type="button">Automation</button>
                 </div>
@@ -114,6 +137,26 @@
                     </div>
                     <div class="note" id="meta-note"></div>
                     <div id="meta-progress"></div>
+                </div>
+
+                <!-- The accounts this client is measured against. Held here,
+                     not retyped per run: a comparison whose yardstick moves
+                     between reports says nothing about the client. -->
+                <div data-pane="rivals" class="is-hidden">
+                    <p class="hint">
+                        The businesses this client is compared against, in reports and in "how do I compare to similar
+                        businesses near me". Keep the set stable — if it changes between reports, so does the comparison,
+                        and an improvement can be nothing more than an easier yardstick.
+                    </p>
+                    <label style="margin-top:16px">Handles</label>
+                    <textarea id="riv-list" rows="4" placeholder="One Instagram handle per line, or comma separated."></textarea>
+                    <div class="row-actions">
+                        <button class="btn-secondary" id="btn-riv-save" type="button">Save set</button>
+                        <button class="btn-secondary" id="btn-riv-find" type="button">Find similar businesses</button>
+                    </div>
+                    <div class="note" id="riv-note"></div>
+                    <div id="riv-progress"></div>
+                    <div id="riv-found" style="margin-top:12px"></div>
                 </div>
 
                 <div data-pane="auto" class="is-hidden">
@@ -200,7 +243,7 @@
         } catch (err) { $('form-note').textContent = err.message; return; }
         fillForm(current);
         await loadList();
-        renderMembers(); renderConnections(); loadTimeline(); loadAutomation();
+        renderMembers(); renderConnections(); renderRivals(); loadTimeline(); loadAutomation();
         history.replaceState(null, '', `clients.html?client=${id}`);
     }
 
@@ -382,8 +425,149 @@
         } catch (err) { $('meta-note').textContent = err.message; }
     });
 
+    // ---- comparison set ------------------------------------------------------------
+    function renderRivals() {
+        const c = (detail && detail.client) || current || {};
+        $('riv-list').value = (c.competitors || []).join('\n');
+        $('riv-note').textContent = c.competitors_updated_at
+            ? `${(c.competitors || []).length} account(s) · ${c.competitors_source === 'discovered' ? 'found automatically' : 'entered by hand'} · ${fmtDate(c.competitors_updated_at)}`
+            : 'No comparison set yet.';
+        $('riv-found').innerHTML = '';
+    }
+
+    $('btn-riv-save').addEventListener('click', async () => {
+        if (!current) return;
+        const handles = $('riv-list').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+        $('riv-note').textContent = 'Saving…';
+        try {
+            const r = await EL.api(`/api/clients/${current.id}/competitors`, { method: 'PUT', body: { handles } });
+            $('riv-list').value = (r.handles || []).join('\n');
+            $('riv-note').textContent = `Saved ${(r.handles || []).length} account(s).`;
+            await loadList();
+        } catch (err) { $('riv-note').textContent = err.message; }
+    });
+
+    $('btn-riv-find').addEventListener('click', async () => {
+        if (!current) return;
+        const c = (detail && detail.client) || current;
+        if (!c.niche) { $('riv-note').textContent = 'Set a niche on this client first — that is what gets searched for.'; return; }
+        $('riv-note').textContent = 'Searching… this spends a little Apify credit.';
+        try {
+            const { job } = await EL.runJob(`/api/clients/${current.id}/competitors/discover`, {}, {
+                mount: $('riv-progress'),
+                onProgress: j => { $('riv-note').textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                onFailed: j => { $('riv-note').textContent = 'Failed: ' + (j.error || 'unknown'); }
+            });
+            const r = (job && job.result) || {};
+            // A search match is not a competitor. The list is shown for review
+            // and written into the box; saving it is still a decision.
+            if ((r.accounts || []).length) {
+                $('riv-found').innerHTML = `<div class="hint" style="margin-bottom:8px">Found these, closest in size first. Edit the list above, then save.</div>` +
+                    r.accounts.map(a => `<div class="conn"><b>@${esc(a.username)}</b> · ${Number(a.followers).toLocaleString()} followers${a.category ? ' · ' + esc(a.category) : ''}${a.isBusiness ? '' : ' · personal account'}</div>`).join('');
+                $('riv-list').value = (r.handles || []).join('\n');
+                $('riv-note').textContent = `${r.handles.length} of ${r.considered} accounts were a comparable size. Review them, then save.`;
+            } else {
+                $('riv-note').textContent = (r.warnings || []).join(' ') || 'Nothing comparable came back.';
+            }
+        } catch (err) { if (!err.handled) $('riv-note').textContent = err.message; }
+    });
+
+    // ---- pages you manage ----------------------------------------------------------
+    /**
+     * The onboarding inbox. Only unfiled Pages are listed: a Page already
+     * under a client is not a decision anyone needs to make again, and
+     * showing it turns the panel into a list you scroll past.
+     */
+    async function loadInbox() {
+        let d;
+        try { d = await EL.api('/api/meta/inbox'); } catch { return; }
+
+        const unfiled = (d.pages || []).filter(p => p.needsClient);
+        const card = $('inbox-card');
+
+        // Nothing connected at all is worth showing once — it is how an
+        // employee discovers the path exists. Nothing UNFILED is not.
+        if (!d.pages.length && !d.configured) { card.classList.add('is-hidden'); return; }
+        if (!unfiled.length && d.pages.length) { card.classList.add('is-hidden'); return; }
+        card.classList.remove('is-hidden');
+
+        $('btn-connect-manager').disabled = !d.configured;
+        if (!d.configured) {
+            $('inbox-note').textContent = 'Server has no META_APP_ID / META_APP_SECRET yet — connecting is disabled until an admin sets them.';
+            $('inbox-list').innerHTML = '';
+            return;
+        }
+
+        if (!d.pages.length) {
+            $('inbox-list').innerHTML = `<div class="empty">No Pages yet. If you are a manager on a client's
+                Business Suite, connect Meta and their Pages appear here.</div>`;
+            return;
+        }
+
+        $('inbox-list').innerHTML = unfiled.map(p => `
+            <div class="conn" data-page="${esc(p.connectionId)}">
+                <b>${esc(p.pageName || p.pageId)}</b>${p.igUsername ? ` · Instagram <b>@${esc(p.igUsername)}</b>` : ' · no Instagram account linked'}
+                <div class="hint">Not filed under a client yet.</div>
+                <div class="row-actions" style="margin-top:9px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                    <button class="btn-secondary btn-mini" data-onboard="${esc(p.connectionId)}" type="button">Make this a client</button>
+                    ${d.clients.length ? `<select data-file="${esc(p.connectionId)}" style="width:auto;min-width:180px">
+                        <option value="">File under an existing client…</option>
+                        ${d.clients.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+                    </select>` : ''}
+                </div>
+            </div>`).join('');
+
+        $('inbox-list').querySelectorAll('[data-onboard]').forEach(b =>
+            b.addEventListener('click', () => onboardPage(b.dataset.onboard, b)));
+
+        $('inbox-list').querySelectorAll('[data-file]').forEach(sel =>
+            sel.addEventListener('change', async () => {
+                if (!sel.value) return;
+                $('inbox-note').textContent = 'Filing…';
+                try {
+                    await EL.api(`/api/meta/connections/${sel.dataset.file}`, { method: 'PATCH', body: { clientId: sel.value } });
+                    $('inbox-note').textContent = 'Filed.';
+                    await loadList(); await loadInbox();
+                } catch (err) { $('inbox-note').textContent = err.message; }
+            }));
+    }
+
+    /**
+     * Create the client from the Page. Niche and location are the only two
+     * things Meta cannot tell us and the only two the content plan and the
+     * comparison set genuinely need, so they are asked for here rather than
+     * left blank for someone to discover missing three screens later.
+     */
+    async function onboardPage(connectionId, btn) {
+        const niche = prompt('What does this business do? (e.g. "home solar", "bridal wear")\n\nUsed to find comparable businesses and to plan content.');
+        if (niche === null) return;
+        const location = prompt('Where are they? (e.g. "Dhaka" or "Rangpur, Bangladesh")\n\nLeave blank if they are not local.') || '';
+
+        btn.disabled = true;
+        $('inbox-note').textContent = 'Creating…';
+        try {
+            const r = await EL.api(`/api/meta/connections/${connectionId}/onboard`, {
+                method: 'POST', body: { niche: niche.trim() || null, location: location.trim() || null }
+            });
+            $('inbox-note').textContent = `Created "${r.client.name}".`;
+            await loadList();
+            await loadInbox();
+            await open(r.client.id);
+        } catch (err) {
+            $('inbox-note').textContent = err.message;
+        } finally { btn.disabled = false; }
+    }
+
+    $('btn-connect-manager').addEventListener('click', async () => {
+        // No client_id: this is the manager path, where the Pages come back
+        // first and get filed afterwards.
+        try { const d = await EL.api('/api/meta/oauth/start'); window.location.href = d.url; }
+        catch (err) { $('inbox-note').textContent = err.message; }
+    });
+
     // ---- boot --------------------------------------------------------------------
     await loadList();
+    loadInbox();
     const q = new URLSearchParams(location.search);
     if (q.get('meta') === 'ok') { $('form-note').textContent = `Meta connected (${q.get('pages')} page(s)).`; }
     if (q.get('meta') === 'error') { $('form-note').textContent = 'Meta connection failed: ' + (q.get('message') || ''); }

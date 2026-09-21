@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Analyst — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* assistant.html — page-specific only. Shared rules live in app.css.
+       The chat mechanics are deliberately the same as client-assistant.html:
+       one behaviour, learned once. What differs is what sits around it. */
+
+    .as-wrap { max-width: 900px; margin: 0 auto; }
+
+    /* ---- who this conversation is about --------------------------------
+       An operator runs several accounts. The single most expensive mistake
+       here is answering about the wrong one, so the scope is stated at the
+       top of the page and repeated on every thread rather than left to the
+       sidebar picker to imply. */
+    .as-scope { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 13px 16px; border-radius: var(--r-md); margin-bottom: 18px;
+        background: rgba(12,120,86,0.10); border: 1px solid rgba(63,191,143,0.26);
+        font-size: 0.86rem; color: var(--text-secondary); }
+    .as-scope.is-none { background: rgba(255,255,255,0.035); border-color: var(--card-border); }
+    .as-scope b { color: var(--text-primary); font-weight: 800; }
+    .as-scope .as-scope-tag { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.07em;
+        text-transform: uppercase; padding: 4px 9px; border-radius: 999px;
+        background: rgba(63,191,143,0.18); color: var(--jade); }
+    .as-scope.is-none .as-scope-tag { background: rgba(255,255,255,0.07); color: var(--text-muted); }
+    .as-scope a { color: var(--accent-solid); text-decoration: none; margin-left: auto; font-weight: 700; }
+    .as-scope a:hover { text-decoration: underline; }
+
+    .as-thread { display: flex; flex-direction: column; gap: 16px; min-height: 200px; margin-bottom: 22px; }
+
+    .as-turn { display: flex; gap: 12px; align-items: flex-start; }
+    .as-turn.me { flex-direction: row-reverse; }
+    .as-avatar { width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0; display: grid; place-items: center;
+        font-size: 0.82rem; font-weight: 800; }
+    .as-turn.ai .as-avatar { background: var(--accent-glow); color: var(--on-accent); }
+    .as-turn.me .as-avatar { background: rgba(255,255,255,0.09); color: var(--text-muted); }
+
+    .as-bubble { padding: 14px 17px; border-radius: 14px; font-size: 0.92rem; line-height: 1.65; max-width: 84%; }
+    .as-turn.ai .as-bubble { background: var(--card-bg); border: 1px solid var(--card-border); border-top-left-radius: 4px; }
+    .as-turn.me .as-bubble { background: rgba(12,120,86,0.16); border: 1px solid rgba(217,181,108,0.28);
+        border-top-right-radius: 4px; }
+    .as-bubble p { margin: 0 0 10px; }
+    .as-bubble p:last-child { margin-bottom: 0; }
+    /* An operator copies answers into decks and emails, so the copy affordance
+       is part of the answer rather than something they hunt for. */
+    .as-copy { margin-top: 10px; font-size: 0.74rem; font-weight: 700; color: var(--text-muted);
+        background: none; border: none; padding: 0; cursor: pointer; letter-spacing: 0.02em; }
+    .as-copy:hover { color: var(--accent-solid); }
+
+    .as-status { display: flex; align-items: center; gap: 9px; font-size: 0.84rem; color: var(--text-muted); }
+    .as-dots { display: inline-flex; gap: 3px; }
+    .as-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-solid);
+        animation: as-pulse 1.2s infinite ease-in-out; }
+    .as-dots i:nth-child(2) { animation-delay: .18s; }
+    .as-dots i:nth-child(3) { animation-delay: .36s; }
+    @keyframes as-pulse { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+    .as-ask { display: flex; gap: 10px; align-items: flex-end; }
+    .as-ask textarea { flex: 1; resize: none; min-height: 52px; max-height: 180px; line-height: 1.5; }
+    /* app.css gives .btn-primary width:100%, which here squeezes the textarea
+       down to a sliver. Overridden rather than changed globally. */
+    .as-ask button { flex: 0 0 auto; width: auto; min-width: 104px; padding-left: 26px; padding-right: 26px; }
+    .as-hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 10px; line-height: 1.55; }
+
+    .as-recent { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
+    .as-recent-lab { font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--text-muted); margin-right: 2px; }
+    .as-thread-chip { font-size: 0.8rem; padding: 7px 13px; border-radius: 999px; cursor: pointer;
+        max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+        color: var(--text-secondary); transition: border-color .15s, color .15s; }
+    .as-thread-chip:hover { border-color: var(--accent-solid); color: var(--text-primary); }
+
+    .as-starters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .as-starter { font-size: 0.82rem; padding: 9px 14px; border-radius: 999px; cursor: pointer;
+        background: rgba(255,255,255,0.045); border: 1px solid var(--card-border); color: var(--text-primary);
+        transition: border-color .15s, background .15s; text-align: left; }
+    .as-starter:hover { border-color: var(--accent-solid); background: rgba(12,120,86,0.1); }
+
+    .as-intro { padding: 18px 0 6px; }
+    .as-intro h2 { font-size: 1.32rem; font-weight: 800; margin-bottom: 8px; letter-spacing: -0.02em; }
+    .as-intro p { color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; max-width: 560px; }
+
+    /* ---- the monthly report ---------------------------------------------
+       Kept on this page rather than a page of its own: the report and the
+       conversation about it are the same job. You run the month, then you
+       ask the analyst to turn it into something you can send. */
+    .as-monthly { margin-bottom: 20px; }
+    .as-monthly .mo-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .as-monthly .mo-field { flex: 1 1 190px; min-width: 0; }
+    .as-monthly label { margin: 0 0 6px; }
+    .as-monthly select, .as-monthly input { width: 100%; }
+    .as-monthly .mo-go { flex: 0 0 auto; width: auto; margin: 0; padding: 13px 22px; }
+    .mo-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 12px; line-height: 1.55; }
+    .mo-progress { margin-top: 14px; }
+
+    .mo-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+    .mo-item { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: var(--r-sm);
+        background: rgba(255,255,255,0.035); border: 1px solid var(--card-border); font-size: 0.85rem; }
+    .mo-item b { font-weight: 800; color: var(--text-primary); }
+    .mo-item .mo-when { color: var(--text-muted); font-size: 0.78rem; }
+    .mo-item .mo-use { margin-left: auto; font-size: 0.78rem; font-weight: 700; color: var(--accent-solid);
+        background: none; border: none; cursor: pointer; padding: 0; }
+    .mo-item .mo-use:hover { text-decoration: underline; }
+
+    @media (max-width: 640px) {
+        .as-bubble { max-width: 92%; }
+        .as-ask button { min-width: 84px; padding-left: 16px; padding-right: 16px; }
+    }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page as-wrap">
+
+    <div id="as-scope"></div>
+
+    <div class="card as-monthly hidden" id="as-monthly">
+        <div class="card-title">Monthly report</div>
+        <div class="card-subtitle">Built from this account's own Meta Insights — the month against the
+            one before it. Nothing scraped goes into it.</div>
+        <div class="mo-row">
+            <div class="mo-field">
+                <label for="mo-conn">Account</label>
+                <select id="mo-conn"></select>
+            </div>
+            <div class="mo-field">
+                <label for="mo-month">Month</label>
+                <select id="mo-month"></select>
+            </div>
+            <button class="btn-primary mo-go" id="mo-go" type="button">Build it</button>
+        </div>
+        <div class="mo-progress hidden" id="mo-progress"></div>
+        <p class="mo-note" id="mo-note"></p>
+        <div class="mo-list" id="mo-list"></div>
+    </div>
+
+    <div class="as-intro" id="as-intro">
+        <h2>Your analyst</h2>
+        <p>Ask anything about the account you have selected — what moved, what worked, what to
+           do next, or write it up for the client. It reads the reports and, where Meta is
+           connected, the owner numbers behind them.</p>
+    </div>
+
+    <div class="as-recent" id="as-recent"></div>
+    <div class="as-starters" id="as-starters"></div>
+    <div class="as-thread" id="as-thread"></div>
+
+    <div class="as-ask">
+        <textarea id="as-input" placeholder="What changed last month, and why?" rows="1"></textarea>
+        <button class="btn-primary" id="as-send" type="button">Ask</button>
+    </div>
+    <p class="as-hint" id="as-hint"></p>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    let conversationId = null;
+    let busy = false;
+    let clientId = null;
+    let clientName = null;
+
+    // Operator questions, not owner questions. An owner asks "how am I doing";
+    // an operator asks for the thing they are about to send someone.
+    const STARTERS = [
+        'What moved this month, and what caused it?',
+        'Write the monthly summary I can send the client',
+        'What should we post more of, and what should we stop?',
+        'Where is this account weakest right now?'
+    ];
+    const STARTERS_META = [
+        'Turn last month\'s numbers into a client-ready update',
+        'What does the audience data actually tell us?'
+    ];
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        const me = await EL.init({ engine: null, page: 'assistant.html' });
+        esc = EL.escape;
+
+        clientId = EL.clientId();
+        // EL.currentClient() is only accurate once the list has loaded, and
+        // EL.init fires the picker without awaiting it. Without this the
+        // banner reads "Answering about Selected client", which is exactly
+        // the reassurance it was put there to give.
+        if (clientId) { try { await EL.clients(); } catch { /* banner degrades, page works */ } }
+        const cur = EL.currentClient();
+        clientName = cur ? cur.name : null;
+
+        renderScope();
+        renderStarters(false);
+        loadThreads();
+        setupMonthly(me);
+
+        $('as-send').addEventListener('click', send);
+        $('as-input').addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+        });
+        $('as-input').addEventListener('input', autoGrow);
+    });
+
+    /** Say out loud which account is being answered about. */
+    function renderScope() {
+        const hint = $('as-hint');
+        if (clientId && clientName) {
+            $('as-scope').innerHTML = `<div class="as-scope">
+                <span class="as-scope-tag">Client</span>
+                <span>Answering about <b>${esc(clientName)}</b> only — other clients are out of scope here.</span>
+                <a href="clients.html">Manage</a></div>`;
+            hint.textContent = 'Threads are kept per client. Switch client in the sidebar to start a separate conversation.';
+        } else {
+            $('as-scope').innerHTML = `<div class="as-scope is-none">
+                <span class="as-scope-tag">No client</span>
+                <span>Answering about <b>your own account</b>. Pick a client in the sidebar to ask about theirs.</span>
+                <a href="clients.html">Clients</a></div>`;
+            hint.textContent = 'Pick a client in the sidebar and this becomes their analyst, with their reports and their Meta numbers.';
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MONTHLY REPORT
+    // -----------------------------------------------------------------------
+    let connections = [];
+
+    async function setupMonthly(me) {
+        if (!(me.engines || []).includes('meta_owned') && me.role !== 'admin') return;
+
+        try {
+            const q = clientId ? '?client_id=' + encodeURIComponent(clientId) : '';
+            const r = await EL.api('/api/meta/connections' + q);
+            connections = r.connections || [];
+            if (!r.configured) {
+                $('as-monthly').classList.remove('hidden');
+                $('mo-note').textContent = 'Meta is not configured on this server yet, so monthly reports cannot be built.';
+                $('mo-go').disabled = true;
+                return;
+            }
+        } catch { return; }
+
+        $('as-monthly').classList.remove('hidden');
+
+        if (!connections.length) {
+            $('mo-note').innerHTML = clientId
+                ? `No Meta account is connected for this client yet. <a href="clients.html">Connect one</a> — if you manage their Page in Business Suite, that is all it takes.`
+                : `No Meta account is connected. <a href="clients.html">Connect one</a> to build monthly reports from real owner numbers.`;
+            $('mo-go').disabled = true;
+            $('mo-conn').innerHTML = '<option>None connected</option>';
+            $('mo-month').innerHTML = '<option>—</option>';
+            return;
+        }
+
+        $('mo-conn').innerHTML = connections.map(c =>
+            `<option value="${esc(c.id)}">${esc(c.page_name || c.page_id)}${c.ig_username ? ' · @' + esc(c.ig_username) : ''}</option>`).join('');
+        $('mo-month').innerHTML = lastMonths(6).map((m, i) =>
+            `<option value="${m.value}" ${i === 0 ? 'selected' : ''}>${m.label}</option>`).join('');
+        $('mo-note').textContent = 'A month can only be built once it has finished, so the list starts with last month.';
+
+        $('mo-go').addEventListener('click', buildMonth);
+        loadMonths();
+    }
+
+    /** The last N COMPLETE months, newest first. */
+    function lastMonths(n) {
+        const out = [];
+        const now = new Date();
+        for (let i = 1; i <= n; i++) {
+            const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+            const value = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
+            out.push({ value, label: d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }) });
+        }
+        return out;
+    }
+
+    async function loadMonths() {
+        let list = [];
+        try {
+            const r = await EL.api('/api/meta/monthly');
+            list = (r.reports || []).slice(0, 6);
+        } catch { return; }
+        if (!list.length) { $('mo-list').innerHTML = ''; return; }
+
+        $('mo-list').innerHTML = list.map(r => {
+            const d = new Date(r.snapshot_date + 'T00:00:00Z');
+            const label = d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+            return `<div class="mo-item">
+                <b>${esc(label)}</b>
+                <span class="mo-when">${esc(r.target_handle || '')} · ${r.posts_analyzed || 0} posts</span>
+                <button class="mo-use" type="button" data-month="${esc(r.month)}">Ask about it</button>
+            </div>`;
+        }).join('');
+
+        $('mo-list').querySelectorAll('.mo-use').forEach(b => b.addEventListener('click', () => {
+            $('as-input').value = `Write up ${b.dataset.month} as a client-ready monthly update.`;
+            send();
+        }));
+    }
+
+    async function buildMonth() {
+        if (busy) return;
+        busy = true;
+        $('mo-go').disabled = true;
+        const prog = $('mo-progress');
+        prog.classList.remove('hidden');
+        prog.innerHTML = `<div class="as-status"><span class="as-dots"><i></i><i></i><i></i></span>
+                          <span id="mo-step">Starting</span></div>`;
+
+        const step = t => { const el = $('mo-step'); if (el) el.textContent = t; };
+
+        try {
+            const { job } = await EL.runJob('/api/meta/monthly', {
+                connectionId: $('mo-conn').value,
+                month: $('mo-month').value
+            }, {
+                onProgress: j => step(j.current_step || 'Working'),
+                onFailed: j => { prog.innerHTML = `<p class="mo-note">${esc(j.error || 'The report could not be built.')}</p>`; },
+                onPaused: j => { prog.innerHTML = `<p class="mo-note">${esc(j.error || 'Paused — it can be resumed from Schedules.')}</p>`; }
+            });
+            if (job && job.status === 'done') {
+                prog.classList.add('hidden');
+                await loadMonths();
+                $('as-input').value = `Summarise ${$('mo-month').value} for me, then give me a version I can send the client.`;
+                busy = false;                       // send() checks this
+                $('mo-go').disabled = false;
+                return send();
+            }
+        } catch (err) {
+            if (!err.handled) prog.innerHTML = `<p class="mo-note">${esc(err.message || 'That did not work.')}</p>`;
+        } finally {
+            busy = false;
+            $('mo-go').disabled = false;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CHAT
+    // -----------------------------------------------------------------------
+    async function loadThreads() {
+        let list = [];
+        try {
+            // Threads follow the client, so the query carries it. Without this
+            // an operator would see eight clients' conversations in one list.
+            const q = clientId ? '?client_id=' + encodeURIComponent(clientId) : '';
+            const r = await EL.api('/api/assistant/conversations' + q);
+            list = (r.conversations || []).slice(0, 5);
+        } catch { return; }
+        if (!list.length) return;
+
+        $('as-recent').innerHTML = `<span class="as-recent-lab">Earlier</span>` +
+            list.map(c => `<button class="as-thread-chip" type="button" data-id="${esc(c.id)}"
+                >${esc(c.title || 'Conversation')}</button>`).join('');
+        $('as-recent').querySelectorAll('.as-thread-chip').forEach(b =>
+            b.addEventListener('click', () => openThread(b.dataset.id)));
+    }
+
+    async function openThread(id) {
+        if (busy) return;
+        busy = true;
+        try {
+            const { messages } = await EL.api('/api/assistant/conversation/' + encodeURIComponent(id));
+            conversationId = id;
+            collapseIntro();
+            $('as-thread').innerHTML = '';
+            (messages || []).forEach(m => turn(m.role === 'user' ? 'me' : 'ai', m.content));
+        } catch (err) {
+            if (!err.handled) turn('ai', err.message || 'Could not open that conversation.');
+        } finally { busy = false; }
+    }
+
+    function collapseIntro() {
+        $('as-intro').style.display = 'none';
+        $('as-starters').style.display = 'none';
+        $('as-recent').style.display = 'none';
+    }
+
+    function autoGrow() {
+        const t = $('as-input');
+        t.style.height = 'auto';
+        t.style.height = Math.min(t.scrollHeight, 180) + 'px';
+    }
+
+    function renderStarters(metaConnected) {
+        const list = metaConnected ? STARTERS.concat(STARTERS_META) : STARTERS;
+        $('as-starters').innerHTML = list
+            .map(s => `<button class="as-starter" type="button">${esc(s)}</button>`).join('');
+        $('as-starters').querySelectorAll('.as-starter').forEach(b =>
+            b.addEventListener('click', () => { $('as-input').value = b.textContent; send(); }));
+    }
+
+    function turn(role, text) {
+        const el = document.createElement('div');
+        el.className = 'as-turn ' + (role === 'me' ? 'me' : 'ai');
+        el.innerHTML = `<div class="as-avatar">${role === 'me' ? 'You' : '⚡'}</div>
+                        <div class="as-bubble">${paragraphs(text)}</div>`;
+        if (role === 'ai') addCopy(el, text);
+        $('as-thread').appendChild(el);
+        el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        return el;
+    }
+
+    /** Copy the answer as text — it is going into an email or a deck. */
+    function addCopy(el, text) {
+        if (!text) return;
+        const b = document.createElement('button');
+        b.className = 'as-copy'; b.type = 'button'; b.textContent = 'Copy';
+        b.addEventListener('click', async () => {
+            try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; }
+            catch { b.textContent = 'Press Ctrl+C'; }
+            setTimeout(() => { b.textContent = 'Copy'; }, 1800);
+        });
+        el.querySelector('.as-bubble').appendChild(b);
+    }
+
+    /** Paragraphs only — everything is escaped before it reaches the DOM. */
+    function paragraphs(text) {
+        return String(text || '').split(/\n{2,}/).map(p =>
+            `<p>${esc(p.trim()).replace(/\n/g, '<br>')}</p>`).join('');
+    }
+
+    async function send() {
+        if (busy) return;
+        const input = $('as-input');
+        const message = input.value.trim();
+        if (!message) return;
+
+        collapseIntro();
+        busy = true;
+        $('as-send').disabled = true;
+        input.value = ''; autoGrow();
+
+        turn('me', message);
+        const thinking = turn('ai', '');
+        thinking.querySelector('.as-bubble').innerHTML =
+            `<div class="as-status"><span class="as-dots"><i></i><i></i><i></i></span>
+             <span id="as-status-label">Thinking</span></div>`;
+
+        try {
+            await stream(message, label => {
+                const el = document.getElementById('as-status-label');
+                if (el) el.textContent = label;
+            }, out => {
+                thinking.querySelector('.as-bubble').innerHTML = paragraphs(out.answer);
+                addCopy(thinking, out.answer);
+                conversationId = out.conversationId || conversationId;
+                // The first answer tells us whether owner numbers were in play,
+                // which is the moment the Meta-only starters become honest.
+                if (out.metaConnected) renderStarters(true);
+            });
+        } catch (err) {
+            if (err.handled) { thinking.remove(); return; }
+            thinking.querySelector('.as-bubble').innerHTML = paragraphs(
+                err.message || 'Something went wrong answering that. Try again in a moment.');
+        } finally {
+            busy = false;
+            $('as-send').disabled = false;
+            input.focus();
+        }
+    }
+
+    /**
+     * Server-sent events over a POST, so it is read from the fetch body rather
+     * than with EventSource — EventSource cannot POST or carry a bearer token.
+     * The stream carries status, not tokens; the answer arrives in one piece.
+     */
+    async function stream(message, onStatus, onDone) {
+        const res = await fetch(EL.backendUrl() + '/api/assistant/ask?stream=1', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + await EL.token()
+            },
+            body: JSON.stringify({ message, conversationId, clientId })
+        });
+
+        if (!res.ok) {
+            let data = null;
+            try { data = await res.json(); } catch { /* empty body */ }
+            if (res.status === 401) { EL.signOut(); return; }
+            const err = new Error((data && data.error) || `Request failed (${res.status})`);
+            err.status = res.status;
+            throw err;
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // Frames are separated by a blank line; a partial tail stays in the
+            // buffer until the rest of it arrives.
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop();
+
+            for (const frame of frames) {
+                if (!frame.trim() || frame.startsWith(':')) continue;   // keepalive
+                let event = 'message', payload = '';
+                for (const line of frame.split('\n')) {
+                    if (line.startsWith('event:')) event = line.slice(6).trim();
+                    else if (line.startsWith('data:')) payload += line.slice(5).trim();
+                }
+                if (!payload) continue;
+
+                let data;
+                try { data = JSON.parse(payload); } catch { continue; }
+
+                if (event === 'status' && data.label) onStatus(data.label);
+                else if (event === 'done')  onDone(data);
+                else if (event === 'error') throw new Error(data.error || 'That did not work.');
+            }
+        }
+    }
+})();
+</script>
+
+</body>
+</html>

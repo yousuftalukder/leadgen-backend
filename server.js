@@ -10960,6 +10960,97 @@ app.patch('/api/meta/connections/:id', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+/**
+ * Turn a Page you manage into a client, in one step. (phase 19)
+ *
+ * This is how an agency actually onboards: the employee is already a manager
+ * on the client's Business Suite, so connecting Meta once hands back every
+ * Page they look after. Before this, that list was a dead end — you had to go
+ * to the Clients page, retype the business name, the Page and the Instagram
+ * handle that Meta had just told us, save, come back, and assign. Four chances
+ * to typo a handle that everything downstream keys on.
+ *
+ * The Page is the source of truth for name, Page id and linked Instagram, so
+ * none of it is retyped. Niche and location are the only things Meta cannot
+ * tell us, so they are the only things asked for.
+ */
+app.post('/api/meta/connections/:id/onboard', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data: conn } = await supabase.from('meta_connections')
+            .select('id, user_id, client_id, page_id, page_name, ig_username').eq('id', req.params.id).maybeSingle();
+        if (!conn || conn.user_id !== ctx.user.id) return res.status(404).json({ error: 'Connection not found.' });
+        if (conn.client_id) return res.status(409).json({ error: 'This Page is already filed under a client.' });
+
+        const body = cleanClientBody(req.body);
+        const row = {
+            owner_user_id: ctx.user.id,
+            name: body.name || conn.page_name || `Page ${conn.page_id}`,
+            fb_page: body.fb_page || conn.page_name || null,
+            fb_page_id: conn.page_id,
+            ig_handle: body.ig_handle !== undefined ? body.ig_handle : (conn.ig_username || null),
+            niche: body.niche ?? null,
+            location: body.location ?? null,
+            notes: body.notes ?? null
+        };
+        const { data: client, error } = await supabase.from('clients').insert([row]).select().maybeSingle();
+        if (error) throw error;
+
+        // If filing the connection fails, the client row would be left behind
+        // looking connected when it is not. Rolling it back is better than a
+        // half-onboarded client nobody can explain.
+        const { error: linkErr } = await supabase.from('meta_connections')
+            .update({ client_id: client.id }).eq('id', conn.id);
+        if (linkErr) {
+            await supabase.from('clients').delete().eq('id', client.id);
+            throw linkErr;
+        }
+
+        logger.info('meta_client_onboarded', { userId: ctx.user.id, clientId: client.id, pageId: conn.page_id });
+        res.status(201).json({ client: { ...client, access: 'owner' }, connectionId: conn.id });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Every Page this employee manages, with the client each is filed under and
+ * whether it still needs one. The Clients page asks for exactly this after an
+ * OAuth round trip, and building it from /api/meta/connections plus
+ * /api/clients meant two calls and a join in the browser.
+ */
+app.get('/api/meta/inbox', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const [{ data: conns }, { data: owned }, { data: mem }] = await Promise.all([
+            supabase.from('meta_connections')
+                .select('id, client_id, page_id, page_name, ig_username, status, last_sync_at, token_expires_at')
+                .eq('user_id', ctx.user.id).order('created_at', { ascending: false }),
+            supabase.from('clients').select('id, name, archived').eq('owner_user_id', ctx.user.id),
+            supabase.from('client_members').select('client_id').eq('user_id', ctx.user.id)
+        ]);
+        const memberIds = (mem || []).map(m => m.client_id);
+        let shared = [];
+        if (memberIds.length) {
+            const { data } = await supabase.from('clients').select('id, name, archived').in('id', memberIds);
+            shared = data || [];
+        }
+        const clients = [...(owned || []), ...shared].filter(c => !c.archived);
+        const byId = Object.fromEntries(clients.map(c => [c.id, c.name]));
+
+        const pages = (conns || []).map(c => ({
+            connectionId: c.id, pageId: c.page_id, pageName: c.page_name,
+            igUsername: c.ig_username, status: c.status,
+            lastSyncAt: c.last_sync_at, tokenExpiresAt: c.token_expires_at,
+            clientId: c.client_id, clientName: c.client_id ? (byId[c.client_id] || 'a client you cannot see') : null,
+            needsClient: !c.client_id
+        }));
+        res.json({
+            pages, clients: clients.map(c => ({ id: c.id, name: c.name })),
+            unfiled: pages.filter(p => p.needsClient).length,
+            configured: metaConfigured()
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.delete('/api/meta/connections/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -11246,6 +11337,500 @@ app.get('/api/meta/report/:id', async (req, res) => {
         const { data } = await supabase.from('reports').select('*').eq('id', req.params.id).maybeSingle();
         if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
         res.json({ report: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 19 :: THE MONTHLY OWNER REPORT
+//
+// The rolling 28-day sync answers "how are we doing". A monthly report answers
+// a different question — "what happened in September, versus August" — and it
+// is the thing an agency actually sends. That makes the comparison the point,
+// not a garnish, so both months are pulled in the same job rather than
+// diffed against whatever snapshot happened to be lying around.
+//
+// Everything here is owner-side Meta Insights. Nothing scraped is mixed in:
+// the two are different measurements of different populations and a report
+// that blends them is wrong in a way nobody can see.
+// ===========================================================================
+
+/** 'YYYY-MM' -> unix-second bounds covering exactly that calendar month, UTC. */
+function metaMonthWindow(month) {
+    const [y, m] = String(month).split('-').map(Number);
+    const start = Date.UTC(y, m - 1, 1) / 1000;
+    const end = Date.UTC(y, m, 1) / 1000;      // exclusive: the 1st of the next month
+    return { since: start, until: end };
+}
+function metaPrevMonth(month) {
+    const [y, m] = String(month).split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 2, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+/** The last COMPLETE month. A report on a month still running is a report that changes under you. */
+function metaDefaultMonth(now = new Date()) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+function metaMonthLabel(month) {
+    const [y, m] = String(month).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/**
+ * Percentage change, with the cases that matter kept distinct.
+ *
+ * 0 -> 40 is not "+Infinity%" and not "+0%"; it is "new", and a report that
+ * prints either of the other two is lying about the same number.
+ */
+function pctDelta(now, before) {
+    // Number(null) and Number('') are both 0, so coercing first would turn a
+    // metric Meta never returned into a 100% collapse — a number the client
+    // would ask about and nobody could explain. Absence is checked first and
+    // stays absence.
+    const num = v => (v === null || v === undefined || v === '' ? NaN : Number(v));
+    const a = num(now), b = num(before);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return { pct: null, kind: 'unknown' };
+    if (b === 0) return { pct: null, kind: a > 0 ? 'new' : 'flat' };
+    const pct = ((a - b) / b) * 100;
+    return { pct: Math.round(pct * 10) / 10, kind: Math.abs(pct) < 1 ? 'flat' : (pct > 0 ? 'up' : 'down') };
+}
+
+const META_MONTH_METRICS = [
+    { key: 'reach',              level: 'ig',   label: 'Accounts reached' },
+    { key: 'views',              level: 'ig',   label: 'Views' },
+    { key: 'accounts_engaged',   level: 'ig',   label: 'Accounts engaged' },
+    { key: 'total_interactions', level: 'ig',   label: 'Interactions' },
+    { key: 'profile_views',      level: 'ig',   label: 'Profile visits' },
+    { key: 'website_clicks',     level: 'ig',   label: 'Website taps' },
+    { key: 'follower_count',     level: 'ig',   label: 'Followers gained' },
+    { key: 'page_impressions_unique', level: 'page', label: 'Page reach' },
+    { key: 'page_post_engagements',   level: 'page', label: 'Page engagements' },
+    { key: 'page_views_total',        level: 'page', label: 'Page views' },
+    { key: 'page_fan_adds_unique',    level: 'page', label: 'New Page followers' }
+];
+
+/** Owner totals for one window. Used twice per job — this month and last. */
+async function metaWindowTotals(conn, pageToken, since, until) {
+    const gaps = [];
+    const out = { ig: {}, page: {} };
+
+    const pageIns = await graphInsights(conn.page_id,
+        META_MONTH_METRICS.filter(m => m.level === 'page').map(m => m.key),
+        { period: 'day', since, until }, pageToken);
+    gaps.push(...pageIns.unsupported.map(m => `page:${m}`));
+    out.page = Object.fromEntries(Object.entries(pageIns.values).map(([k, v]) => [k, seriesSum(v)]));
+
+    if (conn.ig_user_id) {
+        const igIns = await graphInsights(conn.ig_user_id,
+            META_MONTH_METRICS.filter(m => m.level === 'ig').map(m => m.key),
+            { period: 'day', metric_type: 'total_value', since, until }, pageToken);
+        gaps.push(...igIns.unsupported.map(m => `ig:${m}`));
+        out.ig = Object.fromEntries(Object.entries(igIns.values).map(([k, v]) => [k, Array.isArray(v) ? seriesSum(v) : Number(v) || 0]));
+    }
+    return { ...out, gaps };
+}
+
+registerWorker('meta_monthly', (userId, input, jobId) => async (progress, ck) => {
+    const conn = await supabase.from('meta_connections').select('*').eq('id', input.connectionId).maybeSingle().then(r => r.data);
+    if (!conn) throw new Error('Connection no longer exists.');
+    const pageToken = decryptSecret(conn.page_token_enc);
+    const month = input.month;
+    const prev = metaPrevMonth(month);
+    const win = metaMonthWindow(month);
+    const pwin = metaMonthWindow(prev);
+    const gaps = [], warnings = [];
+
+    // --- both months' totals ------------------------------------------------
+    await progress(8, `Reading ${metaMonthLabel(month)}`);
+    let cur = ck.get('cur');
+    if (!cur) { cur = await metaWindowTotals(conn, pageToken, win.since, win.until); await ck.done('cur', cur); }
+    gaps.push(...cur.gaps);
+
+    await progress(28, `Reading ${metaMonthLabel(prev)} to compare`);
+    let before = ck.get('prev');
+    if (!before) {
+        // A missing previous month is a real state, not a failure: the account
+        // may have connected mid-month. The report says so rather than
+        // printing deltas against zero as though nothing happened last month.
+        try { before = await metaWindowTotals(conn, pageToken, pwin.since, pwin.until); }
+        catch (err) {
+            if (err.statusCode === 401) throw err;
+            before = { ig: {}, page: {}, gaps: [], unavailable: String(err.message || '').slice(0, 200) };
+        }
+        await ck.done('prev', before);
+    }
+    if (before.unavailable) warnings.push(`${metaMonthLabel(prev)} could not be read, so this month is reported without a comparison.`);
+
+    // --- profile snapshot ---------------------------------------------------
+    await progress(42, 'Reading the account');
+    let who = ck.get('who');
+    if (!who) {
+        const pageMeta = await graphGet(conn.page_id, { fields: 'id,name,fan_count,followers_count,category,link' }, pageToken);
+        let ig = null, demographics = {};
+        if (conn.ig_user_id) {
+            ig = await graphGet(conn.ig_user_id, { fields: 'id,username,name,followers_count,follows_count,media_count' }, pageToken);
+            for (const bd of ['age', 'gender', 'city', 'country']) {
+                try {
+                    const d = await graphGet(`${conn.ig_user_id}/insights`, { metric: 'follower_demographics', period: 'lifetime', metric_type: 'total_value', breakdown: bd }, pageToken);
+                    const rows = d.data?.[0]?.total_value?.breakdowns?.[0]?.results || [];
+                    demographics[bd] = rows.map(r => ({ key: (r.dimension_values || []).join(' '), value: r.value }))
+                        .sort((a, b) => b.value - a.value).slice(0, 10);
+                } catch (err) { if (err.statusCode === 401) throw err; gaps.push(`ig:follower_demographics:${bd}`); }
+            }
+        } else {
+            warnings.push('No Instagram professional account is linked to this Page, so the report covers Facebook only.');
+        }
+        who = { page: pageMeta, ig, demographics };
+        await ck.done('who', who);
+    }
+
+    // --- the month's posts --------------------------------------------------
+    await progress(58, 'Reading the posts published this month');
+    let posts = ck.get('posts');
+    if (!posts) {
+        posts = [];
+        if (conn.ig_user_id) {
+            // /media has no reliable since/until, so the window is applied here.
+            // Stopping at the first post older than the window works because
+            // the edge is returned newest-first.
+            const out = await graphGet(`${conn.ig_user_id}/media`, {
+                fields: 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,shortcode',
+                limit: META_MEDIA_LIMIT
+            }, pageToken);
+            const inWindow = (out.data || []).filter(m => {
+                const t = Date.parse(m.timestamp || '') / 1000;
+                return Number.isFinite(t) && t >= win.since && t < win.until;
+            });
+            for (let i = 0; i < inWindow.length; i++) {
+                const m = inWindow[i];
+                const kind = m.media_product_type === 'REELS' ? 'reel' : (m.media_type === 'CAROUSEL_ALBUM' ? 'carousel' : 'still');
+                let ins = {};
+                try {
+                    const r = await graphInsights(m.id, ['reach', 'saved', 'shares', 'views', 'total_interactions'], {}, pageToken);
+                    ins = Object.fromEntries(Object.entries(r.values).map(([k, v]) => [k, Array.isArray(v) ? seriesLast(v) : v]));
+                } catch (err) { if (err.statusCode === 401) throw err; }
+                posts.push({
+                    id: m.id, kind, permalink: m.permalink || null, postedAt: m.timestamp || null,
+                    caption: (m.caption || '').slice(0, 200) || null,
+                    likes: m.like_count ?? null, comments: m.comments_count ?? null,
+                    reach: ins.reach ?? null, saved: ins.saved ?? null, shares: ins.shares ?? null,
+                    views: ins.views ?? null, interactions: ins.total_interactions ?? null
+                });
+                if (i % 8 === 7) await progress(58 + Math.round(20 * (i / inWindow.length)), `Posts ${i + 1}/${inWindow.length}`);
+            }
+        }
+        await ck.done('posts', posts);
+    }
+
+    // --- the comparison table ----------------------------------------------
+    await progress(82, 'Building the month-over-month view');
+    const deltas = META_MONTH_METRICS.map(m => {
+        const now = cur[m.level]?.[m.key];
+        const then = before.unavailable ? null : before[m.level]?.[m.key];
+        if (now === undefined) return null;
+        const d = then === null || then === undefined ? { pct: null, kind: 'no_baseline' } : pctDelta(now, then);
+        return { key: m.key, level: m.level, label: m.label, now: Number(now) || 0, before: then ?? null, ...d };
+    }).filter(Boolean);
+
+    const byKind = {};
+    for (const p of posts) {
+        const a = byKind[p.kind] = byKind[p.kind] || { n: 0, reach: [], saved: [], shares: [], interactions: [] };
+        a.n += 1;
+        for (const f of ['reach', 'saved', 'shares', 'interactions']) if (typeof p[f] === 'number') a[f].push(p[f]);
+    }
+    const formats = Object.fromEntries(Object.entries(byKind).map(([k, a]) => [k, {
+        n: a.n, medianReach: median(a.reach), medianSaved: median(a.saved),
+        medianShares: median(a.shares), medianInteractions: median(a.interactions)
+    }]));
+
+    const top = arr => arr.filter(p => typeof p.reach === 'number').sort((a, b) => b.reach - a.reach).slice(0, 5);
+    const summary = {
+        month, monthLabel: metaMonthLabel(month), prevMonth: prev, prevMonthLabel: metaMonthLabel(prev),
+        comparable: !before.unavailable,
+        account: {
+            pageName: who.page?.name || conn.page_name || null,
+            pageFollowers: who.page?.followers_count ?? who.page?.fan_count ?? null,
+            igUsername: who.ig?.username || conn.ig_username || null,
+            igFollowers: who.ig?.followers_count ?? null,
+            igPosts: who.ig?.media_count ?? null
+        },
+        totals: { current: cur, previous: before.unavailable ? null : { ig: before.ig, page: before.page } },
+        deltas,
+        posting: { count: posts.length, formats, topByReach: top(posts), topBySaves: posts.filter(p => typeof p.saved === 'number').sort((a, b) => b.saved - a.saved).slice(0, 3) },
+        demographics: who.demographics,
+        gaps: [...new Set(gaps)],
+        warnings,
+        sources: { all: 'meta_owner_insights', note: 'Owner-only Meta Insights. Nothing here is scraped and nothing is blended with scraped data.' }
+    };
+
+    // --- narrative ----------------------------------------------------------
+    await progress(90, 'Writing the month up');
+    let ai = null, aiStatus = { ok: false, reason: 'no_key', message: aiReasonText('no_key') };
+    if (geminiAvailable()) {
+        const { json } = budgetedJson(summary, { maxChars: 28000, keep: ['deltas', 'account', 'posting'] });
+        const prompt =
+`You are writing the monthly social media report an agency sends its client. The month is ${summary.monthLabel}${summary.comparable ? `, compared against ${summary.prevMonthLabel}` : ' (no previous month is available to compare against)'}.
+${input.brief ? `Context from the team: ${input.brief}\n` : ''}
+Every number below is owner-side Meta Insights for this account. Rules:
+- Never invent a number. Every figure you use must appear in the JSON.
+- A metric with kind "new" went from zero — describe it as new, never as a percentage.
+- A metric with kind "no_baseline" has no previous month. Do not imply a trend for it.
+- Do not recommend ad spend, budgets, audiences or targeting. There is no ad data here.
+- Write for the business owner: plain language, no metric jargon, no platform lecture.
+${summary.comparable ? '' : '- There is no comparison month. Do not write as if there is.\n'}
+Data (JSON):
+${json}
+
+Reply with ONLY this JSON:
+{
+ "headline": "one sentence a client reads first — the month in a line",
+ "executive_summary": "3-4 sentences with the numbers that matter",
+ "what_moved": ["2-4 lines, each naming a metric and its change"],
+ "what_worked": ["2-3 lines about the posts and formats that performed, with numbers"],
+ "what_did_not": ["1-3 honest lines; say 'nothing stood out' if that is the truth"],
+ "audience": "1-2 sentences from demographics, or 'not enough data'",
+ "next_month": ["3-4 concrete actions, each doable by one person with a phone"],
+ "caveats": "one sentence on anything missing from the data, or empty string"
+}`;
+        const r = await geminiCallDetailed(prompt, { temperature: 0.4, maxOutputTokens: 4000, tag: 'Gemini Monthly', userId });
+        aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
+        ai = r.ok ? r.data : null;
+    }
+    if (!aiStatus.ok) warnings.push(`Narrative unavailable: ${aiStatus.message}`);
+
+    await progress(96, 'Saving');
+    const payload = { ...summary, ai, aiStatus, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
+    const { data: saved } = await supabase.from('reports').insert([{
+        user_id: userId,
+        client_id: input.clientId || conn.client_id || null,
+        meta_connection_id: conn.id,
+        platform: 'meta',
+        report_type: 'meta_monthly',
+        target_handle: conn.ig_username || conn.page_name || conn.page_id,
+        posts_analyzed: posts.length,
+        // The 1st of the month being reported, so the timeline sorts by the
+        // month covered rather than the day somebody pressed the button.
+        snapshot_date: `${month}-01`,
+        credits_estimate: 0,
+        ai_summary: ai?.executive_summary || null,
+        ai_json: ai || null,
+        ai_status: aiStatus,
+        report_json: payload
+    }]).select('id').maybeSingle();
+
+    return { reportId: saved?.id || null, reportRef: saved?.id || null, month, aiStatus, gaps: summary.gaps };
+});
+
+// ===========================================================================
+// PHASE 19 :: THE COMPARISON SET
+//
+// "How do I compare to similar businesses near me" was the one client-facing
+// promise that still depended on somebody typing competitor handles into a box
+// by hand. This finds them: same niche, same place, similar size.
+//
+// Size is the part that is easy to get wrong. A 900-follower florist compared
+// against a 400,000-follower chain learns nothing except that they are small,
+// which they knew. The band below is deliberately narrow and the reason it
+// exists is that a comparison outside it is not a comparison.
+// ===========================================================================
+
+/** The size band a comparison is meaningful inside: a third to three times. */
+function comparableBand(followers) {
+    const f = Number(followers) || 0;
+    if (f < 200) return { min: 0, max: 3000 };   // too small for a ratio to mean anything
+    return { min: Math.round(f / 3), max: Math.round(f * 3) };
+}
+
+/** Search phrases for a niche in a place. Ordered: most specific first. */
+function competitorQueries(niche, location) {
+    const n = String(niche || '').trim();
+    const l = String(location || '').trim();
+    if (!n) return [];
+    const city = l.split(',')[0].trim();
+    return [...new Set([
+        city ? `${n} ${city}` : null,
+        city ? `${city} ${n}` : null,
+        l && l !== city ? `${n} ${l}` : null,
+        n
+    ].filter(Boolean))].slice(0, 3);
+}
+
+registerWorker('competitor_discovery', (userId, input, jobId) => async (progress, ck) => {
+    const { niche, location, selfHandle, followers } = input;
+    const band = comparableBand(followers);
+    const warnings = [];
+
+    await progress(8, `Searching for ${niche}${location ? ` in ${location}` : ''}`);
+    let candidates = ck.get('candidates');
+    if (!candidates) {
+        const seen = new Set();
+        candidates = [];
+        for (const q of competitorQueries(niche, location)) {
+            try {
+                const estimate = COST_PER_1K_PROFILE / 20;
+                const { client } = await getWorkingClient('report', userId, { needUsd: estimate, jobId });
+                const { items } = await callActor(client, 'apify/instagram-search-scraper',
+                    { searchQueries: [q], searchType: 'user' },
+                    { estimateUsd: estimate, maxItems: 40, jobId });
+                for (const it of (items || [])) {
+                    const h = String(it.username || it.ownerUsername || '').toLowerCase().replace('@', '').trim();
+                    if (!h || seen.has(h) || h === String(selfHandle || '').toLowerCase()) continue;
+                    seen.add(h);
+                    candidates.push({ username: h, foundFor: q });
+                }
+            } catch (err) { warnings.push(`Search "${q}" failed: ${err.message}`); }
+        }
+        await ck.done('candidates', candidates);
+    }
+    if (!candidates.length) {
+        return { handles: [], considered: 0, warnings: [...warnings, 'No accounts came back for that niche and location. Try a broader niche word.'] };
+    }
+
+    await progress(45, `Checking ${Math.min(candidates.length, 30)} accounts`);
+    let profiles = ck.get('profiles');
+    if (!profiles) {
+        const batch = candidates.slice(0, 30).map(c => c.username);
+        const estimate = (batch.length / 1000) * COST_PER_1K_PROFILE;
+        const { client } = await getWorkingClient('report', userId, { needUsd: estimate, jobId });
+        const { items } = await callActor(client, 'apify/instagram-profile-scraper',
+            { usernames: batch },
+            { estimateUsd: estimate, maxItems: batch.length, jobId });
+        profiles = items || [];
+        await ck.done('profiles', profiles);
+    }
+
+    await progress(82, 'Picking the comparable ones');
+    const scored = profiles.map(p => {
+        const h = String(p.username || '').toLowerCase();
+        const f = Number(p.followersCount ?? p.followers_count ?? 0) || 0;
+        const isBusiness = !!(p.isBusinessAccount ?? p.is_business_account ?? p.businessCategoryName);
+        const posts = Number(p.postsCount ?? p.posts_count ?? 0) || 0;
+        return {
+            username: h, followers: f, posts, isBusiness,
+            category: p.businessCategoryName || p.category_name || null,
+            private: !!(p.private ?? p.isPrivate),
+            inBand: f >= band.min && f <= band.max
+        };
+    }).filter(p => p.username && !p.private && p.inBand && p.posts >= 6);
+
+    // Closest in size first: the most comparable account is the one most like
+    // them, not the biggest one that matched the search.
+    const target = Number(followers) || 0;
+    scored.sort((a, b) => {
+        if (a.isBusiness !== b.isBusiness) return a.isBusiness ? -1 : 1;
+        return Math.abs(a.followers - target) - Math.abs(b.followers - target);
+    });
+    const picked = scored.slice(0, 8);
+
+    if (!picked.length) {
+        warnings.push(`Found ${profiles.length} accounts but none were a comparable size (between ${band.min.toLocaleString()} and ${band.max.toLocaleString()} followers).`);
+    }
+
+    if (input.clientId && picked.length) {
+        await supabase.from('clients').update({
+            competitors: picked.map(p => p.username),
+            competitors_source: 'discovered',
+            competitors_updated_at: new Date().toISOString()
+        }).eq('id', input.clientId);
+    }
+
+    return {
+        handles: picked.map(p => p.username),
+        accounts: picked,
+        considered: profiles.length,
+        band,
+        warnings,
+        note: 'Discovered from public Instagram search. Review them before using — a search match is not a competitor.'
+    };
+});
+
+app.post('/api/clients/:id/competitors/discover', spendLimit, async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        await assertJobSlot(ctx.user.id);
+
+        const { data: client } = await supabase.from('clients')
+            .select('id, name, ig_handle, niche, location').eq('id', c.id).maybeSingle();
+        const niche = String(req.body.niche || client?.niche || '').trim();
+        const location = String(req.body.location || client?.location || '').trim();
+        if (!niche) return res.status(400).json({ error: 'This client has no niche set, so there is nothing to search for. Add one first.' });
+
+        // Their own follower count sets the band. Without it every account is
+        // "comparable" and the result is a list of whoever ranked highest.
+        let followers = Number(req.body.followers) || 0;
+        if (!followers && client?.ig_handle) {
+            const { data: last } = await supabase.from('reports')
+                .select('followers_snapshot').eq('client_id', c.id)
+                .not('followers_snapshot', 'is', null)
+                .order('created_at', { ascending: false }).limit(1);
+            followers = Number(last?.[0]?.followers_snapshot) || 0;
+        }
+
+        const job = await createJob(ctx.user.id, 'competitor_discovery', 'report', {
+            clientId: c.id, niche, location, followers,
+            selfHandle: client?.ig_handle || null
+        }, COST_PER_1K_PROFILE / 20);
+        runJob(job.id, JOB_WORKERS['competitor_discovery'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ success: true, jobId: job.id });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** The agreed comparison set. Kept on the client so every run uses the same one. */
+app.put('/api/clients/:id/competitors', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        const handles = [...new Set((Array.isArray(req.body.handles) ? req.body.handles : [])
+            .map(h => String(h || '').trim().replace(/^@/, '').replace(/\/+$/, '').toLowerCase())
+            .filter(h => /^[a-z0-9._]{1,30}$/.test(h)))].slice(0, 12);
+        const { error } = await supabase.from('clients').update({
+            competitors: handles.length ? handles : null,
+            competitors_source: handles.length ? (req.body.source === 'discovered' ? 'discovered' : 'manual') : null,
+            competitors_updated_at: handles.length ? new Date().toISOString() : null
+        }).eq('id', c.id);
+        if (error) throw error;
+        res.json({ success: true, handles });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/meta/monthly', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
+        const conn = await metaLoadConnection(ctx.user.id, req.body.connectionId);
+        if (!conn) return res.status(404).json({ error: 'Connection not found.' });
+
+        const month = MONTH_RE.test(String(req.body.month || '')) ? String(req.body.month) : metaDefaultMonth();
+        // A month that has not finished would produce a report that changes
+        // if you ran it again tomorrow. That is not a monthly report.
+        if (month >= new Date().toISOString().slice(0, 7)) {
+            return res.status(400).json({ error: 'That month has not finished yet. Pick a completed month.' });
+        }
+
+        const job = await createJob(ctx.user.id, 'meta_monthly', 'meta_owned', {
+            connectionId: conn.id, month,
+            clientId: req.body.clientId || conn.client_id || null,
+            brief: String(req.body.brief || '').slice(0, 600) || null
+        }, 0);
+        runJob(job.id, JOB_WORKERS['meta_monthly'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ success: true, jobId: job.id, month, estimatedUsd: 0 });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/meta/monthly', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
+        let q = supabase.from('reports')
+            .select('id, user_id, client_id, meta_connection_id, target_handle, posts_analyzed, snapshot_date, created_at, ai_summary, ai_status')
+            .eq('report_type', 'meta_monthly');
+        q = (await applyReportScope(req, ctx))(q);
+        const { data, error } = await q.order('snapshot_date', { ascending: false }).limit(60);
+        if (error) throw error;
+        res.json({ reports: (data || []).map(r => ({ ...r, month: String(r.snapshot_date || '').slice(0, 7) })) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -12815,6 +13400,59 @@ async function geminiToolTurn(contents, functionDeclarations, { systemInstructio
  * invents can widen it.
  */
 const ASSISTANT_TOOLS = {
+    get_monthly_report: {
+        decl: {
+            name: 'get_monthly_report',
+            description: 'A finished monthly report built from owner-side Meta Insights: this month against last month across reach, engagement, profile visits and followers, plus the posts that performed and who the audience is. Use this for any question about a named month, "last month", "how did we do in September", or when asked to write up or summarise a month. It is the only source with month-over-month numbers — do not assemble a month by hand from other reports.',
+            parameters: {
+                type: 'OBJECT',
+                properties: {
+                    month: { type: 'STRING', description: 'The month as YYYY-MM, for example 2026-08. Leave it out for the most recent month available.' }
+                }
+            }
+        },
+        run: async (s, a) => {
+            let q = supabase.from('reports')
+                .select('id, snapshot_date, target_handle, report_json, ai_json')
+                .eq('report_type', 'meta_monthly').or(s.reportScope);
+            const m = String(a.month || '');
+            if (/^\d{4}-(0[1-9]|1[0-2])$/.test(m)) q = q.eq('snapshot_date', `${m}-01`);
+            const { data } = await q.order('snapshot_date', { ascending: false }).limit(1);
+            const row = (data || [])[0];
+            if (!row) {
+                return {
+                    available: false,
+                    note: m ? `No monthly report exists for ${m}.` : 'No monthly report has been produced for this account yet.',
+                    how: 'A monthly report needs Meta connected for this account, then one run for the month.'
+                };
+            }
+            const r = row.report_json || {};
+            // The whole payload is far more than a turn needs and would crowd
+            // out the conversation. What comes back is what a person writing
+            // the month up would actually cite.
+            return {
+                available: true,
+                month: r.month, monthLabel: r.monthLabel,
+                comparedWith: r.comparable ? r.prevMonthLabel : null,
+                account: r.account,
+                movements: (r.deltas || []).map(d => ({
+                    metric: d.label, value: d.now, previous: d.before,
+                    changePct: d.pct, direction: d.kind
+                })),
+                postsPublished: r.posting?.count ?? null,
+                byFormat: r.posting?.formats || null,
+                bestPosts: (r.posting?.topByReach || []).map(p => ({
+                    kind: p.kind, reach: p.reach, saved: p.saved, shares: p.shares,
+                    caption: p.caption, link: p.permalink
+                })),
+                audience: r.demographics || null,
+                narrative: row.ai_json || null,
+                missing: r.gaps || [],
+                source: 'owner Meta Insights'
+            };
+        }
+    },
+
     get_my_reports: {
         decl: {
             name: 'get_my_reports',
@@ -12967,21 +13605,49 @@ function assistantDeclarations() {
  * of inventing one is higher than the cost of saying there is no data.
  */
 function assistantSystemPrompt(scope) {
-    return [
-        'You are EdgeLead\'s assistant. You help the owner of a small business understand their own social media.',
-        '',
-        'How to answer:',
-        '- Talk like a knowledgeable friend, not a dashboard. Short paragraphs, no bullet-point dumps unless asked for a list.',
+    // Two readers, one set of numbers. An owner wants to know what to do on
+    // Monday; an operator is building a deliverable and needs the mechanics,
+    // the caveats and the wording they can hand on. Writing one prompt for
+    // both produces an answer that patronises the operator and overwhelms the
+    // owner, so the register splits here and the access rules do not.
+    const operator = scope.audience === 'operator';
+    const who = scope.client?.name ? `the account "${scope.client.name}"` : 'this business';
+
+    const common = [
         '- Lead with the answer. Put the reasoning after it, only if it helps.',
         '- Numbers are for support, not decoration. One or two that matter beat ten that do not.',
         '- Never invent a figure. If a tool did not return it, say you do not have it and say what would get it.',
-        '- Never mention tools, reports ids, databases, scraping, Apify, or how any of this is built.',
+        '- Scraped numbers and owner-only Meta numbers are different things and are never averaged, added or compared as if they were the same measurement. If you use both, say which is which.'
+    ];
+
+    return [
+        operator
+            ? `You are EdgeLead's analyst. You work alongside an agency operator who is managing ${who} on behalf of a client. They are a professional: they know the platforms, they are building something they will put their name on.`
+            : 'You are EdgeLead\'s assistant. You help the owner of a small business understand their own social media.',
+        '',
+        'How to answer:',
+        operator
+            ? '- Talk like a sharp colleague. Be direct, skip the encouragement, do not explain what engagement rate is.'
+            : '- Talk like a knowledgeable friend, not a dashboard. Short paragraphs, no bullet-point dumps unless asked for a list.',
+        ...common,
+        operator
+            ? '- When something in the data is weak, ambiguous or too small a sample to act on, say so plainly. They would rather hear it from you than from their client.'
+            : '- Never mention tools, reports ids, databases, scraping, Apify, or how any of this is built.',
+        operator
+            ? '- If they ask for something they can send to a client, write it in the client\'s language: no internal metric names, no tool names, no hedging they would have to strip out.'
+            : '',
         '',
         'What you can see:',
         scope.metaConnected
-            ? '- This business has connected Meta, so you can also see owner-only numbers: reach, saves, profile visits and demographics.'
-            : '- This business has NOT connected Meta. You can only see what is visible from outside the account. If they ask about reach, saves, impressions, profile visits or who their audience is, say plainly that those are owner-only numbers and connecting Meta would let you answer properly. Say it once, naturally, not as a sales pitch every time.',
-        scope.handle ? `- Their Instagram is @${scope.handle}.` : '',
+            ? `- ${operator ? 'This account has' : 'This business has'} connected Meta, so you can also see owner-only numbers: reach, saves, profile visits and demographics.`
+            : (operator
+                ? '- Meta is NOT connected for this account, so there are no owner-only numbers: no reach, saves, impressions, profile visits or demographics. Everything you have is observable from outside. Say which is missing when it matters; do not pitch connecting, they already know.'
+                : '- This business has NOT connected Meta. You can only see what is visible from outside the account. If they ask about reach, saves, impressions, profile visits or who their audience is, say plainly that those are owner-only numbers and connecting Meta would let you answer properly. Say it once, naturally, not as a sales pitch every time.'),
+        scope.handle ? `- ${operator ? 'The' : 'Their'} Instagram is @${scope.handle}.` : '',
+        operator && scope.client?.niche ? `- Niche: ${scope.client.niche}${scope.client.location ? `, in ${scope.client.location}` : ''}.` : '',
+        operator && scope.clientId
+            ? '- You are scoped to this one client. You cannot see the operator\'s other clients from here, so do not compare against them or refer to them.'
+            : '',
         `- Today is ${new Date().toISOString().slice(0, 10)}.`,
         '',
         'If you have no data at all for what they asked, say so in one sentence and suggest the one thing that would fix it.'
@@ -12989,11 +13655,25 @@ function assistantSystemPrompt(scope) {
 }
 
 /** Everything a tool needs to stay inside one account, resolved once. */
-async function assistantScope(userId) {
-    const [{ data: memberships }, { data: owned }, { data: conn }, { data: prof }] = await Promise.all([
+/**
+ * What one assistant conversation is allowed to see.
+ *
+ * `clientId` narrows the whole thing to a single client. An employee running
+ * eight accounts asking "how did last month go" must not get an answer blended
+ * across all eight — and the model cannot be trusted to keep them apart on its
+ * own, so the narrowing happens here and the tools never receive an account
+ * argument at all (tested in phase15).
+ *
+ * `audience` is who is reading, not what they may read: an owner and an
+ * operator get the same numbers and a different register. Access is still
+ * decided by scope; this only changes how the answer is written.
+ */
+async function assistantScope(userId, clientId = null, role = null) {
+    const wanted = clientId && UUID_RE.test(String(clientId)) ? String(clientId) : null;
+
+    const [{ data: memberships }, { data: owned }, { data: prof }] = await Promise.all([
         supabase.from('client_members').select('client_id').eq('user_id', userId),
-        supabase.from('clients').select('id, ig_handle').eq('owner_user_id', userId),
-        supabase.from('meta_connections').select('id').eq('user_id', userId).eq('status', 'active').limit(1),
+        supabase.from('clients').select('id, name, ig_handle, fb_page, niche, location, competitors').eq('owner_user_id', userId),
         supabase.from('reports').select('target_handle').eq('user_id', userId)
             .order('created_at', { ascending: false }).limit(1)
     ]);
@@ -13003,15 +13683,40 @@ async function assistantScope(userId) {
         ...(owned || []).map(c => c.id)
     ])].filter(Boolean);
 
-    const ors = [`user_id.eq.${userId}`];
-    if (clientIds.length) ors.push(`client_id.in.(${clientIds.join(',')})`);
+    // A client id the caller has no access to is dropped rather than refused:
+    // the request still answers, just over their own data. Refusing would let
+    // a stale picker selection break an otherwise valid question.
+    const scoped = wanted && clientIds.includes(wanted) ? wanted : null;
+    let client = (owned || []).find(c => c.id === scoped) || null;
+    if (scoped && !client) {
+        const { data } = await supabase.from('clients')
+            .select('id, name, ig_handle, fb_page, niche, location, competitors').eq('id', scoped).maybeSingle();
+        client = data || null;
+    }
+
+    // Meta is checked against the same narrowing. A connection filed under a
+    // different client must not make THIS client look connected, or the
+    // assistant will confidently offer owner numbers it cannot read.
+    let cq = supabase.from('meta_connections').select('id').eq('status', 'active');
+    cq = scoped ? cq.eq('client_id', scoped) : cq.eq('user_id', userId);
+    const { data: conn } = await cq.limit(1);
+
+    const ors = scoped
+        ? [`client_id.eq.${scoped}`]
+        : [`user_id.eq.${userId}`, ...(clientIds.length ? [`client_id.in.(${clientIds.join(',')})`] : [])];
 
     return {
         userId,
+        role,
+        audience: role === 'client' ? 'owner' : 'operator',
         clientIds,
+        clientId: scoped,
+        client,
         reportScope: ors.join(','),
         metaConnected: !!(conn && conn.length),
-        handle: (owned || []).find(c => c.ig_handle)?.ig_handle || prof?.[0]?.target_handle || null
+        handle: client?.ig_handle
+            || (scoped ? null : (owned || []).find(c => c.ig_handle)?.ig_handle || prof?.[0]?.target_handle)
+            || null
     };
 }
 
@@ -13023,10 +13728,10 @@ async function assistantScope(userId) {
  * the ones that turn out to be tool calls, and the win over "I'm reading your
  * September report" is small.
  */
-async function assistantAnswer({ userId, message, conversationId, onEvent }) {
+async function assistantAnswer({ userId, message, conversationId, clientId = null, role = null, onEvent }) {
     const emit = ev => { try { if (onEvent) onEvent(ev); } catch (e) { logger.warn('assistant_emit', { message: e.message }); } };
 
-    const scope = await assistantScope(userId);
+    const scope = await assistantScope(userId, clientId, role);
 
     // Thread: reuse if it belongs to this user, otherwise start one.
     let conv = null;
@@ -13034,10 +13739,15 @@ async function assistantAnswer({ userId, message, conversationId, onEvent }) {
         const { data } = await supabase.from('ai_conversations')
             .select('*').eq('id', conversationId).eq('user_id', userId).maybeSingle();
         conv = data || null;
+        // A thread belongs to the client it was started under. Carrying it to
+        // a different client would silently re-answer eight turns of history
+        // about account A as if they had been about account B.
+        if (conv && (conv.client_id || null) !== (scope.clientId || null)) conv = null;
     }
     if (!conv) {
         const { data } = await supabase.from('ai_conversations').insert([{
             user_id: userId,
+            client_id: scope.clientId,
             title: String(message || '').slice(0, 80) || 'New conversation'
         }]).select().single();
         conv = data;
@@ -13055,6 +13765,7 @@ async function assistantAnswer({ userId, message, conversationId, onEvent }) {
     ];
 
     const STATUS = {
+        get_monthly_report:    'Pulling the monthly numbers',
         get_my_reports:        'Looking at your reports',
         get_report_detail:     'Reading your report',
         get_progress_over_time:'Checking how things have moved',
@@ -13114,7 +13825,11 @@ async function assistantAnswer({ userId, message, conversationId, onEvent }) {
     await supabase.from('ai_conversations')
         .update({ updated_at: new Date().toISOString() }).eq('id', conv.id);
 
-    return { answer, conversationId: conv.id, used: [...new Set(used)], metaConnected: scope.metaConnected };
+    return {
+        answer, conversationId: conv.id, used: [...new Set(used)],
+        metaConnected: scope.metaConnected,
+        clientId: scope.clientId, clientName: scope.client?.name || null
+    };
 }
 
 /**
@@ -13193,10 +13908,15 @@ app.post('/api/assistant/ask', rateLimit({ windowMs: 60000, max: 12 }), async (r
     const message = String(req.body?.message || '').trim().slice(0, 2000);
     if (!message) return res.status(400).json({ error: 'Ask a question first.' });
     const conversationId = req.body?.conversationId || null;
+    // EL.api puts the selected client on every body automatically, so an
+    // employee's question is scoped by the header picker without the page
+    // having to think about it.
+    const clientId = req.body?.clientId || null;
+    const role = ctx.profile?.role || null;
 
     if (String(req.query.stream || '') !== '1') {
         try {
-            res.json(await assistantAnswer({ userId: ctx.user.id, message, conversationId }));
+            res.json(await assistantAnswer({ userId: ctx.user.id, message, conversationId, clientId, role }));
         } catch (err) { sendErr(res, err); }
         return;
     }
@@ -13214,7 +13934,7 @@ app.post('/api/assistant/ask', rateLimit({ windowMs: 60000, max: 12 }), async (r
 
     try {
         const out = await assistantAnswer({
-            userId: ctx.user.id, message, conversationId,
+            userId: ctx.user.id, message, conversationId, clientId, role,
             onEvent: ev => send('status', ev)
         });
         send('done', out);
@@ -13231,10 +13951,15 @@ app.post('/api/assistant/ask', rateLimit({ windowMs: 60000, max: 12 }), async (r
 app.get('/api/assistant/conversations', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
-        const { data, error } = await supabase.from('ai_conversations')
-            .select('id, title, created_at, updated_at')
-            .eq('user_id', ctx.user.id)
-            .order('updated_at', { ascending: false }).limit(40);
+        // Threads follow the selected client. `.is('client_id', null)` rather
+        // than leaving the filter off: with no client selected you want your
+        // own threads, not a list mixing in every client you manage.
+        const cid = String(req.query.client_id || '');
+        let q = supabase.from('ai_conversations')
+            .select('id, title, client_id, created_at, updated_at')
+            .eq('user_id', ctx.user.id);
+        q = UUID_RE.test(cid) ? q.eq('client_id', cid) : q.is('client_id', null);
+        const { data, error } = await q.order('updated_at', { ascending: false }).limit(40);
         if (error) throw error;
         res.json({ conversations: data || [] });
     } catch (err) { sendErr(res, err); }
@@ -13969,5 +14694,8 @@ module.exports = {
     // phase 14 (client surface, extended)
     clientDemandView, DEMAND_INTENT,
     // phase 17
-    cpBoostCall
+    cpBoostCall,
+    // phase 19
+    metaMonthWindow, metaPrevMonth, metaDefaultMonth, metaMonthLabel, pctDelta,
+    META_MONTH_METRICS, comparableBand, competitorQueries
 };

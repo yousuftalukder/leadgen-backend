@@ -90,6 +90,7 @@
         { href: 'fb-advisor.html',     icon: '✍️', label: 'Post Advisor',      engine: 'fb_community' },
 
         { group: 'Workspace' },
+        { href: 'assistant.html',      icon: '💬', label: 'Analyst',           engine: null },
         { href: 'content-plan.html',   icon: '🧭', label: 'Content Plan',      engine: 'content_plan' },
         { href: 'clients.html',        icon: '👥', label: 'Clients',           engine: null },
         { href: 'schedules.html',      icon: '⏱',  label: 'Schedules',         engine: null },
