@@ -602,15 +602,23 @@
             if (id) localStorage.setItem(CLIENT_KEY, id); else localStorage.removeItem(CLIENT_KEY);
             document.querySelectorAll('.el-client-select').forEach(sel => { sel.value = id || ''; });
         },
+        // Why this records the failure instead of swallowing it: an empty list
+        // and a failed call both used to come back as [], so a picker showing
+        // only "None (just me)" could mean "you have no clients" OR "the call
+        // died" — and there was no way to tell which from the screen. The
+        // reason is kept so the picker can say which one happened.
+        _clientsErr: null,
         async clients(force = false) {
             if (EL._clients && !force) return EL._clients;
+            EL._clientsErr = null;
             try {
                 // never scope this list to the selected client — it IS the list of clients
                 const token = await EL.token();
                 const res = await fetch(`${BACKEND_URL}/api/clients`, { headers: { Authorization: `Bearer ${token}` } });
                 const d = await res.json().catch(() => ({}));
+                if (!res.ok) EL._clientsErr = d.error || `HTTP ${res.status}`;
                 EL._clients = res.ok ? (d.clients || []) : [];
-            } catch { EL._clients = []; }
+            } catch (err) { EL._clientsErr = err.message || 'network error'; EL._clients = []; }
             return EL._clients;
         },
         /** The selected client's row, or null. Sync once the picker has loaded. */
@@ -637,13 +645,27 @@
             const current = EL.clientId();
             if (current && !list.some(c => c.id === current)) EL.setClientId(null);
             const cur = EL.clientId();
+            // Three states, not two. A failed call used to look exactly like an
+            // empty account, which sends you hunting for a missing client that
+            // was there all along.
+            if (EL._clientsErr) {
+                host.innerHTML = `
+                    <span>Client</span>
+                    <select class="el-client-select" disabled><option>couldn’t load</option></select>
+                    <button type="button" class="el-client-retry" title="${EL.esc(EL._clientsErr)}">Retry</button>`;
+                host.querySelector('.el-client-retry').addEventListener('click', () => {
+                    EL._clients = null; EL._mountClientPicker().catch(() => {});
+                });
+                return;
+            }
             host.innerHTML = `
                 <span title="Every run on this page is filed under the selected client and every vault is scoped to it.">Client</span>
                 <select class="el-client-select" aria-label="Client workspace">
                     <option value="">None (just me)</option>
                     ${list.filter(c => !c.archived || c.id === cur).map(c =>
                         `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${EL.esc(c.name)}${c.access && c.access !== 'owner' ? ' · shared' : ''}</option>`).join('')}
-                </select>`;
+                </select>
+                <a class="el-client-manage" href="clients.html" title="${list.length ? list.length + ' client' + (list.length === 1 ? '' : 's') : 'No clients yet'}">Manage</a>`;
             host.querySelector('select').addEventListener('change', e => {
                 EL.setClientId(e.target.value || null);
                 // A page's vault, sources and estimates all depend on the client.

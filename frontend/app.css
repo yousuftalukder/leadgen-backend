@@ -637,6 +637,14 @@ tbody tr:last-child td { border-bottom: none; }
     border-radius: var(--r-sm); padding: 7px 10px; font-size: 0.76rem; color: var(--text-muted); }
 .el-side-foot .el-client select { background: transparent; color: var(--text-primary);
     border: none; font-size: 0.78rem; font-family: inherit; width: 100%; padding: 0; min-width: 0; }
+/* Manage / Retry sit at the right of the picker. `flex-shrink: 0` because the
+   select takes width:100% and would otherwise squeeze them to nothing. */
+.el-side-foot .el-client .el-client-manage,
+.el-side-foot .el-client .el-client-retry { flex-shrink: 0; font-size: 0.72rem; color: var(--accent-solid);
+    text-decoration: none; background: none; border: none; padding: 0; cursor: pointer;
+    font-family: inherit; letter-spacing: 0.01em; }
+.el-side-foot .el-client .el-client-manage:hover,
+.el-side-foot .el-client .el-client-retry:hover { color: #f0d39a; text-decoration: underline; }
 .el-side-foot .el-pill { display: flex; align-items: center; gap: 8px;
     background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
     border-radius: var(--r-sm); padding: 8px 10px; font-size: 0.75rem; color: var(--text-muted); }
