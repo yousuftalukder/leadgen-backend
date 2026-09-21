@@ -1,3 +1,35 @@
+# Repo-root Netlify config: the site is the frontend/ folder, nothing is built.
 [build]
+  base    = "frontend"
   publish = "."
   command = ""
+
+# ---------------------------------------------------------------------------
+# CACHING
+#
+# Nothing here is fingerprinted — app.css is always app.css — so the shared
+# assets cannot be cached immutably or a deploy would not reach anyone until
+# their cache expired.
+#
+# must-revalidate with a zero max-age is the right trade for this: the browser
+# still holds the file and still sends a conditional request, but Netlify
+# answers 304 when nothing changed. A repeat visit re-uses the bytes and pays
+# only a round trip, and a deploy is picked up immediately.
+# ---------------------------------------------------------------------------
+
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/app.css"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

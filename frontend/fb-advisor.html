@@ -4,32 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Post Advisor</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* fb-advisor.html — page-specific only. Shared rules live in app.css. */
     body { background: var(--bg-color); color: var(--text-primary); padding: 110px 20px 60px; max-width: 1400px;
-        margin: 0 auto; min-height: 100vh;
-        background-image: radial-gradient(circle at 50% 0%, rgba(59,130,246,0.08) 0%, transparent 50%); }
-    .card { background: var(--card-bg); backdrop-filter: blur(16px); padding: 30px; border-radius: 16px;
-        margin-bottom: 22px; border: 1px solid var(--card-border); }
-    .card-title { font-size: 1.15rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
-    .card-subtitle { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 20px; line-height: 1.55; }
-    label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin-bottom: 7px; }
-    input[type="text"], input[type="number"], select, textarea {
-        width: 100%; padding: 12px 14px; background: var(--input-bg); border: 1px solid var(--card-border);
-        color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
-    textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); }
+        margin: 0 auto; min-height: 100vh; }
     .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-items: end; }
-    .btn-primary { background: var(--accent-glow); border: none; color: #fff; font-weight: 800; padding: 13px 24px;
-        border-radius: 10px; cursor: pointer; font-size: 0.9rem; font-family: inherit; margin-top: 20px; }
     .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-secondary { background: rgba(255,255,255,0.05); color: var(--text-primary); border: 1px solid var(--card-border);
-        padding: 9px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem; font-family: inherit; }
-    .btn-danger { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.35); color: #fca5a5;
-        padding: 9px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem; font-family: inherit; }
     .btn-mini { padding: 6px 11px; font-size: 0.75rem; }
     .btn-go { background: var(--accent-glow); border: none; color: #fff; font-weight: 800; }
 
@@ -54,11 +36,8 @@
         background: rgba(255,255,255,0.02); border-radius: 8px; margin-bottom: 14px; }
     .draft-why strong { color: var(--accent-solid); }
     .draft-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-
-    .badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 0.7rem; font-weight: 800;
-        text-transform: uppercase; letter-spacing: 0.04em; }
     .b-top .badge, .badge.top { background: rgba(16,185,129,0.15); color: #6ee7b7; }
-    .b-above .badge, .badge.above { background: rgba(59,130,246,0.15); color: #93c5fd; }
+    .b-above .badge, .badge.above { background: rgba(12,120,86,0.15); color: #f0d39a; }
     .b-typical .badge, .badge.typical { background: rgba(148,163,184,0.15); color: #cbd5e1; }
     .b-below .badge, .badge.below { background: rgba(245,158,11,0.15); color: #fcd34d; }
     .badge.b-mute { background: rgba(148,163,184,0.12); color: #94a3b8; text-transform: none; letter-spacing: 0; }
@@ -72,16 +51,7 @@
         text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
     .stat strong { font-size: 1.45rem; font-weight: 800; color: #fff; }
     .stat small { display: block; margin-top: 4px; font-size: 0.72rem; color: var(--text-muted); font-weight: 600; }
-
-    .empty { color: var(--text-muted); font-size: 0.86rem; padding: 22px 0; line-height: 1.6; }
     .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
-    .hidden { display: none !important; }
-
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.83rem; margin-top: 14px; }
-    th { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted);
-        font-weight: 800; padding: 10px 12px; border-bottom: 1px solid var(--card-border); }
-    td { padding: 11px 12px; border-bottom: 1px solid var(--card-border); }
-    .idx { font-weight: 800; } .idx.hot { color: #10b981; } .idx.cold { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -171,6 +141,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async function () {

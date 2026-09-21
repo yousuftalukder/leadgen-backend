@@ -103,15 +103,25 @@ test('token is base64url and long enough', () => {
     const t = S.shareToken(); assert.ok(/^[A-Za-z0-9_-]{32}$/.test(t), t);
     assert.notStrictEqual(S.shareToken(), t);
 });
-test('url picks the page by report_type', () => {
-    assert.ok(S.shareUrlFor({ report_type: 'fb_page' }, 'tok').endsWith('/fb-report.html?share=tok'));
-    assert.ok(S.shareUrlFor({ report_type: 'deep_audit' }, 'tok').endsWith('/ig-competitors.html?share=tok'));
-    assert.ok(S.shareUrlFor({ report_type: 'fb_group' }, 'tok').endsWith('/fb-audit.html?share=tok'));
-    assert.ok(S.shareUrlFor({ report_type: 'content_plan' }, 'tok').endsWith('/content-plan.html?share=tok'));
+test('every share url goes to the client page, whatever the report type', () => {
+    // Changed in phase 18. This used to route by report_type into the employee
+    // page that renders it — which put a client inside the agency's workbench
+    // with a read-only bar over it, and shipped every pillar score and rival
+    // handle along with it. One client-facing page now serves all of them.
+    for (const t of ['fb_page', 'deep_audit', 'fb_group', 'content_plan', 'ig_report', 'anything_new']) {
+        assert.strictEqual(S.shareUrlFor({ report_type: t }, 'tok').endsWith('/share.html?share=tok'), true,
+            `${t} should share to share.html`);
+    }
 });
-test('public view strips ownership fields', () => {
-    const v = S.publicReportView({ id: 'r', user_id: 'u', client_id: 'c', set_id: 's', credits_estimate: 1, report_json: { a: 1 } });
-    assert.deepStrictEqual(v, { id: 'r', report_json: { a: 1 } });
+test('share urls never point at an employee page', () => {
+    const employeePages = ['ig-report.html', 'ig-competitors.html', 'fb-report.html',
+                           'fb-audit.html', 'content-plan.html', 'index.html', 'admin.html'];
+    for (const t of ['fb_page', 'deep_audit', 'fb_group', 'content_plan', 'ig_report']) {
+        const url = S.shareUrlFor({ report_type: t }, 'tok');
+        for (const p of employeePages) {
+            assert.ok(!url.includes('/' + p), `${t} leaked to ${p}`);
+        }
+    }
 });
 
 console.log('extractBioContacts');

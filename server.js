@@ -339,6 +339,11 @@ const DEFAULT_POSTS_PER_ACC  = parseInt(process.env.DEFAULT_POSTS_PER_ACCOUNT ||
 const MAX_POSTS_PER_ACC      = parseInt(process.env.MAX_POSTS_PER_ACCOUNT || '100', 10);
 const ENGINES                = ['leadgen', 'report', 'fb_community', 'fb_page', 'meta_owned', 'content_plan'];
 
+// What a self-serve trial account is granted at signup. Everything here is
+// still held to the trial quota on top of the grant.
+const TRIAL_ENGINES = (process.env.TRIAL_ENGINES || 'report,fb_community,leadgen,meta_owned')
+    .split(',').map(s => s.trim()).filter(e => ENGINES.includes(e));
+
 // --- Facebook community engine ---------------------------------------------
 // Actor IDs are env-overridable on purpose: Apify's Facebook actors get
 // renamed and re-published far more often than the Instagram ones.
@@ -452,8 +457,15 @@ async function ensureProfile(user) {
         .from('app_users').select('*').eq('id', user.id).maybeSingle();
 
     if (!profile) {
-        // Bootstrap: master admin by env, or the very first user if no admin exists.
-        let role = 'user';
+        // Reaching here means nobody provisioned this account, which since
+        // phase 13 is the signature of a self-serve signup: an employee gets
+        // an app_users row from POST /api/admin/users before they ever log in,
+        // so they never take this branch. A self-serve account is a client on
+        // a trial, not an employee with no grants.
+        //
+        // Bootstrap still wins: master admin by env, or the very first user if
+        // no admin exists yet.
+        let role = 'client';
         if (MASTER_ADMIN_EMAIL && email === MASTER_ADMIN_EMAIL) {
             role = 'admin';
         } else {
@@ -462,20 +474,42 @@ async function ensureProfile(user) {
             if (!count) role = 'admin';
         }
 
-        const { data: created } = await supabase.from('app_users').upsert({
-            id: user.id, email, role, is_active: true, updated_at: new Date().toISOString()
-        }).select().maybeSingle();
+        const row = {
+            id: user.id, email, role, is_active: true,
+            updated_at: new Date().toISOString()
+        };
 
-        profile = created || { id: user.id, email, role, is_active: true };
+        if (role === 'client') {
+            const days  = await trialDaysSetting();
+            const start = new Date();
+            row.trial_started_at = start.toISOString();
+            row.trial_ends_at    = new Date(start.getTime() + days * 86400000).toISOString();
+            // A trial spends the shared pool, so it can never fall back to a
+            // company key beyond what quota allows. byo_key_only stays false:
+            // the point of the trial is that they do not need a key yet.
+        }
 
-        if (role === 'user') {
-            // legacy single-tenant safety: grant nothing, admin must grant.
-        } else {
+        const { data: created } = await supabase.from('app_users').upsert(row)
+            .select().maybeSingle();
+
+        profile = created || row;
+
+        if (role === 'admin') {
             for (const e of ENGINES) {
                 await supabase.from('user_engine_access')
                     .upsert({ user_id: user.id, engine: e }, { onConflict: 'user_id,engine' });
             }
+        } else if (role === 'client') {
+            // What a trial can reach. fb_page and content_plan are deliberately
+            // absent — those are the paid surface. meta_owned is present even
+            // though it is the upsell, because connecting Meta costs no Apify
+            // and it is the thing worth showing off.
+            for (const e of TRIAL_ENGINES) {
+                await supabase.from('user_engine_access')
+                    .upsert({ user_id: user.id, engine: e }, { onConflict: 'user_id,engine' });
+            }
         }
+        // role 'user' is never minted here: employees are created by an admin.
     } else if (MASTER_ADMIN_EMAIL && email === MASTER_ADMIN_EMAIL && profile.role !== 'admin') {
         await supabase.from('app_users').update({ role: 'admin' }).eq('id', user.id);
         profile.role = 'admin';
@@ -510,6 +544,62 @@ setInterval(() => {
     for (const [k, v] of _authCache) if (now - v.t > AUTH_CACHE_MS) _authCache.delete(k);
 }, 60000).unref?.();
 
+/**
+ * What an account is right now. Mirrors public.el_account_state() exactly —
+ * suspension beats everything, role beats dates, paid beats trial.
+ *
+ * Two implementations on purpose. This one runs on every authenticated
+ * request and reads the profile auth() has already cached, so it costs
+ * nothing. The SQL one is what createJob and the admin panel call, because
+ * that is where money is committed and a stale cache must not be the thing
+ * deciding. If they ever disagree, the SQL one wins and the worst case is up
+ * to AUTH_CACHE_MS of grace on a request that spends nothing.
+ *
+ * Returns: suspended | admin | employee | paid | trial | expired
+ */
+function accountState(profile) {
+    if (!profile) return 'expired';
+    if (profile.is_active !== true)  return 'suspended';
+    if (profile.role === 'admin')    return 'admin';
+    if (profile.role !== 'client')   return 'employee';
+
+    const now = Date.now();
+    const paid  = profile.paid_until    ? Date.parse(profile.paid_until)    : 0;
+    const trial = profile.trial_ends_at ? Date.parse(profile.trial_ends_at) : 0;
+    if (paid  > now) return 'paid';
+    if (trial > now) return 'trial';
+    return 'expired';
+}
+
+/**
+ * One place that decides whether an account may be served at all, so the
+ * cached and uncached paths through auth() cannot drift apart.
+ *
+ * 402 rather than 403 for a lapsed account: the client surface needs to tell
+ * "your trial ended, here is how to continue" apart from "you may not do this",
+ * and it cannot if both arrive as 403.
+ */
+function accountDenial(profile) {
+    const state = accountState(profile);
+    if (state === 'suspended') {
+        return { status: 403, body: { error: 'Account disabled. Contact your administrator.' } };
+    }
+    if (state === 'expired') {
+        const had = profile?.paid_until || profile?.trial_ends_at;
+        return {
+            status: 402,
+            body: {
+                error: had
+                    ? 'Your access has ended. Contact us to continue.'
+                    : 'This account has no active plan. Contact us to get started.',
+                state: 'expired',
+                ended_at: had || null
+            }
+        };
+    }
+    return null;
+}
+
 /** Resolves the caller. Returns null and writes the response on failure. */
 async function auth(req, res) {
     const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
@@ -519,10 +609,8 @@ async function auth(req, res) {
     const hit = _authCache.get(ck);
     if (hit && Date.now() - hit.t < AUTH_CACHE_MS) {
         METRICS.authCache.hit += 1;
-        if (hit.ctx.profile?.is_active === false) {
-            res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
-            return null;
-        }
+        const denyCached = accountDenial(hit.ctx.profile);
+        if (denyCached) { res.status(denyCached.status).json(denyCached.body); return null; }
         const st0 = ELS.getStore(); if (st0) st0.userId = hit.ctx.user.id;
         return hit.ctx;
     }
@@ -536,14 +624,15 @@ async function auth(req, res) {
     }
 
     const profile = await ensureProfile(data.user);
-    const ctx = { user: data.user, profile: profile || { role: 'user' } };
+    // is_active is explicit on the fallback: accountState() reads it, and an
+    // absent flag would otherwise read as suspended and lock out every caller
+    // the moment ensureProfile has a bad minute.
+    const ctx = { user: data.user, profile: profile || { role: 'user', is_active: true } };
     _authCache.set(ck, { ctx, t: Date.now() });
     const st1 = ELS.getStore(); if (st1) st1.userId = ctx.user.id;
 
-    if (profile && profile.is_active === false) {
-        res.status(403).json({ error: 'Account disabled. Contact your administrator.' });
-        return null;
-    }
+    const denyFresh = profile ? accountDenial(profile) : null;
+    if (denyFresh) { res.status(denyFresh.status).json(denyFresh.body); return null; }
 
     return ctx;
 }
@@ -3386,15 +3475,295 @@ ${json}`;
 // JOB ENGINE
 // ===========================================================================
 
+// ===========================================================================
+// QUOTA  (phase 13)
+//
+// Engine access decides whether an account may touch a tool at all. Quota
+// decides how much of it they get. The two stay separate on purpose: a trial
+// client without the content_plan grant never reaches this layer, and a client
+// who has the grant is still held to a ceiling.
+//
+// Item caps assume a run costs about what a run usually costs. The usd cap is
+// the one that actually protects the shared pool, because a runaway actor
+// breaks that assumption without exceeding any item count.
+// ===========================================================================
+
+/**
+ * Job types where one run is one countable item. Leadgen is absent on purpose:
+ * a campaign's cost is the leads it writes, which is not known when the job is
+ * created, so it is metered at insert time instead. Anything not listed here
+ * is still held to the usd cap.
+ */
+const JOB_QUOTA_METRIC = {
+    ig_report:          'ig_report',
+    deep_audit:         'ig_report',
+    fb_community_audit: 'fb_group_audit',
+    fb_discovery:       'fb_group_audit'
+};
+
+const LEADGEN_JOB_TYPES = new Set(['leadgen_campaign', 'leadgen_enrich', 'fb_lead_discovery']);
+
+const QUOTA_DEFAULT_KEY = { trial: 'trial_caps', paid: 'client_monthly_caps' };
+
+/**
+ * Used only when system_settings holds nothing parseable. Fails closed: an
+ * unreadable setting must not read as "no limit", which is exactly the case
+ * where the pool gets drained.
+ */
+const QUOTA_FALLBACK = {
+    trial: { ig_report: 1, fb_group_audit: 1, leads: 50,  usd: 2 },
+    paid:  { ig_report: 4, fb_group_audit: 4, leads: 500, usd: 25 }
+};
+
+/**
+ * The counter a state writes to. Trial spend lives in its own bucket so a
+ * trial cap and a monthly cap never share a counter, and nothing has to be
+ * reset when an account converts.
+ */
+function quotaPeriod(state) {
+    if (state === 'trial') return 'trial';
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Authoritative state, from the database rather than the auth cache. */
+async function accountStateDb(userId) {
+    const { data, error } = await supabase.rpc('el_account_state', { p_user: userId });
+    if (error) {
+        logger.error('account_state_unavailable', { message: error.message });
+        const err = new Error('Could not verify your account. Try again in a moment.');
+        err.statusCode = 503;
+        throw err;
+    }
+    return data || 'expired';
+}
+
+const _capsCache = new Map();
+function invalidateQuotaCaps() { _capsCache.clear(); }
+
+async function defaultCaps(state) {
+    const key = QUOTA_DEFAULT_KEY[state];
+    if (!key) return null;                       // admin and employee are uncapped by default
+    const hit = _capsCache.get(key);
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
+
+    const { data } = await supabase.from('system_settings').select('value').eq('key', key).maybeSingle();
+    let v;
+    try {
+        v = data?.value ? JSON.parse(data.value) : null;
+    } catch (e) {
+        logger.warn('quota_caps_unparsable', { key, message: e.message });
+        v = null;
+    }
+    if (!v || typeof v !== 'object') v = QUOTA_FALLBACK[state] || QUOTA_FALLBACK.trial;
+
+    _capsCache.set(key, { v, t: Date.now() });
+    return v;
+}
+
+/** Length of the free trial, in days. Read once per cache window. */
+async function trialDaysSetting() {
+    const hit = _capsCache.get('trial_days');
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
+
+    const { data } = await supabase.from('system_settings')
+        .select('value').eq('key', 'trial_days').maybeSingle();
+    const n = parseInt(data?.value ?? '', 10);
+    const v = Number.isFinite(n) && n > 0 && n <= 365 ? n : 7;
+
+    _capsCache.set('trial_days', { v, t: Date.now() });
+    return v;
+}
+
+/**
+ * null means unlimited. A usage_limits row wins even when its cap is null,
+ * which is how one client gets exempted from one metric without being
+ * exempted from all of them.
+ */
+async function effectiveCap(userId, state, metric) {
+    const { data } = await supabase.from('usage_limits')
+        .select('cap').eq('user_id', userId).eq('metric', metric).maybeSingle();
+    if (data) return data.cap === null ? null : Number(data.cap);
+
+    const caps = await defaultCaps(state);
+    if (!caps) return null;
+    const c = caps[metric];
+    return (c === undefined || c === null) ? null : Number(c);
+}
+
+async function quotaUsed(userId, period, metric) {
+    const { data } = await supabase.from('usage_counters')
+        .select('used').eq('user_id', userId).eq('period', period).eq('metric', metric).maybeSingle();
+    return Number(data?.used || 0);
+}
+
+function quotaError(metric, cap) {
+    const label = {
+        ig_report:      'Instagram report',
+        fb_group_audit: 'group audit',
+        leads:          'lead',
+        usd:            'usage'
+    }[metric] || metric;
+    const err = new Error(
+        metric === 'usd'
+            ? `This would exceed your usage allowance. Contact us to raise it.`
+            : `You have used your ${label} allowance (${cap}). Contact us to raise it.`
+    );
+    err.statusCode = 402;
+    // 402 covers both "your account lapsed" and "you hit your allowance", and
+    // those are very different things to be told. The code is what lets the
+    // client surface tell them apart — without it a client who runs out of
+    // leads is shown "your access has ended", which is simply false.
+    err.code = 'quota_exceeded';
+    err.quotaMetric = metric;
+    return err;
+}
+
+/**
+ * Take quota for a job before it is queued. Everything taken is rolled back if
+ * a later metric refuses, so a job that cannot start never leaves a dent in
+ * the counters.
+ *
+ * Returns what was taken, which createJob records on the job so the failure
+ * path can hand it back.
+ */
+async function reserveQuota(userId, type, creditsEstimate) {
+    const state = await accountStateDb(userId);
+    if (state === 'suspended' || state === 'expired') {
+        const err = new Error(
+            state === 'suspended'
+                ? 'Account disabled. Contact your administrator.'
+                : 'Your access has ended. Contact us to continue.'
+        );
+        err.statusCode = state === 'suspended' ? 403 : 402;
+        err.code = state === 'suspended' ? 'account_suspended' : 'account_expired';
+        throw err;
+    }
+
+    const period  = quotaPeriod(state);
+    const wanted  = [];
+
+    const metric = JOB_QUOTA_METRIC[type];
+    if (metric) wanted.push({ metric, amount: 1 });
+
+    const usd = Number(creditsEstimate) || 0;
+    if (usd > 0) wanted.push({ metric: 'usd', amount: usd });
+
+    // A leadgen run writes its leads later, so there is nothing to take here.
+    // Refuse up front anyway when the allowance is already gone, rather than
+    // letting a job start, spend on Apify, and then fail to save what it found.
+    if (LEADGEN_JOB_TYPES.has(type)) {
+        const cap = await effectiveCap(userId, state, 'leads');
+        if (cap !== null && await quotaUsed(userId, period, 'leads') >= cap) {
+            throw quotaError('leads', cap);
+        }
+    }
+
+    const taken = [];
+    for (const w of wanted) {
+        const cap = await effectiveCap(userId, state, w.metric);
+        if (cap === null) continue;
+        const { error } = await supabase.rpc('el_quota_consume', {
+            p_user: userId, p_period: period, p_metric: w.metric, p_amount: w.amount, p_cap: cap
+        });
+        if (error) {
+            for (const back of taken) {
+                await supabase.rpc('el_quota_release', {
+                    p_user: userId, p_period: period, p_metric: back.metric, p_amount: back.amount
+                }).catch(() => {});
+            }
+            if (String(error.message || '').includes('quota_exceeded')) throw quotaError(w.metric, cap);
+            throw error;
+        }
+        taken.push(w);
+    }
+
+    return { period, taken };
+}
+
+/**
+ * Leads are metered as they are written rather than when the job is queued,
+ * because a campaign cannot know how many it will find. Returns how many of
+ * `want` may be saved, having already taken that many from the allowance.
+ *
+ * Deliberately partial: finding 80 leads against 50 of allowance saves 50 and
+ * warns, rather than refusing the batch. The scrape is already paid for by
+ * then, so throwing away all 80 would waste money that has left the account.
+ */
+async function takeLeadQuota(userId, want) {
+    if (!(want > 0)) return 0;
+
+    const state = await accountStateDb(userId);
+    if (state === 'suspended' || state === 'expired') return 0;
+
+    const cap = await effectiveCap(userId, state, 'leads');
+    if (cap === null) return want;
+
+    const period = quotaPeriod(state);
+    const room   = Math.max(0, cap - await quotaUsed(userId, period, 'leads'));
+    const take   = Math.min(want, room);
+    if (take <= 0) return 0;
+
+    const { error } = await supabase.rpc('el_quota_consume', {
+        p_user: userId, p_period: period, p_metric: 'leads', p_amount: take, p_cap: cap
+    });
+    if (error) {
+        // A concurrent run took the room between the read and the write. Not an
+        // error worth failing the job over: save none this pass and let the
+        // caller say so.
+        if (String(error.message || '').includes('quota_exceeded')) return 0;
+        throw error;
+    }
+    return take;
+}
+
+/** Give back lead allowance taken for rows that then failed to save. */
+async function refundLeadQuota(userId, amount) {
+    if (!(amount > 0)) return;
+    try {
+        const state = await accountStateDb(userId);
+        await supabase.rpc('el_quota_release', {
+            p_user: userId, p_period: quotaPeriod(state), p_metric: 'leads', p_amount: amount
+        });
+    } catch (e) {
+        logger.warn('lead_quota_refund_failed', { message: e.message });
+    }
+}
+
+/** Hand back what a job reserved. Never throws — a failing job is already bad news. */
+async function releaseQuota(userId, reservation) {
+    if (!reservation || !Array.isArray(reservation.taken)) return;
+    for (const t of reservation.taken) {
+        try {
+            await supabase.rpc('el_quota_release', {
+                p_user: userId, p_period: reservation.period, p_metric: t.metric, p_amount: t.amount
+            });
+        } catch (e) {
+            logger.warn('quota_release_failed', { metric: t.metric, message: e.message });
+        }
+    }
+}
+
 async function createJob(userId, type, engine, input, creditsEstimate) {
+    // Every job in the product comes through here, which is the only reason a
+    // ceiling is worth having: no route can forget to ask.
+    const reservation = await reserveQuota(userId, type, creditsEstimate);
+
     const { data, error } = await supabase.from('jobs').insert([{
-        user_id: userId, type, engine, input,
+        user_id: userId, type, engine,
+        // _quota rides on input because the failure path needs to know what to
+        // hand back, and the period can roll over between queue and failure.
+        input: { ...(input || {}), _quota: reservation },
         client_id: (input && UUID_RE.test(String(input.clientId || ''))) ? input.clientId : null,
         credits_estimate: creditsEstimate || null,
         status: 'queued', progress: 0, log: [],
         completed_units: []
     }]).select().single();
-    if (error) throw error;
+
+    if (error) {
+        await releaseQuota(userId, reservation);
+        throw error;
+    }
     return data;
 }
 
@@ -3684,6 +4053,10 @@ function runJob(jobId, worker, opts = {}) {
                 status: 'failed', error: err.message,
                 finished_at: new Date().toISOString()
             }, 'Failed: ' + err.message);
+            // Terminal failure only. paused_no_credit, interrupted and cancelled
+            // all return above because they are resumable — handing their quota
+            // back would let the resumed run take it a second time.
+            await releaseQuota(row?.user_id, row?.input?._quota);
             if (row?.input?.scheduleId) scheduleNoteOutcome(row.input.scheduleId, { status: 'failed', error: err.message });
         } finally {
             if (beat) clearInterval(beat);
@@ -4891,16 +5264,125 @@ app.get('/api/admin/metrics', async (req, res) => {
     }
 });
 
+// ===========================================================================
+// SELF-SERVE SIGNUP SUPPORT  (phase 13)
+//
+// The signup itself happens in the browser against Supabase Auth, because
+// that is what sends the confirmation email — and email confirmation is the
+// thing standing between a 7-day trial on the shared Apify pool and someone
+// farming it with addresses they do not own. The server's part is this
+// precheck, plus ensureProfile() minting the account as a trial client on
+// first login.
+// ===========================================================================
+
+const SIGNUP_MIN_PASSWORD = parseInt(process.env.SIGNUP_MIN_PASSWORD || '10', 10);
+
+/**
+ * HaveIBeenPwned range lookup, k-anonymity: SHA-1 the password, send the first
+ * five hex characters, match the remaining 35 locally. The password itself
+ * never leaves this process and HIBP never learns which hash we wanted.
+ *
+ * Supabase does this natively, but only on Pro plans, so we do it ourselves.
+ *
+ * Fails OPEN. A breach checker that takes signup down whenever a third party
+ * is slow costs more than the checks it would have caught, and Supabase still
+ * enforces minimum length underneath us.
+ */
+async function isLeakedPassword(password) {
+    try {
+        const sha1   = crypto.createHash('sha1').update(password, 'utf8').digest('hex').toUpperCase();
+        const prefix = sha1.slice(0, 5);
+        const suffix = sha1.slice(5);
+
+        const r = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
+            headers: { 'Add-Padding': 'true' },
+            signal: AbortSignal.timeout ? AbortSignal.timeout(3500) : undefined
+        });
+        if (!r.ok) return false;
+
+        for (const line of (await r.text()).split('\n')) {
+            const [hash, count] = line.trim().split(':');
+            if (hash === suffix && parseInt(count || '0', 10) > 0) return true;
+        }
+        return false;
+    } catch (e) {
+        logger.warn('hibp_unavailable', { message: e.message });
+        return false;
+    }
+}
+
+/**
+ * Called by the signup page before it hands the password to Supabase.
+ *
+ * Advisory by nature — anything client-side can be skipped by not being a
+ * browser. It is still worth having: it protects everyone who uses the form,
+ * and the floor that cannot be bypassed (minimum length) is enforced by
+ * Supabase Auth itself.
+ *
+ * Rate limited hard. This endpoint takes a plaintext password from an
+ * unauthenticated caller, so it must not become an oracle to grind against.
+ */
+app.post('/api/public/signup/password-check',
+    rateLimit({ windowMs: 60000, max: 10 }),
+    async (req, res) => {
+        const password = String(req.body?.password || '');
+        if (password.length < SIGNUP_MIN_PASSWORD) {
+            return res.json({
+                ok: false,
+                reason: 'too_short',
+                error: `Use at least ${SIGNUP_MIN_PASSWORD} characters.`
+            });
+        }
+        if (await isLeakedPassword(password)) {
+            return res.json({
+                ok: false,
+                reason: 'breached',
+                error: 'That password has appeared in a known data breach. Pick a different one.'
+            });
+        }
+        res.json({ ok: true });
+    });
+
 app.get('/api/me', async (req, res) => {
     const ctx = await auth(req, res); if (!ctx) return;
     const { data: access } = await supabase.from('user_engine_access')
         .select('engine').eq('user_id', ctx.user.id);
-    res.json({
+
+    const state = accountState(ctx.profile);
+    const body = {
         id: ctx.user.id,
         email: ctx.user.email,
         role: ctx.profile.role,
-        engines: ctx.profile.role === 'admin' ? ENGINES : (access || []).map(a => a.engine)
-    });
+        engines: ctx.profile.role === 'admin' ? ENGINES : (access || []).map(a => a.engine),
+        state
+    };
+
+    // Only a client needs a window and an allowance on screen. An employee
+    // seeing "0 of 50 leads" would just be confusing.
+    if (ctx.profile.role === 'client') {
+        body.trial_ends_at = ctx.profile.trial_ends_at || null;
+        body.paid_until    = ctx.profile.paid_until || null;
+        body.plan_label    = ctx.profile.plan_label || null;
+
+        if (state === 'trial' || state === 'paid') {
+            const period = quotaPeriod(state);
+            const { data: rows } = await supabase.from('usage_counters')
+                .select('metric, used').eq('user_id', ctx.user.id).eq('period', period);
+
+            const used = Object.fromEntries((rows || []).map(r => [r.metric, Number(r.used)]));
+            body.usage = {};
+            for (const metric of ['ig_report', 'fb_group_audit', 'leads', 'usd']) {
+                const cap = await effectiveCap(ctx.user.id, state, metric);
+                body.usage[metric] = {
+                    used: used[metric] || 0,
+                    cap: cap === null ? null : cap,
+                    remaining: cap === null ? null : Math.max(0, cap - (used[metric] || 0))
+                };
+            }
+        }
+    }
+
+    res.json(body);
 });
 
 /**
@@ -5195,7 +5677,16 @@ app.get('/api/admin/users', async (req, res) => {
         const map = {};
         (access || []).forEach(a => { (map[a.user_id] = map[a.user_id] || []).push(a.engine); });
 
-        res.json({ users: (users || []).map(u => ({ ...u, engines: map[u.id] || [] })) });
+        // state is computed rather than stored, so the admin list can never
+        // disagree with what the gate will actually do to that account.
+        res.json({
+            users: (users || []).map(u => ({
+                ...u,
+                engines: map[u.id] || [],
+                state: accountState(u),
+                expires_at: u.paid_until || u.trial_ends_at || null
+            }))
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5211,14 +5702,28 @@ app.post('/api/admin/users', async (req, res) => {
         if (createErr) throw createErr;
 
         const newId = created.user.id;
-        await supabase.from('app_users').upsert({
+        const newRole = ['admin', 'user', 'client'].includes(role) ? role : 'user';
+        const row = {
             id: newId,
             email: email.toLowerCase(),
             full_name: fullName || null,
-            role: role === 'admin' ? 'admin' : 'user',
+            role: newRole,
             is_active: true,
             byo_key_only: byoKeyOnly === true
-        });
+        };
+
+        // An admin can hand out a trial directly — useful for a client who was
+        // sold in a meeting rather than through the signup page.
+        if (newRole === 'client') {
+            const days  = Number.isFinite(parseInt(req.body.trialDays, 10))
+                ? parseInt(req.body.trialDays, 10)
+                : await trialDaysSetting();
+            const start = new Date();
+            row.trial_started_at = start.toISOString();
+            row.trial_ends_at    = new Date(start.getTime() + days * 86400000).toISOString();
+        }
+
+        await supabase.from('app_users').upsert(row);
 
         for (const e of (engines || []).filter(x => ENGINES.includes(x))) {
             await supabase.from('user_engine_access')
@@ -5235,13 +5740,49 @@ app.post('/api/admin/users', async (req, res) => {
 app.patch('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
-        const { role, isActive, engines, password, byoKeyOnly } = req.body;
+        const {
+            role, isActive, engines, password, byoKeyOnly,
+            paidUntil, planLabel, trialDays
+        } = req.body;
         const target = req.params.id;
 
         const patch = { updated_at: new Date().toISOString() };
-        if (role) patch.role = role === 'admin' ? 'admin' : 'user';
+
+        // Was `role === 'admin' ? 'admin' : 'user'`, which quietly promoted a
+        // client to employee whenever an admin patched anything else on the
+        // same request. Roles are now named explicitly.
+        if (role) {
+            patch.role = ['admin', 'user', 'client'].includes(role) ? role : 'user';
+        }
         if (typeof isActive === 'boolean') patch.is_active = isActive;
         if (typeof byoKeyOnly === 'boolean') { patch.byo_key_only = byoKeyOnly; _byoCache.delete(target); }
+
+        // Manual activation. paid_until is the whole of billing: an admin sets
+        // a date, money is collected out of band, and access ends by itself.
+        // Passing null revokes without deleting anything.
+        if (paidUntil !== undefined) {
+            const when = paidUntil ? new Date(paidUntil) : null;
+            if (when && isNaN(when.getTime())) {
+                return res.status(400).json({ error: 'paidUntil is not a valid date.' });
+            }
+            patch.paid_until   = when ? when.toISOString() : null;
+            patch.activated_by = ctx.user.id;
+            patch.activated_at = new Date().toISOString();
+        }
+        if (planLabel !== undefined) patch.plan_label = planLabel || null;
+
+        // Extending a trial is a separate lever from selling one: it moves the
+        // trial window without implying the account ever paid.
+        if (trialDays !== undefined) {
+            const d = parseInt(trialDays, 10);
+            if (!Number.isFinite(d) || d < 0 || d > 365) {
+                return res.status(400).json({ error: 'trialDays must be between 0 and 365.' });
+            }
+            const start = new Date();
+            patch.trial_started_at = start.toISOString();
+            patch.trial_ends_at    = new Date(start.getTime() + d * 86400000).toISOString();
+        }
+
         await supabase.from('app_users').update(patch).eq('id', target);
 
         if (password) await supabase.auth.admin.updateUserById(target, { password });
@@ -5474,8 +6015,16 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     const uniqueMap = new Map();
     discovered.forEach(p => {
         if (!p?.username) return;
-        const cur = uniqueMap.get(p.username);
-        if (!cur || (p.post_views || 0) > (cur.post_views || 0)) uniqueMap.set(p.username, p);
+        // Normalised here, at the one place every discovered handle passes
+        // through. Instagram treats handles case-insensitively but the actors
+        // do not always agree on case, and since phase 16 the handle is part
+        // of a unique key — so "HarborCafe" and "harborcafe" arriving from two
+        // methods must not become two leads.
+        const key = String(p.username).trim().toLowerCase();
+        if (!key) return;
+        p.username = key;
+        const cur = uniqueMap.get(key);
+        if (!cur || (p.post_views || 0) > (cur.post_views || 0)) uniqueMap.set(key, p);
     });
     const posts = Array.from(uniqueMap.values());
 
@@ -5491,23 +6040,45 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     for (let i = 0; i < posts.length; i += CHUNK) {
         const names = posts.slice(i, i + CHUNK).map(p => p.username);
         const { data: existing } = await supabase.from('leads')
-            .select('id, username').eq('owner_user_id', userId).in('username', names);
+            .select('id, username')
+            .eq('owner_user_id', userId).eq('platform', 'instagram')
+            .in('username', names);
         (existing || []).forEach(l => idByUsername.set(l.username, l.id));
     }
 
-    const missing = posts.filter(p => !idByUsername.has(p.username));
+    let missing = posts.filter(p => !idByUsername.has(p.username));
+
+    // The allowance is taken here, before the writes, so two campaigns running
+    // together cannot both see room and both use it. Anything not saved is
+    // still linked below if the lead already existed — only new rows count.
+    const allowedNew = await takeLeadQuota(userId, missing.length);
+    if (allowedNew < missing.length) {
+        warnings.push(allowedNew === 0
+            ? `Lead allowance reached. ${missing.length} new lead(s) were found but not saved.`
+            : `Lead allowance reached. Saved ${allowedNew} of ${missing.length} new lead(s) found.`);
+        missing = missing.slice(0, allowedNew);
+    }
+
     for (let i = 0; i < missing.length; i += CHUNK) {
         const batch = missing.slice(i, i + CHUNK).map(p => ({
             owner_user_id: userId,
+            platform: 'instagram',          // explicit: it is part of the conflict key
             username: p.username,
             profile_url: `https://instagram.com/${p.username}`,
             is_enriched: false
         }));
+        // Upsert since phase 16, which added the unique key this conflicts on.
+        // The select-then-insert above races: two campaigns both read before
+        // either writes, and before that key existed both rows landed.
         const { data: created, error: insErr } = await supabase.from('leads')
-            .insert(batch).select('id, username');
+            .upsert(batch, { onConflict: 'owner_user_id,platform,username', ignoreDuplicates: false })
+            .select('id, username');
         if (insErr) {
             warnings.push(`DB: ${batch.length} lead(s) in one batch failed to save — ${insErr.message}`);
             logger.error('leadgen_lead_insert_failed', { jobId, message: insErr.message });
+            // The allowance was taken for these rows before the write. They did
+            // not land, so it goes back.
+            await refundLeadQuota(userId, batch.length);
             continue;
         }
         (created || []).forEach(l => idByUsername.set(l.username, l.id));
@@ -5690,7 +6261,10 @@ registerWorker('leadgen_enrich', (userId, input, jobId) => async (progress, ck) 
                 city: p.city || p.cityName || null,
                 address: p.addressStreet || null,
                 is_enriched: true
-            }).eq('username', username).eq('owner_user_id', userId);
+            // Scoped to instagram since phase 16: a Facebook page can share a
+            // handle with an Instagram account, and enrichment from the IG
+            // profile scraper must not overwrite the Facebook lead.
+            }).eq('username', username).eq('owner_user_id', userId).eq('platform', 'instagram');
 
             if (!updErr) batchUpdated++;
         }
@@ -9404,6 +9978,249 @@ app.get('/api/fb/page/estimate-credits', async (req, res) => {
 // FB PAGE API :: RUN A REPORT  (async job, poll /api/job/:id)
 // ===========================================================================
 
+// ===========================================================================
+// FACEBOOK LEAD DISCOVERY  (phase 16)
+//
+// The Facebook half of lead generation, and it works off Pages rather than
+// groups on purpose.
+//
+// The group pipeline destroys author identity by design — author_hash is a
+// one-way HMAC and author_label holds only 'admin' or 'member' — so a group
+// post proves demand exists but names nobody reachable. Making it name people
+// would mean deleting a privacy control built deliberately, over private
+// individuals posting in often-private groups.
+//
+// A Page is a business publishing its own contact button, which is the direct
+// equivalent of the Instagram business profiles the existing methods already
+// target. Same shape of data, same defensibility.
+// ===========================================================================
+
+/** A Page result from search, reduced to what discovery needs. */
+function fbPageSearchRefs(items) {
+    const out = new Map();
+    for (const it of (items || [])) {
+        const ref = parsePageRef(it.url || it.pageUrl || it.link || it.facebookUrl || it.id);
+        if (!ref || out.has(ref.pageId)) continue;
+        out.set(ref.pageId, {
+            ...ref,
+            hintName: it.title || it.name || it.pageName || null,
+            hintCategory: it.category || it.categoryName || null
+        });
+    }
+    return [...out.values()];
+}
+
+/**
+ * A scraped Page turned into a lead row.
+ *
+ * username is the page's vanity where it has one and its numeric id where it
+ * does not, because the unique key is (owner, platform, username) and a page
+ * without a vanity still has to land somewhere stable.
+ */
+function fbPageToLead(profile, userId) {
+    const handle = String(profile.username || profile.page_id || '')
+        .replace(/^https?:\/\/(www\.)?facebook\.com\//i, '')
+        .replace(/\/+$/, '')
+        .trim()
+        .toLowerCase();
+    if (!handle) return null;
+
+    return {
+        owner_user_id: userId,
+        platform: 'facebook',
+        platform_id: profile.page_id || null,
+        username: handle,
+        full_name: profile.name || null,
+        email: profile.email || null,
+        phone: profile.phone || null,
+        website: profile.website || null,
+        category: profile.category || null,
+        city: profile.city || null,
+        address: profile.address || null,
+        followers_count: profile.followers || profile.likes || null,
+        bio: profile.about ? String(profile.about).slice(0, 2000) : null,
+        is_business: true,
+        is_verified: !!profile.verified,
+        profile_url: profile.url || `https://www.facebook.com/${handle}`,
+        // Enriched on arrival: unlike Instagram, one Page scrape returns the
+        // profile and its contact details together, so there is no second pass.
+        is_enriched: true,
+        sources_detected: ['facebook_page']
+    };
+}
+
+registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, ck) => {
+    const keywords = (Array.isArray(input.keywords) ? input.keywords : [])
+        .map(k => String(k || '').trim()).filter(Boolean).slice(0, 4);
+    const location = String(input.location || '').trim();
+    const maxPages = Math.min(parseInt(input.maxPages, 10) || 20, 40);
+    const warnings = [];
+
+    if (!keywords.length) throw new Error('Give it at least one thing to search for.');
+
+    const queries = [...new Set(
+        keywords.flatMap(k => location ? [`${k} ${location}`, k] : [k])
+    )].slice(0, 5);
+
+    // ---- 1. find candidate pages -------------------------------------------
+    const refs = new Map();
+    for (let i = 0; i < queries.length; i++) {
+        const q = queries[i];
+        const unit = 'fbsearch:' + q;
+
+        if (ck.isDone(unit)) {
+            (ck.get(unit) || []).forEach(r => refs.set(r.pageId, r));
+            await progress(5 + Math.floor(25 * i / queries.length), `"${q}" already searched — reusing`);
+            continue;
+        }
+
+        await progress(5 + Math.floor(25 * i / queries.length), `Searching Facebook for "${q}"`);
+        const estimate = fbEstimateCredits(1, 25, false);
+        const { client } = await getWorkingClient('leadgen', userId, { needUsd: estimate, jobId });
+
+        try {
+            const { items } = await callActor(client, FB_SEARCH_ACTOR, {
+                search: q, searchType: 'pages', query: q,
+                resultsLimit: 25, maxResults: 25
+            }, { maxItems: 25, estimateUsd: estimate, jobId });
+
+            const found = fbPageSearchRefs(items);
+            found.forEach(r => refs.set(r.pageId, r));
+            await ck.done(unit, found);
+        } catch (e) {
+            if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+            warnings.push(`Search for "${q}" failed: ${e.message}`);
+            await ck.done(unit, []);
+        }
+    }
+
+    if (!refs.size) {
+        return { platform: 'facebook', found: 0, saved: 0, warnings: warnings.concat('No pages matched that search.') };
+    }
+
+    // ---- 2. drop the ones already on the list -------------------------------
+    const candidates = [...refs.values()].slice(0, maxPages);
+    const { data: existing } = await supabase.from('leads')
+        .select('platform_id')
+        .eq('owner_user_id', userId).eq('platform', 'facebook')
+        .in('platform_id', candidates.map(c => c.pageId));
+    const known = new Set((existing || []).map(e => e.platform_id));
+    const fresh = candidates.filter(c => !known.has(c.pageId));
+
+    if (!fresh.length) {
+        return { platform: 'facebook', found: candidates.length, saved: 0,
+                 warnings: warnings.concat('Every page found is already on your list.') };
+    }
+
+    // ---- 3. the allowance, before any of it is scraped ----------------------
+    // Taken up front rather than per page: scraping forty pages and then
+    // discovering there was room for five spends the difference for nothing.
+    const allowed = await takeLeadQuota(userId, fresh.length);
+    if (allowed <= 0) {
+        return { platform: 'facebook', found: candidates.length, saved: 0,
+                 warnings: warnings.concat('Lead allowance reached, so nothing new was collected.') };
+    }
+    if (allowed < fresh.length) {
+        warnings.push(`Lead allowance reached. Collected ${allowed} of the ${fresh.length} new pages found.`);
+    }
+
+    const wanted = fresh.slice(0, allowed);
+    let refunded = 0;
+
+    // ---- 4. scrape each page, one checkpoint each ---------------------------
+    const rows = [];
+    for (let i = 0; i < wanted.length; i++) {
+        const ref  = wanted[i];
+        const unit = 'fbpage:' + ref.pageId;
+        const pct  = 35 + Math.floor(55 * i / wanted.length);
+
+        if (ck.isDone(unit)) {
+            const saved = ck.get(unit);
+            if (saved) rows.push(saved); else refunded += 1;
+            await progress(pct, `Page ${i + 1} of ${wanted.length} already collected`);
+            continue;
+        }
+
+        await progress(pct, `Reading ${ref.hintName || ref.pageId} (${i + 1} of ${wanted.length})`);
+
+        try {
+            const { client } = await getWorkingClient('leadgen', userId,
+                { needUsd: COST_PER_FB_PAGE_PROFILE, jobId });
+            const items = await fbScrapePageProfile(client, ref);
+            const lead  = fbPageToLead(fbPageProfile(items, ref), userId);
+
+            if (lead) { rows.push(lead); await ck.done(unit, lead); }
+            else      { refunded += 1;  await ck.done(unit, null); }
+        } catch (e) {
+            if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+            warnings.push(`Could not read ${ref.hintName || ref.pageId}: ${e.message}`);
+            refunded += 1;
+            await ck.done(unit, null);
+        }
+    }
+
+    // ---- 5. save ------------------------------------------------------------
+    await progress(92, `Saving ${rows.length} business(es)`);
+    let saved = 0;
+
+    for (let i = 0; i < rows.length; i += 100) {
+        const slice = rows.slice(i, i + 100);
+        // Upsert, not insert: phase 16 added the unique key these conflict on,
+        // so a re-run or an overlapping search updates rather than duplicating.
+        const { error } = await supabase.from('leads')
+            .upsert(slice, { onConflict: 'owner_user_id,platform,username', ignoreDuplicates: false });
+        if (error) {
+            warnings.push(`A batch of ${slice.length} did not save — ${error.message}`);
+            logger.error('fb_lead_save_failed', { jobId, message: error.message });
+            refunded += slice.length;
+        } else {
+            saved += slice.length;
+        }
+    }
+
+    // Allowance was taken for every page we meant to read. Anything that did
+    // not become a saved lead goes back.
+    if (refunded > 0) await refundLeadQuota(userId, refunded);
+
+    await progress(100, `Saved ${saved} business(es) from Facebook`);
+    return { platform: 'facebook', found: candidates.length, saved, warnings };
+});
+
+/**
+ * Start a Facebook Page lead search.
+ *
+ * On the leadgen engine rather than fb_page: this is lead generation that
+ * happens to read Pages, so it draws the leadgen key and is gated by the
+ * leadgen grant — which is what a trial client already holds.
+ */
+app.post('/api/fb/find-leads', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        await assertJobSlot(ctx.user.id);
+
+        const keywords = (Array.isArray(req.body?.keywords) ? req.body.keywords : [req.body?.keywords])
+            .map(k => String(k || '').trim()).filter(Boolean).slice(0, 4);
+        if (!keywords.length) return res.status(400).json({ error: 'Give it at least one thing to search for.' });
+
+        const location = String(req.body?.location || '').trim();
+        const maxPages = Math.min(parseInt(req.body?.maxPages, 10) || 20, 40);
+
+        // Search calls plus one profile read each — the same arithmetic the
+        // worker will actually perform.
+        const estimate = +(
+            fbEstimateCredits(Math.min(keywords.length * (location ? 2 : 1), 5), 25, false) +
+            maxPages * COST_PER_FB_PAGE_PROFILE
+        ).toFixed(4);
+
+        const job = await createJob(ctx.user.id, 'fb_lead_discovery', 'leadgen',
+            { clientId: await resolveClientId(req, ctx), keywords, location, maxPages }, estimate);
+
+        runJob(job.id, JOB_WORKERS['fb_lead_discovery'](ctx.user.id, job.input, job.id));
+
+        res.status(202).json({ success: true, jobId: job.id, maxPages, estimatedUsd: estimate });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.post('/api/fb/page-report', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_page'); if (!ctx) return;
@@ -10506,6 +11323,37 @@ function cpFbFormat(r) {
     if (m === 'link')  return 'Link';
     return 'Text';                                   // text | poll | unknown
 }
+/**
+ * Whether a brief may carry a "spend money on this" recommendation.
+ *
+ * The model is told the rule in the prompt; this enforces it, for the same
+ * reason the cell gate exists. A why=gap cell is by definition something this
+ * account has never won — putting budget behind it is the most expensive kind
+ * of wrong advice a plan can give, and it is exactly the advice a confident
+ * model will volunteer.
+ *
+ * Only a why=double_down cell — something already winning organically — can
+ * be recommended for boosting. Everything else is downgraded, and the
+ * downgrade is recorded so the page can say why rather than silently
+ * disagreeing with the brief next to it.
+ */
+function cpBoostCall(modelBoost, cellWhy, modelWhy) {
+    const wants = /worth/i.test(String(modelBoost || ''));
+    const may   = cellWhy === 'double_down';
+
+    if (wants && may) {
+        return { boost: 'worth boosting', downgraded: false, why: modelWhy || null };
+    }
+    if (wants && !may) {
+        return {
+            boost: 'organic only',
+            downgraded: true,
+            why: 'Not proven for this account yet — win it organically before putting money behind it.'
+        };
+    }
+    return { boost: 'organic only', downgraded: false, why: modelWhy || null };
+}
+
 function cpBand(idx) {
     if (idx == null || isNaN(idx)) return 'typical';
     if (idx >= 1.5) return 'top';
@@ -10898,7 +11746,7 @@ registerWorker('content_plan', (userId, input, jobId) => async (progress, ck) =>
     if (geminiAvailable()) {
         const { json } = budgetedJson(evidence, { maxChars: 32000, keep: [...spec.formats.map(f => f.plural), 'counts', 'target'] });
         const formatLines = spec.formats.map(f =>
-            ` "${f.plural}": [ { "cell": "...", "concept": "${f.conceptHint}", "hook": "first line on screen / first line of the post", "caption": "full ${platform === 'instagram' ? 'caption' : 'post text'} in the cell's length band", "evidence": ["url"], "slot": "day + hour if bestHours suggests one", "why": "one line" } ]`
+            ` "${f.plural}": [ { "cell": "...", "concept": "${f.conceptHint}", "hook": "first line on screen / first line of the post", "script": ["3-6 beats, each one line, in order — what is said or shown from the hook to the close"], "shot": "what the camera or the image actually shows, in one line, concrete enough to hand to whoever makes it", "caption": "full ${platform === 'instagram' ? 'caption' : 'post text'} in the cell's length band", "evidence": ["url"], "slot": "day + hour if bestHours suggests one", "boost": "worth boosting | organic only", "boost_why": "one line", "why": "one line" } ]`
         ).join(',\n');
         const countLine = spec.formats.map(f => `${counts[f.plural]} ${f.plural}`).join(', ');
         const prompt =
@@ -10912,6 +11760,10 @@ RULES:
 - Never claim reach, saves, clicks or impressions unless the owner block supplies them.
 - If freshnessNote is present, say so once in the summary; do not pretend the data is current.
 - Write in the language the evidence hooks are in (English or Bangla as seen).
+- "script" is the spoken or written beats in order, and "shot" is what is actually on screen. Both must be makeable by one person with a phone. No crews, no studios, no stock footage, no voice actors, no motion graphics.
+- Derive script and shot from the evidence hooks in the cell, not from what usually works on this platform. If a cell's exemplars do not show you what was on screen, say so in "shot" rather than inventing a treatment.
+- "boost" may only be "worth boosting" for a why=double_down cell — something this account already wins organically. A why=gap cell is unproven for them, and putting money behind unproven content is how budgets get wasted. Everything else is "organic only".
+- Never suggest a budget, a bid, an audience size or a targeting setting. There is no ad data here and you would be guessing.
 
 Scorecard (JSON):
 ${json}
@@ -10942,8 +11794,18 @@ Produce exactly ${countLine} (fewer only if there are not enough cells).`;
         if (!c || c.format !== format) { removed += 1; return []; }
         const idx = c.target.n >= CP_MIN_CELL ? c.target.dampedIndex : c.rivals.dampedIndex;
         const ev = (Array.isArray(b.evidence) ? b.evidence : []).filter(u => c.exemplars.some(e => e.url === u));
-        return [{ ...b, evidence: ev.length ? ev : c.exemplars.map(e => e.url), predicted_band: cpBand(idx), predicted_index: idx,
-                  sources: { evidence: 'scraped', prediction: 'derived', owner: owner ? 'insights' : null } }];
+
+        const call = cpBoostCall(b.boost, c.why, b.boost_why);
+
+        return [{ ...b, evidence: ev.length ? ev : c.exemplars.map(e => e.url),
+                  predicted_band: cpBand(idx), predicted_index: idx,
+                  boost: call.boost,
+                  boost_downgraded: call.downgraded,
+                  boost_why: call.why,
+                  script: Array.isArray(b.script) ? b.script.slice(0, 8) : [],
+                  shot: b.shot || null,
+                  sources: { evidence: 'scraped', prediction: 'derived',
+                             boost: 'derived', owner: owner ? 'insights' : null } }];
     });
     let briefs = null;
     if (ai) {
@@ -11082,7 +11944,100 @@ app.get('/api/content-plan/:id', async (req, res) => {
         const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
         const { data } = await supabase.from('reports').select('*').eq('id', req.params.id).maybeSingle();
         if (!data || data.report_type !== 'content_plan' || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Plan not found' });
-        res.json({ report: data });
+
+        // Notes ship with the plan rather than behind a second request: they
+        // are part of reading it, and a page that had to ask twice would
+        // routinely render the plan without them.
+        const { data: notes } = await supabase.from('content_plan_notes')
+            .select('id, cell, body, author_name, created_at, updated_at, user_id')
+            .eq('report_id', data.id).order('created_at', { ascending: true }).limit(200);
+
+        res.json({ report: data, notes: notes || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// MANUAL RESEARCH FINDINGS
+//
+// A plan knows what was published and how it performed. It does not know what
+// a customer said on the phone, that a rival quietly changed their pricing, or
+// that the town has a festival in three weeks. Those arrive through a person.
+//
+// Kept in their own table and rendered as somebody's note, never folded into a
+// computed index — the same separation rule 3 applies to scraped and owner
+// metrics. A human observation is a third source, not a correction to the
+// other two.
+// ---------------------------------------------------------------------------
+
+app.post('/api/content-plan/:id/notes', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Bad plan id.' });
+
+        const body = String(req.body?.body || '').trim().slice(0, 4000);
+        if (!body) return res.status(400).json({ error: 'Write something first.' });
+
+        const { data: plan } = await supabase.from('reports')
+            .select('id, user_id, client_id, report_type').eq('id', req.params.id).maybeSingle();
+        if (!plan || plan.report_type !== 'content_plan' || !(await canReadReport(ctx, plan))) {
+            return res.status(404).json({ error: 'Plan not found' });
+        }
+
+        const { data, error } = await supabase.from('content_plan_notes').insert([{
+            report_id: plan.id,
+            user_id: ctx.user.id,
+            client_id: plan.client_id || null,
+            cell: req.body?.cell ? String(req.body.cell).slice(0, 200) : null,
+            body,
+            author_name: ctx.profile?.full_name || ctx.user.email || null
+        }]).select().single();
+        if (error) throw error;
+
+        res.status(201).json({ success: true, note: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/content-plan/notes/:noteId', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!UUID_RE.test(String(req.params.noteId))) return res.status(400).json({ error: 'Bad note id.' });
+
+        const body = String(req.body?.body || '').trim().slice(0, 4000);
+        if (!body) return res.status(400).json({ error: 'Write something first.' });
+
+        // Only the author edits, even where a colleague can read the plan.
+        // Rewriting somebody else's observation and leaving their name on it
+        // is worse than not being able to edit it at all.
+        const { data: note } = await supabase.from('content_plan_notes')
+            .select('id, user_id').eq('id', req.params.noteId).maybeSingle();
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        if (note.user_id !== ctx.user.id && ctx.profile?.role !== 'admin') {
+            return res.status(403).json({ error: 'You can only edit your own notes.' });
+        }
+
+        const { data, error } = await supabase.from('content_plan_notes')
+            .update({ body, updated_at: new Date().toISOString() })
+            .eq('id', note.id).select().single();
+        if (error) throw error;
+
+        res.json({ success: true, note: data });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/content-plan/notes/:noteId', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!UUID_RE.test(String(req.params.noteId))) return res.status(400).json({ error: 'Bad note id.' });
+
+        const { data: note } = await supabase.from('content_plan_notes')
+            .select('id, user_id').eq('id', req.params.noteId).maybeSingle();
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        if (note.user_id !== ctx.user.id && ctx.profile?.role !== 'admin') {
+            return res.status(403).json({ error: 'You can only delete your own notes.' });
+        }
+
+        await supabase.from('content_plan_notes').delete().eq('id', note.id);
+        res.json({ success: true });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -11421,20 +12376,1000 @@ const REPORT_PAGE = {
     content_plan: 'content-plan.html', meta_owned: 'content-plan.html'
 };
 
+/**
+ * Every share link points at one client-facing page, not at the employee page
+ * that happens to render that report type.
+ *
+ * Sending them to ig-report.html put a client inside the agency's workbench
+ * with a read-only bar over it, and shipped every pillar score and rival
+ * handle along with the link.
+ *
+ * REPORT_PAGE above no longer has a caller because of this change. It is kept
+ * rather than deleted because it is the only record of which employee page
+ * renders which report type, which is what an in-app "open this report" link
+ * would need — but nothing reads it today.
+ */
 function shareUrlFor(row, token) {
-    const page = REPORT_PAGE[row.report_type] || 'ig-report.html';
     const base = FRONTEND_URL || '';
-    return `${base}/${page}?share=${encodeURIComponent(token)}`;
+    return `${base}/share.html?share=${encodeURIComponent(token)}`;
 }
 
 function shareToken() { return crypto.randomBytes(24).toString('base64url'); }
 
-function publicReportView(row) {
-    const {
-        user_id, client_id, set_id, job_id, source_report_ids, credits_estimate, ...rest
-    } = row || {};
-    return rest;
+// ===========================================================================
+// CLIENT REPORT VIEW  (phase 14)
+//
+// The same report, said differently. Not a subset and not a dumbed-down copy:
+// the employee report answers "what is the state of this account and what do I
+// do about it", and a business owner is asking something narrower — am I doing
+// well, how do I compare to businesses like mine, and what should I change.
+//
+// Nothing here is scraped or computed fresh. Every number already exists in
+// reports.report_json because the employee report needed it; this reads the
+// same row and chooses different words.
+// ===========================================================================
+
+/**
+ * Plain-language readings of each score pillar. IG and FB Page emit the same
+ * breakdown shape, so one table covers both.
+ *
+ * `strong` and `weak` are written to be true at a glance without the number —
+ * an owner should be able to skip every figure on the page and still leave
+ * knowing what to do.
+ */
+const CLIENT_PILLARS = {
+    'Engagement per follower': {
+        strong: 'The people following you actually react to what you post.',
+        weak:   'Most of your followers scroll past without reacting.',
+        why:    'This is the clearest sign you have the right audience rather than just a large one.'
+    },
+    'Posting cadence': {
+        strong: 'You post often enough to stay in front of people.',
+        weak:   'You are not posting often enough to stay visible.',
+        why:    'Accounts that go quiet get shown to fewer people, and it takes weeks to recover.'
+    },
+    'Consistency': {
+        strong: 'You post on a steady rhythm rather than in bursts.',
+        weak:   'Your posting comes in bursts with long gaps between.',
+        why:    'A long silence resets your reach, so five posts in a week then nothing beats nothing then five.'
+    },
+    'Conversation': {
+        strong: 'People comment, not just tap like.',
+        weak:   'People tap like but rarely comment.',
+        why:    'Comments are worth far more than likes — they are what puts a post in front of new people.'
+    },
+    'Reach': {
+        strong: 'Your posts are being seen well beyond your own followers.',
+        weak:   'Your posts are mostly only reaching people who already follow you.',
+        why:    'Reaching past your followers is how the account grows without paying for it.'
+    },
+    'Amplification': {
+        strong: 'People share your posts on.',
+        weak:   'Your posts are rarely shared.',
+        why:    'A share puts you in front of someone who trusts the person sharing.'
+    },
+    'Format range': {
+        strong: 'You use a good mix of post types.',
+        weak:   'You lean on one type of post.',
+        why:    'Different formats reach different people, and a single format caps how far you go.'
+    },
+    'Profile completeness': {
+        strong: 'Your profile tells a visitor who you are and how to reach you.',
+        weak:   'Your profile is missing things a visitor needs to contact you.',
+        why:    'Someone who likes a post and visits your profile should never have to search for how to buy.'
+    },
+    'Momentum adjustment': {
+        strong: 'Your numbers are moving in the right direction.',
+        weak:   'Your numbers are drifting down month over month.',
+        why:    'The direction matters more than the size — a small account climbing beats a bigger one sliding.'
+    }
+};
+
+function ordinal(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return null;
+    const s = ['th', 'st', 'nd', 'rd'], m = v % 100;
+    return v + (s[(m - 20) % 10] || s[m] || s[0]);
 }
+
+/**
+ * How the account sits against the businesses it was compared with. This is
+ * the question owners ask first and it is the one the employee report answers
+ * least directly, because it buries it in a ranked table of handles.
+ */
+function clientStanding(row, bench, main) {
+    const ranked = Array.isArray(bench.ranked) ? bench.ranked : [];
+    const rank   = row.target_rank ?? (ranked.find(r => r.isTarget) || {}).rank ?? null;
+    const of     = ranked.length || (bench.cohort && bench.cohort.accounts) || null;
+
+    const yours  = parseFloat(row.engagement_rate ?? main.engagementRate ?? NaN);
+    const avg    = parseFloat(row.cohort_avg_er ?? (bench.cohort || {}).avgEngagementRate ?? NaN);
+    const haveEr = Number.isFinite(yours) && Number.isFinite(avg);
+
+    let verdict = null;
+    if (rank && of) {
+        if (rank === 1)       verdict = `You are ahead of every business you were compared with.`;
+        else if (rank === of) verdict = `You are behind the other ${of - 1} businesses you were compared with.`;
+        else                  verdict = `You come ${ordinal(rank)} out of ${of} businesses like yours.`;
+    }
+
+    let gapLine = null;
+    if (haveEr) {
+        const diff = yours - avg;
+        const pct  = Math.abs(diff).toFixed(2);
+        gapLine = Math.abs(diff) < 0.05
+            ? 'Your engagement is level with the others — no real gap either way.'
+            : `For every 100 followers, you get about ${pct} ${diff > 0 ? 'more' : 'fewer'} reactions on a typical post than they do.`;
+    }
+
+    return {
+        rank, of,
+        verdict,
+        gap: gapLine,
+        yours: haveEr ? +yours.toFixed(2) : null,
+        peer_average: haveEr ? +avg.toFixed(2) : null,
+        ahead: haveEr ? yours >= avg : null,
+        peers: ranked.map(r => ({
+            name: r.isTarget ? 'You' : (r.handle ? '@' + r.handle : 'A similar business'),
+            position: r.rank,
+            is_you: !!r.isTarget
+        }))
+    };
+}
+
+/**
+ * Splits the score pillars into what is working and what to change.
+ *
+ * The thresholds are deliberately wide apart. A pillar sitting mid-range is
+ * neither a win nor a problem, and listing it as either would pad the page
+ * with things the owner cannot act on.
+ */
+function clientPillars(breakdown) {
+    const working = [], fix = [];
+    for (const p of (Array.isArray(breakdown) ? breakdown : [])) {
+        const copy = CLIENT_PILLARS[p.pillar];
+        if (!copy || !p.max) continue;
+        // A pillar that could not be measured is not a failing one.
+        if (/not enough|no view counts|no trend/i.test(String(p.detail || ''))) continue;
+
+        const share = Number(p.points) / Number(p.max);
+        if (share >= 0.7)      working.push({ title: copy.strong, why: copy.why });
+        else if (share <= 0.4) fix.push({ title: copy.weak, why: copy.why });
+    }
+    return { working, fix };
+}
+
+/**
+ * A content plan, said to the person who has to make the posts.
+ *
+ * The employee plan is a scorecard of format x opening x length x topic cells
+ * with a damped index on each. An owner does not run cells; they need to know
+ * what to film on Tuesday. So the briefs come through with their script and
+ * shot intact, and the cell machinery stays behind.
+ */
+function clientPlanIdeas(j) {
+    const spec = Array.isArray(j.formatSpec) ? j.formatSpec : [];
+    const out = [];
+
+    for (const f of spec) {
+        for (const b of (j.briefs?.[f.plural] || [])) {
+            out.push({
+                format: f.label || f.plural,
+                concept: b.concept || null,
+                hook: b.hook || null,
+                script: Array.isArray(b.script) ? b.script : [],
+                shot: b.shot || null,
+                caption: b.caption || null,
+                when: b.slot || null,
+                // The band, never the index. "Likely to do well" is actionable;
+                // "predicted index 1.28" invites an argument about the number.
+                outlook: b.predicted_band || null,
+                boost: b.boost === 'worth boosting' ? 'Worth putting money behind' : 'Post it organically',
+                boost_why: b.boost_why || null
+            });
+        }
+    }
+    return out;
+}
+
+/**
+ * A community audit, said to the business whose customers are in those rooms.
+ *
+ * Room value scores, unique-poster ratios and admin shares are how an agency
+ * decides where to spend an afternoon. An owner wants to know which rooms are
+ * worth being in and what people there are asking for.
+ */
+function clientRooms(row, j) {
+    const names = Array.isArray(row.fb_group_names) ? row.fb_group_names : [];
+    const rooms = Array.isArray(j.rooms) ? j.rooms : Array.isArray(j.audits) ? j.audits : [];
+
+    if (rooms.length) {
+        return rooms.slice(0, 12).map(r => ({
+            name: r.name || r.group_name || 'A local group',
+            members: r.member_count ?? r.members ?? null,
+            // Three bands, because an owner is deciding whether to join, not
+            // ranking twelve rooms against each other.
+            worth: (r.room_value_score ?? r.roomValue ?? 0) >= 60 ? 'Worth being in'
+                 : (r.room_value_score ?? r.roomValue ?? 0) >= 35 ? 'Worth a look'
+                 : 'Quiet for you',
+            posts_read: r.posts ?? r.postsAnalysed ?? null
+        }));
+    }
+    // Older reports stored only the names.
+    return names.slice(0, 12).map(n => ({ name: n, members: null, worth: null, posts_read: null }));
+}
+
+function clientReportView(row) {
+    if (!row) return null;
+    const j     = row.report_json || {};
+    const main  = j.main || {};
+    const bench = j.benchmark || {};
+
+    const score = row.score ?? main.score ?? null;
+    const band  = score === null ? null
+                : score >= 80 ? 'strong'
+                : score >= 65 ? 'healthy'
+                : score >= 50 ? 'mixed'
+                : score >= 35 ? 'weak'
+                : 'poor';
+
+    const HEADLINE = {
+        strong:  'Your account is in good shape.',
+        healthy: 'Your account is healthy, with one clear thing to fix.',
+        mixed:   'Your account works, but it is underperforming for its size.',
+        weak:    'There are some basics to fix before anything else will help.',
+        poor:    'The fundamentals need attention first.'
+    };
+
+    // A plan and a community audit answer different questions from an audit,
+    // so they get their own opening line rather than a score-band verdict.
+    const isPlan  = row.report_type === 'content_plan';
+    const isRooms = row.report_type === 'fb_community' || row.report_type === 'fb_group';
+    const ideas   = isPlan  ? clientPlanIdeas(j)      : [];
+    const rooms   = isRooms ? clientRooms(row, j)     : [];
+
+    const { working, fix } = clientPillars(main.scoreBreakdown || main.breakdown || j.breakdown);
+
+    // Profile gaps are the cheapest wins on the page and the easiest for an
+    // owner to action without help, so they are surfaced separately rather
+    // than folded into the completeness pillar.
+    const pc      = main.profileCompleteness || main.completeness || {};
+    const missing = Array.isArray(pc.checks)
+        ? pc.checks.filter(c => !c.ok).map(c => c.label)
+        : [];
+
+    const provisional = !!(main.lowConfidence || j.lowConfidence);
+
+    return {
+        id: row.id,
+        type: row.report_type,
+        platform: row.platform,
+        handle: row.target_handle,
+        date: row.snapshot_date || (row.created_at || '').slice(0, 10),
+        posts_looked_at: row.posts_analyzed ?? null,
+
+        headline: isPlan
+                    ? (ideas.length ? `${ideas.length} things to post next.` : 'Your content plan.')
+                : isRooms
+                    ? (rooms.length ? `${rooms.length} local groups where your customers are talking.`
+                                    : 'Your community report.')
+                : band ? HEADLINE[band] : 'Here is how your account is doing.',
+        band: isPlan || isRooms ? null : band,
+
+        // Present only on the type they belong to, so a page can render what
+        // it is given without knowing the report types.
+        ideas,
+        rooms,
+        // The letter grade is kept because it travels well in conversation;
+        // the raw score is not, because a number out of 100 invites an
+        // argument about the number instead of the finding.
+        grade: row.grade || main.grade || null,
+
+        provisional,
+        provisional_note: provisional
+            ? 'There were not many recent posts to look at, so treat this as a first read rather than a verdict.'
+            : null,
+
+        standing: clientStanding(row, bench, main),
+
+        working,
+        fix,
+
+        profile: {
+            complete_pct: pc.score ?? pc.percent ?? null,
+            missing
+        },
+
+        summary: row.ai_summary || null,
+        followers: row.followers_snapshot ?? main.followers ?? null,
+        posts_per_week: row.posts_per_week ?? null
+    };
+}
+
+
+// ===========================================================================
+// OWNER ASSISTANT  (phase 15)
+//
+// A business owner asks a question in their own words and gets an answer
+// built from their own data. Two tiers, and the difference between them is
+// the whole upsell:
+//
+//   not connected — everything we could work out from the outside. Real, but
+//                   it is what anyone looking at the account could see.
+//   Meta connected — reach, saves, demographics, the numbers only the owner
+//                   can see. Costs no Apify, which is why it is the thing
+//                   worth putting in front of a trial.
+//
+// The model never writes SQL. It picks from bounded tools, each of which is
+// an ordinary scoped query, so the blast radius of a bad model turn is a
+// wrong sentence rather than a wrong read.
+// ===========================================================================
+
+const ASSISTANT_MAX_ROUNDS = parseInt(process.env.ASSISTANT_MAX_ROUNDS || '6', 10);
+const ASSISTANT_HISTORY    = parseInt(process.env.ASSISTANT_HISTORY || '20', 10);
+
+/**
+ * One model turn with function calling.
+ *
+ * Deliberately a sibling of geminiCallDetailed rather than a refactor of it.
+ * That one carries a JSON-repair path every report narrative depends on, and
+ * the risk of breaking it is not worth the saved lines. This shares everything
+ * that matters — the key pool, the cooldowns, the model chain, the dead-model
+ * map — and only the loop body differs.
+ */
+async function geminiToolTurn(contents, functionDeclarations, { systemInstruction, userId, tag = 'assistant' } = {}) {
+    const candidates = await geminiCandidates(userId);
+    if (!candidates.length) return { ok: false, reason: 'no_key' };
+
+    METRICS.gemini.calls += 1;
+
+    const models = await geminiModelChain(candidates[0].key);
+    let keyIdx = 0, modelIdx = 0, withThinking = true;
+    const maxAttempts = 3 + candidates.length + models.length;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (keyIdx >= candidates.length) {
+            keyIdx = 0;
+            await new Promise(r => setTimeout(r, Math.min(2000 * Math.pow(2, attempt), 15000)));
+        }
+        if (modelIdx >= models.length) break;
+
+        const cand = candidates[keyIdx];
+        const model = models[modelIdx];
+
+        const generationConfig = { temperature: 0.2, maxOutputTokens: 2048 };
+        if (withThinking) {
+            generationConfig.thinkingConfig = geminiIsThinkingLevelModel(model)
+                ? { thinkingLevel: 'low' } : { thinkingBudget: 512 };
+        }
+
+        const body = {
+            contents,
+            generationConfig,
+            ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
+            ...(functionDeclarations?.length ? { tools: [{ functionDeclarations }] } : {})
+        };
+
+        try {
+            const r = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+                { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cand.key },
+                  body: JSON.stringify(body) });
+
+            if (r.status === 429) {
+                METRICS.gemini.retries += 1;
+                if (cand.id) _geminiCoolLocal.set(cand.id, Date.now() + GEMINI_KEY_COOLDOWN_MS);
+                await geminiMarkKey(cand.id, {
+                    status: 'cooldown',
+                    cooldown_until: new Date(Date.now() + GEMINI_KEY_COOLDOWN_MS).toISOString(),
+                    last_error: '429'
+                });
+                keyIdx += 1; continue;
+            }
+
+            if (!r.ok) {
+                const text = (await r.text()).slice(0, 400);
+                if (r.status === 400 && /thinking/i.test(text) && withThinking) { withThinking = false; continue; }
+                if ((r.status === 400 || r.status === 403) && /api key|API_KEY|permission|not valid/i.test(text)) {
+                    await geminiMarkKey(cand.id, { status: 'invalid', last_error: text.slice(0, 200), fail_count: 99 });
+                    keyIdx += 1; continue;
+                }
+                if (r.status === 404 || /model|not found|not supported/i.test(text)) {
+                    _geminiDeadModels.set(model, Date.now());
+                    modelIdx += 1; continue;
+                }
+                if (r.status >= 500) {
+                    METRICS.gemini.retries += 1;
+                    await new Promise(res => setTimeout(res, Math.min(2000 * Math.pow(2, attempt), 15000)));
+                    continue;
+                }
+                METRICS.gemini.failed += 1;
+                logger.error('assistant_gemini_failed', { tag, status: r.status, body: text });
+                return { ok: false, reason: 'http_' + r.status };
+            }
+
+            await geminiMarkKey(cand.id, { last_used_at: new Date().toISOString(), status: 'active', cooldown_until: null });
+
+            const json  = await r.json();
+            const parts = json?.candidates?.[0]?.content?.parts || [];
+            return {
+                ok: true,
+                parts,
+                calls: parts.filter(p => p.functionCall).map(p => p.functionCall),
+                text: parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim(),
+                finishReason: json?.candidates?.[0]?.finishReason || null
+            };
+        } catch (e) {
+            logger.warn('assistant_gemini_error', { tag, message: e.message, attempt });
+            await new Promise(res => setTimeout(res, Math.min(1500 * Math.pow(2, attempt), 10000)));
+        }
+    }
+
+    METRICS.gemini.failed += 1;
+    return { ok: false, reason: 'exhausted' };
+}
+
+/**
+ * What the assistant may read. Every tool is scoped to the asking account —
+ * the scope is applied here, not passed in by the model, so no argument it
+ * invents can widen it.
+ */
+const ASSISTANT_TOOLS = {
+    get_my_reports: {
+        decl: {
+            name: 'get_my_reports',
+            description: 'The list of reports that exist for this business, newest first, with their date, type and overall band. Call this first when the user asks anything about how they are doing, so you know what you actually have.',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            const { data } = await supabase.from('reports')
+                .select('id, report_type, target_handle, snapshot_date, created_at, grade, score')
+                .or(s.reportScope).order('created_at', { ascending: false }).limit(20);
+            return (data || []).map(r => ({
+                id: r.id, type: r.report_type, handle: r.target_handle,
+                date: r.snapshot_date || (r.created_at || '').slice(0, 10),
+                grade: r.grade,
+                band: r.score >= 80 ? 'strong' : r.score >= 65 ? 'healthy'
+                    : r.score >= 50 ? 'mixed' : r.score >= 35 ? 'weak' : 'poor'
+            }));
+        }
+    },
+
+    get_report_detail: {
+        decl: {
+            name: 'get_report_detail',
+            description: 'One report in full: the headline finding, how the business compares to similar businesses, what is working, what to change, and any gaps in their profile. Use the id from get_my_reports. This is the richest source you have — prefer it over guessing.',
+            parameters: { type: 'OBJECT', properties: { report_id: { type: 'STRING' } }, required: ['report_id'] }
+        },
+        run: async (s, a) => {
+            if (!UUID_RE.test(String(a.report_id || ''))) return { error: 'bad report id' };
+            const { data } = await supabase.from('reports').select('*').eq('id', a.report_id).maybeSingle();
+            if (!data) return { error: 'not found' };
+            if (data.user_id !== s.userId && !(data.client_id && s.clientIds.includes(data.client_id))) {
+                return { error: 'not found' };
+            }
+            return clientReportView(data);
+        }
+    },
+
+    get_progress_over_time: {
+        decl: {
+            name: 'get_progress_over_time',
+            description: 'How the overall score and engagement rate have moved across every Instagram report for this business, oldest first. Use for "are we improving", "is it working", "compared to last month".',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            const { data } = await supabase.from('reports')
+                .select('snapshot_date, created_at, score, grade, engagement_rate, followers_snapshot, posts_per_week, cohort_avg_er')
+                .or(s.reportScope).in('report_type', ['ig_report', 'deep_audit'])
+                .order('created_at', { ascending: true }).limit(24);
+            return (data || []).map(r => ({
+                date: r.snapshot_date || (r.created_at || '').slice(0, 10),
+                grade: r.grade,
+                engagement_rate: r.engagement_rate,
+                peer_average_engagement: r.cohort_avg_er,
+                followers: r.followers_snapshot,
+                posts_per_week: r.posts_per_week
+            }));
+        }
+    },
+
+    get_best_posts: {
+        decl: {
+            name: 'get_best_posts',
+            description: 'This account\'s own posts from the most recent analysis, ranked by engagement, with format, caption, when it went out and how it did. Use for "what worked", "what should I post more of", "why did that one do well".',
+            parameters: { type: 'OBJECT', properties: { limit: { type: 'INTEGER', description: 'default 8, max 20' } } }
+        },
+        run: async (s, a) => {
+            const { data } = await supabase.from('posts')
+                .select('caption, post_type, likes, comments, views, posted_at, engagement_raw, hashtags, post_url')
+                .eq('user_id', s.userId)
+                .order('engagement_raw', { ascending: false })
+                .limit(Math.min(parseInt(a.limit, 10) || 8, 20));
+            return (data || []).map(p => ({
+                format: p.post_type,
+                posted_at: p.posted_at,
+                caption: String(p.caption || '').slice(0, 220),
+                likes: p.likes, comments: p.comments, views: p.views,
+                hashtags: (p.hashtags || []).slice(0, 8)
+            }));
+        }
+    },
+
+    get_best_times: {
+        decl: {
+            name: 'get_best_times',
+            description: 'When this account\'s posts do best, by day of week and hour, from its own history. Use for "when should I post".',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            const { data } = await supabase.from('posts')
+                .select('hour_local, dow_local, engagement_raw')
+                .eq('user_id', s.userId).limit(500);
+            if (!data || data.length < 8) return { error: 'not enough posts analysed yet to say anything useful about timing' };
+            return timeHeatmap(data);
+        }
+    },
+
+    get_community_demand: {
+        decl: {
+            name: 'get_community_demand',
+            description: 'Real posts from local Facebook groups where somebody is asking for what this business sells — the request, how urgent it reads, and when it was posted. Authors are anonymous by design. Use for "who needs me right now", "what are people asking for".',
+            parameters: { type: 'OBJECT', properties: { limit: { type: 'INTEGER', description: 'default 10, max 25' } } }
+        },
+        run: async (s, a) => {
+            const { data } = await supabase.from('fb_demand_signals')
+                .select('snippet, intent, urgency, category, group_name, posted_at, lead_score')
+                .eq('user_id', s.userId)
+                .order('posted_at', { ascending: false })
+                .limit(Math.min(parseInt(a.limit, 10) || 10, 25));
+            return (data || []).map(d => ({
+                asking_for: String(d.snippet || '').slice(0, 240),
+                kind: d.intent, urgency: d.urgency, category: d.category,
+                group: d.group_name, posted_at: d.posted_at
+            }));
+        }
+    },
+
+    get_owner_insights: {
+        decl: {
+            name: 'get_owner_insights',
+            description: 'The numbers only the account owner can see, from a connected Meta account: reach, impressions, profile visits, saves and audience demographics. Only available when the business has connected Meta. If it returns not_connected, say plainly that connecting Meta would let you answer that properly — do not guess at these figures from anything else.',
+            parameters: { type: 'OBJECT', properties: { days: { type: 'INTEGER', description: 'how far back, default 30' } } }
+        },
+        run: async (s, a) => {
+            if (!s.metaConnected) {
+                return { not_connected: true,
+                         note: 'This business has not connected Meta, so owner-only numbers are unavailable.' };
+            }
+            const days  = Math.min(Math.max(parseInt(a.days, 10) || 30, 1), 90);
+            const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+            const { data } = await supabase.from('meta_snapshots')
+                .select('snapshot_date, level, metrics')
+                .eq('user_id', s.userId).gte('snapshot_date', since)
+                .order('snapshot_date', { ascending: true }).limit(120);
+            if (!data || !data.length) {
+                return { connected_but_empty: true,
+                         note: 'Meta is connected but no insights have synced yet.' };
+            }
+            return { days, snapshots: data };
+        }
+    }
+};
+
+function assistantDeclarations() {
+    return Object.values(ASSISTANT_TOOLS).map(t => t.decl);
+}
+
+/**
+ * The voice. Most of this is about what NOT to do: a business owner asking
+ * how their Instagram is doing will believe a confident number, so the cost
+ * of inventing one is higher than the cost of saying there is no data.
+ */
+function assistantSystemPrompt(scope) {
+    return [
+        'You are EdgeLead\'s assistant. You help the owner of a small business understand their own social media.',
+        '',
+        'How to answer:',
+        '- Talk like a knowledgeable friend, not a dashboard. Short paragraphs, no bullet-point dumps unless asked for a list.',
+        '- Lead with the answer. Put the reasoning after it, only if it helps.',
+        '- Numbers are for support, not decoration. One or two that matter beat ten that do not.',
+        '- Never invent a figure. If a tool did not return it, say you do not have it and say what would get it.',
+        '- Never mention tools, reports ids, databases, scraping, Apify, or how any of this is built.',
+        '',
+        'What you can see:',
+        scope.metaConnected
+            ? '- This business has connected Meta, so you can also see owner-only numbers: reach, saves, profile visits and demographics.'
+            : '- This business has NOT connected Meta. You can only see what is visible from outside the account. If they ask about reach, saves, impressions, profile visits or who their audience is, say plainly that those are owner-only numbers and connecting Meta would let you answer properly. Say it once, naturally, not as a sales pitch every time.',
+        scope.handle ? `- Their Instagram is @${scope.handle}.` : '',
+        `- Today is ${new Date().toISOString().slice(0, 10)}.`,
+        '',
+        'If you have no data at all for what they asked, say so in one sentence and suggest the one thing that would fix it.'
+    ].filter(Boolean).join('\n');
+}
+
+/** Everything a tool needs to stay inside one account, resolved once. */
+async function assistantScope(userId) {
+    const [{ data: memberships }, { data: owned }, { data: conn }, { data: prof }] = await Promise.all([
+        supabase.from('client_members').select('client_id').eq('user_id', userId),
+        supabase.from('clients').select('id, ig_handle').eq('owner_user_id', userId),
+        supabase.from('meta_connections').select('id').eq('user_id', userId).eq('status', 'active').limit(1),
+        supabase.from('reports').select('target_handle').eq('user_id', userId)
+            .order('created_at', { ascending: false }).limit(1)
+    ]);
+
+    const clientIds = [...new Set([
+        ...(memberships || []).map(m => m.client_id),
+        ...(owned || []).map(c => c.id)
+    ])].filter(Boolean);
+
+    const ors = [`user_id.eq.${userId}`];
+    if (clientIds.length) ors.push(`client_id.in.(${clientIds.join(',')})`);
+
+    return {
+        userId,
+        clientIds,
+        reportScope: ors.join(','),
+        metaConnected: !!(conn && conn.length),
+        handle: (owned || []).find(c => c.ig_handle)?.ig_handle || prof?.[0]?.target_handle || null
+    };
+}
+
+/**
+ * Run one question to an answer.
+ *
+ * onEvent receives status updates as tools run. Token-level streaming is
+ * deliberately not done: it would mean streaming every model turn including
+ * the ones that turn out to be tool calls, and the win over "I'm reading your
+ * September report" is small.
+ */
+async function assistantAnswer({ userId, message, conversationId, onEvent }) {
+    const emit = ev => { try { if (onEvent) onEvent(ev); } catch (e) { logger.warn('assistant_emit', { message: e.message }); } };
+
+    const scope = await assistantScope(userId);
+
+    // Thread: reuse if it belongs to this user, otherwise start one.
+    let conv = null;
+    if (conversationId && UUID_RE.test(String(conversationId))) {
+        const { data } = await supabase.from('ai_conversations')
+            .select('*').eq('id', conversationId).eq('user_id', userId).maybeSingle();
+        conv = data || null;
+    }
+    if (!conv) {
+        const { data } = await supabase.from('ai_conversations').insert([{
+            user_id: userId,
+            title: String(message || '').slice(0, 80) || 'New conversation'
+        }]).select().single();
+        conv = data;
+    }
+
+    const { data: history } = await supabase.from('ai_messages')
+        .select('role, content').eq('conversation_id', conv.id)
+        .order('created_at', { ascending: true }).limit(ASSISTANT_HISTORY);
+
+    await supabase.from('ai_messages').insert([{ conversation_id: conv.id, role: 'user', content: message }]);
+
+    const contents = [
+        ...(history || []).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+        { role: 'user', parts: [{ text: message }] }
+    ];
+
+    const STATUS = {
+        get_my_reports:        'Looking at your reports',
+        get_report_detail:     'Reading your report',
+        get_progress_over_time:'Checking how things have moved',
+        get_best_posts:        'Going through your posts',
+        get_best_times:        'Working out your best times',
+        get_community_demand:  'Checking what people are asking for',
+        get_owner_insights:    'Reading your Meta numbers'
+    };
+
+    const used = [];
+    let answer = '';
+
+    for (let round = 0; round < ASSISTANT_MAX_ROUNDS; round++) {
+        const turn = await geminiToolTurn(contents, assistantDeclarations(), {
+            systemInstruction: assistantSystemPrompt(scope), userId, tag: 'assistant'
+        });
+
+        if (!turn.ok) {
+            answer = turn.reason === 'no_key'
+                ? 'The assistant is not switched on for this account yet.'
+                : 'I could not get an answer together just then. Try asking again in a moment.';
+            break;
+        }
+
+        if (!turn.calls.length) {
+            answer = turn.text || 'I could not put an answer together for that one. Try asking it a different way.';
+            break;
+        }
+
+        contents.push({ role: 'model', parts: turn.parts });
+        emit({ type: 'status', label: [...new Set(turn.calls.map(c => STATUS[c.name] || 'Reading your data'))].join(' · ') });
+
+        // Independent reads, so they go together rather than one after another.
+        const settled = await Promise.all(turn.calls.map(async fc => {
+            const tool = ASSISTANT_TOOLS[fc.name];
+            let result;
+            try { result = tool ? await tool.run(scope, fc.args || {}) : { error: 'unknown tool' }; }
+            catch (e) { logger.warn('assistant_tool_failed', { tool: fc.name, message: e.message }); result = { error: e.message }; }
+            return { fc, result };
+        }));
+
+        contents.push({
+            role: 'user',
+            parts: settled.map(({ fc, result }) => {
+                used.push(fc.name);
+                return { functionResponse: { name: fc.name, response: { result } } };
+            })
+        });
+    }
+
+    if (!answer) answer = 'That turned into more digging than I could finish. Try narrowing the question.';
+
+    await supabase.from('ai_messages').insert([{
+        conversation_id: conv.id, role: 'assistant', content: answer,
+        tools: used.length ? used : null
+    }]);
+    await supabase.from('ai_conversations')
+        .update({ updated_at: new Date().toISOString() }).eq('id', conv.id);
+
+    return { answer, conversationId: conv.id, used: [...new Set(used)], metaConnected: scope.metaConnected };
+}
+
+/**
+ * The client's own reports.
+ *
+ * Deliberately a separate endpoint rather than a flag on the employee vault.
+ * That one selects credits_estimate, set_id, source_report_ids and competitor
+ * handles, and the reliable way to keep those off the client surface is for
+ * the client surface to have an endpoint that never selects them in the first
+ * place — rather than a filter somebody has to remember to apply.
+ */
+app.get('/api/client/reports', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+
+        const [{ data: memberships }, { data: owned }] = await Promise.all([
+            supabase.from('client_members').select('client_id').eq('user_id', ctx.user.id),
+            supabase.from('clients').select('id').eq('owner_user_id', ctx.user.id)
+        ]);
+        const clientIds = [...new Set([
+            ...(memberships || []).map(m => m.client_id),
+            ...(owned || []).map(c => c.id)
+        ])].filter(Boolean);
+
+        const ors = [`user_id.eq.${ctx.user.id}`];
+        if (clientIds.length) ors.push(`client_id.in.(${clientIds.join(',')})`);
+
+        const { data, error } = await supabase.from('reports')
+            .select('id, report_type, platform, target_handle, snapshot_date, created_at, grade, score')
+            .or(ors.join(','))
+            .order('created_at', { ascending: false })
+            .limit(60);
+        if (error) throw error;
+
+        const TITLES = {
+            ig_report:          'Instagram check-up',
+            deep_audit:         'Instagram deep dive',
+            fb_page_report:     'Facebook page check-up',
+            fb_community_audit: 'Community report',
+            content_plan:       'Content plan'
+        };
+
+        res.json({
+            reports: (data || []).map(r => ({
+                id: r.id,
+                title: TITLES[r.report_type] || 'Report',
+                handle: r.target_handle,
+                platform: r.platform,
+                date: r.snapshot_date || (r.created_at || '').slice(0, 10),
+                grade: r.grade || null,
+                // A band, never the raw score. A number out of 100 invites an
+                // argument about the number instead of the finding.
+                band: r.score === null || r.score === undefined ? null
+                    : r.score >= 80 ? 'strong'
+                    : r.score >= 65 ? 'healthy'
+                    : r.score >= 50 ? 'mixed'
+                    : r.score >= 35 ? 'weak' : 'poor'
+            }))
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Ask the assistant.
+ *
+ * Streams when asked to, because a tool round can take fifteen seconds and a
+ * chat that sits silent that long reads as broken. The stream carries status,
+ * not tokens — see assistantAnswer.
+ *
+ * Rate limited by address rather than metered like a job: this spends Gemini,
+ * not Apify, and the key pool has its own cooldowns underneath.
+ */
+app.post('/api/assistant/ask', rateLimit({ windowMs: 60000, max: 12 }), async (req, res) => {
+    const ctx = await auth(req, res); if (!ctx) return;
+
+    const message = String(req.body?.message || '').trim().slice(0, 2000);
+    if (!message) return res.status(400).json({ error: 'Ask a question first.' });
+    const conversationId = req.body?.conversationId || null;
+
+    if (String(req.query.stream || '') !== '1') {
+        try {
+            res.json(await assistantAnswer({ userId: ctx.user.id, message, conversationId }));
+        } catch (err) { sendErr(res, err); }
+        return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    // Render sits behind a proxy that will otherwise buffer the whole response
+    // and deliver it at the end, which defeats the point entirely.
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* client gone */ } };
+    const beat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch { /* client gone */ } }, 15000);
+
+    try {
+        const out = await assistantAnswer({
+            userId: ctx.user.id, message, conversationId,
+            onEvent: ev => send('status', ev)
+        });
+        send('done', out);
+    } catch (err) {
+        logger.error('assistant_failed', { message: err.message, stack: (err.stack || '').slice(0, 400) });
+        send('error', { error: 'Something went wrong answering that. Try again in a moment.' });
+    } finally {
+        clearInterval(beat);
+        res.end();
+    }
+});
+
+/** This account's threads, newest first. */
+app.get('/api/assistant/conversations', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const { data, error } = await supabase.from('ai_conversations')
+            .select('id, title, created_at, updated_at')
+            .eq('user_id', ctx.user.id)
+            .order('updated_at', { ascending: false }).limit(40);
+        if (error) throw error;
+        res.json({ conversations: data || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** One thread's turns. Ownership is checked on the thread, not the messages. */
+app.get('/api/assistant/conversation/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Bad conversation id.' });
+
+        const { data: conv } = await supabase.from('ai_conversations')
+            .select('id, title').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
+        if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+
+        const { data: messages } = await supabase.from('ai_messages')
+            .select('role, content, created_at').eq('conversation_id', conv.id)
+            .order('created_at', { ascending: true }).limit(200);
+
+        res.json({ conversation: conv, messages: messages || [] });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * The client's own leads. /api/search-leads needs a search term and returns
+ * the full row including campaign bookkeeping; a client browsing what they
+ * found wants neither.
+ */
+app.get('/api/client/leads', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+
+        const { data, error } = await supabase.from('leads')
+            .select('username, full_name, email, phone, whatsapp, website, category, city, followers_count, profile_url, is_enriched, platform, created_at')
+            .eq('owner_user_id', ctx.user.id)
+            .order('created_at', { ascending: false })
+            .limit(200);
+        if (error) throw error;
+
+        res.json({
+            leads: (data || []).map(l => ({
+                username: l.username,
+                platform: l.platform || 'instagram',
+                name: l.full_name || null,
+                category: l.category || null,
+                city: l.city || null,
+                followers: l.followers_count ?? null,
+                email: l.email || null,
+                phone: l.phone || null,
+                whatsapp: l.whatsapp || null,
+                website: l.website || null,
+                url: l.profile_url || ('https://instagram.com/' + l.username),
+                // An un-enriched row is a username and nothing else yet, which
+                // is worth saying rather than rendering as a contact with every
+                // field blank.
+                enriched: !!l.is_enriched
+            }))
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * A demand signal, said in owner language.
+ *
+ * The employee feed shows intent, urgency, lead_score and a matched phrase,
+ * which is the right shape for someone deciding where to spend an afternoon.
+ * An owner is asking one question — is this worth replying to, and how soon —
+ * so the scores collapse into a stance and the jargon goes.
+ *
+ * The author is not here and cannot be: the group pipeline hashes identity on
+ * the way in, one-way. That is deliberate, and the copy says so rather than
+ * leaving a blank where a name should be.
+ */
+const DEMAND_INTENT = {
+    recommendation_request: 'Asking for a recommendation',
+    question:               'Asking a question',
+    buy_sell:               'Looking to buy',
+    hiring:                 'Looking to hire',
+    event:                  'Planning something',
+    offer:                  'Offering something',
+    complaint:              'Unhappy with someone else',
+    story:                  'Sharing an experience'
+};
+
+function clientDemandView(row) {
+    if (!row) return null;
+
+    const urgency = String(row.urgency || 'low').toLowerCase();
+    return {
+        asking_for: String(row.snippet || '').slice(0, 320),
+        kind: DEMAND_INTENT[row.intent] || 'Mentioned you might help',
+        // Three bands become two words an owner can act on. "Medium" tells
+        // nobody anything; "worth a reply today" does.
+        stance: urgency === 'high' ? 'Reply today'
+              : urgency === 'medium' ? 'Worth a reply'
+              : 'Keep an eye on it',
+        urgent: urgency === 'high',
+        group: row.group_name || null,
+        posted_at: row.posted_at || null,
+        // Present so the page can say why no name is shown, rather than
+        // rendering an empty author line.
+        author_shown: false
+    };
+}
+
+/** What people near this business are asking for. */
+app.get('/api/client/demand', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+
+        const { data, error } = await supabase.from('fb_demand_signals')
+            .select('snippet, intent, urgency, group_name, posted_at, lead_score')
+            .eq('user_id', ctx.user.id)
+            .order('posted_at', { ascending: false })
+            .limit(100);
+        if (error) throw error;
+
+        res.json({ demand: (data || []).map(clientDemandView) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** One report, said in owner language. Same authorisation rule as the vault. */
+app.get('/api/client/report/:id', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Bad report id.' });
+
+        const { data: row } = await supabase.from('reports')
+            .select('*').eq('id', req.params.id).maybeSingle();
+        if (!row || !(await canReadReport(ctx, row))) {
+            return res.status(404).json({ error: 'Report not found.' });
+        }
+        res.json({ report: clientReportView(row) });
+    } catch (err) { sendErr(res, err); }
+});
 
 app.post('/api/share', async (req, res) => {
     try {
@@ -11513,7 +13448,22 @@ app.get('/api/public/share/:token', publicLimit, async (req, res) => {
         supabase.from('report_shares').update({ views: (s.views || 0) + 1, last_viewed_at: new Date().toISOString() })
             .eq('id', s.id).then(() => {}, () => {});
         res.set('Cache-Control', 'no-store');
-        res.json({ report: publicReportView(rep), client, shared: { expiresAt: s.expires_at, label: s.label, page: REPORT_PAGE[rep.report_type] || null } });
+        // The client view, not the employee one.
+        //
+        // publicReportView only stripped ownership columns — everything else
+        // went out: every pillar score, every competitor handle, the whole
+        // agency-language report. A share link is the thing an employee hands
+        // a client, so it now carries what a client should read, and the
+        // internals simply are not in the payload to leak.
+        //
+        // Types clientReportView cannot translate yet (content plans, community
+        // audits) degrade to headline, date and summary rather than falling
+        // back to the raw report.
+        res.json({
+            report: clientReportView(rep),
+            client,
+            shared: { expiresAt: s.expires_at, label: s.label, page: 'share.html' }
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -12004,6 +13954,20 @@ module.exports = {
     invalidateAuth, invalidateEngineAccess,
     // phase 11
     scheduleNextRun, scheduleInputForRun, cleanScheduleBody, scheduleSummary, SCHEDULABLE_TYPES,
-    shareToken, shareUrlFor, publicReportView, REPORT_PAGE,
-    extractBioContacts, getPlays, getVideoViews, igPlaceUrls, igDistribution, igNormalisePost
+    shareToken, shareUrlFor, REPORT_PAGE,
+    extractBioContacts, getPlays, getVideoViews, igPlaceUrls, igDistribution, igNormalisePost,
+    // phase 13
+    accountState, accountDenial, quotaPeriod, JOB_QUOTA_METRIC, LEADGEN_JOB_TYPES,
+    QUOTA_FALLBACK, TRIAL_ENGINES, quotaError,
+    // phase 14
+    clientReportView, clientStanding, clientPillars, ordinal, CLIENT_PILLARS,
+    clientPlanIdeas, clientRooms,
+    // phase 15
+    ASSISTANT_TOOLS, assistantDeclarations, assistantSystemPrompt,
+    // phase 16
+    fbPageToLead, fbPageSearchRefs,
+    // phase 14 (client surface, extended)
+    clientDemandView, DEMAND_INTENT,
+    // phase 17
+    cpBoostCall
 };

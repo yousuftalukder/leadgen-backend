@@ -3,9 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
     <title>Edgelead - Instagram Lead Finder</title>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
 <style>
     /* index.html — page-specific only. Shared rules live in app.css, and the
@@ -18,43 +20,25 @@
         max-width: 1500px;
         margin: 0 auto;
         min-height: 100vh;
-        background-image: radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.08) 0%, transparent 50%);
     }
-    .segment-bar { display: flex; gap: 10px; margin-bottom: 25px; border-bottom: 1px solid var(--card-border); padding-bottom: 10px; }
-    .segment-btn { background: transparent; border: none; color: var(--text-muted); padding: 12px 22px; font-weight: 700; font-size: 0.88rem; cursor: pointer; border-radius: 8px; transition: all 0.25s ease; }
-    .segment-btn.active { background: var(--accent-glow); color: #fff; box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3); }
-    .card { background: var(--card-bg); backdrop-filter: blur(16px); padding: 32px; border-radius: 16px; margin-bottom: 25px; border: 1px solid var(--card-border); box-shadow: 0 20px 40px -15px rgba(0,0,0,0.7); }
     .card-header-bold { font-size: 1.35rem; font-weight: 800; color: #ffffff; margin-bottom: 8px; }
     .card-subtext { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 25px; }
-    label { display: block; font-size: 0.78rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent-solid); margin-top: 22px; margin-bottom: 8px; }
-    input[type="text"], input[type="email"], input[type="password"], select { width: 100%; padding: 15px 18px; background: var(--input-bg); border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.95rem; font-weight: 500; }
-    input:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.25); background: #0e1738; }
     .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 12px; }
     .checkbox-item { display: flex; align-items: center; gap: 12px; background: var(--input-bg); padding: 14px 16px; border-radius: 10px; border: 1px solid var(--card-border); cursor: pointer; font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
-    .checkbox-item:has(input:checked) { border-color: var(--accent-solid); color: #ffffff; background: rgba(96, 165, 250, 0.1); }
-    .btn-primary { width: 100%; padding: 16px; background: var(--accent-glow); color: #fff; border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 30px; }
+    .checkbox-item:has(input:checked) { border-color: var(--accent-solid); color: #ffffff; background: rgba(217,181,108,0.1); }
     .btn-primary[disabled], .btn-enrich[disabled] { opacity: 0.55; cursor: not-allowed; }
     .btn-enrich { width: 100%; padding: 16px; background: var(--enrich-glow); color: #ffffff; border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 20px; }
-    .btn-secondary { background: rgba(255,255,255,0.05); color: var(--text-primary); border: 1px solid var(--card-border); padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
     .btn-success { background: #10b981; color: white; border: none; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 0.8rem; }
-    .btn-danger { background: #ef4444; color: white; border: none; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 0.8rem; }
     .history-card { background: var(--input-bg); border: 1px solid var(--card-border); padding: 22px; border-radius: 12px; margin-top: 18px; }
     .method-badge { background: rgba(255,255,255,0.05); color: #64748b; padding: 4px 10px; border-radius: 6px; font-size: 0.72rem; font-weight: 700; margin-right: 6px; }
-    .method-badge-active { background: rgba(96, 165, 250, 0.15); color: var(--accent-solid); border: 1px solid rgba(96, 165, 250, 0.3); }
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; margin-top: 15px; }
-    th { padding: 12px 10px; color: var(--text-muted); border-bottom: 1px solid var(--card-border); font-weight: 800; text-transform: uppercase; font-size: 0.72rem; }
-    td { padding: 12px 10px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); }
+    .method-badge-active { background: rgba(217,181,108,0.15); color: var(--accent-solid); border: 1px solid rgba(217,181,108,0.3); }
     .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 800; }
     .status-raw { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; }
     .status-enriched { background: rgba(16, 185, 129, 0.2); color: #34d399; }
 
     /* Job panel — same shape as the other pages, so a paused run looks the
        same here as it does on the audit and community pages. */
-    .job-panel { background: var(--terminal-bg); border: 1px solid rgba(59,130,246,0.35); border-radius: 14px; padding: 20px; margin-top: 22px; }
-    .job-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-    .bar { height: 7px; background: rgba(255,255,255,0.07); border-radius: 4px; overflow: hidden; }
-    .bar > div { height: 100%; width: 0%; background: var(--accent-glow); transition: width .4s ease; }
-    .job-logs { height: 190px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #60a5fa; line-height: 1.65; margin-top: 14px; }
+    .job-panel { background: var(--terminal-bg); border: 1px solid rgba(12,120,86,0.35); border-radius: 14px; padding: 20px; margin-top: 22px; }
     .el-run-cost { font-size: 0.8rem; color: var(--text-muted); }
 </style>
 </head>
@@ -79,6 +63,10 @@
     <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
     <button class="btn-primary" id="login-btn">Authenticate Session</button>
     <div id="auth-error" style="margin-top:14px; color:#ef4444; font-size:0.85rem;"></div>
+    <div style="margin-top:20px; padding-top:18px; border-top:1px solid var(--card-border);
+                text-align:center; font-size:0.85rem; color:var(--text-muted);">
+        New here? <a href="signup.html" style="color:var(--accent-solid); text-decoration:none; font-weight:600;">Start a free trial</a>
+    </div>
 </div>
 
 <!-- DASHBOARD CONTAINER -->
@@ -220,6 +208,7 @@
 
 </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (function () {
@@ -261,6 +250,22 @@
                     password: $('password').value
                 });
                 if (error) throw error;
+
+                // A client signing in belongs on their own dashboard, not on
+                // the lead console. index.html is both the login page and a
+                // tool page, so this cannot live in EL.init — that would also
+                // bounce a client who deliberately opened Find Leads.
+                try {
+                    const { data: s } = await bootClient.auth.getSession();
+                    const r = await fetch(EL.backendUrl() + '/api/me', {
+                        headers: { Authorization: 'Bearer ' + s.session.access_token }
+                    });
+                    if (r.ok && (await r.json()).role === 'client') {
+                        window.location.href = 'client.html';
+                        return;
+                    }
+                } catch { /* fall through to the normal boot */ }
+
                 $('auth-section').classList.add('hidden');
                 await boot();
             } catch (err) {

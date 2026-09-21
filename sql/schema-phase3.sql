@@ -23,6 +23,11 @@
 
 create extension if not exists "pgcrypto";
 
+-- The three leadgen tables below default their ids with uuid_generate_v4(),
+-- which is uuid-ossp, not pgcrypto. It is installed on the live instance;
+-- declared here so a rebuild from these files has it too.
+create extension if not exists "uuid-ossp";
+
 
 -- ---------------------------------------------------------------------
 -- 0. BASE TABLES
@@ -35,45 +40,72 @@ create extension if not exists "pgcrypto";
 --    test database. Created here, guarded, so nothing is touched on the
 --    live instance where they already exist.
 -- ---------------------------------------------------------------------
+-- CORRECTED IN PHASE 12. The definitions below were originally written
+-- from memory and never ran on the live instance — the `if not exists`
+-- guards fired against tables that already existed by hand, so the
+-- mismatch stayed invisible until the schema was diffed against the
+-- database in September 2026. What follows is the live shape, which is
+-- also the shape server.js reads and writes. See sql/schema-phase12.sql.
+
 create table if not exists public.leads (
-    id              uuid primary key default gen_random_uuid(),
-    owner_user_id   uuid references auth.users(id) on delete cascade,
-    username        text not null,
-    full_name       text,
-    profile_url     text,
-    followers       bigint default 0,
-    email           text,
-    phone           text,
-    bio             text,
-    website         text,
-    category        text,
-    is_business     boolean,
-    is_verified     boolean,
-    city            text,
-    address         text,
-    posts_count     int,
-    following_count int,
-    raw             jsonb,
-    created_at      timestamptz default now()
+    id               uuid primary key default uuid_generate_v4(),
+    -- No foreign key on the live instance. Kept as a plain uuid so a
+    -- rebuild matches it rather than being stricter than production.
+    owner_user_id    uuid,
+    username         text not null,
+    full_name        text,
+    email            text,
+    phone            text,
+    whatsapp         text,
+    followers_count  integer,
+    following_count  integer,
+    posts_count      integer,
+    engagement_rate  numeric,
+    avg_reel_views   integer default 0,
+    profile_url      text,
+    bio              text,
+    website          text,
+    category         text,
+    is_business      boolean,
+    is_verified      boolean,
+    city             text,
+    address          text,
+    sources_detected text[],
+    is_enriched      boolean default false,
+    created_at       timestamptz not null default timezone('utc'::text, now())
 );
 
+-- keywords and selected_methods are arrays: one campaign fans out across
+-- several keywords and several discovery methods. client_id is added by
+-- phase 9, once public.clients exists.
 create table if not exists public.campaigns (
-    id           uuid primary key default gen_random_uuid(),
-    user_id      uuid references auth.users(id) on delete cascade,
-    name         text,
-    keyword      text,
-    location     text,
-    platform     text default 'instagram',
-    lead_count   int default 0,
-    created_at   timestamptz default now()
+    id                uuid primary key default uuid_generate_v4(),
+    user_id           uuid not null references auth.users(id) on delete cascade,
+    name              text not null,
+    location          text,
+    location_id       text,
+    keywords          text[],
+    selected_methods  text[],
+    end_cursor        text,
+    is_exhausted      boolean default false,
+    total_leads_found integer default 0,
+    created_at        timestamptz not null default timezone('utc'::text, now())
 );
 
+-- The link row carries the post that surfaced the lead. Uniqueness on
+-- (campaign_id, lead_id) is added by phase 6, which is what the resumed-run
+-- upsert conflicts against.
 create table if not exists public.campaign_leads (
-    id          uuid primary key default gen_random_uuid(),
-    campaign_id uuid references public.campaigns(id) on delete cascade,
-    lead_id     uuid references public.leads(id) on delete cascade,
-    user_id     uuid references auth.users(id) on delete cascade,
-    created_at  timestamptz default now()
+    id             uuid primary key default uuid_generate_v4(),
+    campaign_id    uuid not null references public.campaigns(id) on delete cascade,
+    lead_id        uuid not null references public.leads(id)     on delete cascade,
+    user_id        uuid not null references auth.users(id)       on delete cascade,
+    top_post_url   text,
+    top_post_views integer default 0,
+    post_likes     integer default 0,
+    post_comments  integer default 0,
+    post_timestamp timestamptz,
+    added_at       timestamptz not null default timezone('utc'::text, now())
 );
 
 create index if not exists idx_campaign_leads_campaign on public.campaign_leads(campaign_id);

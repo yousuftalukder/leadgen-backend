@@ -4,19 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Content Plan</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* content-plan.html — page-specific only. */
     label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin: 12px 0 6px; }
-    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 11px 13px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
-    textarea { min-height: 70px; resize: vertical; }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); }
     .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 16px; }
     .counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-    .btn-primary { width: auto; padding: 12px 22px; font-size: 0.9rem; margin-top: 16px; }
     .note { font-size: 0.82rem; margin-top: 10px; min-height: 1.2em; font-weight: 600; color: var(--text-muted); }
     .hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
     .is-hidden { display: none !important; }
@@ -28,25 +22,21 @@
     .brief-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
     .brief { border: 1px solid var(--card-border); border-radius: 12px; padding: 16px; background: rgba(15,23,42,0.55); font-size: 0.86rem; line-height: 1.55; }
     .brief h4 { margin: 0 0 8px; color: #fff; font-size: 0.95rem; }
-    .brief .cell { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #93c5fd; word-break: break-all; }
+    .brief .cell { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #f0d39a; word-break: break-all; }
     .brief .cap { white-space: pre-wrap; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px; margin: 8px 0; font-size: 0.82rem; }
-    .brief a { color: #93c5fd; font-size: 0.78rem; }
+    .brief a { color: #f0d39a; font-size: 0.78rem; }
     .band { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 800; }
-    .band.top { background: rgba(16,185,129,0.18); color: #6ee7b7; } .band.above { background: rgba(59,130,246,0.18); color: #93c5fd; }
+    .band.top { background: rgba(16,185,129,0.18); color: #6ee7b7; } .band.above { background: rgba(12,120,86,0.18); color: #f0d39a; }
     .band.typical { background: rgba(148,163,184,0.15); color: #cbd5e1; } .band.below { background: rgba(239,68,68,0.15); color: #fca5a5; }
     .src { font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 5px; margin-left: 4px; }
-    .src.scraped { background: rgba(148,163,184,0.15); color: #cbd5e1; } .src.insights { background: rgba(16,185,129,0.18); color: #6ee7b7; } .src.derived { background: rgba(139,92,246,0.18); color: #c4b5fd; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--card-border); vertical-align: top; }
-    th { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .05em; }
-    td a { color: #93c5fd; }
+    .src.scraped { background: rgba(148,163,184,0.15); color: #cbd5e1; } .src.insights { background: rgba(16,185,129,0.18); color: #6ee7b7; } .src.derived { background: rgba(184,145,63,0.18); color: #f0d39a; }
+    td a { color: #f0d39a; }
     .verdict { font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 5px; }
     .verdict.gap { background: rgba(245,158,11,0.18); color: #fcd34d; } .verdict.double_down { background: rgba(16,185,129,0.18); color: #6ee7b7; } .verdict.stop { background: rgba(239,68,68,0.18); color: #fca5a5; }
     .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
     .list-item { padding: 10px 12px; border: 1px solid var(--card-border); border-radius: 8px; margin: 6px 0; font-size: 0.84rem; cursor: pointer; }
     .list-item:hover { border-color: var(--accent-solid); }
     .list-item small { color: var(--text-muted); display: block; }
-    .empty { padding: 22px; text-align: center; color: var(--text-muted); border: 1px dashed var(--card-border); border-radius: 10px; }
     .true-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
     .true-box { border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 14px; font-size: 0.82rem; line-height: 1.5; }
     .true-box b { display: block; margin-bottom: 4px; color: #fff; }
@@ -110,6 +100,7 @@
         <button class="tab" data-tab="captions" type="button">Captions</button>
         <button class="tab" data-tab="owner" type="button">Owner view</button>
         <button class="tab" data-tab="trueness" type="button">How true is this</button>
+        <button class="tab" data-tab="notes" type="button">Findings <span id="notes-n"></span></button>
     </div>
     <div data-pane="briefs"></div>
     <div data-pane="cells" class="is-hidden"></div>
@@ -117,6 +108,21 @@
     <div data-pane="captions" class="is-hidden"></div>
     <div data-pane="owner" class="is-hidden"></div>
     <div data-pane="trueness" class="is-hidden"></div>
+    <div data-pane="notes" class="is-hidden">
+        <p class="hint" style="margin:14px 0 4px;">
+            What the numbers cannot see. A plan knows what was published and how it did — it does not
+            know what a customer said on the phone, that a rival quietly changed their pricing, or that
+            the town has a festival in three weeks. Those arrive through a person.
+        </p>
+        <p class="hint" style="margin:0 0 16px;">
+            Findings are kept separate from the scorecard and never feed a computed number. They are
+            recorded as somebody's observation, with their name on it.
+        </p>
+        <textarea id="note-body" rows="3" placeholder="e.g. Two customers this week said they found us through the Friday reels, not search."></textarea>
+        <button class="btn-secondary" type="button" id="note-add" style="margin-top:10px;">Add finding</button>
+        <div class="hint" id="note-msg" style="min-height:1.1em;margin-top:8px;"></div>
+        <div id="notes-list" style="margin-top:18px;"></div>
+    </div>
 </div>
 
 <div class="card is-hidden" id="meta-card">
@@ -134,6 +140,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async () => {
@@ -265,6 +272,11 @@
 
     function render(rep) {
         plan = rep;
+        // Every path into render() — a fresh run, the vault, a share link —
+        // points the Findings tab at whatever plan is now on screen, so it is
+        // never left writing notes onto the previous one.
+        notesPlanId = rep && rep.id ? rep.id : null;
+        if (!notesPlanId) { $('notes-n').textContent = ''; $('notes-list').innerHTML = ''; }
         const p = rep.report_json || {};
         $('plan-card').classList.remove('is-hidden'); $('meta-card').classList.add('is-hidden');
         // Plans saved before phase 10 have no formatSpec: default to the IG set.
@@ -349,10 +361,69 @@
         $('meta-card').scrollIntoView({ behavior: 'smooth' });
     }
 
+    // ---- manual research findings ------------------------------------------
+    //
+    // A third source alongside scraped and owner metrics, kept as separate as
+    // those two are from each other: rendered as somebody's note, never folded
+    // into a cell index.
+    let notesPlanId = null;
+
+    function renderNotes(notes) {
+        const list = $('notes-list');
+        $('notes-n').textContent = notes.length ? `(${notes.length})` : '';
+
+        if (!notes.length) {
+            list.innerHTML = `<p class="hint">Nothing recorded yet.</p>`;
+            return;
+        }
+        const mine = EL.me && EL.me.id;
+        list.innerHTML = notes.map(n => `
+            <div class="row-card" style="align-items:flex-start;">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:.88rem;line-height:1.65;white-space:pre-wrap;">${EL.escape(n.body)}</div>
+                    <div class="meta">${EL.escape(n.author_name || 'someone')} · ${new Date(n.created_at).toLocaleDateString()}${n.cell ? ' · ' + EL.escape(n.cell) : ''}</div>
+                </div>
+                ${n.user_id === mine ? `<button class="btn-danger" type="button" data-note-del="${EL.escape(n.id)}">Remove</button>` : ''}
+            </div>`).join('');
+
+        list.querySelectorAll('[data-note-del]').forEach(b =>
+            b.addEventListener('click', async () => {
+                if (!confirm('Remove this finding?')) return;
+                try {
+                    await EL.api(`/api/content-plan/notes/${b.dataset.noteDel}`, { method: 'DELETE' });
+                    loadNotes();
+                } catch (e) { $('note-msg').textContent = e.message; }
+            }));
+    }
+
+    async function loadNotes() {
+        if (!notesPlanId) return;
+        try {
+            const { notes } = await EL.api(`/api/content-plan/${notesPlanId}`);
+            renderNotes(notes || []);
+        } catch { /* the plan itself already reported any failure */ }
+    }
+
+    $('note-add').addEventListener('click', async () => {
+        const body = $('note-body').value.trim();
+        const msg = $('note-msg');
+        if (!body) { msg.textContent = 'Write the finding first.'; return; }
+        if (!notesPlanId) { msg.textContent = 'Open a plan before adding a finding.'; return; }
+        msg.textContent = 'Saving…';
+        try {
+            await EL.api(`/api/content-plan/${notesPlanId}/notes`, { method: 'POST', body: { body } });
+            $('note-body').value = '';
+            msg.textContent = 'Added.';
+            loadNotes();
+        } catch (e) { msg.textContent = e.message; }
+    });
+
     async function openPlan(id) {
         try {
-            const { report } = await EL.api(`/api/content-plan/${id}`);
+            const { report, notes } = await EL.api(`/api/content-plan/${id}`);
             render(report);
+            notesPlanId = id;
+            renderNotes(notes || []);
         } catch (err) {
             // Might be a Meta owner report linked from the client timeline.
             try { const { report } = await EL.api(`/api/meta/report/${id}`); renderMeta(report); }

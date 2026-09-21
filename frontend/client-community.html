@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Local Demand — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* client-community.html — page-specific only. Shared rules live in app.css. */
+
+    .cm-form { max-width: 680px; }
+    .cm-form h2 { font-size: 1.4rem; font-weight: 800; margin-bottom: 8px; }
+    .cm-form .cm-sub { color: var(--text-muted); font-size: 0.88rem; line-height: 1.6; margin-bottom: 20px; }
+    .cm-form label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 7px; }
+    .cm-form label:first-of-type { margin-top: 0; }
+    .cm-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 620px) { .cm-row { grid-template-columns: 1fr; } }
+    .cm-tip { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; line-height: 1.5; }
+    .cm-err { margin-top: 14px; font-size: 0.86rem; color: var(--danger); line-height: 1.5; min-height: 18px; }
+    .cm-err.is-quota { color: #fcd34d; }
+
+    .cm-progress { margin-top: 18px; }
+    .cm-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.09); overflow: hidden; }
+    .cm-track i { display: block; height: 100%; width: 0; background: var(--accent-glow); transition: width .3s; }
+    .cm-step { font-size: 0.84rem; color: var(--text-muted); margin-top: 9px; }
+
+    .cm-head { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+        flex-wrap: wrap; margin: 30px 0 6px; }
+    .cm-head h3 { font-size: 1.05rem; font-weight: 800; }
+    .cm-count { font-size: 0.82rem; color: var(--text-muted); }
+    .cm-privacy { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; margin-bottom: 16px; }
+
+    .cm-list { display: grid; gap: 12px; }
+    .cm-item { padding: 16px 18px; border-radius: 12px; background: var(--card-bg);
+        border: 1px solid var(--card-border); border-left-width: 3px; border-left-color: rgba(255,255,255,0.12); }
+    .cm-item.is-urgent { border-left-color: var(--warn); background: rgba(245,158,11,0.05); }
+
+    .cm-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 9px; }
+    .cm-kind { font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em;
+        padding: 3px 9px; border-radius: 999px; background: rgba(12,120,86,0.15); color: #f0d39a; }
+    .cm-stance { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); }
+    .cm-item.is-urgent .cm-stance { color: #fcd34d; }
+    .cm-when { font-size: 0.75rem; color: var(--text-muted); margin-left: auto; }
+
+    .cm-said { font-size: 0.92rem; line-height: 1.6; color: var(--text-primary); }
+    .cm-where { font-size: 0.78rem; color: var(--text-muted); margin-top: 9px; }
+
+    .cm-empty { text-align: center; padding: 44px 24px; color: var(--text-muted); font-size: 0.9rem;
+        line-height: 1.6; max-width: 520px; margin: 0 auto; }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+
+    <div class="card cm-form">
+        <h2>What are people near you asking for?</h2>
+        <p class="cm-sub">We read local Facebook groups and pull out the posts where somebody is
+           actually looking for what you do — someone asking for a recommendation, a quote, or
+           a hire. Not chatter, just the ones worth replying to.</p>
+
+        <div class="cm-row">
+            <div>
+                <label for="cm-niche">What do you do?</label>
+                <input type="text" id="cm-niche" placeholder="plumbing" autocomplete="off">
+            </div>
+            <div>
+                <label for="cm-where">Where?</label>
+                <input type="text" id="cm-where" placeholder="Boston" autocomplete="off">
+            </div>
+        </div>
+        <p class="cm-tip">This takes a few minutes — it finds the groups first, then reads
+           what has been posted in them recently.</p>
+
+        <button class="btn-primary" id="cm-go" type="button" style="margin-top:18px;">Find local demand</button>
+        <div class="cm-err" id="cm-err"></div>
+        <div class="cm-progress" id="cm-prog" style="display:none;">
+            <div class="cm-track"><i></i></div>
+            <div class="cm-step">Starting…</div>
+        </div>
+    </div>
+
+    <div class="cm-head">
+        <h3>People looking for what you do</h3>
+        <span class="cm-count" id="cm-count"></span>
+    </div>
+    <p class="cm-privacy">Names are never collected. We keep what was asked for and which group
+       it was asked in, so you can go and reply yourself — we do not contact anyone on your behalf.</p>
+
+    <div id="cm-results"><div class="cm-empty">Loading…</div></div>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'fb_community', page: 'client-community.html' });
+        esc = EL.escape;
+
+        $('cm-go').addEventListener('click', run);
+        ['cm-niche', 'cm-where'].forEach(id =>
+            $(id).addEventListener('keydown', e => { if (e.key === 'Enter') run(); }));
+
+        loadDemand();
+    });
+
+    async function loadDemand() {
+        try {
+            const { demand } = await EL.api('/api/client/demand');
+            render(demand || []);
+        } catch (err) {
+            if (err.handled) return;
+            $('cm-results').innerHTML = `<div class="cm-empty">${esc(err.message)}</div>`;
+        }
+    }
+
+    function render(items) {
+        $('cm-count').textContent = items.length
+            ? items.length + (items.length === 1 ? ' post' : ' posts')
+            : '';
+
+        if (!items.length) {
+            $('cm-results').innerHTML = `<div class="cm-empty">
+                Nothing yet. Tell us what you do and where, and we will go and look.
+                Most searches turn up a handful of people actively asking.</div>`;
+            return;
+        }
+
+        // Urgent first, then most recent — an owner reads the top of this list
+        // and stops, so the ones worth replying to today have to be there.
+        const sorted = items.slice().sort((a, b) =>
+            (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0) ||
+            String(b.posted_at || '').localeCompare(String(a.posted_at || '')));
+
+        $('cm-results').innerHTML = `<div class="cm-list">${sorted.map(item).join('')}</div>`;
+    }
+
+    function item(d) {
+        return `
+            <div class="cm-item ${d.urgent ? 'is-urgent' : ''}">
+                <div class="cm-meta">
+                    <span class="cm-kind">${esc(d.kind)}</span>
+                    <span class="cm-stance">${esc(d.stance)}</span>
+                    <span class="cm-when">${esc(when(d.posted_at))}</span>
+                </div>
+                <div class="cm-said">${esc(d.asking_for)}</div>
+                ${d.group ? `<div class="cm-where">Posted in ${esc(d.group)}</div>` : ''}
+            </div>`;
+    }
+
+    function when(ts) {
+        if (!ts) return '';
+        const days = Math.floor((Date.now() - new Date(ts).getTime()) / 86400000);
+        if (!isFinite(days) || days < 0) return '';
+        return days === 0 ? 'today' : days === 1 ? 'yesterday'
+             : days < 7 ? days + ' days ago'
+             : days < 30 ? Math.floor(days / 7) + ' weeks ago'
+             : new Date(ts).toLocaleDateString();
+    }
+
+    async function run() {
+        const niche = String($('cm-niche').value || '').trim();
+        const where = String($('cm-where').value || '').trim();
+
+        const err = $('cm-err');
+        err.textContent = ''; err.className = 'cm-err';
+        if (!niche) { err.textContent = 'Tell us what you do.'; return; }
+
+        const btn  = $('cm-go');
+        const prog = $('cm-prog');
+        const stop = () => { btn.disabled = false; btn.textContent = 'Find local demand'; prog.style.display = 'none'; };
+        const step = (pct, msg) => {
+            prog.querySelector('i').style.width = (pct || 0) + '%';
+            prog.querySelector('.cm-step').textContent = msg || '';
+        };
+
+        btn.disabled = true; btn.textContent = 'Looking…';
+        prog.style.display = ''; step(2, 'Starting…');
+
+        try {
+            // Two jobs, in order: find the rooms, then read them. They are
+            // separate on the employee side because an agency wants to pick
+            // which rooms to spend on; an owner does not, so the page chains
+            // them and only shows the outcome.
+            step(4, 'Finding local groups…');
+            const groups = await job('/api/fb/discover-groups',
+                { niche, location: where, maxGroups: 6, sampleSize: 30 },
+                (p, m) => step(4 + Math.round(p * 0.38), 'Finding groups: ' + (m || '')));
+
+            const ids = groupIdsFrom(groups);
+            if (!ids.length) {
+                stop();
+                err.textContent = 'No local groups matched that. Try a broader word, or a nearby larger town.';
+                return;
+            }
+
+            step(45, `Reading ${ids.length} group(s)…`);
+            await job('/api/fb/audit-community',
+                { groupIds: ids, niche, location: where, mode: 'combined' },
+                (p, m) => step(45 + Math.round(p * 0.53), 'Reading: ' + (m || '')));
+
+            step(100, 'Done');
+            stop();
+            await loadDemand();
+        } catch (e) {
+            stop();
+            if (e.handled) return;
+            err.textContent = e.message;
+            if (e.quota) err.className = 'cm-err is-quota';
+            await loadDemand();          // a partial run may still have saved signals
+        }
+    }
+
+    /** The discovery result shape varies by path; take group ids wherever they are. */
+    function groupIdsFrom(result) {
+        const r = result || {};
+        const rows = r.groups || r.saved || r.discovered || [];
+        return [...new Set(rows
+            .map(g => (typeof g === 'string' ? g : (g.group_id || g.groupId || g.id)))
+            .filter(Boolean))].slice(0, 6);
+    }
+
+    function job(path, body, onStep) {
+        return new Promise((resolve, reject) => {
+            EL.runJob(path, body, {
+                onProgress: j => onStep(j.progress, j.current_step),
+                onDone: j => resolve(j.result || {}),
+                onFailed: j => reject(new Error(j.error || 'That did not finish.'))
+            }).catch(reject);
+        });
+    }
+})();
+</script>
+
+</body>
+</html>

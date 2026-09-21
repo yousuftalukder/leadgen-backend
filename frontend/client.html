@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>My Reports — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* client.html — page-specific only. Shared rules live in app.css. */
+
+    .cl-wrap { display: grid; grid-template-columns: 300px 1fr; gap: 26px; align-items: start; }
+    @media (max-width: 940px) { .cl-wrap { grid-template-columns: 1fr; } }
+
+    /* ---- report list ---- */
+    .cl-list { display: grid; gap: 10px; }
+    .cl-item { text-align: left; width: 100%; cursor: pointer; padding: 15px 16px; border-radius: 12px;
+        background: var(--card-bg); border: 1px solid var(--card-border); transition: border-color .15s, transform .15s; }
+    .cl-item:hover { border-color: rgba(217,181,108,0.45); transform: translateX(2px); }
+    .cl-item.is-active { border-color: var(--accent-solid); background: rgba(12,120,86,0.09); }
+    .cl-item h4 { font-size: 0.92rem; font-weight: 700; margin-bottom: 4px; }
+    .cl-item .cl-meta { font-size: 0.76rem; color: var(--text-muted); display: flex; gap: 8px; align-items: center; }
+
+    .cl-band { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.68rem;
+        font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
+    .cl-band.strong  { background: rgba(16,185,129,0.16); color: #6ee7b7; }
+    .cl-band.healthy { background: rgba(12,120,86,0.16); color: #f0d39a; }
+    .cl-band.mixed   { background: rgba(245,158,11,0.16); color: #fcd34d; }
+    .cl-band.weak,
+    .cl-band.poor    { background: rgba(239,68,68,0.16);  color: #fca5a5; }
+
+    /* ---- report body ---- */
+    .cl-head { margin-bottom: 8px; }
+    .cl-head h1 { font-size: 1.75rem; font-weight: 800; line-height: 1.25; margin-bottom: 10px; }
+    .cl-sub { color: var(--text-muted); font-size: 0.86rem; }
+
+    .cl-flag { margin: 16px 0; padding: 13px 16px; border-radius: 10px; font-size: 0.86rem; line-height: 1.55;
+        background: rgba(245,158,11,0.09); border: 1px solid rgba(245,158,11,0.26); color: #fcd34d; }
+
+    .cl-standing { margin: 22px 0; padding: 26px; border-radius: 16px;
+        background: linear-gradient(135deg, rgba(12,120,86,0.14), rgba(184,145,63,0.10));
+        border: 1px solid rgba(217,181,108,0.26); }
+    .cl-standing h2 { font-size: 1.28rem; font-weight: 800; line-height: 1.35; margin-bottom: 10px; }
+    .cl-standing p { color: #cbd5e1; font-size: 0.92rem; line-height: 1.6; }
+
+    .cl-ranks { display: flex; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+    .cl-rank { flex: 1 1 88px; padding: 12px 10px; border-radius: 10px; text-align: center;
+        background: rgba(2,6,23,0.4); border: 1px solid rgba(255,255,255,0.07); }
+    .cl-rank.is-you { background: rgba(12,120,86,0.22); border-color: var(--accent-solid); }
+    .cl-rank .cl-pos { font-size: 0.68rem; color: var(--text-muted); font-weight: 700; letter-spacing: 0.05em; }
+    .cl-rank .cl-who { font-size: 0.84rem; font-weight: 700; margin-top: 3px; word-break: break-word; }
+    .cl-rank.is-you .cl-who { color: #f3efe4; }
+    /* Four peers just fit across a phone, which splits handles mid-word.
+       Two per row reads far better than four broken ones. */
+    @media (max-width: 520px) {
+        .cl-rank { flex: 1 1 calc(50% - 4px); }
+        .cl-rank .cl-who { font-size: 0.74rem; }
+    }
+
+    .cl-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }
+    @media (max-width: 760px) { .cl-cols { grid-template-columns: 1fr; } }
+
+    .cl-panel h3 { font-size: 1rem; font-weight: 800; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .cl-points { list-style: none; display: grid; gap: 13px; }
+    .cl-point { padding: 14px 16px; border-radius: 11px; background: rgba(2,6,23,0.35);
+        border: 1px solid var(--card-border); border-left-width: 3px; }
+    .cl-point.good { border-left-color: var(--success); }
+    .cl-point.todo { border-left-color: var(--warn); }
+    .cl-point b { display: block; font-size: 0.89rem; font-weight: 700; line-height: 1.45; margin-bottom: 5px; }
+    .cl-point span { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+
+    .cl-missing { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .cl-missing li { font-size: 0.8rem; padding: 6px 11px; border-radius: 8px;
+        background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.22); color: #fca5a5; }
+
+    /* ---- run a new check-up ---- */
+    .cl-run { max-width: 620px; }
+    .cl-run h2 { font-size: 1.4rem; font-weight: 800; margin-bottom: 8px; }
+    .cl-run .cl-sub { margin-bottom: 20px; line-height: 1.6; }
+    .cl-run label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 7px; }
+    .cl-run label:first-of-type { margin-top: 0; }
+    .cl-rivals { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 560px) { .cl-rivals { grid-template-columns: 1fr; } }
+    .cl-tip { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; line-height: 1.5; }
+    .cl-run-err { margin-top: 14px; font-size: 0.86rem; color: var(--danger); line-height: 1.5; min-height: 18px; }
+    .cl-run-err.is-quota { color: #fcd34d; }
+    .cl-progress { margin-top: 18px; }
+    .cl-progress .cl-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.09); overflow: hidden; }
+    .cl-progress .cl-track i { display: block; height: 100%; width: 0; background: var(--accent-glow); transition: width .3s; }
+    .cl-progress .cl-step { font-size: 0.84rem; color: var(--text-muted); margin-top: 9px; }
+
+    .cl-new { width: 100%; margin-bottom: 14px; }
+
+    .cl-empty { text-align: center; padding: 60px 24px; color: var(--text-muted); }
+    .cl-empty .cl-mark { font-size: 2.6rem; margin-bottom: 14px; }
+    .cl-empty h3 { font-size: 1.1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 10px; }
+    .cl-empty p { font-size: 0.9rem; line-height: 1.6; max-width: 420px; margin: 0 auto 8px; }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+    <div class="cl-wrap">
+
+        <aside>
+            <button class="btn-primary cl-new" id="cl-new" type="button">+ New check-up</button>
+            <h3 style="font-size:0.78rem;font-weight:800;color:var(--text-muted);text-transform:uppercase;
+                       letter-spacing:0.05em;margin-bottom:12px;">Your reports</h3>
+            <div class="cl-list" id="cl-list">
+                <div style="color:var(--text-muted);font-size:0.85rem;">Loading…</div>
+            </div>
+        </aside>
+
+        <main id="cl-body">
+            <div class="cl-empty"><div class="cl-mark">📊</div><h3>Loading your report…</h3></div>
+        </main>
+
+    </div>
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    let reports = [];
+    let activeId = null;
+    let canRun = false;
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        // engine: null — this page is the client's home and is not gated on any
+        // single tool grant. EL.init still enforces the session and the account
+        // state, and a lapsed account never gets this far.
+        const me = await EL.init({ engine: null, page: 'client.html' });
+        esc = EL.escape;
+
+        try {
+            const r = await EL.api('/api/client/reports');
+            reports = r.reports || [];
+        } catch (err) {
+            if (err.handled) return;               // 402 already showed its own screen
+            return showEmpty('Could not load your reports', err.message);
+        }
+
+        canRun = (me.engines || []).includes('report');
+        $('cl-new').style.display = canRun ? '' : 'none';
+        $('cl-new').addEventListener('click', () => showRunForm(false));
+
+        renderList();
+        if (reports.length) open(reports[0].id);
+        // An empty dashboard with no way to fill it is a dead end — a new
+        // account lands straight on the form rather than on "nothing here yet".
+        else if (canRun) showRunForm(true);
+        else showEmpty('No reports yet',
+            'Once a report has been run for your business it will appear here.');
+    });
+
+    function showRunForm(firstRun) {
+        activeId = null;
+        renderList();
+        $('cl-body').innerHTML = `
+            <div class="card cl-run">
+                <h2>${firstRun ? 'Let us look at your Instagram' : 'Run a new check-up'}</h2>
+                <p class="cl-sub">${firstRun
+                    ? 'One check-up tells you how your account is doing and how you compare to similar businesses. It takes a couple of minutes.'
+                    : 'Enter the account to look at. Adding similar businesses is what makes the comparison possible.'}</p>
+
+                <label for="rn-handle">Your Instagram handle</label>
+                <input type="text" id="rn-handle" placeholder="harborcafe" autocomplete="off" spellcheck="false">
+
+                <label for="rn-r1">Two businesses like yours
+                    <span style="text-transform:none;font-weight:500;letter-spacing:0;">— optional</span></label>
+                <div class="cl-rivals">
+                    <input type="text" id="rn-r1" placeholder="a competitor" autocomplete="off" spellcheck="false">
+                    <input type="text" id="rn-r2" placeholder="another one" autocomplete="off" spellcheck="false">
+                </div>
+                <p class="cl-tip">Pick businesses about your size, ideally near you. Leave these blank
+                   and you still get your own report — just without anything to compare it against.</p>
+
+                <button class="btn-primary" id="rn-go" type="button" style="margin-top:20px;">Run my check-up</button>
+                <div class="cl-run-err" id="rn-err"></div>
+                <div class="cl-progress" id="rn-prog" style="display:none;">
+                    <div class="cl-track"><i></i></div>
+                    <div class="cl-step">Starting…</div>
+                </div>
+            </div>`;
+
+        $('rn-go').addEventListener('click', runCheckup);
+        ['rn-handle', 'rn-r1', 'rn-r2'].forEach(id =>
+            $(id).addEventListener('keydown', e => { if (e.key === 'Enter') runCheckup(); }));
+    }
+
+    async function runCheckup() {
+        const clean  = v => String(v || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
+        const target = clean($('rn-handle').value);
+        const r1 = clean($('rn-r1').value);
+        const r2 = clean($('rn-r2').value);
+
+        const err = $('rn-err');
+        err.textContent = ''; err.className = 'cl-run-err';
+        if (!target) { err.textContent = 'Enter your Instagram handle to get started.'; return; }
+
+        const btn  = $('rn-go');
+        const prog = $('rn-prog');
+        const stop = () => { btn.disabled = false; btn.textContent = 'Run my check-up'; prog.style.display = 'none'; };
+        const step = (pct, msg) => {
+            prog.querySelector('i').style.width = (pct || 0) + '%';
+            prog.querySelector('.cl-step').textContent = msg || '';
+        };
+
+        btn.disabled = true; btn.textContent = 'Running…';
+        prog.style.display = ''; step(2, 'Starting…');
+
+        try {
+            await EL.runJob('/api/generate-ig-report',
+                { target, compareRivals: !!(r1 || r2), rival1: r1 || null, rival2: r2 || null },
+                {
+                    onProgress: j => step(j.progress, j.current_step),
+                    onFailed: j => { stop(); err.textContent = j.error || 'That check-up did not finish.'; },
+                    onDone: async j => {
+                        step(100, 'Done — opening your report');
+                        const id = j.result && (j.result.reportId || j.result.reportRef);
+                        try {
+                            const r = await EL.api('/api/client/reports');
+                            reports = r.reports || [];
+                        } catch { /* the report itself still opens below */ }
+                        renderList();
+                        if (id) open(id);
+                        else if (reports.length) open(reports[0].id);
+                        else stop();
+                    }
+                });
+        } catch (e) {
+            stop();
+            if (e.handled) return;              // lapsed account already has its screen
+            err.textContent = e.message;
+            // Hitting an allowance is amber, not red — the account is fine,
+            // this one run is not available.
+            if (e.quota) err.className = 'cl-run-err is-quota';
+        }
+    }
+
+    function renderList() {
+        if (!reports.length) { $('cl-list').innerHTML =
+            '<div style="color:var(--text-muted);font-size:0.85rem;">Nothing here yet.</div>'; return; }
+
+        $('cl-list').innerHTML = reports.map(r => `
+            <button class="cl-item ${r.id === activeId ? 'is-active' : ''}" data-id="${esc(r.id)}">
+                <h4>${esc(r.title)}${r.handle ? ' · @' + esc(r.handle) : ''}</h4>
+                <div class="cl-meta">
+                    <span>${esc(r.date || '')}</span>
+                    ${r.band ? `<span class="cl-band ${esc(r.band)}">${esc(r.band)}</span>` : ''}
+                </div>
+            </button>`).join('');
+
+        $('cl-list').querySelectorAll('.cl-item').forEach(el => {
+            el.addEventListener('click', () => open(el.dataset.id));
+        });
+    }
+
+    async function open(id) {
+        activeId = id;
+        renderList();
+        $('cl-body').innerHTML = '<div class="cl-empty"><div class="cl-mark">⏳</div><h3>Opening…</h3></div>';
+        try {
+            const { report } = await EL.api('/api/client/report/' + encodeURIComponent(id));
+            render(report);
+        } catch (err) {
+            if (err.handled) return;
+            showEmpty('Could not open that report', err.message);
+        }
+    }
+
+    function render(r) {
+        if (!r) return showEmpty('That report is empty', 'Nothing was saved for it.');
+
+        const st = r.standing || {};
+
+        const ranks = (st.peers || []).length ? `
+            <div class="cl-ranks">
+                ${st.peers.map(p => `
+                    <div class="cl-rank ${p.is_you ? 'is-you' : ''}">
+                        <div class="cl-pos">#${p.position}</div>
+                        <div class="cl-who">${esc(p.name)}</div>
+                    </div>`).join('')}
+            </div>` : '';
+
+        const standing = st.verdict ? `
+            <section class="cl-standing">
+                <h2>${esc(st.verdict)}</h2>
+                ${st.gap ? `<p>${esc(st.gap)}</p>` : ''}
+                ${ranks}
+            </section>` : '';
+
+        const points = (list, cls) => list.length ? `
+            <ul class="cl-points">
+                ${list.map(p => `
+                    <li class="cl-point ${cls}">
+                        <b>${esc(p.title)}</b>
+                        <span>${esc(p.why)}</span>
+                    </li>`).join('')}
+            </ul>` : `<p class="cl-sub">Nothing stood out here.</p>`;
+
+        const missing = (r.profile && r.profile.missing || []);
+
+        $('cl-body').innerHTML = `
+            <div class="cl-head">
+                <h1>${esc(r.headline)}</h1>
+                <div class="cl-sub">
+                    ${r.handle ? '@' + esc(r.handle) + ' · ' : ''}${esc(r.date || '')}
+                    ${r.posts_looked_at ? ' · based on ' + r.posts_looked_at + ' recent posts' : ''}
+                    ${r.grade ? ' · grade ' + esc(r.grade) : ''}
+                </div>
+            </div>
+
+            ${r.provisional ? `<div class="cl-flag">${esc(r.provisional_note)}</div>` : ''}
+
+            ${standing}
+
+            <div class="cl-cols">
+                <div class="card cl-panel">
+                    <h3>✅ What is working</h3>
+                    ${points(r.working || [], 'good')}
+                </div>
+                <div class="card cl-panel">
+                    <h3>🔧 What to change</h3>
+                    ${points(r.fix || [], 'todo')}
+                </div>
+            </div>
+
+            ${missing.length ? `
+                <div class="card cl-panel">
+                    <h3>📇 Missing from your profile</h3>
+                    <p class="cl-sub">Someone who likes a post and visits your profile should never
+                       have to search for how to reach you. These are quick to add.</p>
+                    <ul class="cl-missing">${missing.map(m => `<li>${esc(m)}</li>`).join('')}</ul>
+                </div>` : ''}
+
+            ${r.summary ? `
+                <div class="card cl-panel">
+                    <h3>📝 In summary</h3>
+                    <p style="font-size:0.9rem;line-height:1.65;color:#cbd5e1;">${esc(r.summary)}</p>
+                </div>` : ''}
+        `;
+    }
+
+    function showEmpty(title, body) {
+        $('cl-body').innerHTML = `
+            <div class="cl-empty">
+                <div class="cl-mark">📊</div>
+                <h3>${esc(title)}</h3>
+                <p>${esc(body || '')}</p>
+            </div>`;
+    }
+})();
+</script>
+
+</body>
+</html>

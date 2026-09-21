@@ -1,6 +1,6 @@
 {
   "name": "edgelead-backend",
-  "version": "11.0.0",
+  "version": "17.0.0",
   "private": true,
   "description": "EdgeLead — social media intelligence and reporting for SMM freelancers. Single-file Express backend.",
   "main": "server.js",
@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js && node --check frontend/header.js",
-    "test": "node tests/phase11.test.js && node tests/header.smoke.js",
+    "test": "node tests/phase11.test.js && node tests/phase13.test.js && node tests/phase14.test.js && node tests/phase15.test.js && node tests/phase16.test.js && node tests/phase17.test.js && node tests/header.smoke.js",
     "live-checks": "node scripts/live-checks.js"
   },
   "dependencies": {
