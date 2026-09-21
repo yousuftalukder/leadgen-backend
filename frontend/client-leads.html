@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Find Leads — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* client-leads.html — page-specific only. Shared rules live in app.css. */
+
+    .lf-form { max-width: 680px; }
+    .lf-form h2 { font-size: 1.4rem; font-weight: 800; margin-bottom: 8px; }
+    .lf-form .lf-sub { color: var(--text-muted); font-size: 0.88rem; line-height: 1.6; margin-bottom: 20px; }
+    .lf-form label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 7px; }
+    .lf-form label:first-of-type { margin-top: 0; }
+    .lf-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 620px) { .lf-row { grid-template-columns: 1fr; } }
+    .lf-tip { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; line-height: 1.5; }
+
+    .lf-where-seg { display: flex; gap: 8px; flex-wrap: wrap; }
+    .lf-seg { padding: 9px 16px; border-radius: 9px; cursor: pointer; font-size: 0.85rem; font-weight: 600;
+        background: rgba(255,255,255,0.045); border: 1px solid var(--card-border); color: var(--text-muted);
+        transition: border-color .15s, color .15s, background .15s; }
+    .lf-seg:hover { border-color: rgba(217,181,108,0.45); color: var(--text-primary); }
+    .lf-seg.is-on { background: rgba(12,120,86,0.16); border-color: var(--accent-solid); color: #f3efe4; }
+
+    .lf-badge { font-size: 0.66rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 2px 7px; border-radius: 999px; margin-left: 7px; vertical-align: middle; }
+    .lf-badge.instagram { background: rgba(236,72,153,0.16); color: #f9a8d4; }
+    .lf-badge.facebook  { background: rgba(12,120,86,0.16); color: #f0d39a; }
+    .lf-err { margin-top: 14px; font-size: 0.86rem; color: var(--danger); line-height: 1.5; min-height: 18px; }
+    .lf-err.is-quota { color: #fcd34d; }
+
+    .lf-progress { margin-top: 18px; }
+    .lf-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.09); overflow: hidden; }
+    .lf-track i { display: block; height: 100%; width: 0; background: var(--accent-glow); transition: width .3s; }
+    .lf-step { font-size: 0.84rem; color: var(--text-muted); margin-top: 9px; }
+
+    .lf-head { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+        flex-wrap: wrap; margin: 30px 0 14px; }
+    .lf-head h3 { font-size: 1.05rem; font-weight: 800; }
+    .lf-count { font-size: 0.82rem; color: var(--text-muted); }
+
+    .lf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 14px; }
+    .lf-card { padding: 17px; border-radius: 13px; background: var(--card-bg);
+        border: 1px solid var(--card-border); display: flex; flex-direction: column; gap: 9px; }
+    .lf-card h4 { font-size: 0.95rem; font-weight: 700; line-height: 1.35; }
+    .lf-card h4 a { color: var(--accent-solid); text-decoration: none; }
+    .lf-who { font-size: 0.78rem; color: var(--text-muted); line-height: 1.45; }
+    .lf-contacts { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+    .lf-contact { font-size: 0.8rem; display: flex; gap: 7px; align-items: baseline; word-break: break-all; }
+    .lf-contact span { color: var(--text-muted); flex-shrink: 0; }
+    .lf-contact a { color: var(--text-primary); text-decoration: none; }
+    .lf-contact a:hover { color: var(--accent-solid); }
+    .lf-pending { font-size: 0.78rem; color: var(--text-muted); font-style: italic; }
+
+    .lf-empty { text-align: center; padding: 44px 24px; color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+
+    <div class="card lf-form">
+        <h2>Find businesses worth talking to</h2>
+        <p class="lf-sub">Tell us what you are looking for and where. We will find matching
+           businesses on Instagram and pull out whatever contact details they have published.</p>
+
+        <div class="lf-row">
+            <div>
+                <label for="lf-what">What are you looking for?</label>
+                <input type="text" id="lf-what" placeholder="coffee shops" autocomplete="off">
+            </div>
+            <div>
+                <label for="lf-where">Where?</label>
+                <input type="text" id="lf-where" placeholder="Boston" autocomplete="off">
+            </div>
+        </div>
+        <label>Where should we look?</label>
+        <div class="lf-where-seg" id="lf-platform">
+            <button type="button" class="lf-seg is-on" data-p="instagram">Instagram</button>
+            <button type="button" class="lf-seg" data-p="facebook">Facebook Pages</button>
+            <button type="button" class="lf-seg" data-p="both">Both</button>
+        </div>
+
+        <p class="lf-tip">Plain words work best — "wedding photographers", "dental clinics",
+           "gyms". Facebook Pages tend to publish a phone number and an address;
+           Instagram tends to publish an email. Searching both uses more of your
+           allowance than searching one.</p>
+
+        <button class="btn-primary" id="lf-go" type="button" style="margin-top:18px;">Find them</button>
+        <div class="lf-err" id="lf-err"></div>
+        <div class="lf-progress" id="lf-prog" style="display:none;">
+            <div class="lf-track"><i></i></div>
+            <div class="lf-step">Starting…</div>
+        </div>
+    </div>
+
+    <div class="lf-head">
+        <h3>Businesses you have found</h3>
+        <span class="lf-count" id="lf-count"></span>
+    </div>
+    <div id="lf-results">
+        <div class="lf-empty">Loading…</div>
+    </div>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    let platform = 'instagram';
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'leadgen', page: 'client-leads.html' });
+        esc = EL.escape;
+
+        $('lf-go').addEventListener('click', run);
+        ['lf-what', 'lf-where'].forEach(id =>
+            $(id).addEventListener('keydown', e => { if (e.key === 'Enter') run(); }));
+
+        $('lf-platform').addEventListener('click', e => {
+            const b = e.target.closest('.lf-seg');
+            if (!b) return;
+            $('lf-platform').querySelectorAll('.lf-seg').forEach(x => x.classList.toggle('is-on', x === b));
+            platform = b.dataset.p;
+        });
+
+        loadLeads();
+    });
+
+    async function loadLeads() {
+        try {
+            const { leads } = await EL.api('/api/client/leads');
+            render(leads || []);
+        } catch (err) {
+            if (err.handled) return;
+            $('lf-results').innerHTML = `<div class="lf-empty">${esc(err.message)}</div>`;
+        }
+    }
+
+    function render(leads) {
+        $('lf-count').textContent = leads.length
+            ? leads.length + (leads.length === 1 ? ' business' : ' businesses')
+            : '';
+
+        if (!leads.length) {
+            $('lf-results').innerHTML = `<div class="lf-empty">
+                Nothing yet. Run a search above and the businesses we find will appear here,
+                with their contact details where they have published them.</div>`;
+            return;
+        }
+
+        $('lf-results').innerHTML = `<div class="lf-grid">${leads.map(card).join('')}</div>`;
+    }
+
+    function card(l) {
+        const contacts = [
+            l.email    ? ['Email', `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>`] : null,
+            l.phone    ? ['Phone', `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>`] : null,
+            l.whatsapp ? ['WhatsApp', esc(l.whatsapp)] : null,
+            l.website  ? ['Site', `<a href="${EL.safeUrl(l.website)}" target="_blank" rel="noopener noreferrer">${esc(l.website)}</a>`] : null
+        ].filter(Boolean);
+
+        const where = [l.category, l.city].filter(Boolean).map(esc).join(' · ');
+        const size  = l.followers ? Number(l.followers).toLocaleString() + ' followers' : '';
+
+        return `
+            <div class="lf-card">
+                <h4><a href="${EL.safeUrl(l.url)}" target="_blank" rel="noopener noreferrer">@${esc(l.username)}</a><span
+                    class="lf-badge ${l.platform === 'facebook' ? 'facebook' : 'instagram'}"
+                    >${l.platform === 'facebook' ? 'FB' : 'IG'}</span></h4>
+                ${l.name ? `<div class="lf-who">${esc(l.name)}</div>` : ''}
+                ${(where || size) ? `<div class="lf-who">${[where, size].filter(Boolean).join(' · ')}</div>` : ''}
+                ${contacts.length
+                    ? `<div class="lf-contacts">${contacts.map(([k, v]) =>
+                        `<div class="lf-contact"><span>${k}</span>${v}</div>`).join('')}</div>`
+                    : l.enriched
+                        ? `<div class="lf-pending">No contact details published.</div>`
+                        : `<div class="lf-pending">Details still being collected.</div>`}
+            </div>`;
+    }
+
+    async function run() {
+        const what  = String($('lf-what').value || '').trim();
+        const where = String($('lf-where').value || '').trim();
+
+        const err = $('lf-err');
+        err.textContent = ''; err.className = 'lf-err';
+        if (!what) { err.textContent = 'Tell us what kind of business to look for.'; return; }
+
+        const btn  = $('lf-go');
+        const prog = $('lf-prog');
+        const stop = () => { btn.disabled = false; btn.textContent = 'Find them'; prog.style.display = 'none'; };
+        const step = (pct, msg) => {
+            prog.querySelector('i').style.width = (pct || 0) + '%';
+            prog.querySelector('.lf-step').textContent = msg || '';
+        };
+
+        btn.disabled = true; btn.textContent = 'Searching…';
+        prog.style.display = ''; step(2, 'Starting…');
+
+        const targets = platform === 'both' ? ['instagram', 'facebook'] : [platform];
+        const warnings = [];
+
+        try {
+            // Sequential, not parallel. Two jobs at once would trip the
+            // active-job limit, and running Instagram first means a shared
+            // allowance is spent on the richer source before Facebook sees it.
+            for (let i = 0; i < targets.length; i++) {
+                const p = targets[i];
+                const band = [i / targets.length, (i + 1) / targets.length];
+                const scale = (pct) => Math.round((band[0] + (pct / 100) * (band[1] - band[0])) * 100);
+
+                const label = p === 'facebook' ? 'Facebook' : 'Instagram';
+                step(scale(2), `Searching ${label}…`);
+
+                await runOne(p, what, where, (pct, msg) =>
+                    step(scale(pct || 0), `${label}: ${msg || 'working'}`), warnings);
+            }
+
+            step(100, 'Done');
+            stop();
+
+            // An allowance hit mid-run comes back as a warning, not a failure —
+            // the scrape already happened and some of it was saved. Say so
+            // rather than pretending it all landed.
+            const capped = warnings.find(w => /allowance/i.test(w));
+            if (capped) { err.className = 'lf-err is-quota'; err.textContent = capped; }
+            else if (warnings.length) { err.textContent = warnings[0]; }
+
+            await loadLeads();
+        } catch (e) {
+            stop();
+            if (e.handled) return;
+            err.textContent = e.message;
+            if (e.quota) err.className = 'lf-err is-quota';
+            await loadLeads();          // a partial run still saved something
+        }
+    }
+
+    /** One platform's search, resolved when its job finishes. */
+    function runOne(platform, what, where, onStep, warnings) {
+        const body = platform === 'facebook'
+            ? { keywords: [what], location: where, maxPages: 20 }
+            : {
+                campaignName: [what, where].filter(Boolean).join(' in ') || 'Search',
+                location: where,
+                method1_keywords: where ? [what] : [],
+                method3_1_keywords: [what],
+                // method_3_1 searches the phrase; method_1 adds the location
+                // sweep when one was given. Each is a single Apify call, which
+                // is what keeps a trial search inside its allowance.
+                selected_methods: where ? ['method_3_1', 'method_1'] : ['method_3_1']
+            };
+
+        const path = platform === 'facebook' ? '/api/fb/find-leads' : '/api/run-campaign';
+
+        return new Promise((resolve, reject) => {
+            EL.runJob(path, body, {
+                onProgress: j => onStep(j.progress, j.current_step),
+                onDone: j => {
+                    ((j.result && j.result.warnings) || []).forEach(w => warnings.push(w));
+                    resolve();
+                },
+                onFailed: j => reject(new Error(j.error || `The ${platform} search did not finish.`))
+            }).catch(reject);
+        });
+    }
+})();
+</script>
+
+</body>
+</html>

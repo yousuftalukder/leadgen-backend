@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Start your free trial — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* signup.html — page-specific only. Shared rules live in app.css. */
+    body { padding: 60px 20px; max-width: 1100px; }
+
+    .su-wrap { display: grid; grid-template-columns: 1.05fr 1fr; gap: 34px; align-items: start; }
+    @media (max-width: 880px) { .su-wrap { grid-template-columns: 1fr; gap: 22px; } }
+
+    .su-logo { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 26px;
+        background: var(--accent-glow); -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; }
+
+    .su-pitch h1 { font-size: 2rem; font-weight: 800; line-height: 1.2; margin-bottom: 14px; }
+    .su-pitch .su-sub { color: var(--text-muted); font-size: 0.95rem; line-height: 1.6; margin-bottom: 24px; }
+    .su-list { list-style: none; display: grid; gap: 12px; }
+    .su-list li { display: flex; gap: 11px; align-items: flex-start; font-size: 0.9rem; line-height: 1.5; }
+    .su-list .su-tick { color: var(--success); font-weight: 800; flex-shrink: 0; }
+    .su-list b { color: var(--text-primary); font-weight: 700; }
+    .su-note { margin-top: 22px; padding: 13px 15px; border-radius: 10px; font-size: 0.82rem; line-height: 1.55;
+        color: var(--text-muted); background: rgba(12,120,86,0.07); border: 1px solid rgba(12,120,86,0.18); }
+
+    .su-card label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 7px; }
+    .su-card label:first-of-type { margin-top: 0; }
+    .su-hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 6px; min-height: 15px; line-height: 1.4; }
+    .su-hint.is-bad { color: var(--danger); }
+    .su-hint.is-good { color: var(--success); }
+    .su-hint.is-busy { color: var(--accent-solid); }
+
+    .su-meter { height: 4px; border-radius: 999px; background: rgba(255,255,255,0.09); margin-top: 9px; overflow: hidden; }
+    .su-meter i { display: block; height: 100%; width: 0; background: var(--danger); transition: width .18s, background .18s; }
+    .su-meter.s2 i { background: var(--warn); }
+    .su-meter.s3 i { background: var(--success); }
+
+    .su-error { margin-top: 15px; color: var(--danger); font-size: 0.85rem; line-height: 1.5; min-height: 18px; }
+    .su-foot { margin-top: 20px; font-size: 0.85rem; color: var(--text-muted); text-align: center; }
+    .su-foot a { color: var(--accent-solid); text-decoration: none; font-weight: 600; }
+
+    .su-done { text-align: center; padding: 14px 0 6px; }
+    .su-done .su-mark { font-size: 2.6rem; line-height: 1; margin-bottom: 14px; }
+    .su-done h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: 10px; }
+    .su-done p { color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; margin-bottom: 10px; }
+    .su-done .su-addr { color: var(--text-primary); font-weight: 700; word-break: break-all; }
+    </style>
+</head>
+<body>
+
+<div class="su-logo">⚡ EDGELEAD</div>
+
+<div class="su-wrap">
+
+    <section class="su-pitch">
+        <h1>See what your social media is actually doing.</h1>
+        <p class="su-sub">
+            Instagram and Facebook analysis built for the questions owners actually ask:
+            how am I doing, how do I compare to businesses like mine nearby, and what should
+            I post next. Free for <b id="trial-days-text">7 days</b>, no card needed.
+        </p>
+
+        <ul class="su-list">
+            <li><span class="su-tick">✓</span><span><b>A performance audit</b> of your Instagram, scored and explained in words rather than dashboards.</span></li>
+            <li><span class="su-tick">✓</span><span><b>Local comparison</b> — how you sit against similar businesses in your area.</span></li>
+            <li><span class="su-tick">✓</span><span><b>Community demand</b> — what people near you are asking for in Facebook groups.</span></li>
+            <li><span class="su-tick">✓</span><span><b>Lead discovery</b> — find businesses worth talking to, with their contact details.</span></li>
+            <li><span class="su-tick">✓</span><span><b>Connect Meta</b> and it stops guessing: real reach, saves and demographics only the owner can see.</span></li>
+        </ul>
+
+        <p class="su-note">
+            The trial runs on our own data budget, so it comes with sensible limits —
+            enough to see exactly what the tool does on your own business, not enough
+            to run an agency on. You will see what is left as you go.
+        </p>
+    </section>
+
+    <section class="card su-card" id="form-card">
+        <h2 class="card-title">Start free</h2>
+        <p class="card-subtitle">No card, no call. Confirm your email and you are in.</p>
+
+        <label for="su-name">Your name</label>
+        <input type="text" id="su-name" placeholder="Alex Rahman" autocomplete="name">
+
+        <label for="su-email">Work email</label>
+        <input type="email" id="su-email" placeholder="you@yourbusiness.com" autocomplete="email">
+
+        <label for="su-pass">Password</label>
+        <input type="password" id="su-pass" placeholder="••••••••••" autocomplete="new-password">
+        <div class="su-meter" id="su-meter"><i></i></div>
+        <div class="su-hint" id="su-pass-hint">At least 10 characters.</div>
+
+        <label for="su-pass2">Confirm password</label>
+        <input type="password" id="su-pass2" placeholder="••••••••••" autocomplete="new-password">
+        <div class="su-hint" id="su-pass2-hint"></div>
+
+        <button class="btn-primary" id="su-go" style="margin-top:20px;">Create my account</button>
+        <div class="su-error" id="su-error"></div>
+
+        <div class="su-foot">Already have an account? <a href="index.html">Sign in</a></div>
+    </section>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    // This page is pre-auth, so it cannot call EL.init() — that redirects to
+    // index.html when there is no session, which from here would loop. Same
+    // reasoning as the login block on index.html. EL is still loaded, for
+    // EL.api() on the public precheck and for EL.escape().
+    const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
+    const MIN_PASSWORD = 10;
+
+    const $ = id => document.getElementById(id);
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Already signed in? Nothing to sign up for.
+    sb.auth.getSession().then(({ data }) => {
+        if (data && data.session) window.location.href = 'index.html';
+    });
+
+    // ---- password feedback --------------------------------------------------
+    //
+    // The breach check costs a network round trip, so it runs when the field is
+    // done being typed in, not on every keystroke. Length and strength are
+    // local and update live.
+
+    let breachTimer = null;
+    let lastChecked = { value: null, ok: null };
+
+    function strength(pw) {
+        let s = 0;
+        if (pw.length >= MIN_PASSWORD) s++;
+        if (pw.length >= 14) s++;
+        if (/[^A-Za-z0-9]/.test(pw) || (/[A-Za-z]/.test(pw) && /[0-9]/.test(pw))) s++;
+        return Math.min(3, s);
+    }
+
+    function paintMeter(pw) {
+        const s = pw ? strength(pw) : 0;
+        const bar = $('su-meter');
+        bar.className = 'su-meter' + (s >= 3 ? ' s3' : s === 2 ? ' s2' : '');
+        bar.querySelector('i').style.width = (s / 3 * 100) + '%';
+    }
+
+    function setHint(el, text, cls) {
+        el.textContent = text;
+        el.className = 'su-hint' + (cls ? ' ' + cls : '');
+    }
+
+    async function checkBreached(pw) {
+        if (pw === lastChecked.value) return lastChecked.ok;
+        setHint($('su-pass-hint'), 'Checking this password…', 'is-busy');
+        try {
+            const r = await EL.api('/api/public/signup/password-check', {
+                method: 'POST', body: { password: pw }
+            });
+            lastChecked = { value: pw, ok: !!r.ok };
+            if (r.ok) setHint($('su-pass-hint'), 'Looks good.', 'is-good');
+            else setHint($('su-pass-hint'), r.error || 'Pick a different password.', 'is-bad');
+            return !!r.ok;
+        } catch (err) {
+            // The checker is advisory and fails open, exactly as it does on the
+            // server. Minimum length is enforced by Supabase regardless.
+            lastChecked = { value: pw, ok: true };
+            setHint($('su-pass-hint'), 'Could not check that password right now.', '');
+            return true;
+        }
+    }
+
+    $('su-pass').addEventListener('input', () => {
+        const pw = $('su-pass').value;
+        paintMeter(pw);
+        clearTimeout(breachTimer);
+
+        if (pw.length < MIN_PASSWORD) {
+            setHint($('su-pass-hint'), `At least ${MIN_PASSWORD} characters.`, pw ? 'is-bad' : '');
+            return;
+        }
+        setHint($('su-pass-hint'), 'Checking this password…', 'is-busy');
+        breachTimer = setTimeout(() => checkBreached(pw), 550);
+    });
+
+    $('su-pass2').addEventListener('input', () => {
+        const a = $('su-pass').value, b = $('su-pass2').value;
+        if (!b) return setHint($('su-pass2-hint'), '', '');
+        setHint($('su-pass2-hint'), a === b ? 'Passwords match.' : 'Passwords do not match.',
+                a === b ? 'is-good' : 'is-bad');
+    });
+
+    // ---- submit -------------------------------------------------------------
+
+    async function submit() {
+        const btn  = $('su-go');
+        const name = $('su-name').value.trim();
+        const mail = $('su-email').value.trim().toLowerCase();
+        const pw   = $('su-pass').value;
+        const pw2  = $('su-pass2').value;
+
+        $('su-error').textContent = '';
+
+        if (!name)                  return fail('Tell us your name so we know who to address.');
+        if (!/^\S+@\S+\.\S+$/.test(mail)) return fail('Enter a valid email address.');
+        if (pw.length < MIN_PASSWORD)     return fail(`Your password needs at least ${MIN_PASSWORD} characters.`);
+        if (pw !== pw2)             return fail('The two passwords do not match.');
+
+        btn.disabled = true; btn.textContent = 'Checking…';
+
+        if (!(await checkBreached(pw))) {
+            btn.disabled = false; btn.textContent = 'Create my account';
+            return fail('That password has appeared in a known data breach. Please pick another.');
+        }
+
+        btn.textContent = 'Creating your account…';
+        try {
+            // Signing up through Supabase rather than our own endpoint is what
+            // sends the confirmation email. The account itself is provisioned
+            // server-side on first sign-in, as a client on a trial.
+            const { data, error } = await sb.auth.signUp({
+                email: mail,
+                password: pw,
+                options: {
+                    data: { full_name: name },
+                    emailRedirectTo: window.location.origin + '/index.html'
+                }
+            });
+            if (error) throw error;
+
+            // An existing address comes back looking like a success with no
+            // identities, so that it cannot be used to enumerate who has an
+            // account. Say the same thing either way.
+            done(mail, !(data && data.user && (data.user.identities || []).length));
+        } catch (err) {
+            btn.disabled = false; btn.textContent = 'Create my account';
+            fail(err.message || 'Could not create the account. Try again.');
+        }
+    }
+
+    function fail(msg) { $('su-error').textContent = msg; return false; }
+
+    function done(mail, existed) {
+        $('form-card').innerHTML = `
+            <div class="su-done">
+                <div class="su-mark">📬</div>
+                <h2>Check your email</h2>
+                <p>We sent a confirmation link to <span class="su-addr">${EL.escape(mail)}</span>.
+                   Click it and your trial starts straight away.</p>
+                <p>Nothing yet? Give it a minute, then look in spam — the link
+                   comes from Supabase on our behalf.</p>
+                ${existed ? '<p>If you already had an account, sign in instead.</p>' : ''}
+                <div class="su-foot" style="margin-top:18px;">
+                    <a href="index.html">Go to sign in</a>
+                </div>
+            </div>`;
+    }
+
+    $('su-go').addEventListener('click', submit);
+    ['su-name', 'su-email', 'su-pass', 'su-pass2'].forEach(id => {
+        $(id).addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    });
+})();
+</script>
+
+</body>
+</html>

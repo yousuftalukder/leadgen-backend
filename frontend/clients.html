@@ -4,8 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Clients</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* clients.html — page-specific only. */
@@ -14,17 +13,11 @@
     .client-list { display: flex; flex-direction: column; gap: 8px; }
     .client-row { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--card-border); background: rgba(15,23,42,0.6);
         cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-    .client-row:hover, .client-row.is-active { border-color: var(--accent-solid); background: rgba(59,130,246,0.08); }
+    .client-row:hover, .client-row.is-active { border-color: var(--accent-solid); background: rgba(12,120,86,0.08); }
     .client-row b { display: block; color: #fff; font-size: 0.92rem; }
     .client-row small { color: var(--text-muted); font-size: 0.75rem; }
-    .count { font-size: 0.72rem; font-weight: 800; color: #93c5fd; background: rgba(59,130,246,0.12); padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
-    label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin: 12px 0 6px; }
-    input[type="text"], input[type="email"], select, textarea { width: 100%; padding: 11px 13px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
-    textarea { min-height: 80px; resize: vertical; }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); }
+    .count { font-size: 0.72rem; font-weight: 800; color: #f0d39a; background: rgba(12,120,86,0.12); padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
     .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 16px; }
-    .btn-primary { width: auto; padding: 12px 22px; font-size: 0.9rem; margin-top: 16px; }
     .row-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
     .note { font-size: 0.82rem; margin-top: 10px; min-height: 1.2em; font-weight: 600; color: var(--text-muted); }
     .timeline { display: flex; flex-direction: column; gap: 8px; }
@@ -32,7 +25,7 @@
         border: 1px solid var(--card-border); border-radius: 10px; background: rgba(15,23,42,0.5); font-size: 0.85rem; }
     .t-row .type { font-size: 0.7rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; text-align: center; }
     .type.ig_report, .type.deep_audit, .type.content_plan { background: rgba(236,72,153,0.15); color: #f9a8d4; }
-    .type.fb_community, .type.fb_group, .type.fb_page { background: rgba(59,130,246,0.15); color: #93c5fd; }
+    .type.fb_community, .type.fb_group, .type.fb_page { background: rgba(12,120,86,0.15); color: #f0d39a; }
     .type.meta_owned { background: rgba(16,185,129,0.15); color: #6ee7b7; }
     .t-row small { color: var(--text-muted); display: block; margin-top: 2px; }
     .member { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border: 1px solid var(--card-border); border-radius: 8px; margin: 6px 0; font-size: 0.85rem; }
@@ -40,7 +33,6 @@
     .conn.is-bad { border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.06); }
     .conn b { color: #fff; }
     .hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
-    .empty { padding: 26px; text-align: center; color: var(--text-muted); border: 1px dashed var(--card-border); border-radius: 10px; }
     .is-hidden { display: none !important; }
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
     .tab { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; font-size: 0.8rem; font-family: inherit; }
@@ -150,6 +142,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async () => {

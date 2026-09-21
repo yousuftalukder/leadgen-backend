@@ -3,17 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
     <title>Edgelead - Instagram Performance Audit</title>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
 <style>
     /* ig-report.html — page-specific only. Shared rules live in app.css. */
-    input[type="text"], input[type="password"] { width: 100%; padding: 15px 18px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none;
-        font-size: 0.95rem; font-weight: 500; }
-    input:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
     .toggle-container { display: flex; align-items: center; gap: 12px; margin-top: 20px; cursor: pointer; }
     .toggle-switch { width: 46px; height: 24px; background: var(--input-bg); border-radius: 20px;
         border: 1px solid var(--card-border); position: relative; transition: background 0.3s; }
@@ -44,7 +41,7 @@
     .pillar { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 0.83rem; }
     .pillar .name { width: 200px; font-weight: 700; color: var(--text-primary); flex: 0 0 auto; }
     .pillar .track { flex: 1; height: 8px; background: rgba(255,255,255,0.07); border-radius: 5px; overflow: hidden; }
-    .pillar .track > div { height: 100%; background: var(--accent-glow); }
+    .pillar .track > div { height: 100%; background: var(--accent-solid); border-radius: 999px; }
     .pillar .pts { width: 58px; text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
     .pillar .detail { width: 220px; color: var(--text-muted); font-size: 0.76rem; flex: 0 0 auto; }
 
@@ -59,7 +56,7 @@
     .mbar { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 0.8rem; }
     .mbar .m { width: 68px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); }
     .mbar .track { flex: 1; height: 16px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
-    .mbar .track > div { height: 100%; background: var(--accent-glow); }
+    .mbar .track > div { height: 100%; background: var(--accent-solid); border-radius: 999px; }
     .mbar .v { width: 92px; text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
 
     .flagrow { display: grid; grid-template-columns: 1fr 90px 90px 90px; gap: 10px; padding: 10px 0;
@@ -153,6 +150,7 @@
 
 </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script src="report-cover.js"></script>
 <script>
@@ -343,7 +341,7 @@
         <div class="kpi-grid">
             ${kpi('Followers', num(m.followers))}
             ${kpi('Engagement rate', `${esc(m.engagementRateMedian ?? m.engagementRate)}%`, 'var(--accent-solid)')}
-            ${kpi('Views per follower', `${esc(m.viralityScoreMedian ?? m.viralityScore)}x`, '#60a5fa')}
+            ${kpi('Views per follower', `${esc(m.viralityScoreMedian ?? m.viralityScore)}x`, '#d9b56c')}
             ${kpi('Posts / week', esc(m.postsPerWeek))}
             ${kpi('Median likes', num(m.distribution?.likes?.median ?? m.avgLikes))}
             ${kpi('Median comments', num(m.distribution?.comments?.median ?? m.avgComments))}
@@ -439,14 +437,14 @@
                 const c = lookup[`${di}:${h}`];
                 const v = c ? (c.medIndex ?? c.avgIndex ?? 0) : 0;
                 const a = c ? Math.max(0.12, Math.min(1, v / peak)) : 0;
-                grid += `<div class="cell"${c ? ` style="background:rgba(96,165,250,${a})" title="${d} ${h}:00 — ${c.posts} post(s), index ${v ?? 'n/a'}"` : ''}></div>`;
+                grid += `<div class="cell"${c ? ` style="background:rgba(63,191,143,${Math.max(0.15, a)})" title="${d} ${h}:00 — ${c.posts} post(s), index ${v ?? 'n/a'}"` : ''}></div>`;
             }
         });
 
         return section('When posts land best (local time)',
             hm.reliable ? null : 'Fewer than 20 posts in the window — read this as a sketch, not a schedule.',
             `<div class="table-wrap"><div class="heat">${grid}</div></div>
-             <p class="heat-legend">Darker = higher median performance index. Best windows:
+             <p class="heat-legend">Brighter = higher median performance index. Best windows:
                 ${hm.bestHours?.length
                     ? hm.bestHours.slice(0, 4).map(h => `<strong>${h.hour}:00</strong> (${h.medIndex}x, ${h.posts}p)`).join(', ')
                     : 'not enough posts per slot to call one'}.

@@ -4,17 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Community Audit</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* fb-audit.html — page-specific only. Shared rules live in app.css. */
-    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 14px 16px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem; font-family: inherit; }
     .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
     .mode-card { background: var(--input-bg); border: 2px solid var(--card-border); border-radius: 12px; padding: 18px; cursor: pointer; }
-    .mode-card.is-on { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.18); }
+    .mode-card.is-on { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(217,181,108,0.18); }
     .mode-card strong { display: block; font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
     .mode-card span { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
     .mode-card input { display: none; }
@@ -134,8 +130,6 @@
 
         </div>
     </details>
-
-
 
     <div class="segment-bar el-owner-only">
         <button class="segment-btn active" type="button" data-tab="run">Run an audit</button>
@@ -266,6 +260,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script src="report-cover.js"></script>
 <script>
@@ -367,7 +362,6 @@
         $('picker').querySelectorAll('[data-pick]').forEach(cb => cb.checked = false);
         estimate();
     });
-
 
     /**
      * Turn the estimate response into a plain answer: can this run finish on
@@ -568,14 +562,14 @@
                 const c = lookup[`${d}-${h}`];
                 const a = c ? Math.min(1, c.avgIndex / max) : 0;
                 grid += `<div class="cell" title="${DOW[d]} ${h}:00 — ${c ? c.avgIndex + 'x over ' + c.posts + ' posts' : 'no posts'}"
-                    style="background:${c ? `rgba(96,165,250,${0.15 + a * 0.85})` : 'rgba(255,255,255,0.04)'}"></div>`;
+                    style="background:${c ? `rgba(63,191,143,${0.15 + a * 0.85})` : 'rgba(255,255,255,0.04)'}"></div>`;
             }
         }
         const hours = (hm.bestHours || []).map(b => `<strong>${String(b.hour).padStart(2, '0')}:00</strong> (${b.avgIndex}x)`).join(', ');
         const days  = (hm.bestDays || []).slice(0, 3).map(b => `<strong>${esc(b.dowName)}</strong> (${b.avgIndex}x)`).join(', ');
         return `<h3 class="block-title">When posts land best (local time)</h3>
             <div class="table-wrap"><div class="heat">${grid}</div></div>
-            <p class="heat-legend">Darker = higher performance index.
+            <p class="heat-legend">Brighter = higher performance index.
                 ${hours ? `Best hours: ${hours}.` : ''} ${days ? `Best days: ${days}.` : ''}</p>`;
     }
 

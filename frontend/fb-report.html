@@ -4,17 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Facebook Page Report</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* fb-report.html — page-specific only. Shared rules live in app.css. */
-    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 14px 16px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem; font-family: inherit; }
     .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
     .mode-card { background: var(--input-bg); border: 2px solid var(--card-border); border-radius: 12px; padding: 18px; cursor: pointer; }
-    .mode-card.is-on { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.18); }
+    .mode-card.is-on { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(217,181,108,0.18); }
     .mode-card strong { display: block; font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
     .mode-card span { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
     .mode-card input { display: none; }
@@ -49,7 +45,7 @@
     .pillar .pname strong { color: #fff; font-weight: 700; display: block; }
     .pillar .pname span { color: var(--text-muted); font-size: 0.76rem; }
     .pillar .ptrack { height: 7px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; }
-    .pillar .ptrack > div { height: 100%; background: var(--accent-glow); }
+    .pillar .ptrack > div { height: 100%; background: var(--accent-solid); border-radius: 999px; }
     .pillar .ppts { text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.8rem; }
     .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 8px; margin-top: 14px; }
     .chk { display: flex; align-items: center; gap: 9px; font-size: 0.83rem; padding: 9px 12px;
@@ -57,16 +53,48 @@
     .chk.no { border-color: rgba(245,158,11,0.35); color: #fcd34d; }
     .chk.yes { color: var(--text-muted); }
     .chk b { font-size: 0.9rem; }
-    .mixbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; margin: 14px 0 10px; }
-    .mixbar > div { height: 100%; }
+    /* A 2px gap of the surface colour between stacked fills, per the mark
+       specs — two fills meeting edge to edge read as one shape with a seam. */
+    .mixbar { display: flex; gap: 2px; height: 10px; margin: 14px 0 10px; }
+    .mixbar > div { height: 100%; border-radius: 3px; min-width: 2px; }
+
+    /* The headline number the paragraph is actually about. A hero number is
+       the right form when the answer is one figure — a chart of it would be
+       a chart of nothing. */
+    .hero-split { display: flex; align-items: baseline; gap: 14px; margin: 4px 0 6px; }
+    .hero-num { font-size: 2.6rem; font-weight: 800; color: #fff; line-height: 1;
+        letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+    .hero-num small { font-size: 1.1rem; color: var(--text-muted); font-weight: 700; margin-left: 2px; }
+    .hero-cap { font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5; }
+    .hero-cap span { font-size: 0.78rem; color: var(--text-muted); }
+
+    /* The full seven-way breakdown. Identity comes from the word, so the row
+       stays readable to any reader and needs no colour key at all. */
+    .react-list { margin-top: 18px; display: grid; gap: 2px; }
+    .react-row { display: grid; grid-template-columns: 86px 1fr 46px 62px; gap: 12px;
+        align-items: center; padding: 7px 0; font-size: 0.83rem; }
+    .react-row + .react-row { border-top: 1px solid rgba(255,255,255,0.045); }
+    .react-name { text-transform: capitalize; color: var(--text-primary); font-weight: 600; }
+    .react-track { height: 6px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; }
+    /* A 1% row renders about four pixels wide and reads as nothing at all.
+       A visible floor keeps a small value legible as a small value rather
+       than as an absent one — the number beside it carries the precision. */
+    .react-track i { display: block; height: 100%; background: var(--accent-solid);
+        border-radius: 999px; min-width: 5px; }
+    .react-val { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .react-n { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    @media (max-width: 560px) {
+        .react-row { grid-template-columns: 74px 1fr 42px; }
+        .react-n { display: none; }
+    }
     .mixkey { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.78rem; color: var(--text-muted); }
     .mixkey span i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; font-style: normal; }
     .monthbars { display: flex; align-items: flex-end; gap: 8px; height: 130px; margin-top: 16px; }
     .monthbars > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
         align-items: center; gap: 7px; height: 100%; }
-    .monthbars .mb { width: 100%; background: var(--accent-glow); border-radius: 5px 5px 0 0; min-height: 3px; }
+    .monthbars .mb { width: 100%; background: var(--accent-solid); border-radius: 4px 4px 0 0; min-height: 3px; }
     .monthbars .ml { font-size: 0.7rem; color: var(--text-muted); font-weight: 700; }
-    .h2h th.col-t, .h2h td.col-t { background: rgba(96,165,250,0.07); }
+    .h2h th.col-t, .h2h td.col-t { background: rgba(217,181,108,0.07); }
     .h2h td.win { color: var(--success); font-weight: 800; }
     .h2h td.lose { color: #fca5a5; font-weight: 700; }
     .rec { border-left: 3px solid var(--accent-solid); background: var(--input-bg); border-radius: 0 12px 12px 0;
@@ -82,7 +110,7 @@
         text-transform: uppercase; letter-spacing: 0.05em; margin-right: 8px; vertical-align: 1px; }
     .pri.critical { background: rgba(239,68,68,0.18); color: #fca5a5; }
     .pri.high { background: rgba(245,158,11,0.18); color: #fcd34d; }
-    .pri.medium { background: rgba(96,165,250,0.18); color: #93c5fd; }
+    .pri.medium { background: rgba(217,181,108,0.18); color: #f0d39a; }
     .pri.low { background: rgba(148,163,184,0.16); color: var(--text-muted); }
     details.sub-audit { border: 1px solid var(--card-border); border-radius: 14px; margin-top: 22px; overflow: hidden; }
     details.sub-audit > summary { cursor: pointer; padding: 16px 22px; font-weight: 800; color: #fff; font-size: 0.95rem; }
@@ -291,6 +319,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async function () {
@@ -327,7 +356,6 @@
             if (btn.dataset.tab === 'vault') loadVault();
         });
     });
-
 
     /**
      * Turn the estimate response into a plain answer: can this run finish on
@@ -528,12 +556,12 @@
                 const c = lookup[`${d}-${h}`];
                 const a = c ? Math.min(1, c.avgIndex / max) : 0;
                 grid += `<div class="cell" title="${DOW[d]} ${h}:00 — ${c ? c.avgIndex + 'x over ' + c.posts + ' posts' : 'no posts'}"
-                    style="background:${c ? `rgba(96,165,250,${0.15 + a * 0.85})` : 'rgba(255,255,255,0.04)'}"></div>`;
+                    style="background:${c ? `rgba(63,191,143,${0.15 + a * 0.85})` : 'rgba(255,255,255,0.04)'}"></div>`;
             }
         }
         return `<h3 class="block-title">When posts land best (local time)</h3>
             <div class="table-wrap"><div class="heat">${grid}</div></div>
-            <p class="heat-legend">Darker = higher performance index. Best windows:
+            <p class="heat-legend">Brighter = higher performance index. Best windows:
                 ${(hm.bestHours || []).slice(0, 4).map(b => `<strong>${String(b.hour).padStart(2, '0')}:00</strong> (${b.avgIndex}x)`).join(' · ') || '—'}
                 ${(hm.bestDays || []).length ? ` · Best days: ${hm.bestDays.slice(0, 3).map(d => `<strong>${d.dowName}</strong> (${d.avgIndex}x)`).join(' · ')}` : ''}</p>`;
     }
@@ -576,21 +604,70 @@
             <div class="chk ${k.ok ? 'yes' : 'no'}"><b>${k.ok ? '✓' : '✕'}</b> ${esc(k.label)}</div>`).join('')}</div>`;
     }
 
-    const REACT_COLORS = { like: '#3b82f6', love: '#ef4444', care: '#f59e0b', haha: '#facc15',
-                           wow: '#a78bfa', sad: '#64748b', angry: '#dc2626' };
+    /**
+     * Reaction sentiment.
+     *
+     * This was a seven-segment stacked bar, one colour per reaction type. The
+     * palette validator failed it on every colour check, and the reference
+     * palette says why in general: with all pairs in play no ordering of more
+     * than three categorical slots clears the separation floors. Four of these
+     * seven (love, care, haha, angry) sit in the same warm arc, so the worst
+     * pairs were love/angry at ΔE 6.1 to normal vision and wow/like at 3.6 to
+     * a tritan reader — indistinguishable, and the bar is sorted by share so
+     * any two of them can end up touching.
+     *
+     * Re-stepping could not fix it, and it was solving the wrong problem
+     * anyway: the paragraph under the heading argues that the number worth
+     * reading is plain-Like versus everything-else. That is two categories,
+     * not seven. So the bar shows the split it is actually about, the seven
+     * types become a labelled list where identity comes from the word rather
+     * than the swatch, and the negative share — a state, not a category —
+     * gets a status colour with a label beside it.
+     *
+     * Slots 1 and 2 of the reference dark palette, validated against this
+     * surface: all five checks pass.
+     */
+    const SPLIT_PLAIN  = '#3987e5';   // reference categorical slot 1
+    const SPLIT_EFFORT = '#d95926';   // reference categorical slot 2
 
     function sentimentBlock(s) {
         if (!s?.available) return `<h3 class="block-title">Reaction sentiment</h3>
             <p class="empty">${esc(s?.note || 'No reaction breakdown was returned for this Page.')}</p>`;
+
+        const effort = Number(s.highEffortShare) || 0;
+        const plain  = Math.max(0, 100 - effort);
+        const worrying = Number(s.negativeShare) > 5;
+
         return `<h3 class="block-title">Reaction sentiment</h3>
-        <p class="card-subtitle" style="margin:0 0 6px;">Anything other than a plain Like took deliberate effort from the reader — that share is the real affection signal.</p>
-        <div class="mixbar">${s.mix.map(m => `<div style="width:${m.share}%; background:${REACT_COLORS[m.type] || '#475569'}" title="${esc(m.type)} ${m.share}%"></div>`).join('')}</div>
-        <div class="mixkey">${s.mix.map(m => `<span><i style="background:${REACT_COLORS[m.type] || '#475569'}"></i>${esc(m.type)} ${m.share}% (${num(m.count)})</span>`).join('')}</div>
-        <div class="kpi-grid">
-            ${kpi('Beyond a plain Like', s.highEffortShare + '%', 'var(--success)')}
-            ${kpi('Positive reactions', s.positiveShare + '%')}
-            ${kpi('Angry or sad', s.negativeShare + '%', s.negativeShare > 5 ? 'var(--danger)' : undefined)}
-            ${kpi('Reactions counted', num(s.grandTotal))}
+        <p class="card-subtitle" style="margin:0 0 14px;">Anything other than a plain Like took deliberate effort from the reader — that share is the real affection signal.</p>
+
+        <div class="hero-split">
+            <div class="hero-num">${effort}<small>%</small></div>
+            <div class="hero-cap">went beyond a plain Like<br>
+                <span>${num(s.grandTotal)} reactions counted</span></div>
+        </div>
+
+        <div class="mixbar" role="img" aria-label="Plain Like ${plain}%, beyond a plain Like ${effort}%">
+            <div style="width:${plain}%;  background:${SPLIT_PLAIN}"></div>
+            <div style="width:${effort}%; background:${SPLIT_EFFORT}"></div>
+        </div>
+        <div class="mixkey">
+            <span><i style="background:${SPLIT_PLAIN}"></i>Plain Like ${plain}%</span>
+            <span><i style="background:${SPLIT_EFFORT}"></i>Beyond a Like ${effort}%</span>
+        </div>
+
+        ${worrying ? `<div class="warnbox" style="margin-top:14px;">
+            <strong>⚠ ${s.negativeShare}% angry or sad.</strong>
+            Above about 5% is worth reading the comments on the posts that drew them.</div>` : ''}
+
+        <div class="react-list">
+            ${s.mix.map(m => `
+                <div class="react-row">
+                    <span class="react-name">${esc(m.type)}</span>
+                    <span class="react-track"><i style="width:${m.share}%"></i></span>
+                    <span class="react-val">${m.share}%</span>
+                    <span class="react-n">${num(m.count)}</span>
+                </div>`).join('')}
         </div>`;
     }
 
@@ -625,7 +702,7 @@
             ${kpi('Share of engagement', b.shareOfVoice ? b.shareOfVoice.target + '%' : '—')}
             ${kpi('Their page score', b.rival.score)}
         </div>
-        <div class="warnbox" style="background:rgba(96,165,250,0.08); border-color:rgba(96,165,250,0.3); color:#bfdbfe;">${esc(b.verdict)}</div>
+        <div class="warnbox" style="background:rgba(217,181,108,0.08); border-color:rgba(217,181,108,0.3); color:#f3efe4;">${esc(b.verdict)}</div>
 
         <div class="table-wrap"><table class="h2h"><thead><tr>
             <th>Measure</th><th class="col-t">${esc(b.target.name)}</th><th>${esc(b.rival.name)}</th><th>Gap</th></tr></thead><tbody>
@@ -784,9 +861,40 @@
     }
 
     // ---------- PDF ----------
-    function exportPdf(node, name) {
+    //
+    // html2pdf is ~800KB and used by one button that most visits never press.
+    // It used to load render-blocking in <head> on every page view; it now
+    // loads on the first click and is reused after that.
+    let _pdfLib = null;
+    function loadPdfLib() {
+        if (_pdfLib) return _pdfLib;
+        _pdfLib = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+            s.onload  = () => resolve(window.html2pdf);
+            s.onerror = () => { _pdfLib = null; reject(new Error('Could not load the PDF exporter.')); };
+            document.head.appendChild(s);
+        });
+        return _pdfLib;
+    }
+
+    async function exportPdf(node, name, btn) {
         if (!node || !node.innerHTML.trim()) return alert('Nothing to export yet.');
-        html2pdf().set({
+
+        const label = btn ? btn.textContent : null;
+        if (btn) { btn.disabled = true; btn.textContent = 'Preparing…'; }
+        try {
+            const html2pdf = await loadPdfLib();
+            await exportWith(html2pdf, node, name);
+        } catch (e) {
+            alert(e.message || 'The PDF export failed.');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = label; }
+        }
+    }
+
+    function exportWith(html2pdf, node, name) {
+        return html2pdf().set({
             margin: 8,
             filename: `${name}.pdf`,
             image: { type: 'jpeg', quality: 0.95 },
@@ -794,10 +902,10 @@
             jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
         }).from(node).save();
     }
-    $('export').addEventListener('click', () =>
-        exportPdf($('paper'), `edgelead-fb-page-${(currentReport?.target?.pageId || 'report')}`));
-    $('vault-export').addEventListener('click', () =>
-        exportPdf($('vault-paper'), `edgelead-fb-page-${(vaultReport?.target?.pageId || 'report')}`));
+    $('export').addEventListener('click', e =>
+        exportPdf($('paper'), `edgelead-fb-page-${(currentReport?.target?.pageId || 'report')}`, e.currentTarget));
+    $('vault-export').addEventListener('click', e =>
+        exportPdf($('vault-paper'), `edgelead-fb-page-${(vaultReport?.target?.pageId || 'report')}`, e.currentTarget));
 
     // =====================================================================
     // VAULT

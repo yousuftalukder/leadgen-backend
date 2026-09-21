@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Component gallery — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>body { padding: 40px 20px 80px; } h2.sec { margin: 38px 0 14px; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }</style>
+</head>
+<body>
+
+<h2 class="sec">Segmented control</h2>
+<div class="segment-bar">
+    <button class="segment-btn active">Discovery</button>
+    <button class="segment-btn">Enricher</button>
+    <button class="segment-btn">Vault</button>
+</div>
+
+<h2 class="sec">Card + form controls</h2>
+<div class="card">
+    <h2 class="card-title">Stage 1: Multi-Vector Discovery</h2>
+    <p class="card-subtitle">Each selected method is one billable Apify call, run as a checkpointed job.</p>
+    <div class="grid-2">
+        <div><label>Target handle</label><input type="text" placeholder="harborcafe"></div>
+        <div><label>Location</label><input type="text" placeholder="Boston"></div>
+    </div>
+    <label>Platform</label>
+    <select><option>Instagram</option><option>Facebook</option></select>
+    <label>Notes</label>
+    <textarea placeholder="Anything worth recording"></textarea>
+    <div class="check"><input type="checkbox" checked><span>Compare against rivals</span></div>
+    <div class="estimate">
+        <div><span>ACCOUNTS</span><strong>3</strong></div>
+        <div><span>POSTS EACH</span><strong>40</strong></div>
+        <div><span>ESTIMATE</span><strong>$0.42</strong></div>
+    </div>
+    <button class="btn-primary">Run discovery</button>
+</div>
+
+<h2 class="sec">KPI grid</h2>
+<div class="kpi-grid">
+    <div class="kpi-box"><span>FOLLOWERS</span><div class="kpi-num">3,204</div></div>
+    <div class="kpi-box"><span>ENGAGEMENT</span><div class="kpi-num">2.40%</div></div>
+    <div class="kpi-box"><span>POSTS / WEEK</span><div class="kpi-num">1.2</div></div>
+    <div class="kpi-box"><span>SCORE</span><div class="kpi-num">71</div></div>
+</div>
+
+<h2 class="sec">Table</h2>
+<div class="card">
+<div class="table-wrap"><table>
+<thead><tr><th>Handle</th><th>Followers</th><th>Engagement</th><th>Index</th><th>Status</th></tr></thead>
+<tbody>
+<tr class="is-top"><td>@bayside.kitchen</td><td>8,420</td><td>3.10%</td><td class="idx hot">1.42</td><td><span class="badge b-ok">Strong</span></td></tr>
+<tr><td>@harborcafe</td><td>3,204</td><td>2.40%</td><td class="idx">1.00</td><td><span class="badge b-warn">Mixed</span></td></tr>
+<tr><td>@rivertown.roast</td><td>1,240</td><td>1.90%</td><td class="idx cold">0.71</td><td><span class="badge b-bad">Weak</span></td></tr>
+<tr><td>@the.dockhouse</td><td>760</td><td>1.40%</td><td class="idx cold">0.52</td><td><span class="badge b-mute">No data</span></td></tr>
+</tbody></table></div>
+</div>
+
+<h2 class="sec">Buttons</h2>
+<div class="card" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+    <button class="btn-secondary">Secondary</button>
+    <button class="btn-danger">Delete</button>
+    <button class="btn-primary" style="width:auto;margin-top:0;padding:14px 28px;">Primary</button>
+    <button class="btn-primary" disabled style="width:auto;margin-top:0;padding:14px 28px;">Disabled</button>
+</div>
+
+<h2 class="sec">Job panel</h2>
+<div class="job-panel">
+    <div class="job-head"><strong>Running discovery</strong><span style="color:var(--text-muted);font-size:.8rem;">62%</span></div>
+    <div class="bar"><div style="width:62%"></div></div>
+    <div class="job-logs">› Searching Instagram for "coffee shops"<br>› 24 candidates returned<br>› Reading profiles 12 of 24</div>
+</div>
+
+<h2 class="sec">Row cards, notices, skeletons</h2>
+<div class="row-card"><div><strong>Harbor Cafe</strong><div class="meta">Boston · 3,204 followers</div></div><span class="badge b-ok">Active</span></div>
+<div class="warnbox">Stored data is older than 30 days for two rivals. The plan reflects that period, not today.</div>
+<div class="ai-panel"><h4>Executive summary</h4><p>Engagement is strong for your size and your regulars are talkative. The single thing holding the account back is how often you post.</p></div>
+<div class="card"><div class="sk sk-line w-40"></div><div class="sk sk-line w-80"></div><div class="sk sk-line w-60"></div><div class="sk sk-card"></div></div>
+
+
+<h2 class="sec">Magnitude meters (solid — length is the encoding)</h2>
+<div class="card">
+  <style>
+    .pl { display:grid; grid-template-columns:190px 1fr 56px; gap:12px; align-items:center; padding:8px 0; font-size:.84rem; }
+    .pl + .pl { border-top:1px solid rgba(255,255,255,.045); }
+    .pl .track { height:8px; background:rgba(255,255,255,.07); border-radius:999px; overflow:hidden; }
+    .pl .track > div { height:100%; background:var(--accent-solid); border-radius:999px; }
+    .pl .pts { text-align:right; font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.8rem; }
+  </style>
+  <div class="pl"><span>Engagement per follower</span><span class="track"><div style="width:85%"></div></span><span class="pts">22/26</span></div>
+  <div class="pl"><span>Posting cadence</span><span class="track"><div style="width:25%"></div></span><span class="pts">4/16</span></div>
+  <div class="pl"><span>Consistency</span><span class="track"><div style="width:55%"></div></span><span class="pts">6/11</span></div>
+  <div class="pl"><span>Conversation</span><span class="track"><div style="width:50%"></div></span><span class="pts">8/16</span></div>
+  <div class="pl"><span>Profile completeness</span><span class="track"><div style="width:74%"></div></span><span class="pts">9/12</span></div>
+</div>
+
+<h2 class="sec">Row meter in a table (.rv)</h2>
+<div class="card"><div class="table-wrap"><table>
+<thead><tr><th>Group</th><th>Room value</th><th>Members</th></tr></thead>
+<tbody>
+<tr><td>Boston Neighbours</td><td><div class="rv"><div class="rv-bar"><div style="width:88%"></div></div><strong>88</strong></div></td><td>14,200</td></tr>
+<tr><td>Southie Chat</td><td><div class="rv"><div class="rv-bar"><div style="width:61%"></div></div><strong>61</strong></div></td><td>5,910</td></tr>
+<tr><td>Dorchester Board</td><td><div class="rv"><div class="rv-bar"><div style="width:24%"></div></div><strong>24</strong></div></td><td>1,180</td></tr>
+</tbody></table></div></div>
+
+</body>
+</html>

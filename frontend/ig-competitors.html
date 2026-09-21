@@ -4,27 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Competitor Intel</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* ig-competitors.html — page-specific only. Shared rules live in app.css. */
-    h3.block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin-bottom: 12px; }
-    label { display: block; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.02em; color: var(--accent-solid);
-        margin-top: 22px; margin-bottom: 8px; }
-    input[type="text"], input[type="number"] { width: 100%; padding: 14px 16px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem; font-weight: 500; }
-    input:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
     .rival-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
     .rival-row input { flex: 1; }
-    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin: 22px 0; }
-    .kpi-num { font-size: 1.55rem; font-weight: 800; color: #fff; margin-top: 4px; }
     .grade-badge { display: inline-block; padding: 5px 14px; border-radius: 8px; font-weight: 800; font-size: 1.15rem;
         background: rgba(16,185,129,0.18); color: var(--success); }
-    th { padding: 11px 10px; color: var(--text-muted); border-bottom: 1px solid var(--card-border); font-weight: 700; font-size: 0.75rem; }
-    td { padding: 11px 10px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); vertical-align: top; }
-    tr.is-target td { background: rgba(96,165,250,0.09); }
+    tr.is-target td { background: rgba(217,181,108,0.09); }
     .chip-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
     .chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 11px 15px; font-size: 0.82rem; }
     .chip strong { display: block; font-size: 1.05rem; font-weight: 800; margin-top: 3px; }
@@ -139,6 +127,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script src="report-cover.js"></script>
 <script>
@@ -161,7 +150,6 @@
 
     const num = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
     const dateStr = d => d ? new Date(d).toLocaleDateString() : '—';
-
 
     let currentReport = null;
 
@@ -195,7 +183,6 @@
 
     const rivalHandles = () => Array.from($('rivals').querySelectorAll('input'))
         .map(i => i.value.replace('@', '').trim().toLowerCase()).filter(Boolean);
-
 
     /**
      * Turn the estimate response into a plain answer: can this run finish on

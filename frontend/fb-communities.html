@@ -4,24 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — FB Communities</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* fb-communities.html — page-specific only. Shared rules live in app.css. */
-    h3.block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin-bottom: 12px; }
-    input[type="text"], input[type="number"], textarea, select { width: 100%; padding: 14px 16px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.94rem;
-        font-weight: 500; font-family: inherit; }
-    textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
-    input:focus, textarea:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
-    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 20px; }
-    .check { display: flex; align-items: center; gap: 9px; font-size: 0.86rem; color: var(--text-primary);
-        font-weight: 600; margin-top: 14px; cursor: pointer; }
-    td { padding: 11px 10px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); vertical-align: top; }
-    .rv { display: flex; align-items: center; gap: 9px; min-width: 120px; }
-    .rv-bar { flex: 1; height: 7px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; }
-    .rv strong { font-size: 0.9rem; font-weight: 800; width: 26px; text-align: right; }
     .sticky-actions { position: sticky; bottom: 0; background: rgba(6,9,19,0.94); backdrop-filter: blur(10px);
         border-top: 1px solid var(--card-border); padding: 16px 0; margin-top: 18px; display: flex; gap: 12px;
         align-items: center; flex-wrap: wrap; }
@@ -126,8 +112,6 @@
 
         </div>
     </details>
-
-
 
     <div class="segment-bar">
         <button class="segment-btn active" type="button" data-tab="find">Find rooms</button>
@@ -270,6 +254,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async function () {
@@ -292,7 +277,6 @@
     const num = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString();
     const dateStr = d => d ? new Date(d).toLocaleDateString() : 'never';
 
-
     let savedGroups = [];
     const selected = new Set();
 
@@ -304,7 +288,6 @@
             if (btn.dataset.tab === 'saved') loadSaved();
         });
     });
-
 
     /**
      * Turn the estimate response into a plain answer: can this run finish on

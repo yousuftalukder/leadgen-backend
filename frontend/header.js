@@ -37,108 +37,82 @@
     const BACKEND_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
     const CLIENT_KEY = 'el-client-id';
 
+    // Shown as a "Contact us" button to accounts whose access has lapsed.
+    // Left empty on purpose: set it to a real support address and the button
+    // appears; leave it blank and the screen simply has no mail link.
+    const SUPPORT_EMAIL = '';
+
+    /**
+     * Wake the backend the moment this file runs, not when the first real
+     * request needs it.
+     *
+     * Render's free tier sleeps an idle service, and the next request pays a
+     * cold start measured in tens of seconds. Every page used to hit that wall
+     * at EL.init → /api/me, after the HTML, CSS and fonts had already loaded —
+     * so the wait was serial and the screen sat empty through all of it.
+     *
+     * Firing here overlaps the cold start with everything else the page is
+     * doing. On a warm backend it costs one cheap request; on a cold one it
+     * buys back however long the rest of the page takes to render.
+     *
+     * Deliberately unauthenticated and deliberately ignored: this is a wake-up
+     * call, not a health check, and nothing should wait on it or fail from it.
+     */
+    const _wokeAt = Date.now();
+    let _backendCold = false;          // set once the wake-up call comes back slow
+    try {
+        fetch(BACKEND_URL + '/api/health', { method: 'GET', cache: 'no-store', keepalive: true })
+            .then(() => { _backendCold = Date.now() - _wokeAt > 2500; })
+            .catch(() => { _backendCold = true; });
+    } catch { /* fetch unavailable */ }
+
+    /**
+     * Grouped, because twelve flat items is a list you read rather than a menu
+     * you scan. The groups are the three things somebody is actually here to
+     * do — look at Instagram, look at Facebook, or run the business — so the
+     * eye lands on the right third before it reads a single label.
+     *
+     * Icon and label are separate fields so the icons can sit in a fixed
+     * column and the labels start on one line. Emoji have wildly different
+     * widths; inlined into the label string they left the text ragged.
+     */
     const NAV = [
-        { href: 'index.html',           label: '🎯 IG Lead Finder',        engine: 'leadgen' },
-        { href: 'ig-report.html',       label: '📊 IG Performance Audit',  engine: 'report'  },
-        { href: 'ig-competitors.html',  label: '🥊 Competitor Intel',      engine: 'report'  },
-        { href: 'fb-report.html',        label: '📘 FB Page Report',       engine: 'fb_page' },
-        { href: 'fb-communities.html',  label: '🏘 FB Communities',        engine: 'fb_community' },
-        { href: 'fb-audit.html',        label: '🔬 Community Audit',       engine: 'fb_community' },
-        { href: 'fb-leads.html',        label: '🎣 Demand Feed',           engine: 'fb_community' },
-        { href: 'fb-advisor.html',      label: '✍️ Post Advisor',          engine: 'fb_community' },
-        { href: 'content-plan.html',    label: '🧭 Content Plan',          engine: 'content_plan' },
-        { href: 'clients.html',         label: '👥 Clients',               engine: null },
-        { href: 'schedules.html',       label: '⏱ Schedules',              engine: null },
-        { href: 'admin.html',           label: '🛠 Admin',                 adminOnly: true   }
+        { group: 'Instagram' },
+        { href: 'index.html',          icon: '🎯', label: 'Lead Finder',       engine: 'leadgen' },
+        { href: 'ig-report.html',      icon: '📊', label: 'Performance Audit', engine: 'report'  },
+        { href: 'ig-competitors.html', icon: '🥊', label: 'Competitor Intel',  engine: 'report'  },
+
+        { group: 'Facebook' },
+        { href: 'fb-report.html',      icon: '📘', label: 'Page Report',       engine: 'fb_page' },
+        { href: 'fb-communities.html', icon: '🏘', label: 'Communities',       engine: 'fb_community' },
+        { href: 'fb-audit.html',       icon: '🔬', label: 'Community Audit',   engine: 'fb_community' },
+        { href: 'fb-leads.html',       icon: '🎣', label: 'Demand Feed',       engine: 'fb_community' },
+        { href: 'fb-advisor.html',     icon: '✍️', label: 'Post Advisor',      engine: 'fb_community' },
+
+        { group: 'Workspace' },
+        { href: 'content-plan.html',   icon: '🧭', label: 'Content Plan',      engine: 'content_plan' },
+        { href: 'clients.html',        icon: '👥', label: 'Clients',           engine: null },
+        { href: 'schedules.html',      icon: '⏱',  label: 'Schedules',         engine: null },
+        { href: 'admin.html',          icon: '🛠', label: 'Admin',             adminOnly: true }
     ];
 
-    const styles = `
-    .el-header { position: fixed; top: 0; left: 0; width: 100%; height: 75px; z-index: 9999;
-        display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 0 28px;
-        background: rgba(6, 9, 19, 0.85); backdrop-filter: blur(16px);
-        border-bottom: 1px solid rgba(255,255,255,0.08); box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-        font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-    .el-client-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-    .el-client-picker label { font-size: .8rem; color: #94a3b8; font-weight: 600; }
-    .el-client-picker select { background: #0f172a; color: #e2e8f0; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 8px 10px; font-size: .9rem; min-width: 220px; }
-    .el-client-picker .el-client-manage { font-size: .8rem; color: #60a5fa; text-decoration: none; }
-    .el-ai-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
-    .el-logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; white-space: nowrap;
-        background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
-        -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-    .el-nav { display: flex; gap: 4px; max-width: 100%; background: rgba(15,23,42,0.9); padding: 6px; border-radius: 12px;
-        border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; }
-    .el-tab { padding: 9px 13px; color: #94a3b8; font-weight: 700; font-size: 0.82rem; text-decoration: none;
-        border-radius: 8px; white-space: nowrap; transition: color .2s, background .2s; }
-    .el-tab:hover { color: #e2e8f0; }
-    .el-tab.is-active { background: linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%); color: #fff;
-        box-shadow: 0 4px 15px rgba(59,130,246,0.3); }
-    .el-right { display: flex; align-items: center; gap: 10px; }
-    .el-pill { display: flex; align-items: center; gap: 10px; background: rgba(15,23,42,0.9);
-        border: 1px solid rgba(255,255,255,0.08); padding: 7px 14px; border-radius: 30px; font-size: 0.8rem;
-        color: #94a3b8; white-space: nowrap; }
-    .el-node { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
-    .el-node.is-live { background: #10b981; box-shadow: 0 0 10px #10b981; animation: el-pulse 1.4s infinite; }
-    .el-node.is-dead { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
-    @keyframes el-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
-    .el-btn { background: rgba(255,255,255,0.05); color: #f8fafc; border: 1px solid rgba(255,255,255,0.08);
-        padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem;
-        font-family: inherit; }
-    .el-btn:hover { background: rgba(255,255,255,0.1); }
-    .el-btn:focus-visible, .el-tab:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
-    .el-btn.el-btn-go { background: linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%); border: none; font-weight: 800; }
-    .el-mini { padding: 4px 10px; font-size: 0.74rem; }
+    /**
+     * What a client sees. A client is not an employee with fewer grants — the
+     * employee nav is a workbench of eleven tools, and handing that to a
+     * business owner buries the one page they came for.
+     *
+     * Engine filtering still applies on top, so a client without a grant does
+     * not see the tab either.
+     */
+    const CLIENT_NAV = [
+        { href: 'client.html',           icon: '📊', label: 'My Reports',   engine: null },
+        { href: 'client-assistant.html', icon: '💬', label: 'Ask',          engine: null },
+        { href: 'client-leads.html',     icon: '🎯', label: 'Find Leads',   engine: 'leadgen' },
+        { href: 'client-community.html', icon: '🏘', label: 'Local Demand', engine: 'fb_community' }
+    ];
 
-    .el-scrim { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center;
-        justify-content: center; padding: 20px; background: rgba(3,7,18,0.9); backdrop-filter: blur(12px);
-        font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-    .el-modal { width: 460px; max-width: 100%; background: #0b1329; border: 1px solid #60a5fa;
-        border-radius: 16px; padding: 26px; color: #f8fafc; }
-    .el-modal h3 { font-size: 1.15rem; font-weight: 800; margin: 0 0 6px; }
-    .el-modal p { font-size: 0.84rem; color: #94a3b8; margin: 0 0 18px; line-height: 1.5; }
-    .el-modal label { display: block; font-size: 0.74rem; font-weight: 800; text-transform: uppercase;
-        letter-spacing: 0.08em; color: #60a5fa; margin: 16px 0 7px; }
-    .el-modal input, .el-modal select { width: 100%; padding: 13px 15px; background: #060913; color: #fff;
-        border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; outline: none; font-size: 0.92rem;
-        font-family: inherit; }
-    .el-modal input:focus, .el-modal select:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
-    .el-modal-actions { display: flex; gap: 10px; margin-top: 22px; }
-    .el-modal-actions .el-btn { flex: 1; padding: 12px; }
-    .el-note { font-size: 0.78rem; margin-top: 14px; min-height: 1.1em; }
-
-    .el-blocked { max-width: 520px; margin: 140px auto 0; background: rgba(15,23,42,0.75);
-        border: 1px solid rgba(239,68,68,0.4); border-radius: 16px; padding: 32px; color: #f8fafc;
-        font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-    .el-blocked h2 { font-size: 1.3rem; font-weight: 800; margin: 0 0 10px; }
-    .el-blocked p { color: #94a3b8; font-size: 0.9rem; line-height: 1.6; margin: 0 0 18px; }
-
-    @media (max-width: 1100px) {
-        .el-header { height: auto; padding: 12px 16px; flex-wrap: wrap; position: static; }
-        body.el-has-header { padding-top: 24px !important; }
-    }
-    `;
 
     // phase 10/11 additions to the shell
-    const styles2 = `
-    .el-header .el-client { display:flex; align-items:center; gap:6px; background: rgba(15,23,42,0.9);
-        border: 1px solid rgba(255,255,255,0.08); padding: 5px 8px 5px 12px; border-radius: 30px; font-size: .78rem; color:#94a3b8; }
-    .el-header .el-client select { background: transparent; color:#e2e8f0; border: none; font-size:.8rem; font-family: inherit;
-        max-width: 190px; cursor: pointer; outline: none; }
-    .el-header .el-client select option { background:#0f172a; }
-    .el-share-bar { position: fixed; top:0; left:0; width:100%; z-index: 9999; display:flex; justify-content:space-between;
-        align-items:center; gap: 14px; padding: 0 28px; height: 64px; background: rgba(6,9,19,0.92); backdrop-filter: blur(16px);
-        border-bottom: 1px solid rgba(255,255,255,0.08); font-family: 'Plus Jakarta Sans', system-ui, sans-serif; color:#94a3b8; font-size:.85rem; }
-    .el-share-bar b { color:#e2e8f0; }
-    body.el-share .el-owner-only { display: none !important; }
-    body.el-share.el-has-header { padding-top: 84px; }
-    .el-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin: 10px 0 14px; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-    .el-actions .el-note { margin:0; font-size:.78rem; }
-    .el-share-list { font-size:.78rem; color:#94a3b8; width:100%; }
-    .el-share-list div { display:flex; gap:8px; align-items:center; padding: 4px 0; border-top: 1px solid rgba(255,255,255,.06); }
-    .el-share-list code { color:#e2e8f0; word-break: break-all; font-size:.74rem; }
-    .el-modal .el-grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    @media (max-width: 1100px) { .el-share-bar { position: static; height:auto; padding: 12px 16px; flex-wrap: wrap; } }
-    `;
 
     const EL = {
         BACKEND_URL,
@@ -164,6 +138,9 @@
          * `clientId` on JSON bodies, `client_id` on GET query strings — so no
          * page can forget to file a run under the client again.
          */
+        /** The API origin, for the rare page that must fetch before EL.init. */
+        backendUrl() { return BACKEND_URL; },
+
         async api(path, opts = {}) {
             const method = String(opts.method || 'GET').toUpperCase();
             const isPublic = path.startsWith('/api/public/');
@@ -187,6 +164,22 @@
             try { data = await res.json(); } catch { /* empty body */ }
 
             if (res.status === 401 && !isPublic) { EL.signOut(); throw new Error('Session expired. Sign in again.'); }
+            // 402 covers two different things. A lapsed account is terminal and
+            // gets the whole screen. A hit allowance is not — the account is
+            // fine, this one action is not available — so it is thrown for the
+            // page to show in place, and blockExpired stays out of the way.
+            if (res.status === 402 && !isPublic) {
+                const lapsed = !data || data.state === 'expired' || data.code === 'account_expired';
+                if (lapsed) {
+                    blockExpired(data);
+                    const err = new Error((data && data.error) || 'Your access has ended.');
+                    err.status = 402; err.data = data; err.handled = true;
+                    throw err;
+                }
+                const err = new Error((data && data.error) || 'That is not available on your plan.');
+                err.status = 402; err.data = data; err.quota = true;
+                throw err;
+            }
             if (!res.ok) {
                 const err = new Error((data && (data.error || data.message)) || `Request failed (${res.status})`);
                 err.status = res.status; err.data = data;
@@ -466,17 +459,51 @@
             EL.session = data.session;
             EL.user = data.session.user;
 
+            // A cold Render instance takes tens of seconds to answer the first
+            // request. Saying so beats an empty screen, which reads as broken
+            // and gets reloaded — which starts the wait over.
+            // If the wake-up call already came back slow we know the instance
+            // was asleep, so there is no reason to make them wait another two
+            // seconds to be told. If it came back fast, a slow /api/me is
+            // something else and the delay avoids flashing a notice at anyone
+            // whose request was merely ordinary.
+            const slowTimer = setTimeout(() => bootNotice(
+                _backendCold ? 'Waking the server' : 'Still loading',
+                _backendCold
+                    ? 'This only happens on the first visit after a quiet spell. It usually takes under a minute.'
+                    : 'Taking longer than usual. Hang on a moment.'
+            ), _backendCold ? 250 : 1800);
+
             let me;
             try {
                 me = await EL.api('/api/me');
+                clearTimeout(slowTimer); clearBootNotice();
             } catch (err) {
+                clearTimeout(slowTimer); clearBootNotice();
+                // A lapsed account fails /api/me with 402, and EL.api has
+                // already put the right screen up. Stacking "backend
+                // unreachable" on top of it would be wrong and alarming.
+                if (err.handled) return new Promise(() => {});
                 renderShell(page, null);
                 block('Backend unreachable', `The API did not answer: ${err.message}. Check that the service is awake, then reload.`);
                 return new Promise(() => {});
             }
             EL.me = me;
 
+            // A client who lands on an employee page goes home rather than
+            // being shown a console built for somebody else. Engine grants
+            // alone would not catch this: a trial holds the report grant, so
+            // nothing would stop them opening the full audit workbench.
+            if (me.role === 'client') {
+                const allowed = CLIENT_NAV.map(t => t.href);
+                if (!allowed.includes(currentPage(page))) {
+                    window.location.href = 'client.html';
+                    return new Promise(() => {});
+                }
+            }
+
             renderShell(page, me);
+            renderPlanBanner(me);
             refreshStatus();
             EL._mountClientPicker().catch(() => {});
 
@@ -736,12 +763,37 @@
 
     // -----------------------------------------------------------------------
 
+    /**
+     * The header's CSS lives in app.css as of phase 18, so it arrives with the
+     * stylesheet instead of being appended after the first paint. Injecting it
+     * here meant every page rendered once unstyled and then again — a flash on
+     * every navigation, on every page.
+     *
+     * This stays as a fallback for a page that forgets to link app.css: it
+     * detects the stylesheet by probing for a rule only app.css defines, and
+     * injects the old strings if it is genuinely missing. A page that has the
+     * stylesheet pays one cheap DOM check and nothing else.
+     */
     function injectStyles() {
         if (document.getElementById('el-header-styles')) return;
-        const tag = document.createElement('style');
-        tag.id = 'el-header-styles';
-        tag.textContent = styles + styles2;
-        document.head.appendChild(tag);
+        if (!document.body) return;
+
+        // Read a sentinel custom property that no media query ever changes.
+        // The previous probe read .el-header's computed position, which the
+        // old mobile rule flips to static — so on a phone it concluded the
+        // stylesheet was missing and injected a second copy of the whole file.
+        if (getComputedStyle(document.documentElement)
+                .getPropertyValue('--el-stylesheet').trim() === '1') return;
+
+        // The stylesheet is genuinely missing. Load it rather than carry a
+        // second copy of the CSS in this file: keeping the strings here cost
+        // every page ~7KB to insure against a case that only happens if a new
+        // page forgets the <link>.
+        const link = document.createElement('link');
+        link.id = 'el-header-styles';
+        link.rel = 'stylesheet';
+        link.href = 'app.css';
+        document.head.appendChild(link);
     }
 
     function currentPage(explicit) {
@@ -755,33 +807,93 @@
         const isAdmin = me && me.role === 'admin';
         const engines = (me && me.engines) || [];
 
-        const tabs = NAV
+        const visible = (me && me.role === 'client' ? CLIENT_NAV : NAV)
             .filter(t => {
+                if (t.group) return true;                    // resolved below
                 if (t.adminOnly) return isAdmin;
                 if (!me) return true;
                 if (t.engine === null) return true;          // every signed-in user
                 return isAdmin || engines.includes(t.engine);
-            })
-            .map(t => `<a class="el-tab ${t.href === here ? 'is-active' : ''}" href="${t.href}">${t.label}</a>`)
-            .join('');
+            });
 
-        const bar = document.createElement('div');
-        bar.className = 'el-header';
+        // Drop a group heading whose whole section was filtered away by engine
+        // grants — an empty "Facebook" label sitting over nothing reads as
+        // something broken. A heading survives only if a link follows it before
+        // the next heading does.
+        const kept = visible.filter((t, i) => {
+            if (!t.group) return true;
+            for (let j = i + 1; j < visible.length; j++) {
+                if (visible[j].group) return false;          // next heading first
+                return true;                                 // a link first
+            }
+            return false;                                    // nothing after it
+        });
+
+        const tabs = kept.map(t => t.group
+            ? `<div class="el-group">${t.group}</div>`
+            : `<a class="el-tab ${t.href === here ? 'is-active' : ''}" href="${t.href}">
+                   <span class="el-ico" aria-hidden="true">${t.icon || ''}</span>
+                   <span class="el-lab">${t.label}</span>
+               </a>`).join('');
+
+        // A rail rather than a top bar. Twelve destinations in a horizontal
+        // strip either wrap or scroll sideways, and both hide the tail of the
+        // list — which is where Admin and Schedules live. Stacked, the whole
+        // set is visible at once and the labels get room to be words rather
+        // than abbreviations.
+        const bar = document.createElement('aside');
+        bar.className = 'el-sidebar';
+        bar.id = 'el-sidebar';
         bar.innerHTML = `
-            <div class="el-logo">⚡ EDGELEAD</div>
+            <div class="el-side-top">
+                <div class="el-logo">⚡ EDGELEAD</div>
+            </div>
+
             <nav class="el-nav" aria-label="Sections">${tabs}</nav>
-            <div class="el-right">
+
+            <div class="el-side-foot">
                 <div class="el-client" id="el-client-host"><span>Client</span><select class="el-client-select" disabled><option>…</option></select></div>
                 <div class="el-pill">
                     <span class="el-node" id="el-node"></span>
                     <span id="el-status">Checking Apify…</span>
+                </div>
+                <div class="el-side-actions">
                     <button class="el-btn el-mini" type="button" id="el-key-btn">Update key</button>
                     <button class="el-btn el-mini" type="button" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>
                 </div>
-                <button class="el-btn" type="button" id="el-out">Sign out</button>
+                <button class="el-btn el-signout" type="button" id="el-out">Sign out</button>
             </div>`;
+
+        // The rail is off-canvas on a phone, so the bar that opens it has to
+        // exist before it — otherwise there is no way back to navigation.
+        const top = document.createElement('div');
+        top.className = 'el-topbar';
+        top.innerHTML = `
+            <button class="el-burger" type="button" id="el-burger" aria-label="Open navigation" aria-expanded="false" aria-controls="el-sidebar">
+                <span></span><span></span><span></span>
+            </button>
+            <div class="el-logo">⚡ EDGELEAD</div>`;
+
+        const scrim = document.createElement('div');
+        scrim.className = 'el-scrim';
+        scrim.id = 'el-scrim';
+
+        document.body.prepend(scrim);
         document.body.prepend(bar);
-        document.body.classList.add('el-has-header');
+        document.body.prepend(top);
+        document.body.classList.add('el-has-header', 'el-has-sidebar');
+
+        const setOpen = open => {
+            document.body.classList.toggle('el-nav-open', open);
+            top.querySelector('#el-burger').setAttribute('aria-expanded', String(open));
+        };
+        top.querySelector('#el-burger').addEventListener('click',
+            () => setOpen(!document.body.classList.contains('el-nav-open')));
+        scrim.addEventListener('click', () => setOpen(false));
+        // Escape closes it, and following a link closes it too — otherwise the
+        // drawer stays over the page you just navigated to.
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') setOpen(false); });
+        bar.querySelectorAll('.el-tab').forEach(a => a.addEventListener('click', () => setOpen(false)));
 
         bar.querySelector('#el-key-btn').addEventListener('click', openKeyModal);
         bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
@@ -796,6 +908,57 @@
             <div id="el-share-meta">Shared report · read-only</div>
             <div>Prepared with EdgeLead</div>`;
         document.body.prepend(bar);
+    }
+
+    /**
+     * Trial / plan strip, clients only.
+     *
+     * Employees never see it — "0 of 50 leads" against an uncapped account is
+     * just noise. The usd metric is deliberately not shown: it is our Apify
+     * cost, not a number a client has any use for.
+     */
+    function renderPlanBanner(me) {
+        const old = document.querySelector('.el-plan');
+        if (old) old.remove();
+
+        if (!me || me.role !== 'client') return;
+        if (me.state !== 'trial' && me.state !== 'paid') return;
+
+        // Plan-strip CSS lives in app.css as of phase 18.
+
+        const endsAt = me.state === 'trial' ? me.trial_ends_at : me.paid_until;
+        const days   = endsAt ? Math.ceil((new Date(endsAt).getTime() - Date.now()) / 86400000) : null;
+        const urgent = me.state === 'trial' && days !== null && days <= 2;
+
+        let lead;
+        if (me.state === 'trial') {
+            lead = days === null ? 'Free trial'
+                 : days <= 0     ? 'Trial ends today'
+                 : days === 1    ? 'Trial ends tomorrow'
+                 : `${days} days left in your trial`;
+        } else {
+            lead = me.plan_label ? EL.escape(me.plan_label) : 'Active plan';
+            if (days !== null && days <= 14) lead += ` — renews in ${days} day${days === 1 ? '' : 's'}`;
+        }
+
+        const LABELS = { ig_report: 'Reports', fb_group_audit: 'Audits', leads: 'Leads' };
+        const meters = Object.entries(LABELS).map(([metric, label]) => {
+            const u = me.usage && me.usage[metric];
+            if (!u || u.cap === null || u.cap === undefined) return '';
+            const pct = u.cap > 0 ? Math.min(100, Math.round((u.used / u.cap) * 100)) : 100;
+            return `<span class="el-plan-meter">${label}
+                <span class="el-plan-bar ${pct >= 100 ? 'is-full' : ''}"><i style="width:${pct}%"></i></span>
+                <b>${u.used}/${u.cap}</b></span>`;
+        }).join('');
+
+        const bar = document.createElement('div');
+        bar.className = 'el-plan' + (urgent ? ' is-urgent' : '');
+        bar.innerHTML = `
+            <span class="el-plan-tag">${me.state === 'trial' ? 'Trial' : 'Plan'}</span>
+            <span>${lead}</span>
+            <span class="el-plan-meters">${meters}</span>`;
+        document.body.appendChild(bar);
+        document.body.classList.add('el-has-plan');
     }
 
     async function refreshStatus(opts = {}) {
@@ -1082,27 +1245,36 @@
         });
     }
 
-    (function injectJobStyles() {
-        const css = document.createElement('style');
-        css.textContent = `
-        .el-job-budget:empty{display:none}
-        .el-job-budget{margin:8px 0 2px;font-size:13px;font-weight:700;color:#fbbf24}
-        .el-cancel-row{display:flex;align-items:center;gap:10px;margin:0 0 12px}
-        .el-cancel-note{font-size:12px;color:#94a3b8}
-        .el-run-cost{display:inline-flex;align-items:center;gap:6px;font-size:12px;
-            font-weight:700;padding:4px 10px;border-radius:20px;border:1px solid rgba(255,255,255,.1);
-            background:rgba(15,23,42,.7);color:#94a3b8}
-        .el-run-cost.is-tight{color:#fbbf24;border-color:rgba(245,158,11,.4)}
-        .el-run-cost.is-over{color:#ef4444;border-color:rgba(239,68,68,.4)}
-        .el-job-banner{background:#1e1b16;border:1px solid #b45309;border-radius:10px;
-            padding:14px 16px;margin:0 0 16px;color:#fde68a;font-size:14px}
-        .el-job-banner strong{display:block;color:#fbbf24;margin-bottom:6px;font-size:15px}
-        .el-job-banner p{margin:4px 0;color:#e2e8f0;line-height:1.5}
-        .el-job-banner .el-job-detail{color:#94a3b8;font-size:13px}
-        .el-job-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-        .el-job-note{margin-top:8px;font-size:13px;min-height:16px}`;
-        document.head.appendChild(css);
-    })();
+        // Job-banner CSS lives in app.css as of phase 18. It was an IIFE here,
+    // so it injected on every page load whether or not a job ever ran.
+
+
+    /**
+     * A waiting state that is honest about what it is waiting for.
+     *
+     * Deliberately not a spinner: a spinner says "something is happening" and
+     * nothing else, so a thirty-second one reads as a hang. Naming the cause
+     * and giving a rough duration is the difference between someone waiting
+     * and someone reloading — and a reload restarts the cold start.
+     */
+    function bootNotice(title, message) {
+        if (document.getElementById('el-boot')) return;
+        const el = document.createElement('div');
+        el.id = 'el-boot';
+        el.className = 'el-boot';
+        el.innerHTML = `
+            <div class="el-boot-card">
+                <div class="el-boot-bar"><i></i></div>
+                <h3>${title}</h3>
+                <p>${message}</p>
+            </div>`;
+        document.body.appendChild(el);
+    }
+
+    function clearBootNotice() {
+        const el = document.getElementById('el-boot');
+        if (el) el.remove();
+    }
 
     function block(title, message) {
         document.querySelectorAll('.el-page').forEach(el => el.remove());
@@ -1110,6 +1282,39 @@
         card.className = 'el-blocked';
         card.innerHTML = `<h2>${title}</h2><p>${message}</p>
             <button class="el-btn" type="button" onclick="location.reload()">Reload</button>`;
+        document.body.appendChild(card);
+    }
+
+    /**
+     * A lapsed account is not an error, it is a state with a next step. This is
+     * the whole reason the server answers 402 instead of 403: "your trial ended,
+     * here is how to continue" and "you may not do this" are different screens,
+     * and a page cannot tell them apart if both arrive as 403.
+     *
+     * Idempotent — EL.api and EL.init can both reach it on the same load.
+     */
+    function blockExpired(data) {
+        if (document.querySelector('.el-blocked[data-expired]')) return;
+        document.querySelectorAll('.el-page').forEach(el => el.remove());
+
+        const ended = data && data.ended_at ? new Date(data.ended_at) : null;
+        const when  = ended && !isNaN(ended.getTime()) ? ended.toLocaleDateString() : null;
+
+        const card = document.createElement('div');
+        card.className = 'el-blocked';
+        card.setAttribute('data-expired', '1');
+        card.innerHTML = `
+            <h2>Your access has ended</h2>
+            <p>${EL.escape((data && data.error) || 'This account has no active plan.')}</p>
+            ${when ? `<p class="el-job-detail">Ended ${EL.escape(when)}.</p>` : ''}
+            <p class="el-job-detail">Nothing has been deleted. Your reports and data are waiting,
+               and everything returns the moment the account is reactivated.</p>
+            <div class="el-job-actions">
+                ${SUPPORT_EMAIL
+                    ? `<a class="el-btn" href="mailto:${SUPPORT_EMAIL}?subject=EdgeLead%20access">Contact us</a>`
+                    : ''}
+                <button class="el-btn" type="button" onclick="location.reload()">Reload</button>
+            </div>`;
         document.body.appendChild(card);
     }
 

@@ -4,23 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edgelead — Demand Feed</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* fb-leads.html — page-specific only. Shared rules live in app.css. */
     body { background: var(--bg-color); color: var(--text-primary); padding: 110px 20px 60px; max-width: 1400px;
-        margin: 0 auto; min-height: 100vh;
-        background-image: radial-gradient(circle at 50% 0%, rgba(59,130,246,0.08) 0%, transparent 50%); }
-    .card { background: var(--card-bg); backdrop-filter: blur(16px); padding: 30px; border-radius: 16px;
-        margin-bottom: 22px; border: 1px solid var(--card-border); }
-    .card-subtitle { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 20px; line-height: 1.55; }
-    label { display: block; font-size: 0.74rem; font-weight: 700; color: var(--accent-solid); margin-bottom: 7px; }
-    input[type="text"], select { width: 100%; padding: 12px 14px; background: var(--input-bg);
-        border: 1px solid var(--card-border); color: #fff; border-radius: 10px; outline: none; font-size: 0.9rem; font-family: inherit; }
+        margin: 0 auto; min-height: 100vh; }
     .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; align-items: end; }
-    .btn-secondary { background: rgba(255,255,255,0.05); color: var(--text-primary); border: 1px solid var(--card-border);
-        padding: 9px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem; }
     .btn-go { background: var(--accent-glow); border: none; color: #fff; font-weight: 800; }
     .btn-mini { padding: 6px 11px; font-size: 0.75rem; }
     .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
@@ -43,14 +33,12 @@
     .score { display: flex; align-items: center; gap: 8px; }
     .score strong { font-size: 1.5rem; font-weight: 800; color: var(--accent-solid); font-family: 'JetBrains Mono', monospace; }
     .score span { font-size: 0.68rem; color: var(--text-muted); font-weight: 700; line-height: 1.2; }
-    .badge { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 0.7rem; font-weight: 800; margin-right: 5px; }
-    .b-blue { background: rgba(96,165,250,0.16); color: var(--accent-solid); }
+    .b-blue { background: rgba(217,181,108,0.16); color: var(--accent-solid); }
     .status-pills { display: flex; gap: 6px; flex-wrap: wrap; }
     .pill { background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); color: var(--text-muted);
         padding: 6px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; cursor: pointer; }
     .pill.is-on { background: var(--accent-glow); border-color: transparent; color: #fff; }
-    .empty { color: var(--text-muted); font-size: 0.88rem; line-height: 1.7; padding: 24px 0; }
-    .privacy { background: rgba(96,165,250,0.06); border: 1px solid rgba(96,165,250,0.25); border-radius: 10px;
+    .privacy { background: rgba(217,181,108,0.06); border: 1px solid rgba(217,181,108,0.25); border-radius: 10px;
         padding: 14px 16px; font-size: 0.79rem; color: var(--text-muted); line-height: 1.6; margin-top: 18px; }
 </style>
 </head>
@@ -147,8 +135,6 @@
         </div>
     </details>
 
-
-
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
             <div style="flex:1; min-width:260px;">
@@ -217,6 +203,7 @@
 
 </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script>
 (async function () {

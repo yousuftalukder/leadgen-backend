@@ -13,38 +13,105 @@
    ========================================================================= */
 
 :root {
-    --bg-color: #060913;
-    --card-bg: rgba(15,23,42,0.75);
-    --card-border: rgba(255,255,255,0.08);
-    --accent-glow: linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);
-    --accent-solid: #60a5fa;
-    --text-primary: #f8fafc;
-    --text-muted: #94a3b8;
-    --input-bg: #0b1329;
-    --terminal-bg: #030712;
-    --success: #10b981;
-    --warn: #f59e0b;
-    --danger: #ef4444;
-    --enrich-glow: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    /* A sentinel header.js probes for, to tell "app.css is missing" apart from
+       "app.css is here". It must be a value no media query ever changes —
+       the previous probe read .el-header's position, which the old mobile
+       rule flips to static, so on a phone it concluded the stylesheet was
+       absent and injected a second copy of the whole file. */
+    --el-stylesheet: 1;
+
+    /* ---- surface ramp ---------------------------------------------------
+       Four real steps rather than one translucent grey reused everywhere.
+       Depth is what stops a dark interface reading as flat, and it only
+       works if the steps are actually different. */
+    /* Taken from the EdgeLead site (edgeleadweb.netlify.app): the same jade
+       ladder its dark sections are built on, so the app and the company look
+       like the same company. It was blue-black, which belonged to nothing. */
+    --bg-color: #06140f;
+    --surface-1: #0b231a;
+    --surface-2: #0f2a20;
+    --card-bg: rgba(11, 35, 26, 0.72);
+    /* Hairlines and edges carry a little gold rather than plain white — it is
+       what makes the dark read as warm jade instead of grey. */
+    --card-border: rgba(240, 211, 154, 0.10);
+    /* A one-pixel highlight along the top edge of a raised surface. This is
+       most of what separates a card that looks lit from a card that looks
+       like a rectangle. */
+    --card-edge: rgba(240, 211, 154, 0.14);
+
+    /* ---- accent ---------------------------------------------------------
+       Gold carries action, jade carries the brand — the same division the
+       site makes, where dark sections take gold buttons and jade is the
+       identity. It also keeps UI chrome out of the data-colour vocabulary,
+       so a gold button can never be mistaken for a series.
+
+       The raw brand jade (#0c7856) is 3.02:1 on this surface — fine as a
+       mark, not enough to carry text — so anything jade that means something
+       uses the lifted step at 7.14:1. */
+    --accent-glow: linear-gradient(180deg, #f0d39a 0%, #d9b56c 100%);
+    --accent-solid: #d9b56c;
+    --accent-dim: rgba(217, 181, 108, 0.14);
+    --on-accent: #0a241d;
+    --jade: #3fbf8f;
+    --jade-deep: #0c7856;
+
+    --text-primary: #f3efe4;
+    --text-secondary: #cdd8d0;
+    --text-muted: #9bb0a6;
+
+    --input-bg: #081c15;
+    --terminal-bg: #04100b;
+    --success: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --enrich-glow: linear-gradient(180deg, #4fd6a4 0%, #0c7856 100%);
+
+    /* ---- elevation ------------------------------------------------------
+       Long, soft, low-opacity. A dark theme shows a harsh shadow as a
+       grey smear, so the shadow does the lifting and the edge highlight
+       does the definition. */
+    --lift-1: 0 1px 2px rgba(0,0,0,.28);
+    --lift-2: 0 4px 16px rgba(0,0,0,.30);
+    --lift-3: 0 18px 44px rgba(0,0,0,.42);
+
+    /* ---- rhythm ---------------------------------------------------------
+       One scale, so spacing is chosen rather than guessed. */
+    --r-sm: 9px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px;
+    --s-1: 6px; --s-2: 10px; --s-3: 16px; --s-4: 24px; --s-5: 34px; --s-6: 48px;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
 body { background: var(--bg-color); color: var(--text-primary); padding: 110px 20px 60px; max-width: 1500px;
         margin: 0 auto; min-height: 100vh;
-        background-image: radial-gradient(circle at 50% 0%, rgba(59,130,246,0.08) 0%, transparent 50%); }
+        /* Two light sources rather than one centred glow. A single symmetric
+           gradient reads as a default; offsetting them and letting one fall
+           off the edge makes the page feel lit rather than tinted. */
+        background-image:
+            radial-gradient(900px 560px at 18% -8%, rgba(12,120,86,0.16) 0%, transparent 62%),
+            radial-gradient(760px 480px at 88% 2%, rgba(184,145,63,0.09) 0%, transparent 60%);
+        background-attachment: fixed; }
 .segment-bar { display: flex; gap: 10px; margin-bottom: 25px; border-bottom: 1px solid var(--card-border); padding-bottom: 10px; flex-wrap: wrap; }
 .segment-btn { background: transparent; border: none; color: var(--text-muted); padding: 12px 22px; font-weight: 700; font-size: 0.88rem; cursor: pointer; border-radius: 8px; }
-.segment-btn.active { background: var(--accent-glow); color: #fff; }
-.card { background: var(--card-bg); backdrop-filter: blur(16px); padding: 32px; border-radius: 16px; margin-bottom: 25px; border: 1px solid var(--card-border); }
-.card-title { font-size: 1.35rem; font-weight: 800; color: #fff; margin-bottom: 8px; }
-.card-subtitle { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 22px; line-height: 1.55; }
-h3.block-title { color: #fff; font-size: 1.05rem; font-weight: 800; margin: 30px 0 12px; }
+.segment-btn.active { background: var(--accent-glow); color: var(--on-accent); }
+.card { position: relative; background: var(--card-bg); backdrop-filter: blur(16px);
+        padding: var(--s-5); border-radius: var(--r-lg); margin-bottom: 25px;
+        border: 1px solid var(--card-border); box-shadow: var(--lift-2); }
+/* The lit top edge. One pixel, and it is most of the difference between a
+   surface that looks raised and a rectangle with a border. */
+.card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
+        border-radius: var(--r-lg) var(--r-lg) 0 0;
+        background: linear-gradient(90deg, transparent, var(--card-edge) 22%, var(--card-edge) 78%, transparent);
+        pointer-events: none; }
+.card-title { font-size: 1.32rem; font-weight: 800; color: var(--text-primary); margin-bottom: 8px;
+        letter-spacing: -0.021em; line-height: 1.25; }
+.card-subtitle { font-size: 0.86rem; color: var(--text-muted); margin-bottom: 22px; line-height: 1.6; }
+h3.block-title { color: var(--text-primary); font-size: 1.05rem; font-weight: 800; margin: 30px 0 12px; }
 label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--accent-solid); margin: 22px 0 8px; }
-input:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(96,165,250,0.25); }
+input:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(217,181,108,0.25); }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 20px; }
 .check { display: flex; align-items: center; gap: 9px; font-size: 0.86rem; font-weight: 600; margin-top: 14px; cursor: pointer; }
 .check input { width: auto; }
-.btn-primary { width: 100%; padding: 16px; background: var(--accent-glow); color: #fff; border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 26px; }
+.btn-primary { width: 100%; padding: 16px; background: var(--accent-glow); color: var(--on-accent); border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 26px; }
 .btn-primary[disabled] { opacity: .5; cursor: not-allowed; }
 .btn-secondary { background: rgba(255,255,255,0.05); color: var(--text-primary); border: 1px solid var(--card-border); padding: 8px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.83rem; }
 .btn-secondary:hover { background: rgba(255,255,255,0.1); }
@@ -52,20 +119,25 @@ input:focus, select:focus { border-color: var(--accent-solid); box-shadow: 0 0 0
 .hidden { display: none !important; }
 .estimate { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 24px; padding: 18px 20px; background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 12px; }
 .estimate div span { display: block; font-size: 0.72rem; color: var(--text-muted); font-weight: 700; }
-.estimate div strong { font-size: 1.15rem; font-weight: 800; color: #fff; }
+.estimate div strong { font-size: 1.15rem; font-weight: 800; color: var(--text-primary); }
 .rv { display: flex; align-items: center; gap: 8px; width: 110px; }
 .rv-bar { flex: 1; height: 6px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; }
-.rv-bar > div { height: 100%; background: var(--accent-glow); }
+/* Solid, not the gradient. These meters sit one per table row, so a gradient
+   across each bar paints a short bar blue and a long one purple — double-
+   encoding length as hue, and burning the one free channel on information the
+   length already carries. The single job-progress bar keeps its gradient:
+   there is only ever one on screen, so nothing is being compared. */
+.rv-bar > div { height: 100%; background: var(--accent-solid); border-radius: 999px; }
 .rv strong { font-size: 0.85rem; font-weight: 800; width: 24px; text-align: right; }
 .report-paper { background: #0b1329; border: 1px solid var(--card-border); border-radius: 16px; padding: 34px; margin-top: 22px; }
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 15px; margin: 22px 0; }
 .kpi-box { background: rgba(15,23,42,0.8); border: 1px solid var(--card-border); border-radius: 12px; padding: 17px; }
 .kpi-box span { font-size: 0.72rem; color: var(--text-muted); font-weight: 700; }
-.kpi-num { font-size: 1.5rem; font-weight: 800; color: #fff; margin-top: 4px; }
+.kpi-num { font-size: 1.5rem; font-weight: 800; color: var(--text-primary); margin-top: 4px; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; margin-top: 14px; }
 th { padding: 11px 10px; color: var(--text-muted); border-bottom: 1px solid var(--card-border); font-weight: 700; font-size: 0.75rem; white-space: nowrap; }
 td { padding: 11px 10px; border-bottom: 1px solid var(--card-border); vertical-align: top; }
-tr.is-top td { background: rgba(96,165,250,0.09); }
+tr.is-top td { background: rgba(217,181,108,0.09); }
 .table-wrap { overflow-x: auto; }
 .badge { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 0.7rem; font-weight: 800; }
 .b-ok { background: rgba(16,185,129,0.16); color: var(--success); }
@@ -79,7 +151,7 @@ tr.is-top td { background: rgba(96,165,250,0.09); }
 .job-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .bar { height: 8px; background: rgba(255,255,255,0.07); border-radius: 6px; overflow: hidden; }
 .bar > div { height: 100%; width: 0; background: var(--accent-glow); transition: width .4s ease; }
-.job-logs { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #60a5fa; line-height: 1.7; height: 170px; overflow-y: auto; margin-top: 16px; }
+.job-logs { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #d9b56c; line-height: 1.7; height: 170px; overflow-y: auto; margin-top: 16px; }
 .row-card { background: var(--input-bg); border: 1px solid var(--card-border); padding: 18px; border-radius: 12px;
         margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .row-card strong { color: #fff; font-size: 1rem; }
@@ -135,7 +207,7 @@ tr.is-top td { background: rgba(96,165,250,0.09); }
 .ex-table td:first-child { font-weight: 700; white-space: nowrap; }
 .ex-scroll { overflow-x: auto; }
 .ex-note { border-radius: 10px; padding: 14px 17px; font-size: 0.83rem; line-height: 1.7; margin: 14px 0; }
-.ex-note.info { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3); color: #bfdbfe; }
+.ex-note.info { background: rgba(217,181,108,0.08); border: 1px solid rgba(217,181,108,0.3); color: #f3efe4; }
 .ex-note.warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); color: #fcd34d; }
 .ex-note.good { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.3); color: #a7f3d0; }
 .ex-note.bad  { background: rgba(239,68,68,0.08);  border: 1px solid rgba(239,68,68,0.3);  color: #fecaca; }
@@ -150,3 +222,491 @@ tr.is-top td { background: rgba(96,165,250,0.09); }
     }
 textarea { min-height: 90px; resize: vertical; line-height: 1.6; }
 .segment-btn:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; }
+
+/* =========================================================================
+   HEADER SHELL  (moved out of header.js in phase 18)
+   -------------------------------------------------------------------------
+   These rules used to be a template string that header.js appended to
+   <head> at runtime. That meant every page painted its content once
+   unstyled and then again with the header — a flash on every single
+   navigation, on every page, for the life of the product.
+
+   They are plain CSS with no reason to be in JavaScript, so they live here
+   and arrive with the stylesheet. header.js still owns the markup.
+   ========================================================================= */
+
+    .el-header { position: fixed; top: 0; left: 0; width: 100%; height: 75px; z-index: 9999;
+        display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 0 28px;
+        background: rgba(6, 9, 19, 0.85); backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(255,255,255,0.08); box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+    .el-client-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+    .el-client-picker label { font-size: .8rem; color: #94a3b8; font-weight: 600; }
+    .el-client-picker select { background: #0f172a; color: #e2e8f0; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 8px 10px; font-size: .9rem; min-width: 220px; }
+    .el-client-picker .el-client-manage { font-size: .8rem; color: #d9b56c; text-decoration: none; }
+    .el-ai-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .el-logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; white-space: nowrap;
+        background: var(--accent-glow);
+        -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+    .el-nav { display: flex; gap: 4px; max-width: 100%; background: rgba(15,23,42,0.9); padding: 6px; border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; }
+    .el-tab { padding: 9px 13px; color: #94a3b8; font-weight: 700; font-size: 0.82rem; text-decoration: none;
+        border-radius: 8px; white-space: nowrap; transition: color .2s, background .2s; }
+    .el-tab:hover { color: #e2e8f0; }
+    .el-tab.is-active { background: var(--accent-glow); color: #fff;
+        box-shadow: 0 4px 15px rgba(12,120,86,0.3); }
+    .el-right { display: flex; align-items: center; gap: 10px; }
+    .el-pill { display: flex; align-items: center; gap: 10px; background: rgba(15,23,42,0.9);
+        border: 1px solid rgba(255,255,255,0.08); padding: 7px 14px; border-radius: 30px; font-size: 0.8rem;
+        color: #94a3b8; white-space: nowrap; }
+    .el-node { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
+    .el-node.is-live { background: #10b981; box-shadow: 0 0 10px #10b981; animation: el-pulse 1.4s infinite; }
+    .el-node.is-dead { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
+    @keyframes el-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+    .el-btn { background: rgba(255,255,255,0.05); color: #f8fafc; border: 1px solid rgba(255,255,255,0.08);
+        padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.82rem;
+        font-family: inherit; }
+    .el-btn:hover { background: rgba(255,255,255,0.1); }
+    .el-btn:focus-visible, .el-tab:focus-visible { outline: 2px solid #d9b56c; outline-offset: 2px; }
+    .el-btn.el-btn-go { background: var(--accent-glow); border: none; font-weight: 800; }
+    .el-mini { padding: 4px 10px; font-size: 0.74rem; }
+
+    .el-scrim { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(3,7,18,0.9); backdrop-filter: blur(12px);
+        font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+    .el-modal { width: 460px; max-width: 100%; background: #0b1329; border: 1px solid #d9b56c;
+        border-radius: 16px; padding: 26px; color: #f8fafc; }
+    .el-modal h3 { font-size: 1.15rem; font-weight: 800; margin: 0 0 6px; }
+    .el-modal p { font-size: 0.84rem; color: #94a3b8; margin: 0 0 18px; line-height: 1.5; }
+    .el-modal label { display: block; font-size: 0.74rem; font-weight: 800; text-transform: uppercase;
+        letter-spacing: 0.08em; color: #d9b56c; margin: 16px 0 7px; }
+    .el-modal input, .el-modal select { width: 100%; padding: 13px 15px; background: #060913; color: #fff;
+        border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; outline: none; font-size: 0.92rem;
+        font-family: inherit; }
+    .el-modal input:focus, .el-modal select:focus { border-color: #d9b56c; box-shadow: 0 0 0 3px rgba(217,181,108,0.25); }
+    .el-modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+    .el-modal-actions .el-btn { flex: 1; padding: 12px; }
+    .el-note { font-size: 0.78rem; margin-top: 14px; min-height: 1.1em; }
+
+    .el-blocked { max-width: 520px; margin: 140px auto 0; background: rgba(15,23,42,0.75);
+        border: 1px solid rgba(239,68,68,0.4); border-radius: 16px; padding: 32px; color: #f8fafc;
+        font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+    .el-blocked h2 { font-size: 1.3rem; font-weight: 800; margin: 0 0 10px; }
+    .el-blocked p { color: #94a3b8; font-size: 0.9rem; line-height: 1.6; margin: 0 0 18px; }
+
+    @media (max-width: 1100px) {
+        .el-header { height: auto; padding: 12px 16px; flex-wrap: wrap; position: static; }
+        /* Superseded by the sidebar layout: body.el-has-sidebar sets the
+           offset now. This !important was beating it and sliding the
+           content under the fixed top bar on a phone. */
+        body.el-has-header:not(.el-has-sidebar) { padding-top: 24px; }
+    }
+
+    .el-header .el-client { display:flex; align-items:center; gap:6px; background: rgba(15,23,42,0.9);
+        border: 1px solid rgba(255,255,255,0.08); padding: 5px 8px 5px 12px; border-radius: 30px; font-size: .78rem; color:#94a3b8; }
+    .el-header .el-client select { background: transparent; color:#e2e8f0; border: none; font-size:.8rem; font-family: inherit;
+        max-width: 190px; cursor: pointer; outline: none; }
+    .el-header .el-client select option { background:#0f172a; }
+    .el-share-bar { position: fixed; top:0; left:0; width:100%; z-index: 9999; display:flex; justify-content:space-between;
+        align-items:center; gap: 14px; padding: 0 28px; height: 64px; background: rgba(6,9,19,0.92); backdrop-filter: blur(16px);
+        border-bottom: 1px solid rgba(255,255,255,0.08); font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; color:#94a3b8; font-size:.85rem; }
+    .el-share-bar b { color:#e2e8f0; }
+    body.el-share .el-owner-only { display: none !important; }
+    body.el-share.el-has-header { padding-top: 84px; }
+    .el-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin: 10px 0 14px; font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+    .el-actions .el-note { margin:0; font-size:.78rem; }
+    .el-share-list { font-size:.78rem; color:#94a3b8; width:100%; }
+    .el-share-list div { display:flex; gap:8px; align-items:center; padding: 4px 0; border-top: 1px solid rgba(255,255,255,.06); }
+    .el-share-list code { color:#e2e8f0; word-break: break-all; font-size:.74rem; }
+    .el-modal .el-grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 1100px) { .el-share-bar { position: static; height:auto; padding: 12px 16px; flex-wrap: wrap; } }
+
+
+/* =========================================================================
+   SYSTEM LAYER  (phase 18)
+   -------------------------------------------------------------------------
+   Base rules that every page assumed but only some of them defined. Page
+   <style> blocks load after this file, so anything a page already sets
+   still wins — this only fills the gaps.
+   ========================================================================= */
+
+html { -webkit-text-size-adjust: 100%; }
+body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* ---- form controls ------------------------------------------------------
+   These were copy-pasted into some pages and missing from others, so an
+   input looked different depending on which screen you were on. */
+input[type="text"], input[type="email"], input[type="password"],
+input[type="number"], input[type="search"], input[type="url"],
+input[type="date"], select, textarea {
+    width: 100%;
+    padding: 13px 15px;
+    background: var(--input-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    font-size: 0.92rem;
+    font-family: inherit;
+    transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+input::placeholder, textarea::placeholder { color: #64748b; }
+input:hover:not(:focus), select:hover:not(:focus), textarea:hover:not(:focus) {
+    border-color: rgba(255,255,255,0.16);
+}
+textarea:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(217,181,108,0.25); }
+input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; }
+select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%2394a3b8' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    padding-right: 38px;
+}
+
+/* ---- interaction --------------------------------------------------------
+   One focus ring for everything keyboard-reachable, and buttons that
+   acknowledge a press. */
+:where(a, button, [role="button"], summary, input, select, textarea):focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+.btn-primary, .btn-secondary, .btn-danger {
+    transition: transform .12s ease, filter .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.btn-primary:hover:not([disabled]) { filter: brightness(1.08); box-shadow: 0 6px 20px rgba(12,120,86,0.28); }
+.btn-primary:active:not([disabled]),
+.btn-secondary:active, .btn-danger:active { transform: translateY(1px); }
+.btn-danger:hover { background: rgba(239,68,68,0.2); }
+.card { transition: border-color .15s ease; }
+
+/* ---- skeletons ----------------------------------------------------------
+   A grey block the size of the thing that is coming reads as loading. A
+   spinner reads as waiting, and an empty panel reads as broken. */
+.sk { background: linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.09) 37%, rgba(255,255,255,.04) 63%);
+      background-size: 400% 100%; animation: sk-shimmer 1.3s ease-in-out infinite;
+      border-radius: 8px; }
+.sk-line { height: 12px; margin-bottom: 10px; }
+.sk-line.w-40 { width: 40%; } .sk-line.w-60 { width: 60%; } .sk-line.w-80 { width: 80%; }
+.sk-card { height: 96px; border-radius: 12px; margin-bottom: 12px; }
+@keyframes sk-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+/* ---- first-load notice --------------------------------------------------
+   Shown when the backend is cold. Names the cause rather than spinning,
+   because an unexplained thirty-second wait gets reloaded — and a reload
+   starts the cold start again. */
+.el-boot { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center;
+    background: rgba(6,9,19,0.82); backdrop-filter: blur(6px);
+    font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
+.el-boot-card { max-width: 380px; margin: 0 24px; padding: 30px 32px; text-align: center;
+    background: #0f172a; border: 1px solid var(--card-border); border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+.el-boot-card h3 { color: #fff; font-size: 1.08rem; font-weight: 800; margin-bottom: 9px; }
+.el-boot-card p { color: var(--text-muted); font-size: 0.86rem; line-height: 1.6; }
+.el-boot-bar { height: 4px; border-radius: 999px; background: rgba(255,255,255,.08);
+    overflow: hidden; margin-bottom: 20px; }
+.el-boot-bar i { display: block; height: 100%; width: 38%; border-radius: 999px;
+    background: var(--accent-glow); animation: el-boot-slide 1.4s ease-in-out infinite; }
+@keyframes el-boot-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+
+/* ---- motion -------------------------------------------------------------
+   Everything above animates. Anyone who has asked their system not to
+   gets the same interface without the movement. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* ---- job banner (moved out of header.js, phase 18) ---- */
+
+        .el-job-budget:empty{display:none}
+        .el-job-budget{margin:8px 0 2px;font-size:13px;font-weight:700;color:#fbbf24}
+        .el-cancel-row{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+        .el-cancel-note{font-size:12px;color:#94a3b8}
+        .el-run-cost{display:inline-flex;align-items:center;gap:6px;font-size:12px;
+            font-weight:700;padding:4px 10px;border-radius:20px;border:1px solid rgba(255,255,255,.1);
+            background:rgba(15,23,42,.7);color:#94a3b8}
+        .el-run-cost.is-tight{color:#fbbf24;border-color:rgba(245,158,11,.4)}
+        .el-run-cost.is-over{color:#ef4444;border-color:rgba(239,68,68,.4)}
+        .el-job-banner{background:#1e1b16;border:1px solid #b45309;border-radius:10px;
+            padding:14px 16px;margin:0 0 16px;color:#fde68a;font-size:14px}
+        .el-job-banner strong{display:block;color:#fbbf24;margin-bottom:6px;font-size:15px}
+        .el-job-banner p{margin:4px 0;color:#e2e8f0;line-height:1.5}
+        .el-job-banner .el-job-detail{color:#94a3b8;font-size:13px}
+        .el-job-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+        .el-job-note{margin-top:8px;font-size:13px;min-height:16px}
+
+/* ---- trial / plan strip (moved out of header.js, phase 18) ---- */
+
+            .el-plan{position:fixed;top:75px;left:0;width:100%;z-index:9998;display:flex;
+                align-items:center;gap:14px;flex-wrap:wrap;padding:8px 28px;
+                font-family:'Anek Latin','Anek Bangla',system-ui,sans-serif;font-size:.82rem;
+                background:rgba(15,23,42,.92);backdrop-filter:blur(12px);
+                border-bottom:1px solid rgba(255,255,255,.07);color:#cbd5e1}
+            .el-plan.is-urgent{background:rgba(69,26,3,.92);border-bottom-color:rgba(251,146,60,.35)}
+            .el-plan-tag{font-weight:800;letter-spacing:.04em;text-transform:uppercase;font-size:.7rem;
+                padding:3px 8px;border-radius:999px;background:rgba(12,120,86,0.18);color:#f0d39a}
+            .el-plan.is-urgent .el-plan-tag{background:rgba(251,146,60,.2);color:#fdba74}
+            .el-plan-meters{display:flex;gap:12px;flex-wrap:wrap;margin-left:auto}
+            .el-plan-meter{display:flex;align-items:center;gap:6px;color:#94a3b8}
+            .el-plan-meter b{color:#e2e8f0;font-weight:700}
+            .el-plan-bar{width:52px;height:5px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}
+            .el-plan-bar i{display:block;height:100%;background:#0c7856}
+            .el-plan-bar.is-full i{background:#f97316}
+            body.el-has-plan{padding-top:36px}
+            @media (max-width:720px){.el-plan{padding:8px 16px;font-size:.76rem}
+                .el-plan-meters{margin-left:0;width:100%}}
+
+
+/* =========================================================================
+   REFINEMENT LAYER  (phase 18)
+   -------------------------------------------------------------------------
+   Craft pass over the shared components. Everything above still defines the
+   structure; this tunes how it reads. Page <style> blocks load after this
+   file, so a page that has already made a decision keeps it.
+   ========================================================================= */
+
+/* ---- typography ---------------------------------------------------------
+   Optical tracking: large type set at default spacing looks loose, small
+   type set tight looks cramped. Tightening as size increases is the single
+   clearest signal between typography that was set and typography that was
+   left alone. */
+h1, .h1 { letter-spacing: -0.028em; line-height: 1.14; font-weight: 800; }
+h2, .h2 { letter-spacing: -0.022em; line-height: 1.22; font-weight: 800; }
+h3, h4  { letter-spacing: -0.014em; line-height: 1.32; }
+p { line-height: 1.68; }
+
+/* Tabular figures only where numbers stack vertically and want to line up —
+   table rows, index columns, meter values. NOT on hero or stat-tile numbers:
+   equal-width digits make a large figure look loose and gappy, so those keep
+   the proportional figures the typeface was drawn with. */
+.idx, td, th, .rv strong {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+}
+.kpi-num, .estimate div strong, .hero-num, .score-dial .val {
+    font-variant-numeric: proportional-nums;
+}
+
+::selection { background: rgba(106,168,255,0.28); color: #fff; }
+
+/* ---- surfaces -----------------------------------------------------------
+   The same lit-edge treatment the card gets, for the panels that sit at the
+   same level as one. */
+.report-paper, .job-panel, .ai-panel, .explainer {
+    position: relative;
+    box-shadow: var(--lift-2);
+}
+.report-paper { background: var(--surface-1); border-radius: var(--r-lg); }
+.kpi-box, .row-card, .ex-tile {
+    background: var(--surface-1);
+    border-radius: var(--r-md);
+    transition: border-color .15s ease, background .15s ease;
+}
+.kpi-box:hover, .row-card:hover, .ex-tile:hover { border-color: rgba(255,255,255,0.14); }
+
+/* ---- buttons ------------------------------------------------------------
+   The primary keeps the gradient because it is the primary. It gains a
+   hairline of its own colour along the top so it reads as a lit object
+   rather than a painted shape. */
+.btn-primary {
+    position: relative;
+    border-radius: var(--r-md);
+    letter-spacing: -0.006em;
+    box-shadow: var(--lift-1), inset 0 1px 0 rgba(255,255,255,0.18);
+}
+.btn-secondary, .btn-danger { border-radius: var(--r-sm); letter-spacing: -0.004em; }
+.btn-secondary { background: rgba(255,255,255,0.045); }
+.btn-secondary:hover { border-color: rgba(255,255,255,0.18); }
+
+/* ---- segmented control --------------------------------------------------
+   Was a row of loose buttons over a rule. A recessed track with one lifted
+   selection reads as a single control instead of several. */
+.segment-bar {
+    gap: 4px; padding: 5px; border-bottom: none; border-radius: var(--r-md);
+    background: rgba(255,255,255,0.035);
+    border: 1px solid var(--card-border);
+    width: fit-content; max-width: 100%;
+}
+.segment-btn { padding: 10px 18px; border-radius: var(--r-sm); font-size: 0.85rem;
+    transition: color .15s ease, background .15s ease; }
+.segment-btn:hover:not(.active) { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+.segment-btn.active { box-shadow: var(--lift-1), inset 0 1px 0 rgba(255,255,255,0.18); }
+
+/* ---- tables -------------------------------------------------------------
+   Hairline rules, an uppercase header that reads as a label rather than a
+   row, and a hover that makes a long table scannable. */
+th { text-transform: uppercase; letter-spacing: 0.055em; font-size: 0.68rem;
+     border-bottom-color: rgba(255,255,255,0.1); }
+td { border-bottom-color: rgba(255,255,255,0.045); }
+tbody tr { transition: background .12s ease; }
+tbody tr:hover td { background: rgba(255,255,255,0.028); }
+tbody tr:last-child td { border-bottom: none; }
+.table-wrap { border-radius: var(--r-md); }
+
+/* ---- badges -------------------------------------------------------------
+   A ring instead of a fill block: it holds its shape against any surface
+   and stops the row looking like a set of highlighter marks. */
+.badge { padding: 3px 10px; border-radius: 999px; letter-spacing: 0.035em;
+    text-transform: uppercase; font-size: 0.66rem; border: 1px solid transparent; }
+.b-ok   { border-color: rgba(52,211,153,0.28); }
+.b-warn { border-color: rgba(251,191,36,0.28); }
+.b-bad  { border-color: rgba(248,113,113,0.28); }
+.b-mute { border-color: rgba(148,163,184,0.22); }
+
+/* ---- progress -----------------------------------------------------------
+   A moving sheen on the filled portion, so a long job reads as running
+   rather than stuck at a number. */
+.bar { border-radius: 999px; }
+.bar > div { position: relative; overflow: hidden; border-radius: 999px; }
+.bar > div::after { content: ''; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.28), transparent);
+    animation: bar-sheen 1.6s ease-in-out infinite; }
+@keyframes bar-sheen { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* ---- scrollbars ---------------------------------------------------------
+   A default light scrollbar on a dark panel is the loudest thing on screen. */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.16) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.13); border-radius: 999px;
+    border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); background-clip: content-box; }
+
+
+/* =========================================================================
+   SIDEBAR SHELL  (phase 18)
+   -------------------------------------------------------------------------
+   Supersedes the top-bar layout above. Twelve destinations in a horizontal
+   strip either wrap onto a second line or scroll sideways, and both bury the
+   tail of the list — which is where Admin and Schedules sit. Stacked in a
+   rail the whole set is visible at once, the labels get room to be words,
+   and adding a thirteenth costs nothing.
+
+   The rules above that this replaces (.el-header, .el-right, the horizontal
+   .el-nav) are left in place: header.js no longer emits that markup, so they
+   match nothing, and a page that still carries a hand-rolled .el-header keeps
+   working.
+   ========================================================================= */
+
+:root { --rail: 248px; }
+
+.el-sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; width: var(--rail); z-index: 9999;
+    display: flex; flex-direction: column;
+    background: rgba(9, 13, 24, 0.92);
+    backdrop-filter: blur(18px);
+    border-right: 1px solid var(--card-border);
+    box-shadow: 1px 0 0 rgba(255,255,255,0.02), var(--lift-3);
+    font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif;
+}
+.el-side-top { padding: 22px 20px 16px; }
+.el-sidebar .el-logo { font-size: 1.22rem; }
+
+/* The nav is the only part that scrolls, so the logo stays put at the top and
+   the account controls stay put at the bottom however long the list gets. */
+.el-sidebar .el-nav {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 4px 12px 12px; margin: 0;
+    background: none; border: none; border-radius: 0; max-width: none;
+}
+.el-sidebar .el-tab {
+    display: block; padding: 10px 12px; border-radius: var(--r-sm);
+    font-size: 0.86rem; font-weight: 600; color: var(--text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: color .13s ease, background .13s ease;
+}
+.el-sidebar .el-tab:hover { color: var(--text-primary); background: rgba(255,255,255,0.045); }
+/* The active item is marked with a solid fill and a bar on the leading edge.
+   The gradient is the primary-action colour and does not belong on a
+   navigation state. */
+.el-sidebar .el-tab.is-active {
+    background: var(--accent-dim); color: #dbe9ff; font-weight: 700;
+    box-shadow: inset 2px 0 0 var(--accent-solid); text-shadow: none;
+}
+
+.el-side-foot { padding: 14px 14px 16px; border-top: 1px solid var(--card-border);
+    display: flex; flex-direction: column; gap: 9px; }
+.el-side-foot .el-client { display: flex; align-items: center; gap: 7px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+    border-radius: var(--r-sm); padding: 7px 10px; font-size: 0.76rem; color: var(--text-muted); }
+.el-side-foot .el-client select { background: transparent; color: var(--text-primary);
+    border: none; font-size: 0.78rem; font-family: inherit; width: 100%; padding: 0; min-width: 0; }
+.el-side-foot .el-pill { display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+    border-radius: var(--r-sm); padding: 8px 10px; font-size: 0.75rem; color: var(--text-muted); }
+.el-side-actions { display: flex; gap: 6px; }
+.el-side-actions .el-btn { flex: 1; justify-content: center; text-align: center; }
+.el-signout { width: 100%; text-align: center; }
+
+/* ---- the page beside it ----
+   A class selector, so it beats the bare `body { padding: ... }` a page may
+   still carry regardless of which file loads first. */
+body.el-has-sidebar {
+    padding: 30px 30px 70px calc(var(--rail) + 30px);
+    max-width: 1720px;
+}
+
+/* ---- mobile: the rail becomes a drawer ---- */
+.el-topbar { display: none; }
+.el-scrim { display: none; }
+
+@media (max-width: 900px) {
+    .el-topbar {
+        display: flex; align-items: center; gap: 12px;
+        position: fixed; top: 0; left: 0; right: 0; height: 58px; z-index: 9998;
+        padding: 0 16px; background: rgba(9,13,24,0.94); backdrop-filter: blur(16px);
+        border-bottom: 1px solid var(--card-border);
+        font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif;
+    }
+    .el-topbar .el-logo { font-size: 1.05rem; }
+    .el-burger { width: 38px; height: 34px; display: grid; align-content: center; gap: 5px;
+        padding: 0 8px; background: none; border: none; cursor: pointer; }
+    .el-burger span { display: block; height: 2px; border-radius: 2px; background: var(--text-primary); }
+
+    .el-sidebar { transform: translateX(-100%); transition: transform .22s ease; width: 272px; }
+    body.el-nav-open .el-sidebar { transform: none; }
+
+    .el-scrim { display: block; position: fixed; inset: 0; z-index: 9998;
+        background: rgba(2,4,10,.6); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
+    body.el-nav-open .el-scrim { opacity: 1; pointer-events: auto; }
+
+    body.el-has-sidebar { padding: 76px 16px 60px; max-width: none; }
+    /* The trial strip sits under the top bar rather than under a 75px header. */
+    .el-plan { top: 58px; }
+}
+
+/* On the rail layout the plan strip spans only the content column. */
+@media (min-width: 901px) {
+    .el-plan { top: 0; left: var(--rail); width: auto; right: 0; }
+    body.el-has-plan { padding-top: 66px; }
+}
+
+/* ---- rail: grouping and alignment ----
+   Icons sit in a fixed column so every label starts on the same line. Emoji
+   have wildly different advance widths; inlined into the label string they
+   left the list ragged down its left edge. */
+.el-group {
+    padding: 16px 12px 6px; font-size: 0.66rem; font-weight: 800;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #5f6b80;
+}
+.el-nav > .el-group:first-child { padding-top: 4px; }
+.el-sidebar .el-tab {
+    display: grid; grid-template-columns: 22px 1fr; align-items: center; gap: 10px;
+}
+.el-ico { font-size: 0.94rem; line-height: 1; text-align: center; opacity: .9; }
+.el-lab { overflow: hidden; text-overflow: ellipsis; }
+.el-sidebar .el-tab.is-active .el-ico { opacity: 1; }
+
+/* The rail's own scrollbar is a full-height line against a dark edge — the
+   loudest thing in the panel. It appears on hover, when it is wanted. */
+.el-sidebar .el-nav { scrollbar-width: none; }
+.el-sidebar .el-nav::-webkit-scrollbar { width: 6px; }
+.el-sidebar .el-nav::-webkit-scrollbar-thumb { background: transparent; }
+.el-sidebar:hover .el-nav { scrollbar-width: thin; }
+.el-sidebar:hover .el-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); }
