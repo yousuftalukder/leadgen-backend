@@ -1,6 +1,8 @@
-# Repo-root Netlify config: the site is the frontend/ folder, nothing is built.
+# Config for the site itself. Netlify reads this one AFTER the repo-root
+# netlify.toml has set base = "frontend", so this file is already inside the
+# base directory and must not set `base` again — doing so resolves to
+# frontend/frontend and the deploy finds nothing to publish.
 [build]
-  base    = "frontend"
   publish = "."
   command = ""
 
