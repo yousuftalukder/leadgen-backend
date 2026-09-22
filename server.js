@@ -11128,7 +11128,12 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
             const { error } = await supabase.from('meta_connections').upsert([row], { onConflict: 'user_id,page_id' });
             if (!error) saved += 1;
         }
-        if (!saved) return back({ meta: 'error', message: 'Login worked but no Facebook Page was returned. Make sure you selected a Page in the dialog.' });
+        // Naming both causes, because they look identical from here and the
+        // second one is the usual answer while the Meta app is in Development
+        // Mode: the login succeeds, Meta returns an empty Page list, and the
+        // person reads "select a Page" and goes hunting through a dialog that
+        // never offered them one.
+        if (!saved) return back({ meta: 'error', message: 'Login worked but Meta returned no Pages. Either no Page was ticked in the dialog, or this Facebook account has no role on the EdgeLead Meta app yet — while the app is in Development Mode only Admins, Developers and Testers get Pages back.' });
         back({ meta: 'ok', pages: saved, client: st.client_id || '' });
     } catch (err) {
         logger.error('meta_oauth_callback', { message: err.message });
