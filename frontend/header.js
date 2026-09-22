@@ -667,6 +667,22 @@
             return EL._clients;
         },
         /**
+         * The contact email and the ways to pay, as the admin set them.
+         * Public and unauthenticated on purpose: the expired screen has no
+         * session to speak of, and the privacy page has no account at all.
+         * One source, read by every slot that shows it.
+         */
+        _contact: null,
+        async contact() {
+            if (EL._contact) return EL._contact;
+            try {
+                const r = await fetch(BACKEND_URL + '/api/public/contact', { cache: 'no-store' });
+                EL._contact = r.ok ? await r.json() : { email: '', paymentOptions: [] };
+            } catch { EL._contact = { email: '', paymentOptions: [] }; }
+            return EL._contact;
+        },
+
+        /**
          * "I want to keep going." Works during the trial and after it has
          * ended — the one call a lapsed account may still make. Nothing is
          * paid here; the admin sees the request and activates by hand.
@@ -912,6 +928,20 @@
         return file || 'index.html';
     }
 
+    /**
+     * The "how to continue" slot: a mail link if there is an address, the
+     * ways to pay if there are any. Empty string when the admin has set
+     * nothing, so a slot with nothing to say takes no space.
+     */
+    function contactSlotHtml(c, { lead = 'To activate now' } = {}) {
+        if (!c) return '';
+        const opts = Array.isArray(c.paymentOptions) ? c.paymentOptions : [];
+        const mail = c.email ? `<a class="el-btn" href="mailto:${EL.escape(c.email)}?subject=EdgeLead%20access">Email ${EL.escape(c.email)}</a>` : '';
+        const pay = opts.length ? `<div class="el-pay"><b>${EL.escape(lead)}:</b>
+            <ul>${opts.map(o => `<li><b>${EL.escape(o.label || 'Pay')}</b>${o.details ? ` — ${EL.escape(o.details)}` : ''}${o.url ? ` <a href="${EL.safeUrl(o.url)}" target="_blank" rel="noopener noreferrer">open ↗</a>` : ''}</li>`).join('')}</ul></div>` : '';
+        return (mail || pay) ? `<div class="el-contact-slot">${mail}${pay}</div>` : '';
+    }
+
     /** The empty host for the work-for bar; the picker fills it. */
     function mountWorkForHost() {
         if (document.getElementById('el-workfor')) return;
@@ -1090,9 +1120,15 @@
         const btn = document.getElementById('el-plan-continue');
         if (btn && !asked) btn.addEventListener('click', async () => {
             btn.disabled = true; btn.textContent = 'Sending…';
-            try { await EL.requestActivation(); btn.textContent = 'Request sent ✓'; }
+            try {
+                await EL.requestActivation(); btn.textContent = 'Request sent ✓';
+                const slot = contactSlotHtml(await EL.contact(), { lead: 'To activate straight away' });
+                if (slot && !bar.querySelector('.el-contact-slot')) bar.insertAdjacentHTML('beforeend', slot);
+            }
             catch (err) { btn.disabled = false; btn.textContent = 'Keep going after the trial'; if (!err.handled) alert(err.message); }
         });
+        // Already asked earlier: the ways to pay are still the thing they need.
+        if (asked && me.state === 'trial') EL.contact().then(c => { const slot = contactSlotHtml(c, { lead: 'To activate straight away' }); if (slot) bar.insertAdjacentHTML('beforeend', slot); });
     }
 
     async function refreshStatus(opts = {}) {
@@ -1447,12 +1483,19 @@
                 ${data && data.activation_requested_at
                     ? `<span class="el-note">You asked to continue on ${EL.escape(new Date(data.activation_requested_at).toLocaleDateString())}. The team has it.</span>`
                     : `<button class="el-btn el-btn-go" type="button" id="el-req-continue">Ask to continue</button>`}
-                ${SUPPORT_EMAIL
-                    ? `<a class="el-btn" href="mailto:${SUPPORT_EMAIL}?subject=EdgeLead%20access">Contact us</a>`
-                    : ''}
                 <button class="el-btn" type="button" onclick="location.reload()">Reload</button>
-            </div>`;
+            </div>
+            <div id="el-expired-contact"></div>`;
         document.body.appendChild(card);
+
+        // What the admin set, or the build-time address as a fallback. Filled
+        // after the card is up so a slow answer never delays the screen.
+        EL.contact().then(c => {
+            const host = document.getElementById('el-expired-contact');
+            if (!host) return;
+            const eff = { email: c.email || SUPPORT_EMAIL, paymentOptions: c.paymentOptions };
+            host.innerHTML = contactSlotHtml(eff, { lead: 'To activate now' });
+        });
 
         // This used to be the end of the road: "contact us" with, when
         // SUPPORT_EMAIL was blank, nobody to contact. The business model is

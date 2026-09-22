@@ -199,7 +199,55 @@ global.fetch = async (url, opts = {}) => {
         if (!next) return reply(500, 'the test scripted no reply for this turn');
         return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
     }
+    if (/graph\.facebook\.com\//.test(u)) return reply(200, GRAPH.answer(new URL(u)));
     return reply(404, `the test fake has no answer for ${u}`);
+};
+
+// ---------------------------------------------------------------------------
+// A GRAPH API WITH ONE ACCOUNT IN IT
+//
+// Enough of Meta's Graph API for the monthly report to run: Page and
+// Instagram insights for two months (chosen by the `since` the server asks
+// for), the account, follower demographics, the month's media and each
+// post's insights. The numbers are fixed so the report's arithmetic can be
+// checked exactly — including the cases that make a report lie: a metric
+// that was zero last month ("new", not +Infinity%) and one that barely moved.
+// ---------------------------------------------------------------------------
+const GRAPH = {
+    PAGE: '77001', IG: '17841400000000001',
+    AUG_1: Date.UTC(2026, 7, 1) / 1000,
+    cur:  { page: { page_impressions_unique: 8120, page_post_engagements: 940, page_views_total: 500, page_fan_adds_unique: 40 },
+            ig:   { reach: 41820, views: 96400, accounts_engaged: 3180, total_interactions: 5910, profile_views: 1204, website_clicks: 77, follower_count: 412 } },
+    prev: { page: { page_impressions_unique: 7000, page_post_engagements: 1120, page_views_total: 480, page_fan_adds_unique: 35 },
+            ig:   { reach: 28410, views: 71200, accounts_engaged: 3160, total_interactions: 6430, profile_views: 1309, website_clicks: 90, follower_count: 0 } },
+    answer(url) {
+        const seg = url.pathname.split('/').filter(Boolean).slice(1);   // drop the version
+        const q = url.searchParams;
+        const set = Number(q.get('since') || 0) >= GRAPH.AUG_1 ? GRAPH.cur : GRAPH.prev;
+        const metrics = String(q.get('metric') || '').split(',').filter(Boolean);
+        if (seg[0] === GRAPH.PAGE && seg[1] === 'insights') {
+            return { data: metrics.map(name => ({ name, values: [{ end_time: '2026-08-31T07:00:00+0000', value: set.page[name] ?? 0 }] })) };
+        }
+        if (seg[0] === GRAPH.IG && seg[1] === 'insights') {
+            if (metrics[0] === 'follower_demographics') {
+                const rows = { age: [['25-34', 3900], ['35-44', 2600]], gender: [['F', 5600], ['M', 3400]], city: [['Boston', 4100]], country: [['US', 8800]] }[q.get('breakdown')] || [];
+                return { data: [{ total_value: { breakdowns: [{ results: rows.map(([k, v]) => ({ dimension_values: [k], value: v })) }] } }] };
+            }
+            return { data: metrics.map(name => ({ name, total_value: { value: set.ig[name] ?? 0 } })) };
+        }
+        if (seg[0] === GRAPH.IG && seg[1] === 'media') {
+            return { data: [
+                { id: 'm1', caption: 'The seasonal menu, start to finish.', media_type: 'VIDEO', media_product_type: 'REELS', timestamp: '2026-08-10T10:00:00+0000', like_count: 300, comments_count: 20, permalink: 'https://instagram.com/p/abc', shortcode: 'abc' },
+                { id: 'm2', caption: 'July throwback.', media_type: 'IMAGE', media_product_type: 'FEED', timestamp: '2026-07-30T10:00:00+0000', like_count: 90, comments_count: 4, permalink: 'https://instagram.com/p/def', shortcode: 'def' }
+            ] };
+        }
+        if (seg[0] === 'm1' && seg[1] === 'insights') {
+            return { data: [['reach', 11240], ['saved', 184], ['shares', 96], ['views', 30000], ['total_interactions', 600]].map(([name, v]) => ({ name, values: [{ value: v }] })) };
+        }
+        if (seg[0] === GRAPH.PAGE) return { id: GRAPH.PAGE, name: 'Harbor Cafe', fan_count: 4800, followers_count: 4820, category: 'Cafe' };
+        if (seg[0] === GRAPH.IG)   return { id: GRAPH.IG, username: 'harborcafe', name: 'Harbor Cafe', followers_count: 9240, follows_count: 300, media_count: 120 };
+        return { data: [] };
+    }
 };
 
 const S = require(path.join(__dirname, '..', 'server.js'));
@@ -732,6 +780,39 @@ test('a changed trial cap is enforced on the very next request', async () => {
     const again = await call('GET', '/api/admin/settings', { token: 't-admin' });
     assert.strictEqual(again.body.stored.trial_caps, true);
 });
+test('the admin sets the contact email and the ways to pay, and every slot can read them without signing in', async () => {
+    const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: {
+        contactEmail: 'Hello@Agency.test',
+        paymentOptions: [
+            { label: 'bKash', details: '017 0000 0000 (personal), reference: your business name' },
+            { label: 'Bank transfer', details: 'Harbor Bank, account 1234', url: 'https://pay.example.test/edgelead' },
+            { label: '', details: '' }                                   // an empty row is dropped, not stored
+        ]
+    } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const pub = await call('GET', '/api/public/contact');            // no token at all
+    assert.strictEqual(pub.statusCode, 200, JSON.stringify(pub.body));
+    assert.strictEqual(pub.body.email, 'hello@agency.test');
+    assert.strictEqual(pub.body.paymentOptions.length, 2, 'the empty row should not be kept');
+    assert.strictEqual(pub.body.paymentOptions[1].url, 'https://pay.example.test/edgelead');
+    const admin = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.strictEqual(admin.body.contactEmail, 'hello@agency.test');
+});
+test('a bad address or a non-http link is refused; clearing is allowed; an employee cannot set them', async () => {
+    const bad = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { contactEmail: 'not an email' } });
+    assert.strictEqual(bad.statusCode, 400);
+    const badUrl = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { paymentOptions: [{ label: 'x', details: 'y', url: 'javascript:alert(1)' }] } });
+    assert.strictEqual(badUrl.statusCode, 400, 'a javascript: link reached storage');
+    const emp = await call('PATCH', '/api/admin/settings', { token: 't-emp', body: { contactEmail: 'me@x.test' } });
+    assert.strictEqual(emp.statusCode, 403);
+    const clear = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { contactEmail: '', paymentOptions: [] } });
+    assert.strictEqual(clear.statusCode, 200);
+    const pub = await call('GET', '/api/public/contact');
+    assert.strictEqual(pub.body.email, '');
+    assert.deepStrictEqual(pub.body.paymentOptions, []);
+    // put them back for the money-moment section below
+    await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { contactEmail: 'hello@agency.test', paymentOptions: [{ label: 'bKash', details: '017 0000 0000' }] } });
+});
 test('a nonsense trial length is refused', async () => {
     for (const bad of [0, -3, 400, 'soon']) {
         const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { trialDays: bad } });
@@ -919,6 +1000,77 @@ test('an Instagram report still comes out the Instagram way — bands, pillars, 
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.report.band, 'healthy', 'score 71 is the healthy band');
     assert.ok(Array.isArray(r.body.report.working) && Array.isArray(r.body.report.fix));
+});
+
+section('\nthe monthly owner report, against a scripted Graph API');
+/** Wait for a job the route started in the background to finish. */
+async function untilDone(jobId, ms = 8000) {
+    const t0 = Date.now();
+    for (;;) {
+        const j = tbl('jobs').find(x => x.id === jobId);
+        if (j && ['done', 'failed', 'paused', 'cancelled'].includes(j.status)) return j;
+        if (Date.now() - t0 > ms) return j || { status: 'missing' };
+        await new Promise(r => setTimeout(r, 40));
+    }
+}
+test('the run is queued under the client and finishes', async () => {
+    tbl('user_engine_access').push({ user_id: EMP.id, engine: 'meta_owned' });
+    const old = tbl('jobs').find(j => j.id === state.job); if (old) old.status = 'done';   // free the slot
+    state.moConn = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, page_id: GRAPH.PAGE, page_name: 'Harbor Cafe', ig_user_id: GRAPH.IG, ig_username: 'harborcafe', page_token_enc: 'plain-page-token', status: 'active', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(state.moConn);
+    GEMINI.script = [{ parts: [{ text: JSON.stringify({
+        headline: 'August was the strongest month for reach.', executive_summary: 'Reach rose 47% to 41,820.',
+        what_moved: ['Reach up 47%'], what_worked: ['Reels'], what_did_not: ['Nothing stood out'],
+        audience: 'Mostly 25-34, in Boston.', next_month: ['Post eight Reels'], caveats: ''
+    }) }] }];
+    const r = await call('POST', '/api/meta/monthly', { token: 't-emp', body: { connectionId: state.moConn.id, month: '2026-08', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `the job ended ${job.status}: ${job.error || ''}`);
+    assert.strictEqual(job.client_id, state.C, 'the monthly run was not filed under the client');
+    state.moReport = job.result_report_id;
+    assert.ok(state.moReport, 'no report id on the finished job');
+});
+test('the report carries this month against last, with the arithmetic a client could check', async () => {
+    const rep = tbl('reports').find(x => x.id === state.moReport);
+    assert.ok(rep, 'no report row');
+    assert.strictEqual(rep.report_type, 'meta_monthly');
+    assert.strictEqual(rep.client_id, state.C);
+    assert.strictEqual(rep.snapshot_date, '2026-08-01', 'sorted by the month reported, not the day it ran');
+    const d = Object.fromEntries(rep.report_json.deltas.map(x => [x.key, x]));
+    assert.strictEqual(d.reach.now, 41820); assert.strictEqual(d.reach.before, 28410);
+    assert.strictEqual(d.reach.pct, 47.2); assert.strictEqual(d.reach.kind, 'up');
+    assert.strictEqual(d.follower_count.kind, 'new', 'zero last month must read as new');
+    assert.strictEqual(d.follower_count.pct, null, 'never a percentage against zero');
+    assert.strictEqual(d.accounts_engaged.kind, 'flat', '3160 to 3180 is not a movement');
+    assert.strictEqual(d.total_interactions.kind, 'down');
+    assert.strictEqual(d.page_impressions_unique.now, 8120);
+    assert.strictEqual(rep.report_json.posting.count, 1, 'only the August post belongs to August');
+    assert.strictEqual(rep.report_json.posting.topByReach[0].reach, 11240);
+    assert.deepStrictEqual(rep.report_json.demographics.age.map(x => x.key), ['25-34', '35-44']);
+    assert.strictEqual(rep.ai_json.headline, 'August was the strongest month for reach.');
+    assert.strictEqual(rep.report_json.sources.all, 'meta_owner_insights', 'nothing scraped may be in here');
+});
+test('a month still running is refused; a stranger cannot use the connection', async () => {
+    const cur = new Date().toISOString().slice(0, 7);
+    const r = await call('POST', '/api/meta/monthly', { token: 't-emp', body: { connectionId: state.moConn.id, month: cur, clientId: state.C } });
+    assert.strictEqual(r.statusCode, 400, JSON.stringify(r.body));
+    const s = await call('POST', '/api/meta/monthly', { token: 't-emp2', body: { connectionId: state.moConn.id, month: '2026-08', clientId: state.C } });
+    assert.ok(s.statusCode === 403 || s.statusCode === 404, 'a stranger reached another employee\'s connection: ' + s.statusCode);
+});
+test('the analyst reads the month back with the same numbers', async () => {
+    GEMINI.script = [
+        { parts: [{ functionCall: { name: 'get_monthly_report', args: { month: '2026-08' } } }] },
+        { parts: [{ text: 'In August reach rose 47% to 41,820 accounts.' }] }
+    ];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'How did August go?', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual(r.body.used, ['get_monthly_report']);
+    const fr = GEMINI.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse).functionResponse.response.result;
+    assert.strictEqual(fr.available, true);
+    const reach = fr.movements.find(m => m.metric === 'Accounts reached');
+    assert.strictEqual(reach.changePct, 47.2, 'the assistant must see the same arithmetic the report holds');
 });
 
 section('\nrate limits do not bleed between routes');

@@ -76,10 +76,18 @@
     <p id="contact"></p>
 </main>
 <script>
-    const CONTACT_EMAIL = '';
-    document.getElementById('contact').innerHTML = CONTACT_EMAIL
-        ? `<a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>`
-        : 'Contact your account administrator, who can reach the EdgeLead team.';
+    (async () => {
+        const el = document.getElementById('contact');
+        el.textContent = 'Contact your account administrator, who can reach the EdgeLead team.';
+        try {
+            const r = await fetch('https://leadgen-backend-1-mgzc.onrender.com/api/public/contact');
+            const c = r.ok ? await r.json() : null;
+            if (c && c.email) {
+                const a = document.createElement('a'); a.href = 'mailto:' + c.email; a.textContent = c.email;
+                el.textContent = ''; el.appendChild(a);
+            }
+        } catch { /* the fallback line stands */ }
+    })();
 </script>
 </body>
 </html>

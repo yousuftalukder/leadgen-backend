@@ -17,6 +17,16 @@
     .bucket { margin-bottom: 30px; }
     .bucket:last-child { margin-bottom: 0; }
     .tag-want { background: rgba(217,181,108,0.2); color: var(--accent-solid); }
+    .funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .funnel-tile { padding: 12px 14px; border-radius: var(--r-md); background: rgba(255,255,255,0.035);
+        border: 1px solid var(--card-border); }
+    .funnel-tile .k { font-size: 0.66rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+    .funnel-tile .v { font-size: 1.5rem; font-weight: 800; margin-top: 4px; letter-spacing: -0.02em; }
+    .funnel-tile .s { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; }
+    .funnel-tile.is-hot { border-color: rgba(217,181,108,0.45); }
+    .funnel-tile.is-hot .v { color: var(--accent-solid); }
+    .funnel-tile.is-link { cursor: pointer; }
+    .funnel-tile.is-link:hover { background: rgba(217,181,108,0.08); }
     .bucket-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
         margin-bottom: 12px; padding-bottom: 9px; border-bottom: 1px solid var(--card-border); }
     .bucket-head h3 { font-size: 0.96rem; font-weight: 800; letter-spacing: -0.01em; }
@@ -146,6 +156,10 @@
                 </div>
                 <button class="btn-secondary" type="button" id="reload-users">Refresh</button>
             </div>
+            <!-- The business in five numbers. Single values wear stat tiles;
+                 there is nothing here to compare along an axis. "Waiting" is
+                 a button: it jumps to the first client who asked. -->
+            <div class="funnel" id="funnel" hidden></div>
             <div id="users-list" class="empty">Loading people…</div>
         </div>
     </section>
@@ -252,7 +266,17 @@
                 that stops one account draining the shared pool.</p>
             <div class="field-grid" id="pl-paid"></div>
 
-            <button class="btn-primary" type="button" id="pl-save" style="max-width:260px">Save limits</button>
+            <h3 class="block-title">Contact &amp; ways to pay</h3>
+            <p class="card-subtitle" style="margin-bottom:12px">Shown to clients wherever they are asked to continue — the
+                trial banner, the expired screen, the request confirmation — and on the privacy and terms pages. Money is
+                collected outside the product; this is how you tell them where to send it.</p>
+            <label for="pl-email">Contact email</label>
+            <input type="email" id="pl-email" placeholder="hello@youragency.com" style="max-width:360px">
+            <label>Ways to pay</label>
+            <div id="pl-pay"></div>
+            <button class="btn-secondary btn-mini" type="button" id="pl-pay-add" style="margin-top:8px">+ Add a way to pay</button>
+
+            <button class="btn-primary" type="button" id="pl-save" style="max-width:260px">Save</button>
             <div class="note" id="pl-note"></div>
         </div>
     </section>
@@ -421,6 +445,9 @@
             const d = await EL.api('/api/admin/settings');
             PLAN_METRICS = d.metrics || [];
             $('pl-days').value = d.trialDays;
+            $('pl-email').value = d.contactEmail || '';
+            $('pl-pay').innerHTML = (d.paymentOptions || []).map(payRow).join('');
+            wirePayRows();
 
             const fields = (hostId, caps) => {
                 $(hostId).innerHTML = PLAN_METRICS.map(m => {
@@ -445,6 +472,32 @@
         }
     }
 
+    /** One way to pay: a label, the details, an optional link. */
+    function payRow(o = {}) {
+        return `<div class="pay-row" style="display:grid;grid-template-columns:150px 1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px">
+            <input type="text" data-pay="label" placeholder="bKash / Bank / Card" value="${esc(o.label || '')}">
+            <input type="text" data-pay="details" placeholder="account number, name, reference" value="${esc(o.details || '')}">
+            <input type="url" data-pay="url" placeholder="https:// (optional payment link)" value="${esc(o.url || '')}">
+            <button class="btn-secondary btn-mini" type="button" data-pay-remove title="Remove">✕</button>
+        </div>`;
+    }
+    function wirePayRows() {
+        document.querySelectorAll('#pl-pay [data-pay-remove]').forEach(b =>
+            b.addEventListener('click', () => b.closest('.pay-row').remove()));
+    }
+    function readPay() {
+        return [...document.querySelectorAll('#pl-pay .pay-row')].map(row => ({
+            label: row.querySelector('[data-pay="label"]').value.trim(),
+            details: row.querySelector('[data-pay="details"]').value.trim(),
+            url: row.querySelector('[data-pay="url"]').value.trim()
+        })).filter(o => o.label || o.details);
+    }
+    if ($('pl-pay-add')) $('pl-pay-add').addEventListener('click', () => {
+        if (document.querySelectorAll('#pl-pay .pay-row').length >= 6) return;
+        $('pl-pay').insertAdjacentHTML('beforeend', payRow());
+        wirePayRows();
+    });
+
     function readCaps(hostId) {
         const out = {};
         document.querySelectorAll(`#${hostId} input[data-cap]`).forEach(i => {
@@ -463,20 +516,59 @@
                 body: {
                     trialDays: Number($('pl-days').value),
                     trialCaps: readCaps('pl-trial'),
-                    clientMonthlyCaps: readCaps('pl-paid')
+                    clientMonthlyCaps: readCaps('pl-paid'),
+                    contactEmail: $('pl-email').value.trim(),
+                    paymentOptions: readPay()
                 }
             });
-            say($('pl-note'), 'Saved. Every account on these plans is governed by the new numbers now.', true);
+            say($('pl-note'), 'Saved. The limits govern every account on these plans now, and the contact details show wherever a client is asked to continue.', true);
         } catch (err) {
             say($('pl-note'), err.message, false);
         } finally { btn.disabled = false; }
     });
+
+    /**
+     * Try free, then buy — as five counts. Computed from the same rows the
+     * buckets draw, so the strip can never disagree with the list under it.
+     */
+    function renderFunnel(users) {
+        const host = $('funnel');
+        if (!host) return;
+        const clients = users.filter(u => u.role === 'client');
+        const inDays = (iso, n) => { if (!iso) return false; const d = (new Date(iso).getTime() - Date.now()) / 86400000; return d >= 0 && d <= n; };
+        const counts = {
+            trial:   clients.filter(u => u.state === 'trial').length,
+            soon:    clients.filter(u => u.state === 'trial' && inDays(u.trial_ends_at, 7)).length,
+            waiting: clients.filter(u => u.activation_requested_at).length,
+            paid:    clients.filter(u => u.state === 'paid').length,
+            lapsed:  clients.filter(u => u.state === 'expired').length
+        };
+        if (!clients.length) { host.hidden = true; return; }
+        host.hidden = false;
+        const tile = (k, label, n, sub, hot) => `<div class="funnel-tile ${hot && n ? 'is-hot' : ''}" data-funnel="${k}">
+            <div class="k">${label}</div><div class="v">${n}</div><div class="s">${sub}</div></div>`;
+        host.innerHTML =
+            tile('trial',   'On trial',            counts.trial,   'right now') +
+            tile('soon',    'Ending this week',    counts.soon,    'trial ends in 7 days', true) +
+            tile('waiting', 'Waiting to continue', counts.waiting, 'asked, not yet activated', true) +
+            tile('paid',    'Paying',              counts.paid,    'active plan') +
+            tile('lapsed',  'Lapsed',              counts.lapsed,  'trial or plan ended');
+        const w = host.querySelector('[data-funnel="waiting"]');
+        if (w && counts.waiting) {
+            w.classList.add('is-link'); w.title = 'Jump to the first one';
+            w.addEventListener('click', () => {
+                const row = document.querySelector('.tag-want')?.closest('.user-row');
+                if (row) { row.open = true; row.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+            });
+        }
+    }
 
     async function loadUsers() {
         const box = $('users-list');
         try {
             const { users, allEngines } = await EL.api('/api/admin/users');
             ALL_ENGINES = allEngines || [];
+            renderFunnel(users);
             // The create form is rendered here too, so it can never offer a
             // different set of engines from the edit rows below it.
             const nu = $('nu-engines');

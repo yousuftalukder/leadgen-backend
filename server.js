@@ -3613,6 +3613,37 @@ async function defaultCaps(state) {
     return v;
 }
 
+/**
+ * The contact email and the ways to pay, as the admin set them. (phase 27)
+ *
+ * Money is collected outside the product by decision — which only works if
+ * the client is told where to send it. These are read by every place a
+ * client is asked to continue, and by the privacy and terms pages. Cached
+ * with the caps; PATCH /api/admin/settings clears the same cache.
+ */
+async function contactSettings() {
+    const hit = _capsCache.get('contact');
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
+    const { data } = await supabase.from('system_settings').select('key, value').in('key', ['contact_email', 'payment_options']);
+    const raw = Object.fromEntries((data || []).map(r => [r.key, r.value]));
+    let options = [];
+    try { const p = raw.payment_options ? JSON.parse(raw.payment_options) : []; options = Array.isArray(p) ? p : []; } catch { options = []; }
+    const v = { email: String(raw.contact_email || '').trim(), paymentOptions: options };
+    _capsCache.set('contact', { v, t: Date.now() });
+    return v;
+}
+
+/** One way to pay, cleaned. Null if there is nothing usable in it. */
+function cleanPaymentOption(o) {
+    if (!o || typeof o !== 'object') return null;
+    const label = String(o.label || '').trim().slice(0, 40);
+    const details = String(o.details || '').trim().slice(0, 300);
+    const url = String(o.url || '').trim().slice(0, 300);
+    if (!label && !details) return null;
+    if (url && !/^https?:\/\//i.test(url)) return { error: `"${label || details}" has a link that is not http(s).` };
+    return { label: label || 'Pay', details, ...(url ? { url } : {}) };
+}
+
 /** Length of the free trial, in days. Read once per cache window. */
 async function trialDaysSetting() {
     const hit = _capsCache.get('trial_days');
@@ -5785,6 +5816,11 @@ const QUOTA_METRICS = [
     { key: 'usd',            label: 'Apify spend ceiling', kind: 'usd'   }
 ];
 
+/** Public: what a client — signed in, lapsed, or reading the privacy page — needs to reach us or pay. */
+app.get('/api/public/contact', publicLimit, async (req, res) => {
+    try { res.json(await contactSettings()); } catch (err) { sendErr(res, err); }
+});
+
 app.get('/api/admin/settings', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
@@ -5804,6 +5840,7 @@ app.get('/api/admin/settings', async (req, res) => {
             clientMonthlyCaps: parse(raw.client_monthly_caps, QUOTA_FALLBACK.paid),
             metrics: QUOTA_METRICS,
             fallbacks: QUOTA_FALLBACK,
+            ...(await contactSettings().then(c => ({ contactEmail: c.email, paymentOptions: c.paymentOptions }))),
             // Says out loud when a value is the built-in fallback rather than
             // something anyone chose, so an unset limit does not look decided.
             stored: { trial_days: raw.trial_days != null, trial_caps: raw.trial_caps != null, client_monthly_caps: raw.client_monthly_caps != null }
@@ -5841,6 +5878,23 @@ app.patch('/api/admin/settings', async (req, res) => {
             const caps = cleanCaps(req.body[field]);
             if (!caps) return res.status(400).json({ error: `No usable values for ${key}.` });
             writes.push({ key, value: JSON.stringify(caps) });
+        }
+        if (req.body.contactEmail !== undefined) {
+            const email = String(req.body.contactEmail || '').trim().toLowerCase().slice(0, 120);
+            if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                return res.status(400).json({ error: 'That does not look like an email address.' });
+            }
+            writes.push({ key: 'contact_email', value: email });
+        }
+        if (req.body.paymentOptions !== undefined) {
+            const list = Array.isArray(req.body.paymentOptions) ? req.body.paymentOptions : [];
+            const cleaned = [];
+            for (const o of list.slice(0, 6)) {
+                const c = cleanPaymentOption(o);
+                if (c && c.error) return res.status(400).json({ error: c.error });
+                if (c) cleaned.push(c);
+            }
+            writes.push({ key: 'payment_options', value: JSON.stringify(cleaned) });
         }
         if (!writes.length) return res.status(400).json({ error: 'Nothing to change.' });
 
@@ -15588,5 +15642,7 @@ module.exports = {
     // phase 24
     metaParseSignedRequest, metaDeleteUserData,
     // phase 26
-    auth
+    auth,
+    // phase 27
+    contactSettings, cleanPaymentOption
 };

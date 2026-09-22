@@ -659,6 +659,19 @@ tbody tr:last-child td { border-bottom: none; }
     font-size: 0.66rem; font-weight: 800; text-align: center; line-height: 1.5;
     background: var(--accent-glow); color: var(--on-accent); }
 
+/* ---- the how-to-continue slot ----
+   One renderer, four places: the trial banner, the expired screen, the
+   request confirmation, the legal pages' contact line. */
+.el-contact-slot { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; font-size: 0.85rem;
+    color: var(--text-secondary); text-align: left; }
+.el-contact-slot .el-btn { align-self: flex-start; }
+.el-pay ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.el-pay li { padding: 7px 10px; border-radius: var(--r-sm); background: rgba(255,255,255,0.04);
+    border: 1px solid var(--card-border); line-height: 1.5; }
+.el-pay li b { color: var(--text-primary); }
+.el-pay a { color: var(--accent-solid); font-weight: 700; text-decoration: none; }
+.el-plan .el-contact-slot { flex-basis: 100%; margin-top: 8px; }
+
 /* ---- the trial banner's one action ----
    The moment the business model turns on. Quiet until the last two days,
    when the banner itself goes urgent and the button goes with it. */

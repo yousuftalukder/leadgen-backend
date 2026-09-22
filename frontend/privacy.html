@@ -91,12 +91,20 @@
     <p id="contact"></p>
 </main>
 <script>
-    // The same convention as header.js: set the address once and the page
-    // uses it; leave it blank and the page says how else to reach us.
-    const CONTACT_EMAIL = '';
-    document.getElementById('contact').innerHTML = CONTACT_EMAIL
-        ? `Questions or requests: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>.`
-        : 'Questions or requests: contact your account administrator, who can reach the EdgeLead team.';
+    // The address the admin set in the product, read from the same public
+    // endpoint every other slot reads. No account needed to see it.
+    (async () => {
+        const el = document.getElementById('contact');
+        el.textContent = 'Questions or requests: contact your account administrator, who can reach the EdgeLead team.';
+        try {
+            const r = await fetch('https://leadgen-backend-1-mgzc.onrender.com/api/public/contact');
+            const c = r.ok ? await r.json() : null;
+            if (c && c.email) {
+                const a = document.createElement('a'); a.href = 'mailto:' + c.email; a.textContent = c.email;
+                el.textContent = 'Questions or requests: '; el.appendChild(a); el.appendChild(document.createTextNode('.'));
+            }
+        } catch { /* the fallback line stands */ }
+    })();
 </script>
 </body>
 </html>
