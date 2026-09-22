@@ -26,7 +26,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const SERVER = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+// Phase 31: the Owner Assistant's routes are registered from xp/index.js, so its
+// source is part of "the server" for every check that reads route registrations.
+const SERVER = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8') + '\n' + fs.readFileSync(path.join(ROOT, 'xp', 'index.js'), 'utf8');
 const FRONT_DIR = path.join(ROOT, 'frontend');
 const PAGES = fs.readdirSync(FRONT_DIR).filter(f => f.endsWith('.html'));
 const HEADER = fs.readFileSync(path.join(FRONT_DIR, 'header.js'), 'utf8');

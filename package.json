@@ -1,6 +1,6 @@
 {
   "name": "edgelead-backend",
-  "version": "29.0.0",
+  "version": "31.0.0",
   "private": true,
   "description": "EdgeLead — social media intelligence and reporting for SMM freelancers. Single-file Express backend.",
   "main": "server.js",
@@ -20,6 +20,10 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "nodemailer": "^6.10.0 || ^7.0.0"
+    "nodemailer": "^6.10.0 || ^7.0.0",
+    "@google/genai": "^2.18.0",
+    "axios": "^1.19.0",
+    "luxon": "^3.6.1",
+    "node-cron": "^3.0.3"
   }
 }

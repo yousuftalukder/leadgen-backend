@@ -62,6 +62,9 @@ const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 require('dotenv').config();
+// The XpulseAI Owner Assistant, copied under xp/ (phase 31). Its routes are
+// mounted at the end of this file, its cron started with the schedulers.
+const xp = require('./xp');
 
 // Per-request / per-job context. Lets deep helpers (the Gemini pool) know
 // which user a call is for without threading userId through every signature.
@@ -16150,6 +16153,9 @@ async function start() {
             setTimeout(() => metaDailyTick().catch(() => {}), 45000).unref?.();
             setInterval(() => metaDailyTick().catch(() => {}), Math.max(60000, META_DAILY_POLL_MS)).unref?.();
         }
+        // Phase 31: XpulseAI's warehouse sync on its own clock (09:00 and 21:00 UTC),
+        // and the boot-time pass that provisions every connected client into it.
+        try { logger.info('xp_start', xp.start()); } catch (e) { logger.error('xp_start_failed', { message: e.message }); }
         logger.info('phase11_ready', { instance: INSTANCE_ID, scheduler: SCHEDULER_ENABLED, pollMs: SCHEDULER_POLL_MS });
     });
 
@@ -16218,6 +16224,11 @@ if (require.main === module) {
 // server or touching Supabase. Nothing here changes runtime behaviour.
 // Every route above is registered. From here an uncaught exception is a
 // runtime fault to log and survive, not a boot failure to die on.
+
+// Phase 31: the Owner Assistant's routes (chat, conversations, status, sync),
+// behind EdgeLead's own auth and client access.
+xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger });
+
 BOOTED = true;
 
 module.exports = {

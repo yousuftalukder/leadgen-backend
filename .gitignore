@@ -5,3 +5,6 @@ node_modules/
 .DS_Store
 patch/
 /docs/LIVE-CHECKS-*.md.tmp
+
+# XpulseAI cassettes: recordings of a real account, kept out of the public repository (copy from the XpulseAI checkout to run xp/scripts/replay.js)
+xp/fixtures/

@@ -139,7 +139,7 @@ Three rules the arrows enforce:
 | C1 | Sign up → 7-day trial → I am my own business from the first login | **E2E** | `usecases` — *a business signs itself up* |
 | C2 | See my reports in owner language — Instagram banded and ranked; Facebook, owner and monthly reports as headline, what is working, what to change | **E2E** | `usecases` — *the client surface names every kind of report*: titles for every stored type; a Page report and a monthly report open as points, with no invented standing; an Instagram report still bands and ranks |
 | C3 | Draw a limited number of leads; audit a limited number of groups; stay under a dollar ceiling | **UNIT** | `phase13` — 32 checks on caps, periods, refunds |
-| C4 | Ask the assistant — the owner assistant, exactly the analyst's engine, tools and numbers, in the owner register | **E2E** | `usecases` — *the owner assistant reads the Meta its agency connected*: a client's question is scoped to its own business, the connection its agency made counts, the daily numbers are offered, the thread is filed under the business; *a client account is answered in the owner register, about itself* |
+| C4 | Ask the Owner Assistant — XpulseAI's, copied in whole: its warehouse of my own Meta numbers, its nineteen SQL-backed tools, its persona, its figure panels, its streamed answer; fed by the connection my agency made here | **E2E** | `usecases` — *the Owner Assistant (XpulseAI) reads the connection the agency made*: the client and its connection become an XpulseAI client, a Page asset and an Instagram asset, with the tokens re-sealed, twice is once; the client sees what the warehouse holds; *the Owner Assistant answers, XpulseAI's way*: the prompt is XpulseAI's own persona naming the business, 17 of its 19 tools offered (ads and influencers only when asked about), a tool round trip returns the daily series to the model with its thought signature echoed and a *Day by day* panel comes back, the streamed answer arrives as status, text and done, threads are listed, opened with the panels rebuilt, renamed and soft-deleted; *the walls hold*: a stranger, another business's threads, a question over 2,000 characters, a business with no connection (409, the model never called), admin health for admins only. The sync itself: XpulseAI's cassette replay, idempotent here (see the measurement) |
 | C5 | Connect my own Meta from My Reports and get the owner assistant | **BUILT** / **PARTIAL** | *Connect Meta* on the client dashboard files the connection under the client's own business and lands them back on it. Works for accounts with a role on the Meta app; the privacy, terms and data-deletion pages and the deletion callback App Review asks for exist; **public self-serve still needs the review itself** |
 | C6 | Be taken on by an agency and see the work they do for me | **E2E** | `usecases` — *the agency takes that business on* |
 | C7 | Lapse → refused with `account_expired`; be re-activated by an admin | **E2E** (refusal) / **BUILT** (activation) | `usecases` — *the account states a client can be in* |
@@ -165,6 +165,7 @@ Three rules the arrows enforce:
 | S3 | One Render instance; a second one alarms | **LIVE-ONLY** | heartbeat guard, `/api/health` |
 | S4 | Rate limits are per route: a page-load's reads never lock a job start; public traffic never locks the assistant | **E2E** | `usecases` — *rate limits do not bleed between routes*. Found by the assistant flow: every limiter shared one bucket by key, so six reads in a minute made the next job start a 429 |
 | S5 | Every active Meta connection is read once a day, by itself; a refused token expires the connection and nothing throws | **E2E** | `usecases` — *the hourly pass reads only what is due*; *a refused token marks the connection expired and never throws* |
+| S6 | The Owner Assistant's warehouse is read twice a day (09:00 and 21:00 UTC), a first read backfills 90 days and every post, a closed day is never rewritten, and every EdgeLead client with a connection is provisioned before each pass | **E2E** (provisioning, the 409 gate, the sync's access rules) / **UNIT** (the read, by XpulseAI's cassette replay) / **LIVE-ONLY** (the timer, and Meta itself) | `usecases` — provisioning and re-provisioning; `xp/scripts/replay.js` against the recorded Instagram cassette, twice: the second run changes nothing and no closed row is touched |
 
 ---
 
@@ -183,15 +184,17 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 116 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
+| `tests/usecases.test.js` | 126 | The workflows above marked E2E, as a person would do them — including both assistants, against scripted models whose every request the test reads back |
 | `tests/wiring.test.js` | 38 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~220 | The logic inside each engine |
 | `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
+| `xp/scripts/replay.js` | — | XpulseAI's own harness, copied: the Owner Assistant's sync replayed against a recorded Meta cassette, twice, then finalised. *IDEMPOTENT — the second run changed nothing; no finalized row was touched.* Run by hand: `node xp/scripts/replay.js replay xp/fixtures/ig-shaking-seafood-salem-nh.json --twice --finalize`; the cassette is XpulseAI's private recording and is not in this public repository |
 
 **How the counting is kept honest:** the runner treats a test file that exits cleanly without a result line as a failure. It did not always; when `server.js` once threw at load and its crash handler exited 0, eleven files reported "ok" having run nothing. The server now exits non-zero on any exception before boot completes, so that state cannot deploy either.
 
 **Where the model is still unproven in production:** no engine has been run end to end inside a
 test (they spend Apify credit), the client surface has never rendered for a real client-role
-session, and Meta has never completed a connection. Everything in the E2E column has a second human
+session, Meta has never completed a connection, and the Owner Assistant's twice-daily read has never
+run against a live Page here (its sync is proven by XpulseAI's cassette replay, not by this deployment). Everything in the E2E column has a second human
 in the loop *inside the test*; nothing yet has one outside it.

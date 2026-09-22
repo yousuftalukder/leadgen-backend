@@ -180,6 +180,14 @@ for (const m of ['get', 'post', 'patch', 'put', 'delete']) {
 // and the transport options it was built with, so a test can read the
 // address, the credentials and the text the server actually sent.
 const MAIL = { sent: [], fail: null };
+// ---------------------------------------------------------------------------
+// A GEMINI SDK THAT SAYS WHAT THE TEST TELLS IT TO (phase 31)
+//
+// XpulseAI's chat calls Gemini through the @google/genai SDK, streamed. Same
+// idea as GEMINI below: the test scripts each turn's parts, and every request
+// is kept, so scope is proven by what reached the model.
+// ---------------------------------------------------------------------------
+const XP = { script: [], requests: [] };
 const stubs = {
     nodemailer: {
         createTransport: (opts) => ({
@@ -194,7 +202,24 @@ const stubs = {
     cors: () => () => {},
     'apify-client': { ApifyClient: class {} },
     '@supabase/supabase-js': { createClient: () => fakeSupabase },
-    dotenv: { config() {} }
+    dotenv: { config() {} },
+    '@google/genai': { GoogleGenAI: class {
+        constructor() {
+            this.models = {
+                generateContentStream: async (req) => {
+                    XP.requests.push(req);
+                    let next = XP.script.shift();
+                    if (!next) throw new Error('the test scripted no reply for this turn');
+                    if (typeof next === 'function') next = next(req);
+                    const chunks = [].concat(next).map((c, i, all) => ({
+                        candidates: [{ content: { role: 'model', parts: c.parts }, finishReason: i === all.length - 1 ? 'STOP' : undefined }],
+                        usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20 }
+                    }));
+                    return (async function* () { for (const c of chunks) yield c; })();
+                }
+            };
+        }
+    } }
 };
 const realLoad = Module._load;
 Module._load = function (req, ...rest) { return stubs[req] !== undefined ? stubs[req] : realLoad.call(this, req, ...rest); };
@@ -323,11 +348,12 @@ async function call(method, p, { token, body, query } = {}) {
         get(h) { return this.headers[String(h).toLowerCase()]; }
     };
     const res = {
-        statusCode: 200, body: null, headers: {}, sent: false,
+        statusCode: 200, body: null, headers: {}, sent: false, writes: [], writableEnded: false,
         status(c) { this.statusCode = c; return this; },
         json(b) { this.body = b; this.sent = true; return this; },
         send(b) { this.body = b; this.sent = true; return this; },
-        end() { this.sent = true; }, write() {}, flushHeaders() {}, on() {},
+        end(b) { if (b !== undefined) this.write(b); this.sent = true; this.writableEnded = true; },
+        write(b) { this.writes.push(String(b)); }, flushHeaders() {}, on() {},
         setHeader(k, v) { this.headers[k] = v; },
         set(k, v) { if (typeof k === 'object') Object.assign(this.headers, k); else this.headers[k] = v; return this; },
         get(k) { return this.headers[k]; },
@@ -1601,6 +1627,188 @@ test('a refused token marks the connection expired and never throws', async () =
     assert.ok(/access token/i.test(state.moConn.daily_error || ''), state.moConn.daily_error);
     GRAPH.fail = null; GRAPH.daily = null; GRAPH.igFollowers = null;
     state.moConn.status = 'active'; state.moConn.daily_error = null;
+});
+
+// ===========================================================================
+// PHASE 31 — the Owner Assistant is XpulseAI's, copied in whole; EdgeLead's
+// connection feeds it. What is tested is the seam: provisioning, access,
+// and that the answer really comes from XpulseAI's chat.
+// ===========================================================================
+const xp = require(path.join(__dirname, '..', 'xp'));
+const xpSec = require(path.join(__dirname, '..', 'xp', 'security'));
+section('\nthe Owner Assistant (XpulseAI) reads the connection the agency made');
+test('provisioning turns the client and its connection into an XpulseAI client, a Page asset and an Instagram asset', async () => {
+    const r = await xp.provisionClient(state.C);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.connections, 1);
+    assert.strictEqual(r.assets, 2);
+    const xc = tbl('xp_clients').find(x => x.id === state.C);
+    assert.ok(xc, 'no xp_clients row');
+    assert.strictEqual(xc.client_name, 'Harbor Cafe');
+    assert.strictEqual(xc.is_active, true);
+    assert.strictEqual(xc.timezone, xp.cfg.defaultClientTz);
+    const conn = tbl('xp_meta_connections').find(x => x.el_connection_id === state.moConn.id);
+    assert.ok(conn, 'the connection was not carried across');
+    assert.notStrictEqual(conn.token_enc, 'plain-page-token', 'the token must be sealed with the assistant\'s key');
+    assert.strictEqual(xpSec.decrypt(conn.token_enc), 'plain-page-token');
+    const fb = tbl('xp_meta_assets').find(x => x.client_id === state.C && x.platform === 'FB');
+    const ig = tbl('xp_meta_assets').find(x => x.client_id === state.C && x.platform === 'IG');
+    assert.ok(fb && fb.asset_id === GRAPH.PAGE, 'no Page asset');
+    assert.strictEqual(xpSec.decrypt(fb.access_token_enc), 'plain-page-token');
+    assert.ok(ig && ig.asset_id === GRAPH.IG, 'no Instagram asset');
+    assert.strictEqual(ig.username, 'harborcafe');
+    assert.strictEqual(ig.linked_asset_id, fb.id, 'the Instagram asset hangs off the Page');
+});
+test('provisioning again changes nothing: one connection, two assets', async () => {
+    const r = await xp.provisionClient(state.C);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(tbl('xp_meta_connections').filter(x => x.client_id === state.C).length, 1);
+    assert.strictEqual(tbl('xp_meta_assets').filter(x => x.client_id === state.C).length, 2);
+});
+test('the client sees what the warehouse holds for it; a stranger sees nothing', async () => {
+    const r = await call('GET', '/api/xp/status', { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.provisioned, true);
+    assert.strictEqual(r.body.assets.length, 2);
+    assert.strictEqual(r.body.running, false);
+    assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
+    assert.strictEqual(r.body.model, xp.cfg.gemini.model);
+    const s = await call('GET', '/api/xp/status', { token: 't-stranger', query: { client_id: state.C } });
+    assert.strictEqual(s.statusCode, 403, JSON.stringify(s.body));
+});
+
+section('\nthe Owner Assistant answers, XpulseAI\'s way');
+test('a client asking is answered by XpulseAI\'s Owner Assistant, scoped to its own business', async () => {
+    XP.script = [{ parts: [{ text: 'Reach is up this week.' }] }];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'How is my reach this week?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.reply, 'Reach is up this week.');
+    assert.ok(r.body.conversationId, 'no conversation id');
+    const req = XP.requests[0];
+    assert.strictEqual(req.model, xp.cfg.gemini.model);
+    const sys = String(req.config.systemInstruction);
+    assert.ok(/You are Owner Assistant, powered by XPulse\.inc/.test(sys), 'XpulseAI\'s own persona: ' + sys.slice(0, 200));
+    assert.ok(sys.includes('"Harbor Cafe"'), 'the prompt names the business');
+    assert.strictEqual(req.contents[req.contents.length - 1].parts[0].text, 'How is my reach this week?');
+    const decls = req.config.tools[0].functionDeclarations.map(d => d.name);
+    assert.ok(decls.includes('get_period_summary') && decls.includes('get_daily_series') && decls.includes('get_coverage'), decls.join(','));
+    assert.ok(!decls.includes('get_ad_performance'), 'the ads tool is offered only when ads are asked about');
+    assert.strictEqual(decls.length, 17, 'XpulseAI\'s tools, less the two gated ones: ' + decls.join(','));
+    const conv = tbl('xp_ai_conversations').find(c => c.id === r.body.conversationId);
+    assert.ok(conv && conv.client_id === state.C, 'the thread is filed under the business');
+    assert.deepStrictEqual(tbl('xp_ai_messages').filter(m => m.conversation_id === conv.id).map(m => m.role), ['user', 'assistant']);
+    state.xpConv = conv.id;
+});
+test('a tool round trip: the model asks for the daily series, the warehouse answers, a figure panel comes back', async () => {
+    const start = dd(-7), end = dd(-1);
+    for (let i = 7; i >= 1; i--) {
+        tbl('xp_v_client_day_summary').push({ client_id: state.C, platform: 'IG', day: dd(-i), posts_published: i === 3 ? 1 : 0,
+            followers_total: 9240 - i, account_reach: 1000 + i * 50, account_views: 3000 + i * 10, profile_views: 40, engagements: 70, is_final: i > 2 });
+    }
+    XP.script = [
+        { parts: [{ functionCall: { name: 'get_daily_series', args: { start, end } }, thoughtSignature: 'sig-1' }] },
+        { parts: [{ text: 'Your best day for reach was a week ago.' }] }
+    ];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Which day had the most reach?', conversationId: state.xpConv } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(XP.requests.length, 2, 'one tool round, then the answer');
+    const echoed = XP.requests[1].contents.find(c => c.role === 'model' && c.parts.some(p => p.functionCall));
+    assert.ok(echoed && echoed.parts[0].thoughtSignature === 'sig-1', 'the model\'s own turn goes back with its thought signature');
+    const fr = XP.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse);
+    assert.ok(fr, 'no tool result went back to the model');
+    assert.strictEqual(fr.functionResponse.name, 'get_daily_series');
+    assert.strictEqual(fr.functionResponse.response.result.length, 7);
+    assert.strictEqual(fr.functionResponse.response.result[0].account_reach, 1350, 'the rows come back oldest first');
+    assert.deepStrictEqual(r.body.toolCalls.map(t => t.name), ['get_daily_series']);
+    assert.strictEqual(r.body.charts.length, 1, JSON.stringify(r.body.charts));
+    const panel = r.body.charts[0];
+    assert.strictEqual(panel.kind, 'chart');
+    assert.strictEqual(panel.title, 'Day by day');
+    assert.strictEqual(panel.sections[0].series[0].label, 'Reach', 'the question named reach, so the chart opens on it');
+    assert.strictEqual(panel.sections[0].faded.filter(Boolean).length, 2, 'the two days Meta is still counting are drawn lighter');
+    assert.ok(Array.isArray(r.body.suggestions));
+    const saved = tbl('xp_ai_messages').filter(m => m.conversation_id === state.xpConv && m.role === 'assistant').pop();
+    assert.deepStrictEqual(saved.tool_calls, [{ name: 'get_daily_series', args: { start, end } }]);
+    assert.strictEqual(saved.tool_results[0].result.length, 7, 'the tool results are kept with the answer, so the panel can be rebuilt');
+});
+test('the streamed answer arrives as events: status while a tool runs, text as it comes, then done', async () => {
+    XP.script = [
+        { parts: [{ functionCall: { name: 'get_daily_series', args: { start: dd(-7), end: dd(-1) } } }] },
+        { parts: [{ text: 'Reach held ' }, { text: 'steady all week.' }] }
+    ];
+    const r = await call('POST', '/api/xp/chat/stream', { token: 't-client', body: { message: 'And views?', conversationId: state.xpConv } });
+    assert.strictEqual(r.statusCode, 200);
+    assert.ok(/text\/event-stream/.test(r.headers['Content-Type']), JSON.stringify(r.headers));
+    const events = r.writes.join('').split('\n\n').filter(f => f.startsWith('event: ')).map(f => {
+        const [e, d] = f.split('\n');
+        return { type: e.slice(7), data: JSON.parse(d.slice(6)) };
+    });
+    const types = events.map(e => e.type);
+    assert.ok(types.includes('status'), 'no status event while the tool ran: ' + types.join(','));
+    assert.strictEqual(events.filter(e => e.type === 'delta').map(e => e.data.text).join(''), 'Reach held steady all week.');
+    const done = events.find(e => e.type === 'done');
+    assert.ok(done, 'no done event: ' + types.join(','));
+    assert.strictEqual(done.data.conversationId, state.xpConv);
+    assert.strictEqual(done.data.reply, 'Reach held steady all week.');
+    assert.strictEqual(done.data.charts.length, 1);
+    assert.ok(r.writableEnded, 'the stream must be closed when the answer is done');
+});
+test('the client\'s threads are its own: listed, opened with the panels rebuilt, renamed, deleted', async () => {
+    const list = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-client' });
+    assert.strictEqual(list.statusCode, 200, JSON.stringify(list.body));
+    assert.ok(list.body.conversations.some(c => c.id === state.xpConv), 'the thread is not listed');
+    const one = await call('GET', `/api/xp/chat/${state.C}/conversations/${state.xpConv}`, { token: 't-client' });
+    assert.strictEqual(one.statusCode, 200, JSON.stringify(one.body));
+    assert.strictEqual(one.body.messages.length, 6, 'three questions, three answers');
+    const withChart = one.body.messages.filter(m => m.role === 'assistant' && m.charts.length);
+    assert.strictEqual(withChart.length, 2, 'the two answers that read the daily series get their panel back');
+    assert.strictEqual(withChart[0].charts[0].title, 'Day by day');
+    const ren = await call('PATCH', `/api/xp/chat/${state.C}/conversations/${state.xpConv}`, { token: 't-client', body: { title: '  Reach\u0000 this week  ' } });
+    assert.strictEqual(ren.statusCode, 200, JSON.stringify(ren.body));
+    assert.strictEqual(ren.body.title, 'Reach this week');
+    const del = await call('DELETE', `/api/xp/chat/${state.C}/conversations/${state.xpConv}`, { token: 't-client' });
+    assert.strictEqual(del.statusCode, 200, JSON.stringify(del.body));
+    const after = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-client' });
+    assert.ok(!after.body.conversations.some(c => c.id === state.xpConv), 'a deleted thread must not be listed');
+    const gone = await call('GET', `/api/xp/chat/${state.C}/conversations/${state.xpConv}`, { token: 't-client' });
+    assert.strictEqual(gone.statusCode, 404);
+    assert.ok(tbl('xp_ai_messages').some(m => m.conversation_id === state.xpConv), 'the rows stay: usage and cost figures count them');
+});
+
+section('\nthe walls hold around the Owner Assistant');
+test('a stranger is refused, another business\'s threads are not there, staff on the client may read', async () => {
+    const s = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-stranger' });
+    assert.strictEqual(s.statusCode, 403, JSON.stringify(s.body));
+    const other = await call('GET', `/api/xp/chat/${state.D}/conversations`, { token: 't-client' });
+    assert.strictEqual(other.statusCode, 404, 'a client asking about a business that is not its own');
+    const staff = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-emp' });
+    assert.strictEqual(staff.statusCode, 200, JSON.stringify(staff.body));
+    const ask = await call('POST', '/api/xp/chat', { token: 't-stranger', body: { message: 'Hi', clientId: state.C } });
+    assert.strictEqual(ask.statusCode, 403);
+    const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
+    assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
+});
+test('a business with no Meta connection is told to connect first, and has nothing to read', async () => {
+    XP.script = [{ parts: [{ text: 'never reached' }] }];
+    const r = await call('POST', '/api/xp/chat', { token: 't-emp', body: { message: 'How is my reach?', clientId: state.D } });
+    assert.strictEqual(r.statusCode, 409, JSON.stringify(r.body));
+    assert.ok(/Connect a Facebook Page/.test(r.body.error), r.body.error);
+    assert.strictEqual(XP.script.length, 1, 'the model must not be called');
+    XP.script.length = 0;
+    const s = await call('POST', '/api/xp/sync', { token: 't-emp', body: { clientId: state.D } });
+    assert.strictEqual(s.statusCode, 409, JSON.stringify(s.body));
+    const st = await call('POST', '/api/xp/sync', { token: 't-stranger', body: { clientId: state.C } });
+    assert.strictEqual(st.statusCode, 403);
+});
+test('the admin sees every asset\'s health and the last runs; an employee does not', async () => {
+    const r = await call('GET', '/api/xp/admin/health', { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(r.body.clients.some(c => c.id === state.C), 'the provisioned client is missing');
+    assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
+    const e = await call('GET', '/api/xp/admin/health', { token: 't-emp' });
+    assert.strictEqual(e.statusCode, 403);
 });
 
 (async () => {
