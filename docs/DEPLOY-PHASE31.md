@@ -98,3 +98,14 @@ answers when ad data exists), and the Apify influencer ingestion (the tables exi
   rotating it re-seals EdgeLead's rows through the existing rotation and the `xp_*` rows by
   re-provisioning (`POST /api/xp/admin/sync-all`).
 - **The daily question limit** (`CHAT_DAILY_LIMIT`) is off unless set, as in XpulseAI.
+
+## 31.3 — the client page (22 September 2026)
+
+- **Order.** On `clients.html` the tabs (Timeline, Meta connection, Leads, Comparison set, Sharing,
+  Automation) come first under the client's name; the details form (name, handles, niche, notes,
+  merge, archive, delete) is last. A new client still starts on the form, since it has nothing else yet.
+- **A report opens on the page.** A timeline row, or *Last report* on a schedule, opens a viewer over the
+  client page: the report's engine page embedded with `?embed=1`, which draws neither the rail nor the
+  plan banner nor the work-for bar (`EL.isEmbedded()`, `body.el-embed`). Same rendering, same *Save as
+  PDF* (the engine's own exporter with the cover page, or the browser's print where the engine has
+  none). *Open in its engine* is a deliberate new tab. Nothing navigates away from the client.

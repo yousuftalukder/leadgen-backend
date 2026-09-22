@@ -549,16 +549,23 @@
                 }
             }
 
-            renderShell(page, me);
-            renderPlanBanner(me);
-            // A client's pages are installable: the service worker for the
-            // shell, and one nudge to put it on the home screen. (phase 30)
-            if (me.role === 'client') { registerServiceWorker(); mountInstallNudge(); }
-            refreshStatus();
-            // A client-role account IS its business, so it is never asked
-            // which one. Everyone else is asked on every page where work starts.
-            if (me.role !== 'client' && WORK_PAGES.includes(currentPage(page))) mountWorkForHost();
-            EL._mountClientPicker().catch(() => {});
+            if (EL.isEmbedded()) {
+                // Inside the client page's report viewer (phase 31.3): the page's
+                // content alone, without the rail, the plan banner or the work-for
+                // bar. The access checks below still apply.
+                document.body.classList.add('el-embed');
+            } else {
+                renderShell(page, me);
+                renderPlanBanner(me);
+                // A client's pages are installable: the service worker for the
+                // shell, and one nudge to put it on the home screen. (phase 30)
+                if (me.role === 'client') { registerServiceWorker(); mountInstallNudge(); }
+                refreshStatus();
+                // A client-role account IS its business, so it is never asked
+                // which one. Everyone else is asked on every page where work starts.
+                if (me.role !== 'client' && WORK_PAGES.includes(currentPage(page))) mountWorkForHost();
+                EL._mountClientPicker().catch(() => {});
+            }
 
             const isAdmin = me.role === 'admin';
             if (requireAdmin && !isAdmin) {
@@ -721,6 +728,8 @@
             const v = new URLSearchParams(location.search).get('report') || '';
             return /^[0-9a-f-]{36}$/i.test(v) ? v : null;
         },
+        /** ?embed=1: this page is shown inside another page's viewer (the client timeline). */
+        isEmbedded() { return new URLSearchParams(location.search).get('embed') === '1'; },
 
         /** Draw attention to the picker after a refusal, then let it go. */
         _nudgeClient() {

@@ -42,6 +42,21 @@
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
     .tab { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; font-size: 0.8rem; font-family: inherit; }
     .tab.is-on { background: var(--accent-glow); color: #fff; border-color: transparent; }
+    .t-row.is-link { cursor: pointer; }
+    .t-row.is-link:hover { border-color: var(--accent-solid); }
+    /* the report viewer */
+    .rvw { position: fixed; inset: 0; z-index: 100000; }   /* above the rail and its scrim */
+    .rvw-scrim { position: absolute; inset: 0; background: rgba(2,8,6,0.72); }
+    .rvw-panel { position: absolute; inset: 24px; display: flex; flex-direction: column; border-radius: 14px; overflow: hidden;
+        background: var(--bg-color); border: 1px solid var(--card-border); box-shadow: 0 30px 80px rgba(0,0,0,0.6); }
+    .rvw-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px;
+        border-bottom: 1px solid var(--card-border); font-size: 0.9rem; }
+    .rvw-head b { color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .rvw-actions { display: flex; gap: 6px; flex: none; }
+    .rvw-actions a { text-decoration: none; }
+    #rv-frame { flex: 1; width: 100%; border: 0; background: var(--bg-color); }
+    body.rvw-open { overflow: hidden; }
+    @media (max-width: 720px) { .rvw-panel { inset: 0; border-radius: 0; } .rvw-head b { font-size: 0.82rem; } }
 </style>
 </head>
 <body>
@@ -91,36 +106,10 @@
     </div>
 
     <div id="detail">
-        <div class="card" id="form-card">
-            <h3 class="card-title" id="form-title">New client</h3>
-            <div class="meta-state" id="form-meta-state"></div>
-            <p class="card-subtitle">Only the name is required. Handles fill the audit forms automatically when this client is selected.</p>
-            <div class="field-grid">
-                <div><label>Client name *</label><input type="text" id="f-name" placeholder="e.g. Rangpur Solar Ltd"></div>
-                <div><label>Brand / product</label><input type="text" id="f-brand" placeholder="optional"></div>
-                <div><label>Instagram handle</label><input type="text" id="f-ig" placeholder="@handle"></div>
-                <div><label>Facebook Page (name or URL)</label><input type="text" id="f-fb" placeholder="facebook.com/page"></div>
-                <div><label>Niche</label><input type="text" id="f-niche" placeholder="e.g. home solar"></div>
-                <div><label>Location</label><input type="text" id="f-location" placeholder="e.g. Rangpur"></div>
-            </div>
-            <label>Notes</label>
-            <textarea id="f-notes" placeholder="Brief, goals, what the client cares about, what to avoid."></textarea>
-            <div class="row-actions" id="merge-row" style="margin-bottom:6px">
-                <select id="merge-from" style="width:auto;min-width:220px"><option value="">Merge another client into this one…</option></select>
-                <button class="btn-secondary" id="btn-merge" type="button" disabled>Merge</button>
-                <span class="hint" id="merge-note"></span>
-            </div>
-            <div class="row-actions">
-                <button class="btn-primary" id="btn-save" type="button">Save client</button>
-                <button class="btn-secondary" id="btn-select" type="button">Use in header</button>
-                <button class="btn-secondary" id="btn-archive" type="button">Archive</button>
-                <button class="btn-danger" id="btn-delete" type="button">Delete</button>
-            </div>
-            <div class="note" id="form-note"></div>
-        </div>
-
         <div id="extras" class="is-hidden">
             <div class="card">
+                <h3 class="card-title" id="detail-title"></h3>
+                <div class="meta-state" id="form-meta-state"></div>
                 <div class="tabs">
                     <button class="tab is-on" data-tab="timeline" type="button">Timeline</button>
                     <button class="tab" data-tab="meta" type="button">Meta connection</button>
@@ -131,7 +120,7 @@
                 </div>
 
                 <div data-pane="timeline">
-                    <p class="hint" style="margin-bottom:12px">Everything produced under this client, newest first. Click a row to open it in its engine.</p>
+                    <p class="hint" style="margin-bottom:12px">Everything produced under this client, newest first. Click a row to open it here.</p>
                     <div class="timeline" id="timeline"><div class="empty">Nothing yet.</div></div>
                 </div>
 
@@ -203,10 +192,55 @@
                 </div>
             </div>
         </div>
+
+        <div class="card" id="form-card">
+            <h3 class="card-title" id="form-title">New client</h3>
+            <p class="card-subtitle">Only the name is required. Handles fill the audit forms automatically when this client is selected.</p>
+            <div class="field-grid">
+                <div><label>Client name *</label><input type="text" id="f-name" placeholder="e.g. Rangpur Solar Ltd"></div>
+                <div><label>Brand / product</label><input type="text" id="f-brand" placeholder="optional"></div>
+                <div><label>Instagram handle</label><input type="text" id="f-ig" placeholder="@handle"></div>
+                <div><label>Facebook Page (name or URL)</label><input type="text" id="f-fb" placeholder="facebook.com/page"></div>
+                <div><label>Niche</label><input type="text" id="f-niche" placeholder="e.g. home solar"></div>
+                <div><label>Location</label><input type="text" id="f-location" placeholder="e.g. Rangpur"></div>
+            </div>
+            <label>Notes</label>
+            <textarea id="f-notes" placeholder="Brief, goals, what the client cares about, what to avoid."></textarea>
+            <div class="row-actions" id="merge-row" style="margin-bottom:6px">
+                <select id="merge-from" style="width:auto;min-width:220px"><option value="">Merge another client into this one…</option></select>
+                <button class="btn-secondary" id="btn-merge" type="button" disabled>Merge</button>
+                <span class="hint" id="merge-note"></span>
+            </div>
+            <div class="row-actions">
+                <button class="btn-primary" id="btn-save" type="button">Save client</button>
+                <button class="btn-secondary" id="btn-select" type="button">Use in header</button>
+                <button class="btn-secondary" id="btn-archive" type="button">Archive</button>
+                <button class="btn-danger" id="btn-delete" type="button">Delete</button>
+            </div>
+            <div class="note" id="form-note"></div>
+        </div>
+
     </div>
 </div>
 
 </main>
+
+<!-- A report opens here, on the client page: its engine page embedded without the shell, so the
+     same rendering and the same PDF, and no leaving the client. (phase 31.3) -->
+<div id="rv" class="rvw is-hidden" role="dialog" aria-modal="true" aria-label="Report">
+    <div class="rvw-scrim" data-rv-close></div>
+    <div class="rvw-panel">
+        <div class="rvw-head">
+            <b id="rv-title">Report</b>
+            <span class="rvw-actions">
+                <button class="btn-secondary btn-mini" id="rv-pdf" type="button">Save as PDF</button>
+                <a class="btn-secondary btn-mini" id="rv-full" href="#" target="_blank" rel="noopener">Open in its engine</a>
+                <button class="btn-secondary btn-mini" data-rv-close type="button">Close</button>
+            </span>
+        </div>
+        <iframe id="rv-frame" title="Report" src="about:blank"></iframe>
+    </div>
+</div>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
@@ -243,7 +277,8 @@
     }
 
     function fillForm(c) {
-        $('form-title').textContent = c ? c.name : 'New client';
+        $('form-title').textContent = c ? 'Client details' : 'New client';
+        $('detail-title').textContent = c ? c.name : '';
         $('f-name').value = c?.name || ''; $('f-brand').value = c?.brand || '';
         $('f-ig').value = c?.ig_handle ? '@' + c.ig_handle : ''; $('f-fb').value = c?.fb_page || '';
         $('f-niche').value = c?.niche || ''; $('f-location').value = c?.location || '';
@@ -329,6 +364,32 @@
         document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('is-hidden', p.dataset.pane !== t.dataset.tab));
     }));
 
+    // ---- the report viewer -------------------------------------------------------
+    // A report opens on this page. Its engine page renders it, embedded without the
+    // shell (?embed=1), so it is the same report and the same PDF as on the engine.
+    function openReport(href, title) {
+        $('rv-title').textContent = title || 'Report';
+        $('rv-full').href = href;
+        $('rv-frame').src = href + (href.includes('?') ? '&' : '?') + 'embed=1';
+        $('rv').classList.remove('is-hidden');
+        document.body.classList.add('rvw-open');
+    }
+    function closeReport() {
+        $('rv').classList.add('is-hidden');
+        document.body.classList.remove('rvw-open');
+        $('rv-frame').src = 'about:blank';
+    }
+    document.querySelectorAll('[data-rv-close]').forEach(b => b.addEventListener('click', closeReport));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('rv').classList.contains('is-hidden')) closeReport(); });
+    $('rv-pdf').addEventListener('click', () => {
+        // The engine's own exporter (cover page, page breaks) when it has one; the browser's print otherwise.
+        const w = $('rv-frame').contentWindow;
+        let doc = null; try { doc = w.document; } catch (_) { doc = null; }
+        const btn = doc && (doc.getElementById('export-pdf') || doc.getElementById('export') || doc.getElementById('vault-export'));
+        if (btn && !btn.closest('.hidden')) btn.click(); else if (w) w.print();
+    });
+    const wire = host => host.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openReport(el.dataset.open, el.dataset.title)));
+
     // ---- timeline ------------------------------------------------------------
     async function loadTimeline() {
         const host = $('timeline');
@@ -345,11 +406,12 @@
             }
             rows.sort((a, b) => String(b.when).localeCompare(String(a.when)));
             host.innerHTML = rows.length ? rows.map(r => `
-                <div class="t-row" ${r.href ? `style="cursor:pointer" onclick="location.href='${r.href}'"` : ''}>
+                <div class="t-row${r.href ? ' is-link' : ''}" ${r.href ? `data-open="${esc(r.href)}" data-title="${esc((TYPE_LABEL[r.type] || r.type) + (r.label ? ' · ' + r.label : ''))}"` : ''}>
                     <span class="type ${esc(r.type)}">${esc(TYPE_LABEL[r.type] || r.type)}</span>
                     <div><b style="color:#fff">${esc(r.label || '—')}</b><small>${esc(r.sub)}</small></div>
                     <small>${fmtDate(r.when)}</small>
                 </div>`).join('') : '<div class="empty">Nothing under this client yet. Select it in the header and start a run.</div>';
+            wire(host);
         } catch (err) { host.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
     }
 
@@ -363,11 +425,12 @@
                     <span class="type ${esc(s.job_type)}">${esc(s.cadence)}</span>
                     <div><b style="color:#fff">${esc(s.label || s.summary)}</b><small>${esc(EL.scheduleWhen(s))} · next ${fmtDate(s.next_run_at)}${s.paused ? ' · paused' : ''}${s.last_status ? ' · last: ' + esc(s.last_status) : ''}${s.last_error ? ' — ' + esc(s.last_error.slice(0, 120)) : ''}</small></div>
                     <span style="display:flex;gap:6px">
-                        ${s.last_report_id ? `<a class="btn-secondary btn-mini" href="${TYPE_PAGE[{ig_report:'ig_report',deep_audit:'deep_audit',fb_community_audit:'fb_community',fb_page_report:'fb_page',meta_insights:'meta_owned'}[s.job_type]] || '#'}?report=${s.last_report_id}">Last report</a>` : ''}
+                        ${s.last_report_id ? `<button class="btn-secondary btn-mini" type="button" data-open="${TYPE_PAGE[{ig_report:'ig_report',deep_audit:'deep_audit',fb_community_audit:'fb_community',fb_page_report:'fb_page',meta_insights:'meta_owned'}[s.job_type]] || '#'}?report=${s.last_report_id}" data-title="Last report · ${esc(s.label || s.summary)}">Last report</button>` : ''}
                         <button class="btn-secondary btn-mini" data-pause="${s.id}" data-val="${s.paused ? 'false' : 'true'}" type="button">${s.paused ? 'Resume' : 'Pause'}</button>
                         <button class="btn-secondary btn-mini" data-del-s="${s.id}" type="button">Delete</button>
                     </span>
                 </div>`).join('') : '<div class="empty">No schedules under this client.</div>';
+            wire(sh);
             sh.querySelectorAll('[data-pause]').forEach(b => b.addEventListener('click', async () => {
                 b.disabled = true;
                 try { await EL.api(`/api/schedules/${b.dataset.pause}`, { method: 'PATCH', body: { paused: b.dataset.val === 'true' } }); loadAutomation(); }

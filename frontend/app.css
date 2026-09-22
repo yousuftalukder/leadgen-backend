@@ -313,6 +313,8 @@ textarea { min-height: 90px; resize: vertical; line-height: 1.6; }
     .el-share-bar b { color:#e2e8f0; }
     body.el-share .el-owner-only { display: none !important; }
     body.el-share.el-has-header { padding-top: 84px; }
+    /* Embedded in another page's report viewer (?embed=1): the content alone. */
+    body.el-embed { padding: 18px 18px 48px; max-width: none; }
     .el-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin: 10px 0 14px; font-family: 'Anek Latin', 'Anek Bangla', system-ui, sans-serif; }
     .el-actions .el-note { margin:0; font-size:.78rem; }
     .el-share-list { font-size:.78rem; color:#94a3b8; width:100%; }
