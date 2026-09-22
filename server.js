@@ -5152,6 +5152,14 @@ app.get('/api/health', (req, res) => res.json({
     instances: METRICS.instances || null,
     scheduler: SCHEDULER_ENABLED,
     ai: { model: GEMINI_MODEL, discovered: _geminiDiscovered.models.slice(0, 3), poolKeys: _geminiPool.rows.length, envKey: !!GEMINI_API_KEY, configured: geminiAvailable(), ok: METRICS.ai.ok, failed: METRICS.ai.failed, truncated: METRICS.ai.truncated },
+    // Whether the Meta app credentials are set at all. Booleans and the API
+    // version only — no ids, no secret. This was invisible from outside, which
+    // made "is Meta connected up?" unanswerable without signing in, and that
+    // is the first question anyone asks when the owner assistant says it has
+    // no owner numbers. `configured` says the server CAN start an OAuth
+    // handshake; it says nothing about whether the Meta app has passed review,
+    // which is what decides if anyone outside your dev/tester list can finish one.
+    meta: { configured: metaConfigured(), graphVersion: META_GRAPH_VERSION, scopes: META_SCOPES.length },
     budgetMode: BUDGET_MODE
 }));
 
