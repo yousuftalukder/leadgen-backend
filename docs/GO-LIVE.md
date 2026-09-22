@@ -15,6 +15,7 @@ how long it takes.
 | 5 | **Fund an Apify key and run each engine once** against a real account | 1 hour | The six rows marked *built, never exercised*: the engines themselves. They spend credit, so no test starts one. |
 | 6 | **Decide on lead-list resale packaging** — it is a legal call (Meta ToS, GDPR/CCPA; `leads` holds email, phone, WhatsApp) | your call | Then about half a day to build the packaging and export. The internal list is complete. |
 | 7 | **Submit Meta App Review** once someone qualified has read `privacy.html`, `terms.html` and `data-deletion.html` | days–weeks, on Meta's clock | Only gates *public* self-serve Meta connection. Employees as Testers are unblocked now. |
+| 8 | **Let GitHub Actions run** — settle the account's Actions billing or raise its spending limit, or make the repository public (Actions are free there) | 5 min | The CI workflow exists and is correct; GitHub refused to start it: *"recent account payments have failed or your spending limit needs to be increased"*. Until then a broken push still goes live unnoticed. |
 
 ## Mine — remaining engineering, in order
 
