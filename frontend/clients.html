@@ -34,6 +34,11 @@
     .conn b { color: #fff; }
     .hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; }
     .is-hidden { display: none !important; }
+    .meta-state { display: block; font-size: 0.74rem; color: var(--text-muted); margin-top: 3px; }
+    .meta-state.is-on { color: var(--jade); }
+    .meta-state.is-bad { color: #f0a38a; }
+    #form-meta-state { margin: -4px 0 12px; font-size: 0.8rem; }
+    #form-meta-state:empty { display: none; }
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
     .tab { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; font-size: 0.8rem; font-family: inherit; }
     .tab.is-on { background: var(--accent-glow); color: #fff; border-color: transparent; }
@@ -88,6 +93,7 @@
     <div id="detail">
         <div class="card" id="form-card">
             <h3 class="card-title" id="form-title">New client</h3>
+            <div class="meta-state" id="form-meta-state"></div>
             <p class="card-subtitle">Only the name is required. Handles fill the audit forms automatically when this client is selected.</p>
             <div class="field-grid">
                 <div><label>Client name *</label><input type="text" id="f-name" placeholder="e.g. Rangpur Solar Ltd"></div>
@@ -212,7 +218,8 @@
         host.innerHTML = clients.map(c => `
             <div class="client-row ${current && current.id === c.id ? 'is-active' : ''}" data-id="${c.id}">
                 <div><b>${esc(c.name)}${c.archived ? ' <small>(archived)</small>' : ''}</b>
-                     <small>${esc([c.ig_handle ? '@' + c.ig_handle : '', c.fb_page, c.niche].filter(Boolean).join(' · ') || '—')}${c.access !== 'owner' ? ' · shared with you' : ''}</small></div>
+                     <small>${esc([c.ig_handle ? '@' + c.ig_handle : '', c.fb_page, c.niche].filter(Boolean).join(' · ') || '—')}${c.access === 'admin' ? ' · admin access' : (c.access !== 'owner' ? ' · shared with you' : '')}</small>
+                     <small class="meta-state ${c.meta && c.meta.connected ? 'is-on' : ''}">${c.meta && c.meta.connected ? `Meta connected · ${c.meta.active} page${c.meta.active === 1 ? '' : 's'}` : 'Meta not connected'}</small></div>
                 <span class="count">${c.reports.total} report${c.reports.total === 1 ? '' : 's'}</span>
             </div>`).join('');
         host.querySelectorAll('.client-row').forEach(r => r.addEventListener('click', () => open(r.dataset.id)));
@@ -224,8 +231,19 @@
         $('f-ig').value = c?.ig_handle ? '@' + c.ig_handle : ''; $('f-fb').value = c?.fb_page || '';
         $('f-niche').value = c?.niche || ''; $('f-location').value = c?.location || '';
         $('f-notes').value = c?.notes || '';
-        const owner = !c || c.access === 'owner';
-        const editor = !c || c.access === 'owner' || c.access === 'editor';
+        const owner = !c || c.access === 'owner' || c.access === 'admin';
+        const editor = owner || c.access === 'editor';
+        // Connected or not, said on the client itself — not discovered by
+        // opening a tab. The list row carries the same line.
+        const conns = (detail && detail.metaConnections) || [];
+        const live = conns.filter(x => x.status === 'active');
+        const st = $('form-meta-state');
+        if (st) {
+            if (!c) { st.textContent = ''; }
+            else if (live.length) { st.className = 'meta-state is-on'; st.textContent = `Meta connected · ${live.map(x => x.page_name || x.page_id).join(', ')}`; }
+            else if (conns.length) { st.className = 'meta-state is-bad'; st.textContent = `Meta connection needs attention (${conns[0].status}) — see the Meta tab.`; }
+            else { st.className = 'meta-state'; st.textContent = 'Meta not connected — connect it from the Meta tab to add owner-side numbers.'; }
+        }
         $('btn-archive').classList.toggle('is-hidden', !c || !owner);
         $('btn-delete').classList.toggle('is-hidden', !c || !owner);
         $('btn-select').classList.toggle('is-hidden', !c || c.archived);
@@ -366,7 +384,7 @@
     // ---- members ---------------------------------------------------------------
     function renderMembers() {
         const host = $('member-list');
-        const isOwner = current.access === 'owner';
+        const isOwner = current.access === 'owner' || current.access === 'admin';
         const rows = [`<div class="member"><span><b>${esc(detail.owner.email)}</b> · owner</span></div>`];
         for (const m of (detail.members || [])) {
             rows.push(`<div class="member"><span>${esc(m.email)} · ${esc(m.role)}</span>${isOwner || m.user_id === me.id ? `<button class="btn-danger btn-mini" data-rm="${m.user_id}" type="button">${m.user_id === me.id ? 'Leave' : 'Remove'}</button>` : ''}</div>`);

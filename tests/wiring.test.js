@@ -501,7 +501,49 @@ function adminReachesSetting(admin, key) {
 }
 
 // ---------------------------------------------------------------------------
-// 10. TEST RUNNER HYGIENE
+// 10. THE WORK-FOR BAR IS ON EVERY PAGE THAT STARTS WORK
+//
+// header.js keeps one explicit list of the pages that carry the "filing
+// under" bar. A page that starts jobs but is missing from it lets work be
+// launched with the question unasked — which is exactly how 15 of 16 reports
+// ended up filed under nothing. Same discipline as the engine list: one list,
+// and this makes sure it matches the code.
+// ---------------------------------------------------------------------------
+console.log('\nwork pages: every page that starts a job asks which client it is for');
+{
+    const listed = (/const WORK_PAGES\s*=\s*\[([\s\S]*?)\]/.exec(HEADER) || [])[1];
+    const workPages = listed ? [...listed.matchAll(/'([\w.-]+\.html)'/g)].map(m => m[1]) : [];
+
+    // Routes that create a job: the enclosing route of every JOB_WORKERS[...] start.
+    const routeStarts = [...SERVER.matchAll(/app\.post\(\s*'(\/api\/[^']+)'/g)].map(m => ({ i: m.index, p: m[1] }));
+    const jobRoutes = new Set();
+    for (const m of SERVER.matchAll(/JOB_WORKERS\[/g)) {
+        const owner = routeStarts.filter(r => r.i < m.index).pop();
+        if (owner) jobRoutes.add(owner.p);
+    }
+    const jobMatchers = [...jobRoutes].map(routeMatcher);
+
+    const starters = [];
+    for (const f of PAGES) {
+        if (/^client-|^client\.html$|^share\.html$|^signup\.html$/.test(f)) continue;   // clients ARE their business; public pages start nothing
+        const src = fs.readFileSync(path.join(FRONT_DIR, f), 'utf8');
+        const engineNull = /EL\.init\(\s*\{[^}]*engine:\s*null/.test(src);
+        if (engineNull) continue;                                                    // workspace pages: work is scoped by the record itself
+        const posts = pageCalls(src).filter(c => c.method === 'POST' || c.method === 'ANY');
+        if (posts.some(c => c.paths.some(p => jobMatchers.some(re => re.test(p))))) starters.push(f);
+    }
+
+    check('every page that starts a job carries the work-for bar', starters
+        .filter(f => !workPages.includes(f))
+        .map(f => `${f} starts jobs but is not in WORK_PAGES — work can be launched with no client asked for`));
+    check('every WORK_PAGES entry is a real page that starts a job', workPages
+        .filter(f => !PAGES.includes(f) || !starters.includes(f))
+        .map(f => `${f} is in WORK_PAGES but ${PAGES.includes(f) ? 'starts no job' : 'does not exist'}`));
+    ok(`${starters.length} job-starting pages, all carrying the bar: ${starters.join(', ')}`);
+}
+
+// ---------------------------------------------------------------------------
+// 11. TEST RUNNER HYGIENE
 // ---------------------------------------------------------------------------
 console.log('\ntest runner: every test file actually runs');
 {

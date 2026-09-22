@@ -517,6 +517,10 @@ async function ensureProfile(user) {
                 await supabase.from('user_engine_access')
                     .upsert({ user_id: user.id, engine: e }, { onConflict: 'user_id,engine' });
             }
+            // A client account is a business from the first minute, so its
+            // record exists before its first run rather than being conjured
+            // by one. Everything it does files under this.
+            await ownClientFor({ user, profile }).catch(e => logger.warn('own_client_create_failed', { message: e.message }));
         }
         // role 'user' is never minted here: employees are created by an admin.
     } else if (MASTER_ADMIN_EMAIL && email === MASTER_ADMIN_EMAIL && profile.role !== 'admin') {
@@ -5377,6 +5381,8 @@ app.get('/api/me', async (req, res) => {
     // Only a client needs a window and an allowance on screen. An employee
     // seeing "0 of 50 leads" would just be confusing.
     if (ctx.profile.role === 'client') {
+        const own = await ownClientFor(ctx).catch(() => null);
+        body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
         body.trial_ends_at = ctx.profile.trial_ends_at || null;
         body.paid_until    = ctx.profile.paid_until || null;
         body.plan_label    = ctx.profile.plan_label || null;
@@ -5861,6 +5867,7 @@ app.post('/api/admin/users', async (req, res) => {
 app.patch('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
+        _roleCache.delete(String(req.params.id));   // a demoted admin must lose clientAccess now, not in a minute
         const {
             role, isActive, engines, password, byoKeyOnly,
             paidUntil, planLabel, trialDays
@@ -10773,11 +10780,32 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * Return the client row when the user may act on it, else null.
  * need: 'viewer' (owner or any member) | 'editor' (owner or editor member) | 'owner'
  */
+/**
+ * The caller's account role, cached for the same window as auth itself.
+ * clientAccess takes a user id rather than a ctx because half its callers are
+ * workers with no request in hand, so the role has to be looked up here.
+ */
+const _roleCache = new Map();
+async function userRole(userId) {
+    const hit = _roleCache.get(userId);
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
+    const { data } = await supabase.from('app_users').select('role').eq('id', userId).maybeSingle();
+    const v = data?.role || null;
+    _roleCache.set(userId, { v, t: Date.now() });
+    return v;
+}
+
 async function clientAccess(userId, clientId, need = 'viewer') {
     if (!userId || !clientId || !UUID_RE.test(String(clientId))) return null;
     const { data: c } = await supabase.from('clients').select('*').eq('id', clientId).maybeSingle();
     if (!c) return null;
     if (c.owner_user_id === userId) return { ...c, access: 'owner' };
+    // An admin reaches every client. Without this, "admin creates the client
+    // and assigns an employee" only worked when the admin happened to be the
+    // one who created it — a client an employee made was untouchable by the
+    // person whose job is to hand work out. requireEngine already lets admins
+    // through every engine; this is the same rule applied to clients.
+    if (await userRole(userId) === 'admin') return { ...c, access: 'admin' };
     if (need === 'owner') return null;
     const { data: m } = await supabase.from('client_members')
         .select('role').eq('client_id', clientId).eq('user_id', userId).maybeSingle();
@@ -10787,9 +10815,61 @@ async function clientAccess(userId, clientId, need = 'viewer') {
 }
 
 /** Read clientId from a request body, validate it, or throw 403. */
+/**
+ * The client record a client-role account IS. Owned first; failing that a
+ * record an agency has made them an editor of; failing that, created — an
+ * account that signs up to see how its business is doing is a business.
+ */
+async function ownClientFor(ctx) {
+    const uid = ctx.user.id;
+    const { data: owned } = await supabase.from('clients').select('*')
+        .eq('owner_user_id', uid).eq('archived', false)
+        .order('created_at', { ascending: true }).limit(1);
+    if (owned && owned[0]) return owned[0];
+
+    const { data: mem } = await supabase.from('client_members').select('client_id')
+        .eq('user_id', uid).eq('role', 'editor').limit(1);
+    if (mem && mem[0]) {
+        const { data: c } = await supabase.from('clients').select('*').eq('id', mem[0].client_id).maybeSingle();
+        if (c && !c.archived) return c;
+    }
+
+    const email = ctx.user.email || ctx.profile?.email || '';
+    const name = String(ctx.profile?.full_name || '').trim() || email.split('@')[0] || 'My business';
+    const { data: created } = await supabase.from('clients').insert([{
+        owner_user_id: uid, name,
+        // Explicit, not left to the column default: the lookup above filters
+        // on archived = false, and a row that relies on the database to fill
+        // that in is a row this function cannot find again anywhere the
+        // default is absent. The use-case test caught exactly that.
+        archived: false,
+        notes: 'Created automatically when this account signed up. Rename it to the business name.'
+    }]).select().maybeSingle();
+    return created || null;
+}
+
+/**
+ * Which business a piece of work is for. (phase 22: mandatory)
+ *
+ * This used to return null when the picker said "None (just me)", and the
+ * numbers showed what that meant in practice: 15 of 16 reports and all 27
+ * campaigns on the live database were filed under nothing. Work with no
+ * client has no timeline, no history, no client who can ever see it, and no
+ * way to be found again except by the person who ran it, from memory.
+ *
+ * So: every run is for a business. A client-role account IS its business and
+ * needs to say nothing; everyone else must choose one, and the server refuses
+ * rather than trusting the page to have asked.
+ */
 async function resolveClientId(req, ctx) {
     const raw = req.body?.clientId || req.body?.client_id || req.query?.client_id || null;
-    if (!raw) return null;
+    if (!raw) {
+        if (ctx.profile?.role === 'client') return (await ownClientFor(ctx))?.id || null;
+        const e = new Error('Choose a client first. Every run is filed under a business, and this one has nowhere to go.');
+        e.statusCode = 400;
+        e.code = 'client_required';
+        throw e;
+    }
     const c = await clientAccess(ctx.user.id, raw, 'editor');
     if (!c) { const e = new Error('You do not have edit access to that client.'); e.statusCode = 403; throw e; }
     return c.id;
@@ -10847,6 +10927,15 @@ app.get('/api/clients', async (req, res) => {
             shared = (data || []).map(c => ({ ...c, access: (mem.find(m => m.client_id === c.id) || {}).role || 'viewer' }));
         }
         let rows = [...(owned || []).map(c => ({ ...c, access: 'owner' })), ...shared];
+
+        // An admin's list is every client, not just theirs: assigning work
+        // means seeing the clients other people created. Ownership and
+        // membership still label the rows they apply to.
+        if (ctx.profile.role === 'admin') {
+            const have = new Set(rows.map(r => r.id));
+            const { data: all } = await supabase.from('clients').select('*').order('created_at', { ascending: false });
+            for (const c of (all || [])) if (!have.has(c.id)) rows.push({ ...c, access: 'admin' });
+        }
         if (!includeArchived) rows = rows.filter(c => !c.archived);
         rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
 
@@ -10861,7 +10950,24 @@ app.get('/api/clients', async (req, res) => {
                 counts[r.client_id].byType[r.report_type] = (counts[r.client_id].byType[r.report_type] || 0) + 1;
             }
         }
-        res.json({ clients: rows.map(c => ({ ...c, reports: counts[c.id] || { total: 0, byType: {} } })) });
+        // Meta per client, so "is this one connected?" is answered on the row
+        // rather than by opening each client and finding the tab.
+        const meta = {};
+        if (ids.length) {
+            const { data: conns } = await supabase.from('meta_connections')
+                .select('client_id, status, page_name, ig_username').in('client_id', ids);
+            for (const k of (conns || [])) {
+                const m = meta[k.client_id] = meta[k.client_id] || { connected: false, pages: 0, active: 0, names: [] };
+                m.pages += 1;
+                if (k.status === 'active') { m.active += 1; m.connected = true; }
+                if (k.page_name && m.names.length < 3) m.names.push(k.page_name);
+            }
+        }
+        res.json({ clients: rows.map(c => ({
+            ...c,
+            reports: counts[c.id] || { total: 0, byType: {} },
+            meta: meta[c.id] || { connected: false, pages: 0, active: 0, names: [] }
+        })) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -10958,7 +11064,30 @@ app.post('/api/clients/:id/members', async (req, res) => {
         const { error } = await supabase.from('client_members')
             .upsert([{ client_id: c.id, user_id: u.id, role, added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
         if (error) throw error;
-        res.json({ success: true, member: { user_id: u.id, email: u.email, role } });
+
+        // A client-role account already owns a business record of its own,
+        // made at signup. If an agency now files them under the agency's
+        // record and their own is still empty, keeping both means one
+        // business in two places. The empty one is archived — never deleted —
+        // so their runs land where the agency is already working.
+        let absorbed = null;
+        if (role === 'editor' && await userRole(u.id) === 'client') {
+            const { data: own } = await supabase.from('clients').select('id, name')
+                .eq('owner_user_id', u.id).eq('archived', false);
+            for (const o of (own || [])) {
+                const [{ count: r }, { count: j }, { count: m }] = await Promise.all([
+                    supabase.from('reports').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+                    supabase.from('jobs').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+                    supabase.from('meta_connections').select('id', { count: 'exact', head: true }).eq('client_id', o.id)
+                ]);
+                if (!(r || 0) && !(j || 0) && !(m || 0)) {
+                    await supabase.from('clients').update({ archived: true }).eq('id', o.id);
+                    absorbed = o.id;
+                    logger.info('client_own_record_absorbed', { userId: u.id, into: c.id, archived: o.id });
+                }
+            }
+        }
+        res.json({ success: true, member: { user_id: u.id, email: u.email, role }, absorbed });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -15006,5 +15135,8 @@ module.exports = {
     metaMonthWindow, metaPrevMonth, metaDefaultMonth, metaMonthLabel, pctDelta,
     META_MONTH_METRICS, comparableBand, competitorQueries,
     // phase 20
-    csvCell, LEAD_SORTS
+    csvCell, LEAD_SORTS,
+    // phase 22 — reached directly by the use-case test, which drives real
+    // handlers over an in-memory database instead of trusting that they wire
+    resolveClientId, ownClientFor, createJob, ensureProfile, userRole
 };

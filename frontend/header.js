@@ -107,6 +107,23 @@
      * Engine filtering still applies on top, so a client without a grant does
      * not see the tab either.
      */
+    /**
+     * Pages where somebody presses Run. These carry the "filing under" bar
+     * at the top, because the sidebar picker on its own was not enough: with
+     * it tucked in the footer, 15 of 16 reports on the live database were
+     * filed under nothing. The bar puts the question where the button is.
+     *
+     * Kept as one explicit list, and the wiring audit checks it against the
+     * pages that actually POST to a job route — the same discipline as the
+     * engine list, for the same reason.
+     */
+    const WORK_PAGES = [
+        'index.html', 'ig-report.html', 'ig-competitors.html',
+        'fb-report.html', 'fb-communities.html', 'fb-audit.html', 'fb-advisor.html',
+        'content-plan.html',
+        'leads.html'        // Facebook Page discovery starts from the Lead List
+    ];
+
     const CLIENT_NAV = [
         { href: 'client.html',           icon: '📊', label: 'My Reports',   engine: null },
         { href: 'client-assistant.html', icon: '💬', label: 'Ask',          engine: null },
@@ -186,6 +203,11 @@
             if (!res.ok) {
                 const err = new Error((data && (data.error || data.message)) || `Request failed (${res.status})`);
                 err.status = res.status; err.data = data;
+                if (data && data.code) err.code = data.code;
+                // The server is the one that refuses work with no client; the
+                // page only points at where to fix it. Every page passes
+                // through here, so no page has to remember to.
+                if (err.code === 'client_required') EL._nudgeClient();
                 throw err;
             }
             return data;
@@ -508,6 +530,9 @@
             renderShell(page, me);
             renderPlanBanner(me);
             refreshStatus();
+            // A client-role account IS its business, so it is never asked
+            // which one. Everyone else is asked on every page where work starts.
+            if (me.role !== 'client' && WORK_PAGES.includes(currentPage(page))) mountWorkForHost();
             EL._mountClientPicker().catch(() => {});
 
             const isAdmin = me.role === 'admin';
@@ -540,6 +565,12 @@
          *   });
          */
         async runJob(path, body, opts = {}) {
+            if (EL.me && EL.me.role !== 'client' && !EL.clientId()) {
+                EL._nudgeClient();
+                const e = new Error('Choose a client first — every run is filed under a business. Pick one above or in the sidebar.');
+                e.code = 'client_required';
+                throw e;
+            }
             const start = await EL.api(path, { method: 'POST', body });
             const jobId = start.jobId;
             if (!jobId) throw new Error('The server did not return a job id.');
@@ -641,9 +672,52 @@
             return /^[0-9a-f-]{36}$/i.test(v) ? v : null;
         },
 
+        /** Draw attention to the picker after a refusal, then let it go. */
+        _nudgeClient() {
+            const targets = [document.getElementById('el-workfor'), document.querySelector('.el-side-foot .el-client')].filter(Boolean);
+            targets.forEach(t => { t.classList.remove('is-nudge'); void t.offsetWidth; t.classList.add('is-nudge'); });
+            const bar = document.getElementById('el-workfor');
+            if (bar) { bar.scrollIntoView({ behavior: 'smooth', block: 'center' }); const s = bar.querySelector('select'); if (s) s.focus(); }
+            setTimeout(() => targets.forEach(t => t.classList.remove('is-nudge')), 1800);
+        },
+
+        /** The options every picker on the page shares, so they can never disagree. */
+        _clientOptions(list, cur) {
+            const label = c => EL.esc(c.name) + (c.access === 'admin' ? ' · admin' : (c.access && c.access !== 'owner' ? ' · shared' : ''));
+            return `<option value="">Choose a client…</option>` +
+                list.filter(c => !c.archived || c.id === cur)
+                    .map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${label(c)}</option>`).join('');
+        },
+
+        _onClientChange(e) {
+            EL.setClientId(e.target.value || null);
+            // A page's vault, sources and estimates all depend on the client.
+            // Reloading is simpler and safer than every page re-fetching.
+            const u = new URL(location.href); u.searchParams.delete('report');
+            location.href = u.toString();
+        },
+
+        /** The bar at the top of a work page: which business this is for. */
+        _renderWorkFor(list, cur) {
+            const bar = document.getElementById('el-workfor');
+            if (!bar) return;
+            const c = cur ? list.find(x => x.id === cur) : null;
+            bar.classList.toggle('is-empty', !c);
+            bar.innerHTML = c
+                ? `<span class="el-wf-tag">Client</span>
+                   <span>Filing under <b>${EL.esc(c.name)}</b>${c.ig_handle ? ' · @' + EL.esc(c.ig_handle) : ''}${c.meta && c.meta.connected ? ' · Meta connected' : ''}</span>
+                   <select class="el-client-select" aria-label="Which client this work is for">${EL._clientOptions(list, cur)}</select>`
+                : `<span class="el-wf-tag">Client</span>
+                   <span><b>Choose the client this work is for.</b> Nothing runs until you do${list.length ? '' : ' — <a href="clients.html">create one</a> first'}.</span>
+                   <select class="el-client-select" aria-label="Which client this work is for">${EL._clientOptions(list, cur)}</select>`;
+            bar.querySelector('select').addEventListener('change', EL._onClientChange);
+        },
+
         async _mountClientPicker() {
             const host = document.getElementById('el-client-host');
             if (!host) return;
+            // A client account is the business; asking it to pick one is noise.
+            if (EL.me && EL.me.role === 'client') { host.remove(); return; }
             const list = await EL.clients();
             const current = EL.clientId();
             if (current && !list.some(c => c.id === current)) EL.setClientId(null);
@@ -662,20 +736,11 @@
                 return;
             }
             host.innerHTML = `
-                <span title="Every run on this page is filed under the selected client and every vault is scoped to it.">Client</span>
-                <select class="el-client-select" aria-label="Client workspace">
-                    <option value="">None (just me)</option>
-                    ${list.filter(c => !c.archived || c.id === cur).map(c =>
-                        `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${EL.esc(c.name)}${c.access && c.access !== 'owner' ? ' · shared' : ''}</option>`).join('')}
-                </select>
+                <span title="Every run is filed under the selected client and every vault is scoped to it.">Client</span>
+                <select class="el-client-select" aria-label="Client workspace">${EL._clientOptions(list, cur)}</select>
                 <a class="el-client-manage" href="clients.html" title="${list.length ? list.length + ' client' + (list.length === 1 ? '' : 's') : 'No clients yet'}">Manage</a>`;
-            host.querySelector('select').addEventListener('change', e => {
-                EL.setClientId(e.target.value || null);
-                // A page's vault, sources and estimates all depend on the client.
-                // Reloading is simpler and safer than every page re-fetching.
-                const u = new URL(location.href); u.searchParams.delete('report');
-                location.href = u.toString();
-            });
+            host.querySelector('select').addEventListener('change', EL._onClientChange);
+            EL._renderWorkFor(list, cur);
         },
 
         /**
@@ -825,6 +890,17 @@
         if (explicit) return explicit;
         const file = window.location.pathname.split('/').pop();
         return file || 'index.html';
+    }
+
+    /** The empty host for the work-for bar; the picker fills it. */
+    function mountWorkForHost() {
+        if (document.getElementById('el-workfor')) return;
+        const pg = document.querySelector('.el-page');
+        if (!pg) return;
+        const h = document.createElement('div');
+        h.id = 'el-workfor';
+        h.className = 'el-workfor';
+        pg.insertAdjacentElement('afterbegin', h);
     }
 
     function renderShell(page, me) {

@@ -101,6 +101,25 @@
         <p class="ll-note" id="ll-stats-note"></p>
     </div>
 
+    <!-- Facebook Page discovery for employees. The engine shipped in phase 16
+         wired only to the client surface, so an employee had no page to run it
+         from. It lives here because this is where the results land. -->
+    <div class="card" id="ll-fb">
+        <div class="card-title" style="font-size:1.05rem">Find Facebook Pages</div>
+        <p class="card-subtitle">Searches Facebook for business Pages matching what you type, reads each Page's
+            published contact details, and adds them to this list — filed under the client chosen above.</p>
+        <div class="ll-filters">
+            <div><label for="fb-kw">What to search for</label><input type="text" id="fb-kw" placeholder="e.g. bridal wear, coffee roaster — up to 4, comma-separated"></div>
+            <div><label for="fb-loc">Where</label><input type="text" id="fb-loc" placeholder="e.g. Dhaka"></div>
+            <div><label for="fb-max">Up to how many Pages</label><input type="number" id="fb-max" min="1" max="40" value="20"></div>
+        </div>
+        <div class="ll-bar" style="margin-top:16px">
+            <button class="btn-secondary" id="fb-go" type="button">Search Facebook</button>
+            <span class="ll-count" id="fb-note"></span>
+        </div>
+        <div id="fb-progress"></div>
+    </div>
+
     <div class="card">
         <div class="card-title" style="font-size:1.05rem">Filter</div>
         <div class="ll-filters">
@@ -185,7 +204,41 @@
         });
 
         $('btn-export').addEventListener('click', exportCsv);
+        $('fb-go').addEventListener('click', findFbPages);
     });
+
+    /**
+     * Start a Facebook Page search and, when it lands, re-read the list so
+     * the new rows and the counts above them appear without a reload.
+     */
+    async function findFbPages() {
+        const kws = $('fb-kw').value.split(',').map(s => s.trim()).filter(Boolean).slice(0, 4);
+        if (!kws.length) { $('fb-note').textContent = 'Type at least one thing to search for.'; return; }
+        const btn = $('fb-go');
+        btn.disabled = true;
+        $('fb-note').textContent = 'Starting…';
+        try {
+            const { job } = await EL.runJob('/api/fb/find-leads', {
+                keywords: kws,
+                location: $('fb-loc').value.trim() || null,
+                maxPages: Math.min(Math.max(parseInt($('fb-max').value, 10) || 20, 1), 40)
+            }, {
+                mount: $('fb-progress'),
+                onProgress: j => { $('fb-note').textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                onFailed: j => { $('fb-note').textContent = 'Failed: ' + (j.error || 'unknown'); },
+                onPaused: j => { $('fb-note').textContent = j.error || 'Paused — it can be resumed from Schedules.'; }
+            });
+            if (job && job.status === 'done') {
+                const r = job.result || {};
+                $('fb-note').textContent = `Found ${r.found ?? '—'}, saved ${r.saved ?? '—'}.`
+                    + ((r.warnings || []).length ? ' ' + r.warnings[0] : '');
+                loadSummary();
+                page = 1; load();
+            }
+        } catch (err) {
+            if (!err.handled) $('fb-note').textContent = err.message;
+        } finally { btn.disabled = false; }
+    }
 
     /** The query string both the list and the CSV are built from. */
     function params(extra = {}) {
