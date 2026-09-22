@@ -141,17 +141,22 @@
 
     async function loadLeads() {
         try {
-            const { leads } = await EL.api('/api/client/leads');
-            render(leads || []);
+            const d = await EL.api('/api/client/leads');
+            render(d.leads || [], d.foundForYou || 0);
         } catch (err) {
             if (err.handled) return;
             $('lf-results').innerHTML = `<div class="lf-empty">${esc(err.message)}</div>`;
         }
     }
 
-    function render(leads) {
+    function render(leads, foundForYou = 0) {
+        // Leads an agency found for this business sit in the same list as
+        // the owner's own draws, and the count says so — a client whose team
+        // just found forty businesses for them should not have to wonder
+        // where those came from.
         $('lf-count').textContent = leads.length
             ? leads.length + (leads.length === 1 ? ' business' : ' businesses')
+              + (foundForYou ? ` · ${foundForYou} found for you by your team` : '')
             : '';
 
         if (!leads.length) {
@@ -179,7 +184,7 @@
             <div class="lf-card">
                 <h4><a href="${EL.safeUrl(l.url)}" target="_blank" rel="noopener noreferrer">@${esc(l.username)}</a><span
                     class="lf-badge ${l.platform === 'facebook' ? 'facebook' : 'instagram'}"
-                    >${l.platform === 'facebook' ? 'FB' : 'IG'}</span></h4>
+                    >${l.platform === 'facebook' ? 'FB' : 'IG'}</span>${l.foundForYou ? '<span class="lf-badge" title="Found for you by your team">team</span>' : ''}</h4>
                 ${l.name ? `<div class="lf-who">${esc(l.name)}</div>` : ''}
                 ${(where || size) ? `<div class="lf-who">${[where, size].filter(Boolean).join(' · ')}</div>` : ''}
                 ${contacts.length

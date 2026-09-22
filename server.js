@@ -154,9 +154,21 @@ process.on('unhandledRejection', (err) => {
     logger.error('unhandled_rejection', { message: err?.message, stack: (err?.stack || '').slice(0, 800) });
     alertOnce('unhandled_rejection', 'Unhandled promise rejection: ' + (err?.message || 'unknown'));
 });
+// Set by start() once every route is registered. Until then an exception is a
+// boot failure, and the only honest response is to exit non-zero: carrying on
+// leaves a process that answers /api/health (registered early) while every
+// route after the throw does not exist. That is worse than being down —
+// nothing alarms and half the product 404s. Exactly this happened once, with
+// exit code 0, and eleven test files reported "ok" having run nothing.
+let BOOTED = false;
 process.on('uncaughtException', (err) => {
-    logger.error('uncaught_exception', { message: err?.message, stack: (err?.stack || '').slice(0, 800) });
+    logger.error('uncaught_exception', { message: err?.message, stack: (err?.stack || '').slice(0, 800), booted: BOOTED });
     alertOnce('uncaught_exception', 'Uncaught exception: ' + (err?.message || 'unknown'));
+    if (!BOOTED) {
+        // eslint-disable-next-line no-console
+        console.error('FATAL during boot: ' + (err?.stack || err?.message || err));
+        process.exit(1);
+    }
 });
 
 // ===========================================================================
@@ -295,6 +307,9 @@ const bearerId = req => (req.headers.authorization || '').slice(-32) || null;
 // Anything that spends money is gated harder than plain reads.
 const spendLimit = rateLimit({ windowMs: 60000, max: 6,   key: bearerId });
 const readLimit  = rateLimit({ windowMs: 60000, max: 240, key: bearerId });
+// Per IP: public routes carry no bearer. Declared here, with the others,
+// because every limiter must exist before the first route that names it.
+const publicLimit = rateLimit({ windowMs: 60000, max: 30 });
 app.use('/api/', readLimit);
 
 // Request accounting. Method and path only — request bodies carry Apify tokens
@@ -11462,10 +11477,14 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         const userToken = longTok.access_token;
         const expiresAt = longTok.expires_in ? new Date(Date.now() + longTok.expires_in * 1000).toISOString() : null;
 
-        let granted = [];
+        let granted = [], fbUserId = null;
         try {
             const dbg = await graphGet('debug_token', { input_token: userToken, access_token: `${META_APP_ID}|${META_APP_SECRET}` });
             granted = dbg?.data?.scopes || [];
+            // The app-scoped user id. A Data Deletion Request from Meta names
+            // the person by this and nothing else; without it the request
+            // could not be matched to a single row we hold.
+            fbUserId = dbg?.data?.user_id ? String(dbg.data.user_id) : null;
         } catch (_) {}
 
         const pages = await graphGet('me/accounts', {
@@ -11482,6 +11501,7 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
                 ig_username: p.instagram_business_account?.username || null,
                 user_token_enc: encryptSecret(userToken),
                 token_expires_at: expiresAt, scopes: granted,
+                fb_user_id: fbUserId,
                 status: 'active', last_error: null
             };
             const { error } = await supabase.from('meta_connections').upsert([row], { onConflict: 'user_id,page_id' });
@@ -11498,6 +11518,83 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         logger.error('meta_oauth_callback', { message: err.message });
         back({ meta: 'error', message: String(err.message || 'OAuth failed').slice(0, 200) });
     }
+});
+
+// ===========================================================================
+// META DATA DELETION (phase 24)
+//
+// When a person removes EdgeLead from their Facebook settings, Meta POSTs a
+// signed_request here. The signature is HMAC-SHA256 over the payload with the
+// app secret, so only Meta can produce it. The payload names the person by
+// app-scoped user id; everything held under that id goes, and the response
+// gives Meta a URL and a code the person can use to see that it went.
+//
+// This is a platform requirement for the app to be used by anyone outside
+// its own testers. It is also simply right: the data is theirs.
+// ===========================================================================
+
+/** Verify and decode a Meta signed_request. Returns the payload, or null. */
+function metaParseSignedRequest(signedRequest, secret) {
+    const parts = String(signedRequest || '').split('.');
+    if (parts.length !== 2 || !secret) return null;
+    const b64 = v => Buffer.from(String(v).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const sig = b64(parts[0]);
+    const expected = crypto.createHmac('sha256', secret).update(parts[1]).digest();
+    if (sig.length !== expected.length || !crypto.timingSafeEqual(sig, expected)) return null;
+    try {
+        const payload = JSON.parse(b64(parts[1]).toString('utf8'));
+        return payload && payload.algorithm && String(payload.algorithm).toUpperCase() === 'HMAC-SHA256' ? payload : null;
+    } catch { return null; }
+}
+
+/** Everything held for one Facebook user, gone. Returns what was removed. */
+async function metaDeleteUserData(fbUserId) {
+    const { data: conns } = await supabase.from('meta_connections').select('id').eq('fb_user_id', String(fbUserId));
+    const ids = (conns || []).map(c => c.id);
+    let reports = 0;
+    if (ids.length) {
+        // Owner-side reports are built from this person's insights and are
+        // theirs to withdraw. Scraped reports are not touched: they were
+        // built from public data and name no Facebook user.
+        const { count } = await supabase.from('reports').select('id', { count: 'exact', head: true })
+            .eq('platform', 'meta').in('meta_connection_id', ids);
+        reports = count || 0;
+        await supabase.from('reports').delete().eq('platform', 'meta').in('meta_connection_id', ids);
+        // media and snapshots cascade from the connection
+        await supabase.from('meta_connections').delete().in('id', ids);
+    }
+    return { connections: ids.length, reports };
+}
+
+app.post('/api/meta/data-deletion', publicLimit, async (req, res) => {
+    try {
+        const payload = metaParseSignedRequest(req.body?.signed_request, META_APP_SECRET);
+        if (!payload || !payload.user_id) return res.status(400).json({ error: 'Invalid signed request.' });
+
+        const removed = await metaDeleteUserData(payload.user_id);
+        const code = crypto.randomBytes(12).toString('hex');
+        await supabase.from('meta_deletion_requests').insert([{
+            code, fb_user_id: String(payload.user_id),
+            connections: removed.connections, reports: removed.reports
+        }]);
+        logger.info('meta_data_deletion', { fbUserId: String(payload.user_id), ...removed });
+
+        // Meta expects exactly this shape.
+        const base = FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+        res.json({ url: `${base}/data-deletion.html?code=${code}`, confirmation_code: code });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Public: the status page looks a confirmation code up here. */
+app.get('/api/public/meta/deletion/:code', publicLimit, async (req, res) => {
+    try {
+        const code = String(req.params.code || '');
+        if (!/^[a-f0-9]{24}$/.test(code)) return res.status(404).json({ error: 'No such request.' });
+        const { data } = await supabase.from('meta_deletion_requests')
+            .select('code, connections, reports, created_at').eq('code', code).maybeSingle();
+        if (!data) return res.status(404).json({ error: 'No such request.' });
+        res.json({ status: 'complete', ...data });
+    } catch (err) { sendErr(res, err); }
 });
 
 app.get('/api/meta/connections', async (req, res) => {
@@ -13601,7 +13698,9 @@ app.delete('/api/schedules/:id', async (req, res) => {
 
 const SHARE_DEFAULT_DAYS = parseInt(process.env.SHARE_DEFAULT_DAYS || '30', 10);
 const SHARE_MAX_DAYS     = parseInt(process.env.SHARE_MAX_DAYS || '365', 10);
-const publicLimit = rateLimit({ windowMs: 60000, max: 30 });   // per IP: no bearer on public routes
+// publicLimit is declared beside spendLimit and readLimit near the top of the
+// file. It was here once, after routes that use it — a const read before its
+// line is a ReferenceError at load, which node --check cannot see.
 
 /** Which page renders which report type. Server is the contract; pages conform. */
 const REPORT_PAGE = {
@@ -14643,15 +14742,34 @@ app.get('/api/client/leads', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
 
-        const { data, error } = await supabase.from('leads')
-            .select('username, full_name, email, phone, whatsapp, website, category, city, followers_count, profile_url, is_enriched, platform, created_at')
-            .eq('owner_user_id', ctx.user.id)
-            .order('created_at', { ascending: false })
-            .limit(200);
+        // Their own draws, plus everything an agency found FOR them under
+        // their business record. Before phase 24 this was the first half
+        // only, so a client whose agency had just found forty leads for them
+        // saw none of them here.
+        const own = ctx.profile?.role === 'client' ? await ownClientFor(ctx).catch(() => null) : null;
+        const { data: links } = own
+            ? await supabase.from('client_leads').select('lead_id').eq('client_id', own.id)
+            : { data: [] };
+        const linkedIds = (links || []).map(l => l.lead_id);
+
+        const cols = 'id, owner_user_id, username, full_name, email, phone, whatsapp, website, category, city, followers_count, profile_url, is_enriched, platform, created_at';
+        const [{ data: mine, error }, { data: forYou }] = await Promise.all([
+            supabase.from('leads').select(cols).eq('owner_user_id', ctx.user.id).order('created_at', { ascending: false }).limit(200),
+            linkedIds.length
+                ? supabase.from('leads').select(cols).in('id', linkedIds).order('created_at', { ascending: false }).limit(400)
+                : Promise.resolve({ data: [] })
+        ]);
         if (error) throw error;
 
+        const data = dedupeLeads([...(mine || []), ...(forYou || [])])
+            .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+        const foundForYou = data.filter(l => l.owner_user_id !== ctx.user.id).length;
+
         res.json({
+            yours: data.length - foundForYou,
+            foundForYou,
             leads: (data || []).map(l => ({
+                foundForYou: l.owner_user_id !== ctx.user.id,
                 username: l.username,
                 platform: l.platform || 'instagram',
                 name: l.full_name || null,
@@ -15308,6 +15426,10 @@ if (require.main === module) {
 
 // Exported so the test suite can exercise the pure logic without booting a
 // server or touching Supabase. Nothing here changes runtime behaviour.
+// Every route above is registered. From here an uncaught exception is a
+// runtime fault to log and survive, not a boot failure to die on.
+BOOTED = true;
+
 module.exports = {
     app, start, JOB_WORKERS, __geminiTest: (prompt, userId) => geminiCallDetailed(prompt, { userId, tag: 'test' }), cpFeature, cpScore, cpBand, geminiRank, graphInsights, clientAccess,
     // secrets
@@ -15355,5 +15477,7 @@ module.exports = {
     // handlers over an in-memory database instead of trusting that they wire
     resolveClientId, ownClientFor, createJob, ensureProfile, userRole,
     // phase 23
-    linkLeadsToClient, dedupeLeads, MERGE_TABLES
+    linkLeadsToClient, dedupeLeads, MERGE_TABLES,
+    // phase 24
+    metaParseSignedRequest, metaDeleteUserData
 };

@@ -27,15 +27,26 @@ for (const f of files) {
         code = e.status == null ? 1 : e.status;
     }
     const m = out.match(/(\d+)\s+(?:checks\s+)?passed/);
-    // A smoke test prints "ok" rather than a count. Reporting it as "0 passed"
-    // reads as a file that ran nothing, which is worse than saying "ok".
     const n = m ? parseInt(m[1], 10) : 0;
-    const label = m ? `${n} passed` : (code === 0 ? 'ok' : 'no result');
+    // A smoke test prints "smoke: ok" rather than a count. That exact phrase
+    // is the ONLY way a file with no count passes. Anything else with no
+    // count is a file that ran nothing — and once, every file ran nothing:
+    // server.js threw at load, its crash handler exited 0, and this runner
+    // called all eleven of them "ok" with a total of 36. Silence is failure.
+    const smokeOk = /smoke: ok/.test(out);
+    const crashed = /"event":"uncaught_exception"|ReferenceError:|SyntaxError:|TypeError: Cannot/.test(out);
+    const noResult = !m && !smokeOk;
+    const label = m ? `${n} passed` : (smokeOk ? 'ok' : 'NO RESULT');
     total += n;
     const failures = (out.match(/^\s*FAIL /gm) || []).length;
-    if (code !== 0 || failures) {
+    if (code !== 0 || failures || crashed || noResult) {
         failedFiles.push(f);
-        console.log(`\n=== ${f} — ${failures || '?'} failing ===`);
+        console.log(`\n=== ${f} — ${failures || (crashed ? 'crashed' : noResult ? 'produced no result' : '?')} ===`);
+        if (crashed || noResult) {
+            // The first line that looks like the reason, so nobody has to re-run it.
+            const why = out.split('\n').find(l => /uncaught_exception|Error:|Cannot access/.test(l)) || out.split('\n').find(l => l.trim()) || '(no output at all)';
+            console.log('       ' + why.slice(0, 300));
+        }
         // Print only what failed, plus its detail lines, so a long green run
         // does not bury the one thing that broke.
         out.split('\n').forEach((line, i, all) => {
@@ -45,7 +56,10 @@ for (const f of files) {
             }
         });
     }
-    console.log(`${code === 0 && !failures ? 'PASS' : 'FAIL'}  ${f.padEnd(22)} ${label}`);
+    // The same condition as the failure list above, or a crashed file prints
+    // "PASS … NO RESULT" on one line and "FAILED" three lines later.
+    const ok = code === 0 && !failures && !crashed && !noResult;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(22)} ${label}`);
 }
 
 console.log('\n' + '='.repeat(52));

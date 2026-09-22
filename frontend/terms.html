@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <!--
+        REVIEW BEFORE SUBMITTING TO META APP REVIEW.
+        Plain-language terms that match how the product actually works. Not
+        legal advice; have the operator's name, jurisdiction and liability
+        wording checked by someone qualified.
+    -->
+    <style>
+        body { padding: 40px 20px 80px; max-width: 820px; }
+        .legal h1 { font-size: 1.8rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .legal .when { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 28px; }
+        .legal h2 { font-size: 1.08rem; font-weight: 800; margin: 30px 0 10px; color: var(--text-primary); }
+        .legal p, .legal li { font-size: 0.93rem; line-height: 1.7; color: var(--text-secondary); }
+        .legal ul { padding-left: 22px; margin: 8px 0 14px; }
+        .legal a { color: var(--accent-solid); }
+        .legal .nav { font-size: 0.82rem; margin-bottom: 26px; }
+        .legal .nav a { margin-right: 14px; }
+    </style>
+</head>
+<body>
+<main class="legal">
+    <div class="nav"><a href="index.html">← EdgeLead</a> <a href="privacy.html">Privacy</a> <a href="data-deletion.html">Delete your data</a></div>
+    <h1>Terms of use</h1>
+    <div class="when">Last updated 22 September 2026</div>
+
+    <h2>What EdgeLead is</h2>
+    <p>A tool for analysing social-media accounts, planning content and finding business leads,
+       used by agencies and by the businesses they work with. Reports are built from publicly
+       visible social-media data and, if you connect it, from your own Meta insights.</p>
+
+    <h2>Your account</h2>
+    <ul>
+        <li>A self-service account starts with a free trial of a fixed length and fixed allowances,
+            shown to you inside the product. After it ends, access continues only when an
+            administrator activates a plan for you; payment is arranged with the EdgeLead team
+            directly.</li>
+        <li>Employee accounts are created by an administrator and see only the tools and clients
+            they have been given.</li>
+        <li>You are responsible for keeping your sign-in details private and for what is done from
+            your account.</li>
+    </ul>
+
+    <h2>Using it properly</h2>
+    <ul>
+        <li>Use EdgeLead only for lawful business purposes and in line with Meta's and Instagram's
+            own terms.</li>
+        <li>Contact details in lead lists are ones a business has published itself. Use them
+            respectfully and in line with the marketing and privacy law that applies to you.</li>
+        <li>If you bring your own data-provider API key, its use and cost are yours.</li>
+        <li>Do not attempt to access other accounts' data, overload the service, or resell access.</li>
+    </ul>
+
+    <h2>Your data</h2>
+    <p>What is collected, why, and how to remove it is set out in the
+       <a href="privacy.html">privacy page</a>. You can disconnect a Meta account or delete client
+       records at any time.</p>
+
+    <h2>What we do not promise</h2>
+    <p>Reports are analyses of the data available at the time they were run. Social platforms change
+       what is visible without notice, and third-party data providers can be unavailable. EdgeLead
+       is provided as-is; we do not guarantee any particular business result, and our liability is
+       limited to the extent the law allows.</p>
+
+    <h2>Changes</h2>
+    <p>If these terms change materially, the date above changes and you will be told inside the
+       product.</p>
+
+    <h2>Contact</h2>
+    <p id="contact"></p>
+</main>
+<script>
+    const CONTACT_EMAIL = '';
+    document.getElementById('contact').innerHTML = CONTACT_EMAIL
+        ? `<a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>`
+        : 'Contact your account administrator, who can reach the EdgeLead team.';
+</script>
+</body>
+</html>

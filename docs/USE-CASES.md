@@ -132,16 +132,18 @@ Three rules the arrows enforce:
 | C2 | See my reports in owner language, banded not scored | **UNIT** | `phase14` — `clientReportView`, pillars, standing |
 | C3 | Draw a limited number of leads; audit a limited number of groups; stay under a dollar ceiling | **UNIT** | `phase13` — 32 checks on caps, periods, refunds |
 | C4 | Ask the assistant | **UNIT** | `phase15` |
-| C5 | Connect my own Meta and get the owner assistant | **BUILT** / **PARTIAL** | Works for accounts with a role on the Meta app; **public self-serve needs App Review** |
+| C5 | Connect my own Meta and get the owner assistant | **BUILT** / **PARTIAL** | Works for accounts with a role on the Meta app. The privacy, terms and data-deletion pages and the deletion callback App Review asks for now exist; **public self-serve still needs the review itself** |
 | C6 | Be taken on by an agency and see the work they do for me | **E2E** | `usecases` — *the agency takes that business on* |
 | C7 | Lapse → refused with `account_expired`; be re-activated by an admin | **E2E** (refusal) / **BUILT** (activation) | `usecases` — *the account states a client can be in* |
 | C8 | Purchase | **PARTIAL by decision** | Admin activates manually; no payment gateway |
+| C9 | See the leads my agency found for me, marked as the team's | **E2E** | `usecases` — *the client sees the leads their team found for them* |
 
 ## Public viewer
 
 | # | Use case | Status | Proof / where |
 |---|---|---|---|
 | P1 | Open a share link with no account; expired or revoked → 404 | **E2E** | `usecases` — share create → public read → revoke → 404 |
+| P2 | Meta tells us someone removed the app; their connections and owner-side reports are deleted, and they can check the confirmation | **E2E** | `usecases` — *Meta asks us to forget someone*: wrong secret, tampered payload and garbage all refused; scraped reports untouched |
 
 ## System
 
@@ -158,11 +160,10 @@ Three rules the arrows enforce:
 | Gap | Why it is where it is |
 |---|---|
 | **Payment gateway** | Your decision: admin activates manually. Right for an agency; a ceiling for "anyone can purchase". |
-| **Meta App Review** | Only gates *public* self-serve connection. Employees, as Testers, are unblocked. Needs a privacy policy, terms and a deletion page — I can write those. |
+| **Meta App Review** | Only gates *public* self-serve connection. Employees, as Testers, are unblocked. The pages and the deletion callback it requires exist (`privacy.html`, `terms.html`, `data-deletion.html`, `POST /api/meta/data-deletion`); the submission itself, and a review of the page wording by someone qualified, are still to do. |
 | **Per-industry scoring** | One scoring model for every niche. A bakery and a B2B consultancy are graded the same way. |
 | **Lead-list resale packaging** | Held on your legal call. The internal list is complete. |
 | **Un-merge** | Merge is one-way by design; the archived record keeps a note naming where it went. |
-| **A per-client lead view for the client account** | Employees see it; the client surface does not yet show "leads found for you". Straightforward — same endpoint, `client-leads.html`. |
 
 ---
 
@@ -170,10 +171,12 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 41 | The workflows above marked E2E, as a person would do them |
+| `tests/usecases.test.js` | 49 | The workflows above marked E2E, as a person would do them |
 | `tests/wiring.test.js` | 36 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~200 | The logic inside each engine |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
+
+**How the counting is kept honest:** the runner treats a test file that exits cleanly without a result line as a failure. It did not always; when `server.js` once threw at load and its crash handler exited 0, eleven files reported "ok" having run nothing. The server now exits non-zero on any exception before boot completes, so that state cannot deploy either.
 
 **Where the model is still unproven in production:** no engine has been run end to end inside a
 test (they spend Apify credit), the client surface has never rendered for a real client-role

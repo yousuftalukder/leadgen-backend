@@ -286,14 +286,19 @@ console.log('\npages: shell, styles and auth on every one');
 {
     // share.html is the read-only public view: no session, so no auth boot.
     const PUBLIC = new Set(['share.html']);
+    // Legal and policy pages Meta's review links to. They deliberately carry
+    // no app shell — no header.js, no session, nothing to be signed in to —
+    // so a person can read them without an account. They still must parse
+    // and still must be reachable.
+    const STATIC = new Set(['privacy.html', 'terms.html', 'data-deletion.html']);
     const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
 
     for (const f of PAGES) {
         const src = fs.readFileSync(path.join(FRONT_DIR, f), 'utf8');
         if (!/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
-        if (!/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
-        if (!/supabase-js/.test(src)) noSupabase.push(f);
-        if (!PUBLIC.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
+        if (!STATIC.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
+        if (!STATIC.has(f) && !/supabase-js/.test(src)) noSupabase.push(f);
+        if (!PUBLIC.has(f) && !STATIC.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
         for (const m of src.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
             try { new Function(m[1]); } catch (e) { badParse.push(`${f}: ${e.message}`); }
         }

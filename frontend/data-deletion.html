@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delete your data — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <!-- Meta's "Data Deletion Instructions URL" and the status page its
+         deletion callback points people at (?code=…). Public: no session. -->
+    <style>
+        body { padding: 40px 20px 80px; max-width: 820px; }
+        .legal h1 { font-size: 1.8rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .legal .when { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 28px; }
+        .legal h2 { font-size: 1.08rem; font-weight: 800; margin: 30px 0 10px; color: var(--text-primary); }
+        .legal p, .legal li { font-size: 0.93rem; line-height: 1.7; color: var(--text-secondary); }
+        .legal ol, .legal ul { padding-left: 22px; margin: 8px 0 14px; }
+        .legal a { color: var(--accent-solid); }
+        .legal .nav { font-size: 0.82rem; margin-bottom: 26px; }
+        .legal .nav a { margin-right: 14px; }
+        .status { padding: 16px 18px; border-radius: 12px; margin-bottom: 26px; font-size: 0.93rem; line-height: 1.65;
+            background: rgba(12,120,86,0.12); border: 1px solid rgba(63,191,143,0.3); }
+        .status.is-bad { background: rgba(240,163,138,0.10); border-color: rgba(240,163,138,0.35); }
+        .status b { color: var(--text-primary); }
+    </style>
+</head>
+<body>
+<main class="legal">
+    <div class="nav"><a href="index.html">← EdgeLead</a> <a href="privacy.html">Privacy</a> <a href="terms.html">Terms</a></div>
+    <h1>Delete your data</h1>
+    <div class="when">How to remove what EdgeLead holds from your Meta account, and how to check a request.</div>
+
+    <div class="status" id="status" hidden></div>
+
+    <h2>Three ways, any of which works</h2>
+    <ol>
+        <li><b>Inside EdgeLead.</b> On the Clients page, open the client, go to the Meta tab and
+            press <i>Disconnect</i>. The access tokens and everything read from Meta for that
+            connection are deleted immediately.</li>
+        <li><b>From Facebook.</b> In your Facebook settings, under <i>Apps and Websites</i>, remove
+            EdgeLead. Meta notifies us automatically and the same deletion runs. You are then shown a
+            confirmation code and a link back to this page, which reports what was removed.</li>
+        <li><b>By asking.</b> Contact your account administrator or the EdgeLead team and name the
+            Facebook Page or Instagram account concerned.</li>
+    </ol>
+
+    <h2>What gets deleted</h2>
+    <ul>
+        <li>The connection itself, including the encrypted access tokens.</li>
+        <li>Every post, insight and follower-demographic record read from Meta for it.</li>
+        <li>Every owner-side report built from that data (Meta owner reports and monthly reports).</li>
+    </ul>
+    <p>Reports built only from publicly visible data are not affected — they were not built from your
+       Meta account and name no Facebook user.</p>
+
+    <h2>Check a request</h2>
+    <p>If Meta gave you a confirmation code, open this page with <code>?code=</code> followed by the
+       code, or paste it here.</p>
+    <form id="check" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="code" placeholder="confirmation code" style="max-width:320px">
+        <button class="btn-secondary" type="submit">Check</button>
+    </form>
+</main>
+<script>
+(function () {
+    const BACKEND_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
+    const box = document.getElementById('status');
+    async function check(code) {
+        code = String(code || '').trim();
+        if (!/^[a-f0-9]{24}$/.test(code)) { show(false, 'That does not look like a confirmation code.'); return; }
+        try {
+            const r = await fetch(`${BACKEND_URL}/api/public/meta/deletion/${encodeURIComponent(code)}`);
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) { show(false, d.error || 'No request was found for that code.'); return; }
+            const when = d.created_at ? new Date(d.created_at).toLocaleString() : '';
+            show(true, `<b>Deleted.</b> Request <code>${code}</code> was completed${when ? ' on ' + when : ''}: ` +
+                `${d.connections} connection${d.connections === 1 ? '' : 's'} and ${d.reports} owner-side report${d.reports === 1 ? '' : 's'} removed.`);
+        } catch { show(false, 'Could not reach the service just now. Try again in a moment.'); }
+    }
+    function show(ok, html) { box.hidden = false; box.classList.toggle('is-bad', !ok); box.innerHTML = html; }
+    const q = new URLSearchParams(location.search).get('code');
+    if (q) { document.getElementById('code').value = q; check(q); }
+    document.getElementById('check').addEventListener('submit', e => { e.preventDefault(); check(document.getElementById('code').value); });
+})();
+</script>
+</body>
+</html>

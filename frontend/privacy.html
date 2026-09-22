@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <!--
+        REVIEW BEFORE SUBMITTING TO META APP REVIEW.
+        This page is written to be factually true of what the code does as of
+        the date below. It is not legal advice. Set CONTACT_EMAIL, and have the
+        operator's name and jurisdiction checked by someone qualified.
+    -->
+    <style>
+        body { padding: 40px 20px 80px; max-width: 820px; }
+        .legal h1 { font-size: 1.8rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .legal .when { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 28px; }
+        .legal h2 { font-size: 1.08rem; font-weight: 800; margin: 30px 0 10px; color: var(--text-primary); }
+        .legal p, .legal li { font-size: 0.93rem; line-height: 1.7; color: var(--text-secondary); }
+        .legal ul { padding-left: 22px; margin: 8px 0 14px; }
+        .legal a { color: var(--accent-solid); }
+        .legal .nav { font-size: 0.82rem; margin-bottom: 26px; }
+        .legal .nav a { margin-right: 14px; }
+    </style>
+</head>
+<body>
+<main class="legal">
+    <div class="nav"><a href="index.html">← EdgeLead</a> <a href="terms.html">Terms</a> <a href="data-deletion.html">Delete your data</a></div>
+    <h1>Privacy</h1>
+    <div class="when">Last updated 22 September 2026</div>
+
+    <p>EdgeLead is a social-media analysis and lead-generation tool used by agencies and by the
+       businesses they work with. This page says what it collects, why, where it is kept, and how
+       to have it removed. It is written to be true of what the software actually does.</p>
+
+    <h2>What we collect, and why</h2>
+    <ul>
+        <li><b>Your account.</b> Your email address and, if you give it, your name. Used to sign you
+            in and to show who did what. Held in our database provider (Supabase).</li>
+        <li><b>Client records you create.</b> Business names, Instagram handles, Facebook Page names,
+            niche and location — the details you type in so reports can be filed under the right
+            business.</li>
+        <li><b>Public social-media data.</b> When you run a report or a lead search, EdgeLead reads
+            publicly visible information from Instagram and Facebook — profiles, posts, engagement
+            counts, and contact details a business has itself published — through a third-party
+            data provider (Apify). This is used to build the reports and lead lists you asked for.</li>
+        <li><b>Your Meta data, only if you connect it.</b> If you connect a Facebook Page and its
+            Instagram professional account, EdgeLead reads owner-side insights that Meta makes
+            available to the account holder: reach, views, saves, shares, profile visits, follower
+            demographics, and your own posts' performance. It uses the permissions
+            <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>read_insights</code>,
+            <code>instagram_basic</code>, <code>instagram_manage_insights</code> and
+            <code>business_management</code>. It never posts, messages, edits, or touches ads.</li>
+        <li><b>Usage inside the product.</b> Which reports were run, when, and roughly what they
+            cost, so allowances and budgets can be enforced.</li>
+    </ul>
+
+    <h2>What we do with it</h2>
+    <p>Build the reports, plans and lists you ask for; write the narrative parts of those reports
+       with an AI model (Google Gemini), which is sent the report's figures and never your
+       credentials; and show your own data back to you and to the people you have chosen to share a
+       client with.</p>
+    <p><b>We do not sell personal data.</b> Lead lists you build stay in your account.</p>
+
+    <h2>Where it lives, and for how long</h2>
+    <ul>
+        <li>Data is stored with Supabase (database), Render (application server) and Netlify (the
+            pages you see). Access tokens for Meta and API keys for data providers are encrypted at
+            rest.</li>
+        <li>Meta access tokens expire on Meta's schedule (typically 60 days) and are refreshed only
+            by you reconnecting.</li>
+        <li>Reports, lists and client records are kept until you delete them or your account is
+            deleted.</li>
+    </ul>
+
+    <h2>Deleting your data</h2>
+    <p>You can disconnect a Meta account at any time from the Clients page; that deletes the tokens
+       and everything read from Meta for it. If you remove EdgeLead from your Facebook settings,
+       Meta tells us and the same deletion happens automatically — see
+       <a href="data-deletion.html">Delete your data</a> for the details and for checking the status
+       of a request. For anything else, ask your account administrator or contact us below.</p>
+
+    <h2>Sharing</h2>
+    <p>A report is visible to the account that made it, to people the client record has been shared
+       with inside EdgeLead, and — only if someone creates one — to anyone holding a read-only share
+       link until it expires or is revoked. Nothing is shared with third parties beyond the
+       providers named above, which process it on our behalf.</p>
+
+    <h2>Contact</h2>
+    <p id="contact"></p>
+</main>
+<script>
+    // The same convention as header.js: set the address once and the page
+    // uses it; leave it blank and the page says how else to reach us.
+    const CONTACT_EMAIL = '';
+    document.getElementById('contact').innerHTML = CONTACT_EMAIL
+        ? `Questions or requests: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>.`
+        : 'Questions or requests: contact your account administrator, who can reach the EdgeLead team.';
+</script>
+</body>
+</html>

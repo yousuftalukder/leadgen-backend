@@ -155,6 +155,9 @@ const realLoad = Module._load;
 Module._load = function (req, ...rest) { return stubs[req] !== undefined ? stubs[req] : realLoad.call(this, req, ...rest); };
 process.env.SUPABASE_URL = 'http://stub'; process.env.SUPABASE_SERVICE_ROLE_KEY = 'stub';
 delete process.env.MASTER_ADMIN_EMAIL;      // the first account to sign in bootstraps as admin
+// A known app secret, so a Meta signed_request can be forged HERE and only
+// here: the deletion callback must accept exactly what this secret signs.
+process.env.META_APP_ID = '1234567890'; process.env.META_APP_SECRET = 'test-app-secret';
 
 const S = require(path.join(__dirname, '..', 'server.js'));
 
@@ -544,6 +547,87 @@ test('a stranger cannot revoke it; the maker can; then the link is dead', async 
     assert.strictEqual(yes.statusCode, 200, JSON.stringify(yes.body));
     const gone = await call('GET', `/api/public/share/${state.share.token}`);
     assert.strictEqual(gone.statusCode, 404);
+});
+
+// ===========================================================================
+// PHASE 24 — the client sees what was found for them; Meta can ask us to forget
+// ===========================================================================
+section('\nthe client sees the leads their team found for them');
+test('agency finds show up on the client\'s own surface, marked as the team\'s', async () => {
+    // CLIENT is an editor of C since the agency took them on. northendpizza
+    // and harborbakery were found for C by EMP and ADMIN.
+    const r = await call('GET', '/api/client/leads', { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const names = r.body.leads.map(l => l.username);
+    assert.ok(names.includes('northendpizza') && names.includes('harborbakery'), 'the team\'s finds are missing: ' + names.join(','));
+    assert.ok(r.body.foundForYou >= 2, 'foundForYou should count the team\'s finds');
+    assert.ok(r.body.leads.find(l => l.username === 'harborbakery').foundForYou === true);
+});
+test('…but not another client\'s leads', async () => {
+    const r = await call('GET', '/api/client/leads', { token: 't-client' });
+    assert.ok(!r.body.leads.some(l => l.username === 'bloomflorist'), 'a lead found for a different client leaked to this one');
+});
+
+section('\nMeta asks us to forget someone');
+const b64url = v => Buffer.from(v).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function signedRequest(payload, secret = 'test-app-secret') {
+    const body = b64url(JSON.stringify({ algorithm: 'HMAC-SHA256', ...payload }));
+    const sig = crypto.createHmac('sha256', secret).update(body).digest();
+    return b64url(sig) + '.' + body;
+}
+test('a request signed with the wrong secret is rejected before anything is read', async () => {
+    const r = await call('POST', '/api/meta/data-deletion', { body: { signed_request: signedRequest({ user_id: '999' }, 'not-our-secret') } });
+    assert.strictEqual(r.statusCode, 400, JSON.stringify(r.body));
+});
+test('a tampered payload is rejected', async () => {
+    const good = signedRequest({ user_id: '999' });
+    const [sig] = good.split('.');
+    const tampered = sig + '.' + b64url(JSON.stringify({ algorithm: 'HMAC-SHA256', user_id: '111' }));
+    const r = await call('POST', '/api/meta/data-deletion', { body: { signed_request: tampered } });
+    assert.strictEqual(r.statusCode, 400);
+});
+test('garbage is rejected without throwing', async () => {
+    for (const junk of ['', 'a.b.c', 'nodot', null, '..']) {
+        const r = await call('POST', '/api/meta/data-deletion', { body: { signed_request: junk } });
+        assert.strictEqual(r.statusCode, 400, JSON.stringify(junk));
+    }
+});
+test('a genuine request deletes the person\'s connections and owner-side reports, and nothing else', async () => {
+    const fb = '7788990011';
+    const conn = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, page_id: '9', page_name: 'Harbor Cafe', fb_user_id: fb, status: 'active', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(conn);
+    tbl('meta_media').push({ id: crypto.randomUUID(), connection_id: conn.id, user_id: EMP.id, media_id: 'm1' });
+    tbl('meta_snapshots').push({ id: crypto.randomUUID(), connection_id: conn.id, user_id: EMP.id, level: 'ig' });
+    const ownerRep = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'meta', report_type: 'meta_monthly', meta_connection_id: conn.id, created_at: new Date().toISOString() };
+    tbl('reports').push(ownerRep);
+    const scrapedBefore = tbl('reports').filter(x => x.platform !== 'meta').length;
+
+    const r = await call('POST', '/api/meta/data-deletion', { body: { signed_request: signedRequest({ user_id: fb }) } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(/^[a-f0-9]{24}$/.test(r.body.confirmation_code), 'no confirmation code');
+    assert.ok(String(r.body.url).includes('data-deletion.html?code=' + r.body.confirmation_code), 'the status URL does not carry the code');
+    state.delCode = r.body.confirmation_code;
+
+    assert.ok(!tbl('meta_connections').some(c => c.id === conn.id), 'the connection survived');
+    assert.ok(!tbl('reports').some(x => x.id === ownerRep.id), 'the owner-side report survived');
+    assert.strictEqual(tbl('reports').filter(x => x.platform !== 'meta').length, scrapedBefore, 'a scraped report was deleted — those name no Facebook user');
+});
+test('the status page can look the request up, and nothing else', async () => {
+    const ok = await call('GET', `/api/public/meta/deletion/${state.delCode}`);
+    assert.strictEqual(ok.statusCode, 200, JSON.stringify(ok.body));
+    assert.strictEqual(ok.body.status, 'complete');
+    assert.strictEqual(ok.body.connections, 1);
+    assert.strictEqual(ok.body.reports, 1);
+    const no = await call('GET', '/api/public/meta/deletion/' + 'f'.repeat(24));
+    assert.strictEqual(no.statusCode, 404);
+    const bad = await call('GET', '/api/public/meta/deletion/not-a-code');
+    assert.strictEqual(bad.statusCode, 404);
+});
+test('a request for someone we hold nothing on still completes, honestly', async () => {
+    const r = await call('POST', '/api/meta/data-deletion', { body: { signed_request: signedRequest({ user_id: 'nobody-here' }) } });
+    assert.strictEqual(r.statusCode, 200);
+    const s = await call('GET', `/api/public/meta/deletion/${r.body.confirmation_code}`);
+    assert.strictEqual(s.body.connections, 0);
 });
 
 (async () => {
