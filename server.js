@@ -594,8 +594,12 @@ function accountState(profile) {
  */
 function accountDenial(profile) {
     const state = accountState(profile);
+    // `code` matches what reserveQuota sends for the same states, so a page
+    // reads one field whichever door refused it. The front door used to send
+    // `state` for expired and nothing machine-readable for suspended, which
+    // left a disabled account looking like a network failure.
     if (state === 'suspended') {
-        return { status: 403, body: { error: 'Account disabled. Contact your administrator.' } };
+        return { status: 403, body: { error: 'Account disabled. Contact your administrator.', code: 'account_suspended', state: 'suspended' } };
     }
     if (state === 'expired') {
         const had = profile?.paid_until || profile?.trial_ends_at;
@@ -605,6 +609,7 @@ function accountDenial(profile) {
                 error: had
                     ? 'Your access has ended. Contact us to continue.'
                     : 'This account has no active plan. Contact us to get started.',
+                code: 'account_expired',
                 state: 'expired',
                 ended_at: had || null
             }
@@ -6246,6 +6251,13 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
 
     await progress(95, `Linked ${linked} lead(s) to the campaign`);
 
+    // The campaign knows which client it was filed under; the leads should
+    // too, or "for this client, these are the leads" cannot be answered.
+    {
+        const { data: cmp } = await supabase.from('campaigns').select('client_id').eq('id', campaignId).maybeSingle();
+        if (cmp?.client_id) await linkLeadsToClient(cmp.client_id, [...idByUsername.values()], 'ig_campaign', jobId);
+    }
+
     await supabase.from('campaigns')
         .update({ total_leads_found: linked }).eq('id', campaignId).eq('user_id', userId);
 
@@ -6530,9 +6542,65 @@ function csvCell(v) {
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
+/**
+ * Record that these leads were found for this client. (phase 23)
+ *
+ * Idempotent: a resumed run replays its save phase, and the link must not
+ * turn into a duplicate or an error when it does. Never throws — a failed
+ * link is a warning on the run, not a reason to lose the leads themselves.
+ */
+async function linkLeadsToClient(clientId, leadIds, source, jobId = null) {
+    const ids = [...new Set((leadIds || []).filter(id => UUID_RE.test(String(id || ''))))];
+    if (!clientId || !UUID_RE.test(String(clientId)) || !ids.length) return 0;
+    let linked = 0;
+    for (let i = 0; i < ids.length; i += 200) {
+        const slice = ids.slice(i, i + 200).map(lead_id => ({ client_id: clientId, lead_id, source, job_id: jobId }));
+        const { error } = await supabase.from('client_leads').upsert(slice, { onConflict: 'client_id,lead_id', ignoreDuplicates: true });
+        if (error) { logger.warn('client_leads_link_failed', { clientId, source, message: error.message }); continue; }
+        linked += slice.length;
+    }
+    return linked;
+}
+
+/**
+ * The lead ids a client's view is made of, or null when the request is for
+ * the caller's own master list. A client_only request the caller cannot
+ * read is refused, not silently widened to their own leads.
+ */
+async function leadScope(req, ctx) {
+    if (String(req.query.client_only || '') !== '1') return null;
+    const cid = String(req.query.client_id || req.query.clientId || '');
+    const c = await clientAccess(ctx.user.id, cid, 'viewer');
+    if (!c) { const e = new Error('Client not found.'); e.statusCode = 404; throw e; }
+    const { data } = await supabase.from('client_leads').select('lead_id').eq('client_id', c.id);
+    return { client: c, ids: (data || []).map(r => r.lead_id) };
+}
+
+/**
+ * One row per business in a client's view. Two employees finding the same
+ * Page for one client produce two lead rows (the key is per owner); the
+ * client is asking about the business, not about who found it. The richer
+ * row wins — enriched over not, then the most recently seen.
+ */
+function dedupeLeads(rows) {
+    const best = new Map();
+    for (const r of (rows || [])) {
+        const k = `${r.platform || 'instagram'}:${String(r.username || '').toLowerCase()}`;
+        const cur = best.get(k);
+        if (!cur) { best.set(k, r); continue; }
+        const better = (!!r.is_enriched && !cur.is_enriched) ||
+            (!!r.is_enriched === !!cur.is_enriched && String(r.created_at) > String(cur.created_at));
+        if (better) best.set(k, r);
+    }
+    return [...best.values()];
+}
+
 /** Shared filter builder, so the CSV is always exactly what is on screen. */
-function leadFilters(q, userId) {
-    let s = supabase.from('leads').select('*', { count: 'exact' }).eq('owner_user_id', userId);
+function leadFilters(q, userId, scopeIds = null) {
+    // The master list is the caller's own rows. A client's view is the rows
+    // linked to that client, whoever found them.
+    let s = supabase.from('leads').select('*', { count: 'exact' });
+    s = scopeIds ? s.in('id', scopeIds) : s.eq('owner_user_id', userId);
 
     const platform = String(q.platform || '').toLowerCase();
     if (platform === 'instagram' || platform === 'facebook') s = s.eq('platform', platform);
@@ -6583,6 +6651,26 @@ app.get('/api/leads', async (req, res) => {
         const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
         const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
 
+        const scope = await leadScope(req, ctx);
+        if (scope) {
+            // A client's list is de-duplicated across the people who found it,
+            // and a page cannot be cut before the duplicates are gone — so the
+            // whole view is read (capped) and paged here. Per-client sets are
+            // hundreds, not hundreds of thousands.
+            if (!scope.ids.length) return res.json({ leads: [], page: 1, limit, total: 0, pages: 1, client: { id: scope.client.id, name: scope.client.name } });
+            const { data, error } = await leadFilters(req.query, ctx.user.id, scope.ids)
+                .order(sort.col, { ascending: sort.asc, nullsFirst: false })
+                .range(0, 4999);
+            if (error) throw error;
+            const rows = dedupeLeads(data);
+            return res.json({
+                leads: rows.slice((page - 1) * limit, page * limit),
+                page, limit, total: rows.length,
+                pages: Math.max(1, Math.ceil(rows.length / limit)),
+                client: { id: scope.client.id, name: scope.client.name }
+            });
+        }
+
         const { data, error, count } = await leadFilters(req.query, ctx.user.id)
             .order(sort.col, { ascending: sort.asc, nullsFirst: false })
             .range((page - 1) * limit, page * limit - 1);
@@ -6607,6 +6695,34 @@ app.get('/api/leads/summary', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
         const U = ctx.user.id;
+
+        const scope = await leadScope(req, ctx);
+        if (scope) {
+            // Counted over the de-duplicated view, so the tiles agree with the
+            // list underneath them.
+            const { data } = scope.ids.length
+                ? await supabase.from('leads').select('*').in('id', scope.ids).range(0, 4999)
+                : { data: [] };
+            const rows = dedupeLeads(data);
+            const has = f => rows.filter(r => r[f] != null && r[f] !== '').length;
+            const tally = key => {
+                const m = {};
+                for (const r of rows) { const v = String(r[key] || '').trim(); if (v) m[v] = (m[v] || 0) + 1; }
+                return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, n]) => ({ name, n }));
+            };
+            return res.json({
+                total: rows.length,
+                byPlatform: { instagram: rows.filter(r => r.platform !== 'facebook').length, facebook: rows.filter(r => r.platform === 'facebook').length },
+                enriched: rows.filter(r => r.is_enriched).length,
+                withEmail: has('email'), withPhone: has('phone'),
+                reachable: rows.filter(r => r.email || r.phone || r.whatsapp).length,
+                topCities: tally('city'), topCategories: tally('category'),
+                sampledFrom: rows.length,
+                client: { id: scope.client.id, name: scope.client.name },
+                note: `Leads found for ${scope.client.name}, by anyone working on it, one row per business.`
+            });
+        }
+
         const countOf = fn => fn(supabase.from('leads').select('id', { count: 'exact', head: true }).eq('owner_user_id', U));
 
         const [all, ig, fb, enriched, withEmail, withPhone, reachable] = await Promise.all([
@@ -6656,10 +6772,21 @@ app.get(['/api/leads/export', '/api/leads/export.csv'], async (req, res) => {
         const cap = Math.min(Math.max(parseInt(req.query.limit, 10) || 5000, 1), 20000);
         const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
 
-        const { data, error } = await leadFilters(req.query, ctx.user.id)
-            .order(sort.col, { ascending: sort.asc, nullsFirst: false })
-            .range(0, cap - 1);
-        if (error) throw error;
+        const scope = await leadScope(req, ctx);
+        let data;
+        if (scope) {
+            const r = scope.ids.length
+                ? await leadFilters(req.query, ctx.user.id, scope.ids).order(sort.col, { ascending: sort.asc, nullsFirst: false }).range(0, 4999)
+                : { data: [], error: null };
+            if (r.error) throw r.error;
+            data = dedupeLeads(r.data).slice(0, cap);
+        } else {
+            const r = await leadFilters(req.query, ctx.user.id)
+                .order(sort.col, { ascending: sort.asc, nullsFirst: false })
+                .range(0, cap - 1);
+            if (r.error) throw r.error;
+            data = r.data;
+        }
 
         const cols = ['platform', 'username', 'full_name', 'email', 'phone', 'whatsapp', 'website',
             'followers_count', 'following_count', 'posts_count', 'engagement_rate',
@@ -10487,6 +10614,15 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
         }
     }
 
+    // Facebook leads carried no client at all before phase 23 — a search run
+    // for a client left nothing on the row or anywhere else that said so.
+    if (input.clientId && saved) {
+        const names = rows.map(r => r.username).filter(Boolean);
+        const { data: mine } = await supabase.from('leads').select('id')
+            .eq('owner_user_id', userId).eq('platform', 'facebook').in('username', names);
+        await linkLeadsToClient(input.clientId, (mine || []).map(r => r.id), 'fb_discovery', jobId);
+    }
+
     // Allowance was taken for every page we meant to read. Anything that did
     // not become a saved lead goes back.
     if (refunded > 0) await refundLeadQuota(userId, refunded);
@@ -12211,6 +12347,85 @@ app.post('/api/clients/:id/competitors/discover', spendLimit, async (req, res) =
         }, COST_PER_1K_PROFILE / 20);
         runJob(job.id, JOB_WORKERS['competitor_discovery'](ctx.user.id, job.input, job.id));
         res.status(202).json({ success: true, jobId: job.id });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// MERGE (phase 23)
+//
+// Two records for one business happen honestly: an agency creates one, the
+// business later signs itself up and gets its own, and only the empty case
+// is absorbed automatically (phase 22) — a record with work in it is never
+// touched as a side effect. This is the deliberate act for the rest: every
+// row filed under `from` is re-pointed at `into`, members are carried over,
+// and `from` is archived. Nothing is deleted.
+// ===========================================================================
+
+/** Every table that files rows under a client. Kept in one place so a new table cannot be forgotten by the merge. */
+const MERGE_TABLES = [
+    'reports', 'jobs', 'campaigns', 'meta_connections', 'meta_oauth_states', 'ai_conversations',
+    'content_plan_notes', 'competitor_sets', 'fb_group_sets', 'fb_page_sets', 'fb_suggestions',
+    'fb_posts', 'fb_page_posts', 'posts', 'report_shares', 'schedules'
+];
+
+app.post('/api/clients/:id/merge', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const into = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        const from = await clientAccess(ctx.user.id, req.body?.fromId, 'owner');
+        if (!into || !from) return res.status(404).json({ error: 'You must own both clients, or be an admin.' });
+        if (into.id === from.id) return res.status(400).json({ error: 'A client cannot be merged into itself.' });
+        const dry = String(req.query.dry || req.body?.dry || '') === '1';
+
+        const counts = {};
+        for (const t of MERGE_TABLES) {
+            const { count } = await supabase.from(t).select('*', { count: 'exact', head: true }).eq('client_id', from.id);
+            counts[t] = count || 0;
+        }
+        const { data: fromLinks } = await supabase.from('client_leads').select('lead_id, source, job_id').eq('client_id', from.id);
+        const { data: fromMembers } = await supabase.from('client_members').select('user_id, role').eq('client_id', from.id);
+        counts.client_leads = (fromLinks || []).length;
+        counts.client_members = (fromMembers || []).length;
+
+        if (dry) return res.json({ dry: true, into: { id: into.id, name: into.name }, from: { id: from.id, name: from.name }, counts });
+
+        for (const t of MERGE_TABLES) {
+            if (!counts[t]) continue;
+            const { error } = await supabase.from(t).update({ client_id: into.id }).eq('client_id', from.id);
+            if (error) throw error;
+        }
+        // Links and members are keyed by (client, x): upsert into the target,
+        // then clear the source, so a lead or a person already on both does not
+        // become a conflict.
+        if ((fromLinks || []).length) {
+            await supabase.from('client_leads').upsert(
+                fromLinks.map(l => ({ client_id: into.id, lead_id: l.lead_id, source: l.source || 'merge', job_id: l.job_id })),
+                { onConflict: 'client_id,lead_id', ignoreDuplicates: true });
+            await supabase.from('client_leads').delete().eq('client_id', from.id);
+        }
+        if ((fromMembers || []).length) {
+            const { data: have } = await supabase.from('client_members').select('user_id').eq('client_id', into.id);
+            const had = new Set((have || []).map(m => m.user_id));
+            const add = fromMembers.filter(m => !had.has(m.user_id) && m.user_id !== into.owner_user_id)
+                .map(m => ({ client_id: into.id, user_id: m.user_id, role: m.role, added_by: ctx.user.id }));
+            if (add.length) await supabase.from('client_members').upsert(add, { onConflict: 'client_id,user_id' });
+            await supabase.from('client_members').delete().eq('client_id', from.id);
+        }
+        // The old owner keeps a way in: if they are not the new owner, they
+        // become an editor rather than losing the business they created.
+        if (from.owner_user_id !== into.owner_user_id) {
+            await supabase.from('client_members').upsert(
+                [{ client_id: into.id, user_id: from.owner_user_id, role: 'editor', added_by: ctx.user.id }],
+                { onConflict: 'client_id,user_id' });
+        }
+        const stamp = new Date().toISOString().slice(0, 10);
+        await supabase.from('clients').update({
+            archived: true,
+            notes: `${from.notes ? from.notes + '\n\n' : ''}Merged into "${into.name}" (${into.id}) on ${stamp}.`
+        }).eq('id', from.id);
+
+        logger.info('client_merged', { userId: ctx.user.id, from: from.id, into: into.id, counts });
+        res.json({ success: true, into: { id: into.id, name: into.name }, from: { id: from.id, name: from.name }, counts });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -15138,5 +15353,7 @@ module.exports = {
     csvCell, LEAD_SORTS,
     // phase 22 — reached directly by the use-case test, which drives real
     // handlers over an in-memory database instead of trusting that they wire
-    resolveClientId, ownClientFor, createJob, ensureProfile, userRole
+    resolveClientId, ownClientFor, createJob, ensureProfile, userRole,
+    // phase 23
+    linkLeadsToClient, dedupeLeads, MERGE_TABLES
 };

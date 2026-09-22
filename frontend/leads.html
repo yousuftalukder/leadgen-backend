@@ -139,6 +139,13 @@
                 <option value="username">Handle A–Z</option>
             </select></div>
         </div>
+        <!-- Which list this is. The master list is everything this account
+             collected; the client view is everything found FOR a client, by
+             anyone working on it, one row per business. -->
+        <div class="ll-toggles" id="ll-scope" style="margin-top:14px">
+            <button class="ll-tog is-on" type="button" data-scope="mine">All my leads</button>
+            <button class="ll-tog" type="button" data-scope="client" id="ll-scope-client" disabled>This client's leads</button>
+        </div>
         <div class="ll-toggles">
             <button class="ll-tog" type="button" data-flag="reachable">Has a contact</button>
             <button class="ll-tog" type="button" data-flag="has_email">Has an email</button>
@@ -173,6 +180,7 @@
     let esc = v => String(v ?? '');
     let page = 1, pages = 1, total = 0, busy = false;
     const flags = { reachable: false, has_email: false, enriched: false, business: false, verified: false };
+    let scope = 'mine';           // 'mine' | 'client'
     let debounce = null;
 
     const n = v => (v === null || v === undefined || v === '' ? '—' : Number(v).toLocaleString());
@@ -180,6 +188,22 @@
     document.addEventListener('DOMContentLoaded', async () => {
         await EL.init({ engine: 'leadgen', page: 'leads.html' });
         esc = EL.escape;
+
+        // The client view needs a client. The work-for bar and the sidebar
+        // picker choose it; this page only follows.
+        const cur = EL.currentClient();
+        const scopeBtn = $('ll-scope-client');
+        if (cur) {
+            scopeBtn.disabled = false;
+            scopeBtn.textContent = `${cur.name}'s leads`;
+            if (new URLSearchParams(location.search).get('scope') === 'client') setScope('client');
+        } else {
+            scopeBtn.title = 'Choose a client above to see the leads found for them.';
+        }
+        document.querySelectorAll('#ll-scope .ll-tog').forEach(b => b.addEventListener('click', () => {
+            if (b.disabled) return;
+            setScope(b.dataset.scope);
+        }));
 
         loadSummary();
         load();
@@ -189,7 +213,11 @@
         ['f-platform', 'f-min', 'f-max', 'f-sort'].forEach(id =>
             $(id).addEventListener('change', () => { page = 1; load(); }));
 
-        document.querySelectorAll('.ll-tog').forEach(b => b.addEventListener('click', () => {
+        // Only the filter toggles. The scope switch shares the class for its
+        // look and must not become a filter — binding on the bare class made
+        // a scope click set flags[undefined] = true and every count read
+        // "match" as if a filter were on.
+        document.querySelectorAll('.ll-tog[data-flag]').forEach(b => b.addEventListener('click', () => {
             flags[b.dataset.flag] = !flags[b.dataset.flag];
             b.classList.toggle('is-on', flags[b.dataset.flag]);
             page = 1; load();
@@ -240,9 +268,20 @@
         } finally { btn.disabled = false; }
     }
 
+    function setScope(next) {
+        scope = next === 'client' ? 'client' : 'mine';
+        document.querySelectorAll('#ll-scope .ll-tog').forEach(b => b.classList.toggle('is-on', b.dataset.scope === scope));
+        page = 1;
+        loadSummary();
+        load();
+    }
+
     /** The query string both the list and the CSV are built from. */
     function params(extra = {}) {
         const p = new URLSearchParams();
+        // client_id itself rides along from EL.api when a client is chosen;
+        // client_only is what turns it from a filing hint into the scope.
+        if (scope === 'client') p.set('client_only', '1');
         const put = (k, v) => { if (v !== '' && v !== null && v !== undefined) p.set(k, v); };
         put('q', $('f-q').value.trim());
         put('platform', $('f-platform').value);
@@ -258,7 +297,9 @@
 
     async function loadSummary() {
         let s;
-        try { s = await EL.api('/api/leads/summary'); }
+        // The tiles must count the same list they sit above. client_id rides
+        // along from EL.api; client_only is what makes it the scope.
+        try { s = await EL.api('/api/leads/summary' + (scope === 'client' ? '?client_only=1' : '')); }
         catch { $('ll-stats').innerHTML = ''; return; }
 
         const tile = (k, v, sub) => `<div class="ll-stat"><div class="k">${k}</div>
@@ -272,9 +313,11 @@
             tile('Instagram', s.byPlatform.instagram, pc(s.byPlatform.instagram, s.total)) +
             tile('Facebook', s.byPlatform.facebook, pc(s.byPlatform.facebook, s.total));
 
-        $('ll-stats-note').textContent = s.total
-            ? `“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.`
-            : '';
+        $('ll-stats-note').textContent = s.client
+            ? `Leads found for ${s.client.name} by anyone working on it — one row per business. “Reachable” means at least one of email, phone or WhatsApp is present.`
+            : (s.total
+                ? `“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.`
+                : '');
 
         // Chips are a shortcut into the filters, so they carry their own count.
         const chip = (kind, x) => `<button class="ll-chip" type="button" data-${kind}="${esc(x.name)}">${esc(x.name)} · ${x.n}</button>`;
@@ -294,6 +337,7 @@
         $('ll-count').textContent = 'Loading…';
         try {
             const d = await EL.api('/api/leads?' + params({ page, limit: 50 }).toString());
+            if (scope === 'client' && d.client) $('ll-count').dataset.client = d.client.name;
             total = d.total || 0; pages = d.pages || 1; page = d.page || 1;
             render(d.leads || []);
         } catch (err) {
@@ -318,15 +362,19 @@
 
     function render(rows) {
         const filtered = hasFilters();
+        const who = scope === 'client' && $('ll-count').dataset.client ? ` for ${esc($('ll-count').dataset.client)}` : '';
         $('ll-count').innerHTML = total
-            ? `<b>${n(total)}</b> lead${total === 1 ? '' : 's'}${filtered ? ' match' : ' collected'}`
-            : (filtered ? 'No leads match' : 'No leads yet');
+            ? `<b>${n(total)}</b> lead${total === 1 ? '' : 's'}${filtered ? ' match' : (scope === 'client' ? '' : ' collected')}${who}`
+            : (filtered ? 'No leads match' : (scope === 'client' ? `No leads found${who} yet` : 'No leads yet'));
 
         if (!rows.length) {
             $('ll-body').innerHTML = filtered
                 ? `<div class="ll-empty">No lead matches these filters.<br>Widen them or clear them.</div>`
-                : `<div class="ll-empty">Nothing collected yet.<br>Run a search from the
-                     <a href="index.html">Lead Finder</a> and the results land here.</div>`;
+                : (scope === 'client'
+                    ? `<div class="ll-empty">Nothing has been found for this client yet.<br>Run the
+                         <a href="index.html">Lead Finder</a> or the Facebook search above with this client chosen, and it lands here.</div>`
+                    : `<div class="ll-empty">Nothing collected yet.<br>Run a search from the
+                         <a href="index.html">Lead Finder</a> and the results land here.</div>`);
             $('ll-pager').innerHTML = '';
             $('ll-foot').textContent = '';
             return;

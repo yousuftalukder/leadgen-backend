@@ -186,6 +186,9 @@ async function call(method, p, { token, body, query } = {}) {
         send(b) { this.body = b; this.sent = true; return this; },
         end() { this.sent = true; }, write() {}, flushHeaders() {}, on() {},
         setHeader(k, v) { this.headers[k] = v; },
+        set(k, v) { if (typeof k === 'object') Object.assign(this.headers, k); else this.headers[k] = v; return this; },
+        get(k) { return this.headers[k]; },
+        type() { return this; },
         redirect(u) { this.statusCode = 302; this.headers.location = u; this.sent = true; }
     };
     for (const fn of hit.r.h) {
@@ -392,6 +395,155 @@ test('an expired connection is a page, not a connection', async () => {
     const d = r.body.clients.find(x => x.id === state.D);
     assert.strictEqual(d.meta.connected, false);
     assert.strictEqual(d.meta.pages, 1);
+});
+
+// ===========================================================================
+// PHASE 23 — leads belong to clients; one business, one record
+// ===========================================================================
+section('\nfor this client, these are the leads');
+test('a lead found for a client is linked to it, and the link is idempotent', async () => {
+    const lead = { id: crypto.randomUUID(), owner_user_id: EMP.id, platform: 'instagram', username: 'northendpizza', email: 'hi@nep.test', created_at: new Date().toISOString() };
+    tbl('leads').push(lead);
+    state.leadC = lead.id;
+    assert.strictEqual(await S.linkLeadsToClient(state.C, [lead.id], 'ig_campaign', state.job), 1);
+    await S.linkLeadsToClient(state.C, [lead.id], 'ig_campaign', state.job);       // a resumed run replays its save phase
+    assert.strictEqual(tbl('client_leads').filter(l => l.lead_id === lead.id).length, 1, 'the replay duplicated the link');
+});
+test('the client view shows that lead; another client\'s view does not', async () => {
+    const other = { id: crypto.randomUUID(), owner_user_id: EMP.id, platform: 'facebook', username: 'bloomflorist', phone: '+1', created_at: new Date().toISOString() };
+    tbl('leads').push(other);
+    await S.linkLeadsToClient(state.D, [other.id], 'fb_discovery');
+    const c = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    assert.strictEqual(c.statusCode, 200, JSON.stringify(c.body));
+    assert.deepStrictEqual(c.body.leads.map(l => l.username), ['northendpizza']);
+    assert.strictEqual(c.body.client.name, 'Harbor Cafe');
+    const d = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.D } });
+    assert.deepStrictEqual(d.body.leads.map(l => l.username), ['bloomflorist']);
+});
+test('a lead found by a colleague appears in the client\'s view but not in my own list', async () => {
+    // The admin found this one while working on Harbor Cafe. It is theirs in
+    // the master list and the client's in the client view.
+    const theirs = { id: crypto.randomUUID(), owner_user_id: ADMIN.id, platform: 'instagram', username: 'harborbakery', created_at: new Date().toISOString() };
+    tbl('leads').push(theirs);
+    await S.linkLeadsToClient(state.C, [theirs.id], 'ig_campaign');
+    const view = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    assert.ok(view.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s find is missing from the client view');
+    const mine = await call('GET', '/api/leads', { token: 't-emp' });
+    assert.ok(!mine.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s lead leaked into my master list');
+});
+test('the same business found twice for one client is one row in its view', async () => {
+    const again = { id: crypto.randomUUID(), owner_user_id: ADMIN.id, platform: 'instagram', username: 'northendpizza', is_enriched: true, created_at: new Date(Date.now() + 1000).toISOString() };
+    tbl('leads').push(again);
+    await S.linkLeadsToClient(state.C, [again.id], 'ig_campaign');
+    const view = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    const rows = view.body.leads.filter(l => l.username === 'northendpizza');
+    assert.strictEqual(rows.length, 1, 'the client view shows the same business twice');
+    assert.strictEqual(rows[0].is_enriched, true, 'the richer row should win');
+});
+test('the summary tiles agree with the list they sit above', async () => {
+    const s = await call('GET', '/api/leads/summary', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    const v = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    assert.strictEqual(s.body.total, v.body.total);
+    assert.strictEqual(s.body.client.name, 'Harbor Cafe');
+});
+test('a stranger asking for a client\'s leads is refused, not shown their own', async () => {
+    const r = await call('GET', '/api/leads', { token: 't-emp2', query: { client_only: '1', client_id: state.C } });
+    assert.strictEqual(r.statusCode, 404, JSON.stringify(r.body));
+});
+test('the export follows the same scope', async () => {
+    const r = await call('GET', '/api/leads/export.csv', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    assert.strictEqual(r.statusCode, 200);
+    assert.ok(String(r.body).includes('northendpizza') && String(r.body).includes('harborbakery'));
+    assert.ok(!String(r.body).includes('bloomflorist'), 'another client\'s lead is in this client\'s export');
+});
+
+section('\none business, one record');
+test('a dry run says what would move and moves nothing', async () => {
+    const r = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Harbor Cafe (old)' } });
+    state.E = r.body.client.id;
+    tbl('reports').push({ id: crypto.randomUUID(), user_id: ADMIN.id, client_id: state.E, report_type: 'ig_report', created_at: new Date().toISOString() });
+    tbl('jobs').push({ id: crypto.randomUUID(), user_id: ADMIN.id, client_id: state.E, type: 'ig_report', status: 'done', created_at: new Date().toISOString() });
+    await S.linkLeadsToClient(state.E, [state.leadC], 'ig_campaign');           // already linked to C too — must not conflict
+    await call('POST', `/api/clients/${state.E}/members`, { token: 't-admin', body: { email: EMP2.email, role: 'viewer' } });
+    const dry = await call('POST', `/api/clients/${state.C}/merge`, { token: 't-admin', body: { fromId: state.E }, query: { dry: '1' } });
+    assert.strictEqual(dry.statusCode, 200, JSON.stringify(dry.body));
+    assert.strictEqual(dry.body.dry, true);
+    assert.strictEqual(dry.body.counts.reports, 1);
+    assert.strictEqual(dry.body.counts.jobs, 1);
+    assert.strictEqual(dry.body.counts.client_leads, 1);
+    assert.strictEqual(dry.body.counts.client_members, 1);
+    assert.strictEqual(tbl('reports').filter(x => x.client_id === state.E).length, 1, 'a dry run moved a report');
+});
+test('the merge re-points everything, carries members over, and archives — never deletes', async () => {
+    const before = tbl('reports').filter(x => x.client_id === state.C).length;
+    const r = await call('POST', `/api/clients/${state.C}/merge`, { token: 't-admin', body: { fromId: state.E } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(tbl('reports').filter(x => x.client_id === state.E).length, 0);
+    assert.strictEqual(tbl('reports').filter(x => x.client_id === state.C).length, before + 1);
+    assert.strictEqual(tbl('jobs').filter(x => x.client_id === state.E).length, 0);
+    assert.strictEqual(tbl('client_leads').filter(x => x.client_id === state.E).length, 0);
+    assert.strictEqual(tbl('client_leads').filter(x => x.client_id === state.C && x.lead_id === state.leadC).length, 1, 'a lead on both became two links or none');
+    assert.ok(tbl('client_members').some(m => m.client_id === state.C && m.user_id === EMP2.id), 'the viewer was not carried over');
+    const e = tbl('clients').find(c => c.id === state.E);
+    assert.strictEqual(e.archived, true);
+    assert.ok(/Merged into "Harbor Cafe"/.test(e.notes), 'the archived record does not say where it went');
+    assert.ok(tbl('clients').some(c => c.id === state.E), 'the record was deleted');
+});
+test('an employee cannot merge clients they do not own', async () => {
+    const x = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Not yours' } });
+    const r = await call('POST', `/api/clients/${state.D}/merge`, { token: 't-emp', body: { fromId: x.body.client.id } });
+    assert.strictEqual(r.statusCode, 404, JSON.stringify(r.body));
+});
+test('a client cannot be merged into itself', async () => {
+    const r = await call('POST', `/api/clients/${state.C}/merge`, { token: 't-admin', body: { fromId: state.C } });
+    assert.strictEqual(r.statusCode, 400);
+});
+
+section('\nthe account states a client can be in');
+test('an expired trial is refused at the door with a code the page can act on', async () => {
+    const u = person('expired@x.test'); TOKENS['t-expired'] = u;
+    const past = new Date(Date.now() - 20 * 86400000).toISOString();
+    tbl('app_users').push({ id: u.id, email: u.email, role: 'client', is_active: true, trial_started_at: past, trial_ends_at: past });
+    const r = await call('GET', '/api/me', { token: 't-expired' });
+    assert.strictEqual(r.statusCode, 402, JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'account_expired');
+});
+test('a suspended account is refused with a different code, so the page can say why', async () => {
+    const u = person('suspended@x.test'); TOKENS['t-susp'] = u;
+    tbl('app_users').push({ id: u.id, email: u.email, role: 'user', is_active: false });
+    const r = await call('GET', '/api/me', { token: 't-susp' });
+    assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'account_suspended');
+});
+test('a paying client is active until paid_until, and its state says so', async () => {
+    const u = person('paid@x.test'); TOKENS['t-paid'] = u;
+    const past = new Date(Date.now() - 40 * 86400000).toISOString();
+    tbl('app_users').push({ id: u.id, email: u.email, role: 'client', is_active: true, trial_started_at: past, trial_ends_at: past, paid_until: new Date(Date.now() + 30 * 86400000).toISOString() });
+    const r = await call('GET', '/api/me', { token: 't-paid' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.state, 'paid');
+});
+
+section('\na report goes out to someone with no account');
+test('the employee makes a share link for the client\'s report', async () => {
+    const rep = tbl('reports').find(x => x.client_id === state.C && x.target_handle === 'harborcafe');
+    const r = await call('POST', '/api/share', { token: 't-emp', body: { reportId: rep.id, label: 'September' } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    state.share = r.body.share;
+    assert.ok(r.body.url.includes(state.share.token));
+});
+test('anyone with the link can read it — no session', async () => {
+    const r = await call('GET', `/api/public/share/${state.share.token}`);
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(r.body.report && r.body.report.id === state.share.report_id);
+});
+test('a stranger cannot revoke it; the maker can; then the link is dead', async () => {
+    const no = await call('DELETE', `/api/share/${state.share.id}`, { token: 't-emp2' });
+    assert.ok(no.statusCode === 403 || no.statusCode === 404, 'a stranger revoked someone else\'s share');
+    const yes = await call('DELETE', `/api/share/${state.share.id}`, { token: 't-emp' });
+    assert.strictEqual(yes.statusCode, 200, JSON.stringify(yes.body));
+    const gone = await call('GET', `/api/public/share/${state.share.token}`);
+    assert.strictEqual(gone.statusCode, 404);
 });
 
 (async () => {

@@ -105,6 +105,11 @@
             </div>
             <label>Notes</label>
             <textarea id="f-notes" placeholder="Brief, goals, what the client cares about, what to avoid."></textarea>
+            <div class="row-actions" id="merge-row" style="margin-bottom:6px">
+                <select id="merge-from" style="width:auto;min-width:220px"><option value="">Merge another client into this one…</option></select>
+                <button class="btn-secondary" id="btn-merge" type="button" disabled>Merge</button>
+                <span class="hint" id="merge-note"></span>
+            </div>
             <div class="row-actions">
                 <button class="btn-primary" id="btn-save" type="button">Save client</button>
                 <button class="btn-secondary" id="btn-select" type="button">Use in header</button>
@@ -119,6 +124,7 @@
                 <div class="tabs">
                     <button class="tab is-on" data-tab="timeline" type="button">Timeline</button>
                     <button class="tab" data-tab="meta" type="button">Meta connection</button>
+                    <button class="tab" data-tab="leads" type="button">Leads</button>
                     <button class="tab" data-tab="rivals" type="button">Comparison set</button>
                     <button class="tab" data-tab="members" type="button">Sharing</button>
                     <button class="tab" data-tab="auto" type="button">Automation</button>
@@ -143,6 +149,17 @@
                     </div>
                     <div class="note" id="meta-note"></div>
                     <div id="meta-progress"></div>
+                </div>
+
+                <!-- For this client, these are the leads: found by anyone
+                     working on it, one row per business. The full view with
+                     filters and export is the Lead List with this client chosen. -->
+                <div data-pane="leads" class="is-hidden">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+                        <p class="hint" id="leads-sum">Loading…</p>
+                        <button class="btn-secondary btn-mini" id="btn-leads-open" type="button">Open in Lead List</button>
+                    </div>
+                    <div id="leads-rows" style="margin-top:12px"></div>
                 </div>
 
                 <!-- The accounts this client is measured against. Held here,
@@ -251,6 +268,7 @@
         $('btn-archive').textContent = c?.archived ? 'Unarchive' : 'Archive';
         $('extras').classList.toggle('is-hidden', !c);
         $('form-note').textContent = '';
+        if (!c) $('merge-row').classList.add('is-hidden');
     }
 
     async function open(id) {
@@ -261,7 +279,7 @@
         } catch (err) { $('form-note').textContent = err.message; return; }
         fillForm(current);
         await loadList();
-        renderMembers(); renderConnections(); renderRivals(); loadTimeline(); loadAutomation();
+        renderMembers(); renderConnections(); renderRivals(); renderMerge(); loadTimeline(); loadAutomation(); loadLeads();
         history.replaceState(null, '', `clients.html?client=${id}`);
     }
 
@@ -441,6 +459,72 @@
                 onFailed: j => { $('meta-note').textContent = 'Failed: ' + (j.error || 'unknown'); }
             });
         } catch (err) { $('meta-note').textContent = err.message; }
+    });
+
+    // ---- leads ------------------------------------------------------------------------
+    async function loadLeads() {
+        if (!current) return;
+        $('leads-sum').textContent = 'Loading…';
+        try {
+            const [s, l] = await Promise.all([
+                EL.api(`/api/leads/summary?client_only=1&client_id=${current.id}`),
+                EL.api(`/api/leads?client_only=1&client_id=${current.id}&limit=10`)
+            ]);
+            $('leads-sum').innerHTML = s.total
+                ? `<b>${s.total}</b> business${s.total === 1 ? '' : 'es'} found for this client · ${s.reachable} reachable · ${s.byPlatform.instagram} Instagram, ${s.byPlatform.facebook} Facebook`
+                : 'Nothing found for this client yet. Run the Lead Finder or a Facebook search with this client chosen.';
+            $('leads-rows').innerHTML = (l.leads || []).map(r => `
+                <div class="member"><span><b>${esc(r.username)}</b>${r.full_name ? ' · ' + esc(r.full_name) : ''}${r.city ? ' · ' + esc(r.city) : ''}</span>
+                    <span class="hint">${r.email || r.phone || r.whatsapp ? esc(r.email || r.phone || r.whatsapp) : 'no contact'}</span></div>`).join('')
+                + ((l.total || 0) > 10 ? `<p class="hint" style="margin-top:8px">…and ${l.total - 10} more in the Lead List.</p>` : '');
+        } catch (err) { $('leads-sum').textContent = err.message; }
+    }
+    $('btn-leads-open').addEventListener('click', () => {
+        if (!current) return;
+        EL.setClientId(current.id);
+        location.href = 'leads.html?scope=client';
+    });
+
+    // ---- merge -------------------------------------------------------------------------
+    // Deliberate, two-step, and only for a record you own (or as admin): a
+    // dry run first that says exactly what would move, then the move.
+    function renderMerge() {
+        const sel = $('merge-from');
+        const owner = current && (current.access === 'owner' || current.access === 'admin');
+        $('merge-row').classList.toggle('is-hidden', !current || !owner);
+        if (!current) return;
+        const others = clients.filter(c => c.id !== current.id && !c.archived && (c.access === 'owner' || c.access === 'admin'));
+        sel.innerHTML = '<option value="">Merge another client into this one…</option>' +
+            others.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+        $('btn-merge').disabled = true;
+        $('merge-note').textContent = '';
+    }
+    $('merge-from').addEventListener('change', async () => {
+        const from = $('merge-from').value;
+        $('btn-merge').disabled = true;
+        if (!from) { $('merge-note').textContent = ''; return; }
+        try {
+            const d = await EL.api(`/api/clients/${current.id}/merge?dry=1`, { method: 'POST', body: { fromId: from } });
+            const moving = Object.entries(d.counts).filter(([, n]) => n).map(([t, n]) => `${n} ${t.replace(/_/g, ' ')}`);
+            $('merge-note').textContent = moving.length
+                ? `Would move ${moving.join(', ')} from “${d.from.name}” into “${d.into.name}” and archive “${d.from.name}”.`
+                : `“${d.from.name}” has nothing filed under it; merging would just archive it.`;
+            $('btn-merge').disabled = false;
+        } catch (err) { $('merge-note').textContent = err.message; }
+    });
+    $('btn-merge').addEventListener('click', async () => {
+        const from = $('merge-from').value;
+        if (!from) return;
+        const name = $('merge-from').selectedOptions[0].textContent;
+        if (!confirm(`Merge “${name}” into “${current.name}”?\n\nEverything filed under “${name}” moves here and “${name}” is archived. Nothing is deleted.`)) return;
+        $('btn-merge').disabled = true;
+        $('merge-note').textContent = 'Merging…';
+        try {
+            const d = await EL.api(`/api/clients/${current.id}/merge`, { method: 'POST', body: { fromId: from } });
+            $('merge-note').textContent = `Done. “${d.from.name}” is archived; its work is here now.`;
+            await loadList();
+            await open(current.id);
+        } catch (err) { $('merge-note').textContent = err.message; $('btn-merge').disabled = false; }
     });
 
     // ---- comparison set ------------------------------------------------------------

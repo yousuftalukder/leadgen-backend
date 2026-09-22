@@ -200,6 +200,17 @@
                 err.status = 402; err.data = data; err.quota = true;
                 throw err;
             }
+            // A disabled account is terminal, like a lapsed one, and gets the
+            // whole screen. Without this it fell through to the generic error
+            // and EL.init labelled it "Backend unreachable" — the right message
+            // under the wrong heading, which reads as our fault, not theirs.
+            if (res.status === 403 && data && data.code === 'account_suspended' && !isPublic) {
+                renderShell(null, null);
+                block('Account disabled', data.error || 'This account has been disabled. Contact your administrator.');
+                const err = new Error(data.error || 'Account disabled.');
+                err.status = 403; err.data = data; err.code = data.code; err.handled = true;
+                throw err;
+            }
             if (!res.ok) {
                 const err = new Error((data && (data.error || data.message)) || `Request failed (${res.status})`);
                 err.status = res.status; err.data = data;
