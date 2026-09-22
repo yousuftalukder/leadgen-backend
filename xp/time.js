@@ -49,7 +49,7 @@ const zoneFromOffsetHours = (o) => (o === null || o === undefined || o === 0 ? '
 // Until 18 Sep `until` was e - 1, which leaves the day's own end outside the window: Meta answered
 // every past day with an empty result, the sync kept whatever partial value it had read while the day
 // was still running, and Instagram views / interactions / profile views were stored far too low
-// (Shaking Seafood 14 Sep: 51 stored, 3,100 on Meta). Checked 18 Sep against the reach series: with
+// (one client, 14 Sep: 51 stored, 3,100 on Meta). Checked 18 Sep against the reach series: with
 // (e - 86400, e] total_value reach equals the series value on every day tested.
 function dayWindowFromEndTime(endTime) {
   const e = Math.floor(DateTime.fromISO(endTime).toSeconds());

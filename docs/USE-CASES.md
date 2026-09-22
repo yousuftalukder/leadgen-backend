@@ -189,7 +189,7 @@ Three rules the arrows enforce:
 | `tests/phase*.test.js` | ~220 | The logic inside each engine |
 | `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
-| `xp/scripts/replay.js` | — | XpulseAI's own harness, copied: the Owner Assistant's sync replayed against a recorded Meta cassette, twice, then finalised. *IDEMPOTENT — the second run changed nothing; no finalized row was touched.* Run by hand: `node xp/scripts/replay.js replay xp/fixtures/ig-shaking-seafood-salem-nh.json --twice --finalize`; the cassette is XpulseAI's private recording and is not in this public repository |
+| `xp/scripts/replay.js` | — | XpulseAI's own harness, copied: the Owner Assistant's sync replayed against a recorded Meta cassette, twice, then finalised. *IDEMPOTENT — the second run changed nothing; no finalized row was touched.* Run by hand: `node xp/scripts/replay.js replay xp/fixtures/ig-cassette.json --twice --finalize`; the cassette is XpulseAI's private recording and is not in this public repository |
 
 **How the counting is kept honest:** the runner treats a test file that exits cleanly without a result line as a failure. It did not always; when `server.js` once threw at load and its crash handler exited 0, eleven files reported "ok" having run nothing. The server now exits non-zero on any exception before boot completes, so that state cannot deploy either.
 

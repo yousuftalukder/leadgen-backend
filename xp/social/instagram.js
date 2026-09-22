@@ -3,11 +3,11 @@
 //
 // What the scraper gives, checked on real results (19 Sep 2026):
 // - resultsType "posts" on a profile: its grid, newest first, INCLUDING collab posts other accounts own
-//   (the restaurant is in coauthorProducers). Meta's API never returns those.
+//   (the business is in coauthorProducers). Meta's API never returns those.
 // - resultsType "mentions" on a profile: its tagged tab, i.e. other accounts' posts that tag it, collab or not.
 // - onlyPostsNewerThan works in both modes; pinned posts come back whatever their date.
 // - videoPlayCount is the public "views" of a reel, and equals the Views Meta reports to the owner
-//   (146/146, 233/233, 1,164/1,164, 1,635/1,635 on Shaking Seafood's reels), so the two can be compared.
+//   (146/146, 233/233, 1,164/1,164, 1,635/1,635 on one client's reels), so the two can be compared.
 // - v2.14.1 (F-58): a reel the creator also shared to Facebook. Instagram's public numbers then include the
 //   Facebook part. The tagged tab returns those totals (videoPlayCount, likesCount) with the split
 //   (igPlayCount, fbPlayCount, fbLikeCount); the grid and a read of the post's own link return the Instagram
@@ -121,7 +121,7 @@ function mapProfile(item) {
   };
 }
 
-// Whose post is it, and how does it involve the restaurant?
+// Whose post is it, and how does it involve the business?
 const isCollab = (post, username) => post.owner_username !== username && post.collaborators.includes(username);
 const isAbout = (post, username) => post.owner_username !== username
   && (post.collaborators.includes(username) || post.tagged.includes(username) || post.mentions.includes(username));

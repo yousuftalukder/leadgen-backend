@@ -122,7 +122,7 @@ function ownedElsewhereError(conflicts) {
 }
 
 // F-31 (v2.7.2): every attach inserted a connection and none was ever retired, so validateConnections
-// kept checking (and alerting on) tokens that no asset uses any more; Shaking Seafood had five. After an
+// kept checking (and alerting on) tokens that no asset uses any more; one client had five. After an
 // attach, a connection of this client that no asset points to is SUPERSEDED: kept for the record, no
 // longer validated. Needs migration 0020 (the status value); before it, the update is refused and the
 // attach itself is unaffected.

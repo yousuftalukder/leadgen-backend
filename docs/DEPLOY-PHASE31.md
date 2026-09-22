@@ -48,9 +48,9 @@ as twelve migrations named `phase31_xp_p00 … p11`), then the server. **Four ne
 1. The check constraints on `xp_meta_connections.status` and `xp_sync_runs.run_type` carry
    auto-generated `xp_`-prefixed names here, so XpulseAI's 0020 and 0022 drop both spellings before
    re-adding them (otherwise `SUPERSEDED` and `ADS` would still be refused).
-2. 0014 scoped two Instagram convention notes to Shaking Seafood's asset. That asset does not exist
-   here and the notes describe that account's history, so they are **removed**, and the removal is
-   logged in `xp_data_repairs`.
+2. 0014 scoped two Instagram convention notes to one asset of the deployment the schema was copied from.
+   That asset does not exist here and the notes describe its history, so they are **removed**, and the
+   removal is logged in `xp_data_repairs`.
 3. 0011-g derives the Facebook reach convention from data; this copy starts under the new
    measurement, so the `REACH_MEDIA_VIEWERS` note (in 0019's client wording) is seeded from
    2020-01-01 and logged as `el-0011g`.
@@ -80,11 +80,11 @@ answers when ad data exists), and the Apify influencer ingestion (the tables exi
 5. **As a client with no connection**: Ask shows *Connect your Facebook Page and Instagram account
    first* with the link to My Reports.
 6. `npm test` — 383 checks across 12 files, 126 walked flows; `npm run audit` — 38.
-7. The sync itself, without Meta: `node xp/scripts/replay.js replay xp/fixtures/ig-shaking-seafood-salem-nh.json --twice --finalize`
+7. The sync itself, without Meta: `node xp/scripts/replay.js replay xp/fixtures/ig-cassette.json --twice --finalize`
    prints *IDEMPOTENT — the second run changed nothing* and *no finalized row was touched* (the seven
    cassette misses it reports are date windows that moved since the recording; XpulseAI's own copy
    reports the same seven today). The cassette is XpulseAI's private recording of a real account and stays out of this
-   public repository: copy it from the XpulseAI checkout (fixtures/ig-shaking-seafood-salem-nh.json) into xp/fixtures/ first.
+   public repository: copy the Instagram cassette from the XpulseAI checkout's fixtures/ folder to xp/fixtures/ig-cassette.json first.
 
 ## Known limits
 

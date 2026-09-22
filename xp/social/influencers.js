@@ -1,16 +1,16 @@
-// Influencer posts per restaurant (v2.11.0, 0028).
+// Influencer posts per business (v2.11.0, 0028).
 //
-// Meta's API never returns a post an influencer owns, even a collab with the restaurant. The restaurant's
+// Meta's API never returns a post an influencer owns, even a collab with the business. The business's
 // public Instagram shows them, so they are read with Apify:
-//   - once a week, the restaurant's tagged tab ("mentions") and its grid ("posts", which carries the collabs),
+//   - once a week, the business's tagged tab ("mentions") and its grid ("posts", which carries the collabs),
 //     only posts newer than the last look (the first look goes back 90 days);
 //   - staff can add any post from its link, and look or refresh at any time;
 //   - each influencer post's public numbers are read again while they still move (instagram.refreshDue).
 // Who counts as an influencer (showable): a collab; an account with 1,000+ followers or that Instagram calls
 // a creator, blogger or critic; a post that reached 1,000+ views; or a creator already shown for that
-// restaurant. Anyone else is usually a customer: their post is kept, hidden, until staff show it. Only
+// business. Anyone else is usually a customer: their post is kept, hidden, until staff show it. Only
 // shown (ACTIVE) posts reach the owner's answers and report.
-// Every Apify run is logged in apify_runs with what it was for, the restaurant, its results and its cost.
+// Every Apify run is logged in apify_runs with what it was for, the business, its results and its cost.
 const { DateTime } = require('luxon');
 const { supabase, q } = require('../db');
 const apify = require('../apify');
@@ -64,16 +64,16 @@ async function lastRun(clientId, purpose, statuses = ['OK', 'PARTIAL']) {
   return (await q(s, 'last run'))[0] || null;
 }
 
-// ---------------------------------------------------------------- one job per restaurant at a time
+// ---------------------------------------------------------------- one job per business at a time
 // Staff start a look or a refresh and the page asks how it is going; the daily pass takes the same slot,
-// so two runs never read the same restaurant at once. In memory: a restart forgets them (see closeInterrupted).
+// so two runs never read the same business at once. In memory: a restart forgets them (see closeInterrupted).
 const jobs = new Map();
 const jobOf = (clientId) => jobs.get(clientId) || null;
 function startJob(clientId, kind, by, fn) {
   const cur = jobs.get(clientId);
   if (cur && !cur.finished_at) {
-    throw err(409, { discover: 'Already looking for new posts for this restaurant.', refresh: 'Already refreshing this restaurant\'s numbers.',
-      audit: 'A content audit is already running for this restaurant.' }[cur.kind] || 'Already working on this restaurant.');
+    throw err(409, { discover: 'Already looking for new posts for this business.', refresh: 'Already refreshing this business\'s numbers.',
+      audit: 'A content audit is already running for this business.' }[cur.kind] || 'Already working on this business.');
   }
   const job = { kind, by: by || null, started_at: new Date().toISOString(), finished_at: null, result: null, error: null };
   jobs.set(clientId, job);
@@ -86,12 +86,12 @@ function startJob(clientId, kind, by, fn) {
 const publicJob = (j) => (j ? { kind: j.kind, by: j.by, started_at: j.started_at, finished_at: j.finished_at, result: j.result, error: j.error,
   finished_ago_s: j.finished_at ? Math.round((Date.now() - Date.parse(j.finished_at)) / 1000) : null } : null);
 
-// ---------------------------------------------------------------- the restaurant's own account
-async function restaurantHandle(clientId) {
+// ---------------------------------------------------------------- the business's own account
+async function businessHandle(clientId) {
   const assets = await q(supabase.from('xp_meta_assets').select('username,status').eq('client_id', clientId).eq('platform', 'IG'), 'ig account');
   const a = assets.find((x) => x.status === 'ACTIVE' && x.username) || assets.find((x) => x.username);
   const username = a ? IG.cleanUsername(a.username) : null;
-  if (!username) throw err(400, 'This restaurant has no Instagram account connected.');
+  if (!username) throw err(400, 'This business has no Instagram account connected.');
   const ids = await store.ensureProfiles([{ username }]);
   await q(supabase.from('xp_client_social_profiles').upsert({ client_id: clientId, profile_id: ids.get(username), role: 'SELF', added_by: 'system' },
     { onConflict: 'client_id,profile_id', ignoreDuplicates: true }), 'own profile');
@@ -140,7 +140,7 @@ async function facebookWindow(clientId) {
 }
 
 async function discover(clientId, { by = null, scheduled = false } = {}) {
-  const me = await restaurantHandle(clientId);
+  const me = await businessHandle(clientId);
   const last = await lastRun(clientId, 'DISCOVER');
   const lim = last ? LIMITS.weekly : LIMITS.first;
   const since = last ? DateTime.fromISO(last.started_at).minus({ days: 2 }) : DateTime.utc().minus({ days: FIRST_LOOK_DAYS });
@@ -154,8 +154,8 @@ async function discover(clientId, { by = null, scheduled = false } = {}) {
   ]);
   if (reads.every((r) => r.status === 'rejected')) throw reads[0].reason;
   const items = reads.flatMap((r) => (r.status === 'fulfilled' ? r.value.items : []));
-  // Both views of the profile hold only the restaurant's own posts and posts that involve it, so every
-  // post another account owns is one about the restaurant.
+  // Both views of the profile hold only the business's own posts and posts that involve it, so every
+  // post another account owns is one about the business.
   const saved = await store.savePosts(items, { thumbs: (p) => p.owner_username !== me.username });
   const theirs = saved.filter((p) => p.owner_username && p.owner_username !== me.username);
   const known = theirs.length
@@ -181,19 +181,19 @@ async function discover(clientId, { by = null, scheduled = false } = {}) {
   if (rows.length) await q(supabase.from('xp_influencer_posts').upsert(rows, { onConflict: 'client_id,post_id', ignoreDuplicates: true }), 'influencer posts add');
   await promoteHidden(clientId);
   return {
-    looked_back_to: since.toISODate(), posts_read: saved.length, about_restaurant: theirs.length,
+    looked_back_to: since.toISODate(), posts_read: saved.length, about_business: theirs.length,
     ...(tagSince < since ? { tagged_tab_back_to: tagSince.toISODate(), facebook_parts_read: saved.filter((p) => p.raw?.fb?.read_at && p.raw.fb.read_at >= startedAt).length } : {}),
     new_shown: rows.filter((r) => r.status === 'ACTIVE').length, new_hidden: rows.filter((r) => r.status === 'HIDDEN').length,
     partial: reads.some((r) => r.status === 'rejected') ? reads.find((r) => r.status === 'rejected').reason.message : null
   };
 }
 
-// Creators with a shown post for this restaurant.
+// Creators with a shown post for this business.
 async function shownCreators(clientId) {
   return new Set((await q(supabase.from('xp_influencer_posts').select('influencer_username').eq('client_id', clientId).eq('status', 'ACTIVE'), 'shown creators'))
     .map((r) => r.influencer_username).filter(Boolean));
 }
-// A post hidden automatically is shown once its creator has a shown post for the restaurant. Posts staff
+// A post hidden automatically is shown once its creator has a shown post for the business. Posts staff
 // hid themselves are left alone (a staff change of status clears the automatic note: see update).
 async function promoteHidden(clientId) {
   const shown = [...await shownCreators(clientId)];
@@ -223,7 +223,7 @@ async function addByLink(clientId, link, { visitDate, costUsd, notes, by } = {})
   const l = IG.postLink(link);
   if (!l) throw err(400, 'Paste the link of an Instagram post or reel, like https://www.instagram.com/reel/…');
   const details = { visit_date: cleanDate(visitDate), cost_usd: cleanCost(costUsd), notes: cleanNotes(notes) };
-  const me = await restaurantHandle(clientId);
+  const me = await businessHandle(clientId);
   let post = (await q(supabase.from('xp_social_posts').select(store.POST_COLS).eq('platform', 'IG').eq('short_code', l.shortCode).limit(1), 'post by link'))[0];
   if (!post || !post.thumbnail_path || !post.last_fetched_at || Date.now() - Date.parse(post.last_fetched_at) > 6 * HOUR) {
     const { items } = await tracked('INFLUENCER', clientId, { directUrls: [l.url], resultsType: 'posts', resultsLimit: 1 }, { maxItems: 1 });
@@ -231,7 +231,7 @@ async function addByLink(clientId, link, { visitDate, costUsd, notes, by } = {})
     post = saved.find((p) => p.short_code === l.shortCode) || saved[0] || post;
   }
   if (!post) throw err(404, 'Instagram did not return that post. Check the link, and that the account is public.');
-  if (post.owner_username === me.username) throw err(400, 'That is the restaurant\'s own post. Add the post the influencer published (a collab counts).');
+  if (post.owner_username === me.username) throw err(400, 'That is the business\'s own post. Add the post the influencer published (a collab counts).');
   await creatorProfiles([post.owner_username], clientId).catch((e) => console.warn('[influencers] creator:', e.message));
   const now = new Date().toISOString();
   const existing = (await q(supabase.from('xp_influencer_posts').select('id').eq('client_id', clientId).eq('post_id', post.id), 'influencer post known'))[0];
@@ -273,7 +273,7 @@ async function refreshNumbers({ clientId = null, ids = null, force = false } = {
   let s = supabase.from('xp_influencer_posts').select('id,client_id,status, xp_social_posts(id,url,short_code,posted_at,last_fetched_at,owner_username,thumbnail_path,raw)').eq('status', 'ACTIVE');
   if (clientId) s = s.eq('client_id', clientId);
   if (ids) s = s.in('id', ids);
-  const due = new Map();   // one read per post, even when two restaurants share it
+  const due = new Map();   // one read per post, even when two businesses share it
   for (const r of await q(s, 'influencer posts due')) {
     const p = r.social_posts;
     if (p && p.url && (force || IG.refreshDue(p))) due.set(p.id, p);
@@ -296,7 +296,7 @@ async function refreshNumbers({ clientId = null, ids = null, force = false } = {
 }
 
 // ---------------------------------------------------------------- the daily pass (after the 09:00 and 21:00 syncs)
-// Refreshes what is due and gives each restaurant its weekly look. Safe to call twice a day: nothing is
+// Refreshes what is due and gives each business its weekly look. Safe to call twice a day: nothing is
 // read twice (the schedule and the weekly check see to that). Stops when the key pool runs low, so staff
 // keep some credit for their own looks.
 let dailyRunning = false;   // "Run daily sync now" during a pass must not start a second one
@@ -340,7 +340,7 @@ const ratio = (a, b, places = 1) => (a !== null && a !== undefined && b ? Math.r
 
 // A post's numbers as Instagram shows them. For a reel the creator also shared to Facebook, Instagram adds the
 // Facebook views and likes to its own (F-58): views and likes are those totals, with the two parts beside them.
-// Comparisons with the restaurant's own reels (Instagram views from Meta) use the Instagram part, like with like.
+// Comparisons with the business's own reels (Instagram views from Meta) use the Instagram part, like with like.
 function shownNumbers(p) {
   const fb = p.raw?.fb || null;
   const fbViews = fb && Number.isFinite(fb.views) ? fb.views : null, fbLikes = fb && Number.isFinite(fb.likes) ? fb.likes : null;
@@ -353,7 +353,7 @@ function shownNumbers(p) {
   };
 }
 
-// Every influencer post of a restaurant with its creator, numbers, growth and comparisons.
+// Every influencer post of a business with its creator, numbers, growth and comparisons.
 async function listFor(clientId) {
   const rows = await q(supabase.from('xp_influencer_posts').select(`id,influencer_username,source,status,visit_date,cost_usd,notes,added_by,created_at,updated_at, xp_social_posts(${store.POST_COLS})`)
     .eq('client_id', clientId).order('created_at', { ascending: false }).limit(200), 'influencer posts');
@@ -398,7 +398,7 @@ async function listFor(clientId) {
   return { handle, usual_reel_views: usual, posts };
 }
 
-// The staff page: the list, the job in progress and when the restaurant was last looked at.
+// The staff page: the list, the job in progress and when the business was last looked at.
 async function pageFor(clientId) {
   const [data, lastLook] = await Promise.all([listFor(clientId), lastRun(clientId, 'DISCOVER')]);
   const reads = data.posts.filter((x) => x.status === 'ACTIVE').map((x) => x.post.last_fetched_at).filter(Boolean).sort();
@@ -434,7 +434,7 @@ async function forOwner(clientId, { start = null, end = null, tz = 'America/New_
       post_no_longer_public_since: day(x.post.missing_since),
       latest_comments: x.post.comments_sample.slice(0, 3).map((c) => c.text.slice(0, 160))
     })),
-    ...(shown.length ? {} : { none: start || end ? 'No influencer posts are recorded for this restaurant in this period.' : 'No influencer posts are recorded for this restaurant yet.' })
+    ...(shown.length ? {} : { none: start || end ? 'No influencer posts are recorded for this business in this period.' : 'No influencer posts are recorded for this business yet.' })
   };
 }
 
@@ -466,6 +466,6 @@ async function recentRuns(limit = 30) {
 }
 
 module.exports = {
-  discover, addByLink, update, remove, refreshNumbers, daily, listFor, pageFor, forOwner, forReport, recentRuns, startJob, jobOf, publicJob, restaurantHandle,
+  discover, addByLink, update, remove, refreshNumbers, daily, listFor, pageFor, forOwner, forReport, recentRuns, startJob, jobOf, publicJob, businessHandle,
   usualReelViews, closeInterrupted, creatorProfiles, promoteHidden, tracked, shownNumbers, facebookWindow, MIN_FOLLOWERS
 };

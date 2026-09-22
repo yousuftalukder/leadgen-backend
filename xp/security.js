@@ -199,9 +199,9 @@ function readPending(ticket) {
   } catch { return null; }
 }
 
-// v2.13.0: restaurant owners' own accounts in Owner Assistant (0029). One owner can hold several restaurants,
-// so the token names the owner, not a restaurant; each request is checked against the owner's restaurants.
-// Its own shape and key label, so neither a restaurant's old token nor a staff token can pass as one.
+// v2.13.0: business owners' own accounts in Owner Assistant (0029). One owner can hold several businesses,
+// so the token names the owner, not a business; each request is checked against the owner's businesses.
+// Its own shape and key label, so neither a business's old token nor a staff token can pass as one.
 const OWNER_KEY = crypto.createHmac('sha256', String(cfg.clientSessionSecret)).update('xpulse owner session v1').digest();
 function signOwnerToken(ownerId, storedPassword = '', ttlMs = cfg.clientSessionTtlMs) {
   const expiresAt = Date.now() + ttlMs;

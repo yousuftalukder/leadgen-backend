@@ -4277,7 +4277,7 @@ $$;
 -- mapAccountDay picked reach with first('page_impressions_unique', 'page_total_media_view_unique').
 -- While the first name still answered, FB reach meant "people who saw anything about the Page".
 -- Once it died, the same column silently began carrying "unique viewers of the Page's media" —
--- a strictly smaller population. The Shaking Seafood series steps 2066, 1074, 330 → 225, 355, 47,
+-- a strictly smaller population. One observed series steps 2066, 1074, 330 → 225, 355, 47,
 -- 87 across that changeover. Neither span is wrong; they measure different things, and a month
 -- total that straddles the break is the sum of two different questions.
 --
@@ -4520,7 +4520,7 @@ end $$;
 -- (server.js /api/admin/oauth/:session/attach) and the manual token form (/api/admin/xp_clients/manual) —
 -- insert without it, so every attempt failed with
 --   null value in column "meta_access_token" of relation "xp_clients" violates not-null constraint
--- and only the three v1 xp_clients ever existed. Found 18 Sep 2026 while adding Kon Asian Bistro.
+-- and only the three v1 xp_clients ever existed. Found 18 Sep 2026 while adding a client.
 -- Applied 18 Sep 2026 through the Supabase connector (the first entry in supabase_migrations).
 --
 -- The old values on the three v1 rows are left alone here; nulling them is a separate hygiene step
@@ -4540,14 +4540,14 @@ alter table public.xp_clients alter column meta_access_token drop not null;
 -- Rewrites no snapshot row and no note text.
 --
 -- xp_data_conventions had no owner: fn_conventions_for(p_start, p_end) handed every note to every client.
--- Two of the four notes describe Shaking Seafood's own history — the IG reach audit ("6 September 2026,
+-- Two of the four notes describe one client's own history — the IG reach audit ("6 September 2026,
 -- is understated (stored 3; Meta reports 9)") and the day-attribution bug fixed on 8 Sep — so the other
 -- xp_clients' chat and reports would quote them as facts about their own data (breaks §2.8). None of the
--- other xp_clients' rows in that span were written by the buggy sync or locked on the old timer: Bon Asian's
--- history starts 30 Aug and was synced from 15 Sep; Mosaka, Kon, Tomo and Sawa were backfilled on 18 Sep.
+-- other xp_clients' rows in that span were written by the buggy sync or locked on the old timer; their
+-- histories were synced or backfilled later.
 --
 -- 0014-a  xp_data_conventions.asset_id — null means "every asset on that platform".
--- 0014-b  TIMER_LOCK_MID_COUNT and DAY_PLUS_ONE scoped to Shaking Seafood's IG asset; logged in xp_data_repairs.
+-- 0014-b  TIMER_LOCK_MID_COUNT and DAY_PLUS_ONE scoped to that client's IG asset; logged in xp_data_repairs.
 -- 0014-c  fn_conventions_for(p_client, p_start, p_end): platform-wide notes plus the client's own.
 --         The two-argument form now returns platform-wide notes only, so nothing can leak through it.
 -- 0014-d  fn_client_period_summary and fn_period_bundle call the client form. Their live definitions are
@@ -4564,7 +4564,7 @@ comment on column xp_data_conventions.asset_id is
   'The asset whose data this note describes. Null = every asset on that platform.';
 
 -- 0014-b (EdgeLead) ----------------------------------------------------------
--- XpulseAI scoped these two notes to Shaking Seafood's Instagram asset. That asset does not exist
+-- XpulseAI scoped these two notes to one client's Instagram asset. That asset does not exist
 -- here, and the notes describe that account's history (a timer lock and a day-attribution bug this
 -- copy never ran), so they are removed rather than scoped. The removal is logged.
 with removed as (
@@ -4578,7 +4578,7 @@ insert into xp_data_repairs (migration, target_table, action, rows_affected, det
 select '0014', 'xp_data_conventions', 'remove notes about another deployment''s asset', count(*),
        jsonb_build_object(
          'conventions', jsonb_agg(convention),
-         'reason', 'F-35: these notes describe Shaking Seafood''s history in XpulseAI; no asset in this copy has that history')
+         'reason', 'F-35: these notes described one asset''s history in the deployment this schema was copied from; no asset here has that history')
 from removed
 having count(*) > 0;
 
@@ -4718,11 +4718,11 @@ end $$;
 --
 -- 1. F-31: every reconnect inserted a xp_meta_connections row and none was ever retired, so
 --    validateConnections() kept checking, and alerting on, tokens that no asset uses any more
---    (Shaking Seafood had five, Bon Asian two, all ACTIVE). A connection no asset points to is
+--    (one client had five, another two, all ACTIVE). A connection no asset points to is
 --    SUPERSEDED: kept for the record, no longer validated. From v2.7.2, attachAssets() retires them
 --    after every attach.
 -- 2. F-44 (rest): xp_v_sync_health counted a day as present when a row existed, even an empty v1 shell,
---    which is how Bon Asian's missing history read "30d ok". A day now counts only when it has reach.
+--    which is how one client's missing history read "30d ok". A day now counts only when it has reach.
 --    Measured before applying: 0 gaps on all 12 assets under both rules, so today's figures do not move.
 --    missing_dates are plain dates (they were timestamps as text).
 -- ============================================================================
@@ -4783,9 +4783,9 @@ create index if not exists xp_ai_conversations_client_live_idx on xp_ai_conversa
 -- What it adds
 --   xp_meta_ad_accounts    every ad account the connected Meta login can read, found on each sync. An
 --                       account appears once its owner shares it with that login or its business.
---   xp_meta_ads            each ad seen, and the restaurant it belongs to, matched by the Facebook Page or
+--   xp_meta_ads            each ad seen, and the business it belongs to, matched by the Facebook Page or
 --                       Instagram account the ad runs as. An ad for a Page that is no client's is kept
---                       with no restaurant (looked up once) and its figures are never stored.
+--                       with no business (looked up once) and its figures are never stored.
 --   xp_meta_ad_campaigns   campaign name, objective, status and lifetime totals. Reach lives here, per
 --                       campaign over its whole run: people are never added up across days or campaigns.
 --   xp_ad_daily_snapshots  one row per ad per day, in the ad account's time zone: spend, ad views
@@ -4809,7 +4809,7 @@ create table if not exists xp_meta_ad_accounts (
   account_status  integer,                                            -- Meta: 1 active, 2 disabled, 101 closed, ...
   business_name   text,
   meta_user_id    text,                                               -- the Meta login that can read it
-  client_id       uuid references xp_clients(id) on delete set null,     -- set when every ad in it is one restaurant's, or by the admin
+  client_id       uuid references xp_clients(id) on delete set null,     -- set when every ad in it is one business's, or by the admin
   is_active       boolean not null default true,                      -- false: the admin stopped syncing it
   first_seen_at   timestamptz not null default now(),
   last_seen_at    timestamptz not null default now(),
@@ -4817,7 +4817,7 @@ create table if not exists xp_meta_ad_accounts (
   last_error      text
 );
 comment on table xp_meta_ad_accounts is
-  'Stage E (0022). Ad accounts the connected Meta login can read. client_id is the one restaurant every ad in the account belongs to (set automatically, or by the admin); null for an account that serves several.';
+  'Stage E (0022). Ad accounts the connected Meta login can read. client_id is the one business every ad in the account belongs to (set automatically, or by the admin); null for an account that serves several.';
 
 create table if not exists xp_meta_ad_campaigns (
   campaign_id           text primary key,
@@ -4925,7 +4925,7 @@ alter table xp_sync_runs add constraint sync_runs_run_type_check
   check (run_type in ('CRON', 'MANUAL', 'BACKFILL', 'DISCOVERY', 'FINALIZE', 'ADS'));
 
 -- 0022-d ---------------------------------------------------------------------- readers
--- The period's ad figures for a restaurant. Money is never added across currencies: totals is the
+-- The period's ad figures for a business. Money is never added across currencies: totals is the
 -- single-currency result, and null when the period mixes currencies (by_currency then has each).
 -- roas only when Meta recorded purchase value; costs only when their denominator is above zero.
 create or replace function fn_ad_summary(p_client uuid, p_start date, p_end date)
@@ -4975,7 +4975,7 @@ language sql stable set search_path = public as $$
   );
 $$;
 comment on function fn_ad_summary(uuid, date, date) is
-  'Stage E. A restaurant''s ad figures for a period: spend, ad views, clicks, results, costs and return on ad spend (only where Meta recorded purchase value). connected says whether any ad account is linked to the restaurant.';
+  'Stage E. A business''s ad figures for a period: spend, ad views, clicks, results, costs and return on ad spend (only where Meta recorded purchase value). connected says whether any ad account is linked to the business.';
 
 -- Campaigns in the period, by spend. lifetime carries reach over the campaign's whole run.
 create or replace function fn_ad_campaigns(p_client uuid, p_start date, p_end date, p_limit integer default 10)
@@ -5011,7 +5011,7 @@ language sql stable set search_path = public as $$
   ) t;
 $$;
 comment on function fn_ad_campaigns(uuid, date, date, integer) is
-  'Stage E. A restaurant''s campaigns in a period, by spend, with results, costs, return on ad spend where Meta recorded purchase value, and lifetime reach.';
+  'Stage E. A business''s campaigns in a period, by spend, with results, costs, return on ad spend where Meta recorded purchase value, and lifetime reach.';
 
 -- Day by day, for charts.
 create or replace function fn_ad_daily(p_client uuid, p_start date, p_end date)
@@ -5030,7 +5030,7 @@ language sql stable set search_path = public as $$
   ) t;
 $$;
 comment on function fn_ad_daily(uuid, date, date) is
-  'Stage E. A restaurant''s ad spend, ad views and results per day (ad account time zone), per currency.';
+  'Stage E. A business''s ad spend, ad views and results per day (ad account time zone), per currency.';
 
 do $$ begin raise notice '0022: xp_meta_ad_accounts, xp_meta_ads, xp_meta_ad_campaigns, xp_ad_daily_snapshots (+ guard), xp_sync_runs ADS, fn_ad_summary, fn_ad_campaigns, fn_ad_daily — applied.'; end $$;
 
@@ -5252,7 +5252,7 @@ do $$ begin raise notice '0023 part 2: fn_format_breakdown and fn_posting_patter
 -- Admin → Ads → "Connect ad accounts" signs in with the Facebook profile that can see the ad accounts
 -- the boosts are paid from, asking only for ads_read and business_management. That login is kept
 -- here, NOT in xp_meta_connections: it never replaces a Page connection and never touches a Page token,
--- so connecting it cannot disconnect a restaurant (F-22 is about Page logins). The ads sync reads the
+-- so connecting it cannot disconnect a business (F-22 is about Page logins). The ads sync reads the
 -- ad accounts of every ACTIVE row here as well as of every Page connection's login.
 create table if not exists xp_meta_ad_logins (
   id                 uuid primary key default gen_random_uuid(),
@@ -5322,11 +5322,11 @@ do $$ begin raise notice '0026: xp_apify_keys — applied.'; end $$;
 -- ===================================================================
 -- 0028 — Public social data for content work (v2.11.0, 19 Sep 2026): influencers, content audits, ideas.
 --
--- Read with Apify (the key pool, 0026) from public Instagram profiles and posts: each restaurant's own public
--- profile, one rival per restaurant, and the influencers who post about it. Meta's API never returns a
--- collab post an influencer owns, but the restaurant's public grid does (coauthorProducers), so collabs are
+-- Read with Apify (the key pool, 0026) from public Instagram profiles and posts: each business's own public
+-- profile, one rival per business, and the influencers who post about it. Meta's API never returns a
+-- collab post an influencer owns, but the business's public grid does (coauthorProducers), so collabs are
 -- found automatically. Numbers are what Instagram shows publicly (views = plays, likes, comments); the
--- restaurants' private insights stay in the Meta tables. Staff-only: owners see influencer results in their
+-- businesses' private insights stay in the Meta tables. Staff-only: owners see influencer results in their
 -- answers and report, never rivals. Additive only: new tables, nothing existing changes.
 
 create table if not exists xp_social_profiles (
@@ -5349,9 +5349,9 @@ create table if not exists xp_social_profiles (
   updated_at       timestamptz not null default now(),
   unique (platform, username)
 );
-comment on table xp_social_profiles is 'v2.11.0 (0028). Public profiles read with Apify: restaurants'' own, rivals, influencers.';
+comment on table xp_social_profiles is 'v2.11.0 (0028). Public profiles read with Apify: businesses'' own, rivals, influencers.';
 
--- Which public profiles a restaurant's content work looks at: its own (SELF) and its rival(s) (RIVAL).
+-- Which public profiles a business's content work looks at: its own (SELF) and its rival(s) (RIVAL).
 create table if not exists xp_client_social_profiles (
   client_id   uuid not null references xp_clients(id) on delete cascade,
   profile_id  uuid not null references xp_social_profiles(id) on delete cascade,
@@ -5408,7 +5408,7 @@ create table if not exists xp_social_post_snapshots (
 );
 create index if not exists xp_social_post_snapshots_post_idx on xp_social_post_snapshots (post_id, fetched_at);
 
--- Influencer posts about a restaurant: found on its public grid (a collab) or added by staff.
+-- Influencer posts about a business: found on its public grid (a collab) or added by staff.
 create table if not exists xp_influencer_posts (
   id                   uuid primary key default gen_random_uuid(),
   client_id            uuid not null references xp_clients(id) on delete cascade,
@@ -5424,9 +5424,9 @@ create table if not exists xp_influencer_posts (
   updated_at           timestamptz not null default now(),
   unique (client_id, post_id)
 );
-comment on table xp_influencer_posts is 'v2.11.0 (0028). Influencer posts per restaurant (AUTO: a collab found on its grid; MANUAL: added by staff).';
+comment on table xp_influencer_posts is 'v2.11.0 (0028). Influencer posts per business (AUTO: a collab found on its grid; MANUAL: added by staff).';
 
--- A content audit: a restaurant against one rival, from both profiles' public posts.
+-- A content audit: a business against one rival, from both profiles' public posts.
 create table if not exists xp_content_audits (
   id                uuid primary key default gen_random_uuid(),
   client_id         uuid not null references xp_clients(id) on delete cascade,
@@ -5464,7 +5464,7 @@ create table if not exists xp_content_ideas (
 );
 create index if not exists xp_content_ideas_client_idx on xp_content_ideas (client_id, created_at desc);
 
--- Every Apify run: what for, for which restaurant, on which key, how many results, what it cost.
+-- Every Apify run: what for, for which business, on which key, how many results, what it cost.
 create table if not exists xp_apify_runs (
   id           bigint generated always as identity primary key,
   actor        text not null,

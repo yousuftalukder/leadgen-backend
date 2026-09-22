@@ -7,8 +7,8 @@
 //  2. Per account, ad-level insights one day at a time (time_increment=1), in the account's own time
 //     zone, with Ads Manager's attribution (use_unified_attribution_setting): the trailing 29 days on
 //     every sync, 180 days on an account's first sync, in 30-day slices.
-//  3. Each ad is matched to a restaurant by the Facebook Page or Instagram account it runs as (its
-//     creative). An ad for a Page that is no client's is kept with no restaurant, so it is looked up
+//  3. Each ad is matched to a business by the Facebook Page or Instagram account it runs as (its
+//     creative). An ad for a Page that is no client's is kept with no business, so it is looked up
 //     once, and its figures are never stored. Ads matched later (a new client) are backfilled.
 //  4. One row per ad per day. Meta can attribute messages, leads and purchases to a day for up to 28
 //     days, so a row stays open, and is re-read on every sync, until the day is 29 days old; then it
@@ -61,7 +61,7 @@ function firstAction(list, types) {
   return 0;
 }
 
-// ---------------------------------------------------------------- matching an ad to a restaurant
+// ---------------------------------------------------------------- matching an ad to a business
 function pageOf(creative) {
   if (!creative) return null;
   const spec = creative.object_story_spec || {};
@@ -212,7 +212,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
   const known = await q(supabase.from('xp_meta_ads').select('ad_id,client_id,page_id,ig_user_id,campaign_id,lookup_error').eq('ad_account_id', acct.ad_account_id), 'ads known');
   const ads = new Map(known.map((a) => [a.ad_id, a]));
 
-  // Ads with no restaurant are matched again, since a client added later may own them. Ads whose
+  // Ads with no business are matched again, since a client added later may own them. Ads whose
   // creative could not be read are looked up again. Either way the ad's past days were never
   // stored, so the account is read back FIRST_SYNC_DAYS this time.
   const rematched = [];
@@ -261,7 +261,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
     const adIds = [...new Set(rows.map((r) => String(r.ad_id)))];
     run.adsSeen = adIds.length;
 
-    // 2. Ads never seen before: which restaurant? (Earlier lookup failures were retried above.)
+    // 2. Ads never seen before: which business? (Earlier lookup failures were retried above.)
     const toLookUp = adIds.filter((id) => !ads.has(id));
     const byId = new Map(rows.map((r) => [String(r.ad_id), r]));
     const newAds = [];
@@ -283,7 +283,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
     if (newAds.length) await upsertChunked('xp_meta_ads', newAds, 'ad_id');
     for (const a of newAds) ads.set(a.ad_id, a);
 
-    // 3. Rows for the restaurants' ads, minus days already closed.
+    // 3. Rows for the businesses' ads, minus days already closed.
     const mine = rows.filter((r) => { const a = ads.get(String(r.ad_id)); return a && a.client_id; });
     const closed = new Set();
     if (mine.length) {
@@ -297,7 +297,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
     const cutoff = today.minus({ days: OPEN_DAYS }).toISODate();
     await q(supabase.from('xp_ad_daily_snapshots').update({ is_final: true }).eq('ad_account_id', acct.ad_account_id).eq('is_final', false).lte('metric_date', cutoff), 'ads close days');
 
-    // 5. Campaigns of the restaurants' ads seen in this window: names, status, lifetime totals.
+    // 5. Campaigns of the businesses' ads seen in this window: names, status, lifetime totals.
     const campaigns = new Map();   // campaign_id → Set(client_id)
     for (const r of mine) {
       const cid = r.campaign_id ? String(r.campaign_id) : null;
@@ -307,7 +307,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
     }
     if (campaigns.size) await syncCampaigns(g, acct, campaigns, rows, run);
 
-    // 6. An account whose ads ALL belong to one restaurant is that restaurant's. One ad for another
+    // 6. An account whose ads ALL belong to one business is that business's. One ad for another
     //    Page (an agency account) and it belongs to none; an ad whose creative could not be read
     //    does not count either way.
     if (!acct.client_id) {
@@ -354,7 +354,7 @@ async function syncCampaigns(g, acct, campaigns, rows, run) {
     const owners = campaigns.get(id);
     const row = {
       campaign_id: id, ad_account_id: acct.ad_account_id,
-      client_id: owners.size === 1 ? [...owners][0] : null,   // a campaign for several restaurants belongs to none
+      client_id: owners.size === 1 ? [...owners][0] : null,   // a campaign for several businesses belongs to none
       name: i.name || seen.campaign_name || null, objective: i.objective || seen.objective || null,
       status: i.effective_status || null, start_time: i.start_time || null, stop_time: i.stop_time || null, updated_at: ts
     };
