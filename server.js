@@ -271,6 +271,24 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || '*')
 app.use(cors({ origin: ALLOWED.includes('*') ? '*' : ALLOWED }));
 app.use(express.json({ limit: '2mb' }));
 
+// The pages, served from this process as well as from Netlify. The brief asked
+// for the front end to live in the repo AND be reachable from the Render link;
+// the first was true from the start, the second was not — the Render root
+// answered 404 for every page. Same files, same caching rule as netlify.toml:
+// nothing is fingerprinted, so a deploy must reach the browser on its next
+// request, and must-revalidate with a zero max-age is what does that.
+app.use(express.static(require('path').join(__dirname, 'frontend'), {
+    index: 'index.html',
+    dotfiles: 'ignore',
+    setHeaders(res, filePath) {
+        if (/\.(html|css|js)$/i.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+        if (/\.html$/i.test(filePath)) {
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+        }
+    }
+}));
+
 // ---------------------------------------------------------------------------
 // RATE LIMITING  (in-memory, no extra dependency)
 // Per-IP for unauthenticated surface, per-user for job starts. A single user

@@ -1,0 +1,29 @@
+# Every push and every pull request runs the whole suite and the wiring audit.
+#
+# No `npm ci`: the tests stub every external module (express, supabase,
+# apify-client) and read the source directly, so they need only Node. That is
+# deliberate — a green run here proves the code, not the lockfile.
+#
+# Render deploys whatever lands on main. Until this file existed, a broken
+# push went live; the tests only ran when someone remembered.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Syntax
+        run: node --check server.js && node --check frontend/header.js
+      - name: Suite
+        run: npm test
+      - name: Wiring audit
+        run: npm run audit

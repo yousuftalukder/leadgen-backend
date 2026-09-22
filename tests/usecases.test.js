@@ -194,9 +194,14 @@ global.fetch = async (url, opts = {}) => {
         return reply(200, { models: [{ name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] }] });
     }
     if (/:generateContent$/.test(u)) {
-        GEMINI.requests.push(JSON.parse(opts.body || '{}'));
-        const next = GEMINI.script.shift();
+        const body = JSON.parse(opts.body || '{}');
+        GEMINI.requests.push(body);
+        let next = GEMINI.script.shift();
         if (!next) return reply(500, 'the test scripted no reply for this turn');
+        // A scripted reply may be a function of the request, for the engines
+        // whose prompt carries computed input the test cannot know in advance
+        // — the content plan's cell keys exist only once the scorecard does.
+        if (typeof next === 'function') next = next(body);
         return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
     }
     if (/graph\.facebook\.com\//.test(u)) return reply(200, GRAPH.answer(new URL(u)));
@@ -1071,6 +1076,93 @@ test('the analyst reads the month back with the same numbers', async () => {
     assert.strictEqual(fr.available, true);
     const reach = fr.movements.find(m => m.metric === 'Accounts reached');
     assert.strictEqual(reach.changePct, 47.2, 'the assistant must see the same arithmetic the report holds');
+});
+
+section('\nthe content plan, with the model told to overspend');
+/** Stored posts for one Instagram handle, varied enough to produce cells. */
+function seedPosts(handle, spec) {
+    const now = Date.now();
+    spec.forEach((p, i) => tbl('posts').push({
+        id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'instagram', handle,
+        shortcode: `${handle.slice(0, 3)}${i}`, post_url: `https://instagram.com/p/${handle.slice(0, 3)}${i}`,
+        post_type: p.type, is_video: p.type === 'reel', carousel_count: p.type === 'carousel' ? 5 : null,
+        caption: p.caption, hashtags: ['#boston', '#food'], likes: p.likes, comments: p.comments, views: p.type === 'reel' ? p.likes * 12 : null,
+        engagement_raw: p.likes + p.comments, is_sponsored: false, is_provisional: false,
+        // One post a day, most recent first, so all of them fall in the current
+        // month: the index is computed per handle per month, and a post that
+        // drifts into last month is scored against a different median.
+        posted_at: new Date(now - (i + 1) * 86400000).toISOString(), scraped_at: new Date(now - 3600000).toISOString(),
+        hour_local: 9 + (i % 10), dow_local: i % 7, audio: null, first_comment: null, aspect_ratio: null, video_duration: p.type === 'reel' ? 14 : null
+    }));
+}
+test('the run is queued under the client and finishes on stored rows alone — no Apify', async () => {
+    tbl('user_engine_access').push({ user_id: EMP.id, engine: 'content_plan' });
+    // A cell wins when its posts sit well above the handle's own monthly
+    // median, so the winners are a minority: six against twelve filler
+    // posts. The target wins with question-led Reels; the rival wins with
+    // long how-to Carousels in a cell the target has never used — a gap.
+    const twelve = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    seedPosts('harborcafe', [
+        ...[1, 2, 3, 4, 5, 6].map(i => ({ type: 'reel', caption: `Ever wondered how we roast batch ${i}? Watch.`, likes: 2000 + i * 10, comments: 120 })),
+        ...twelve.map(i => ({ type: 'image', caption: `Morning light on the counter, day ${i}.`, likes: 150, comments: 4 }))
+    ]);
+    seedPosts('northendpizza', [
+        ...[1, 2, 3, 4, 5, 6].map(i => ({ type: 'carousel', caption: `How to pick the right dough, step ${i}: hydration, flour, time, temperature, patience and a hot stone make the difference every single time.`, likes: 3000 + i * 10, comments: 150 })),
+        ...twelve.map(i => ({ type: 'image', caption: `Slice of the day ${i}.`, likes: 300, comments: 8 }))
+    ]);
+
+    state.cpCells = {};
+    GEMINI.script = [(req) => {
+        // Read the scorecard the server built, and answer for the cells it named.
+        const text = req.contents[0].parts[0].text;
+        const start = text.indexOf('Scorecard (JSON):');
+        const end = text.indexOf('Reply with ONLY');
+        const card = JSON.parse(text.slice(start + 'Scorecard (JSON):'.length, end).trim());
+        const brief = (c) => { state.cpCells[c.cell] = c.why; return { cell: c.cell, hook: c.evidence?.[0]?.hook || 'Ever wondered?', script: ['Open on the roaster', 'Cut to the pour', 'End on the cup'], shot: 'Phone on the counter, natural light', boost: 'worth boosting', boost_why: 'It performs, put money behind it.', evidence: [] }; };
+        const out = { summary: 'Reels win; carousels are the gap.', stop_doing: ['Stop posting stills at 9am.'], caption_rules: ['Open with a question.'] };
+        for (const plural of ['reels', 'carousels', 'stills']) out[plural] = (card[plural] || []).slice(0, 3).map(brief);
+        // One invented cell the server never offered. It must be dropped.
+        out.reels.push({ cell: 'Reel|invented|short|nothing', hook: 'Made up', script: [], shot: null, boost: 'worth boosting', boost_why: 'Trust me.', evidence: [] });
+        return { parts: [{ text: JSON.stringify(out) }] };
+    }];
+
+    const r = await call('POST', '/api/content-plan', { token: 't-emp', body: { platform: 'instagram', target: 'harborcafe', rivals: 'northendpizza', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    assert.strictEqual(r.body.estimatedUsd, 0, 'the plan must cost nothing');
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `the job ended ${job.status}: ${job.error || ''}`);
+    assert.strictEqual(job.client_id, state.C);
+    state.cpReport = job.result_report_id;
+    assert.ok(state.cpReport, 'no report id on the finished job');
+    assert.ok(Object.keys(state.cpCells).length >= 2, 'the model was offered too few cells to test the gate: ' + JSON.stringify(state.cpCells));
+});
+test('the boost gate held: every gap was downgraded, every proven cell kept, the invented one dropped', async () => {
+    const rep = tbl('reports').find(x => x.id === state.cpReport);
+    assert.ok(rep, 'no report row');
+    assert.strictEqual(rep.report_type, 'content_plan');
+    const rj = rep.report_json || {};
+    const briefs = rj.briefs || (rj.plan && rj.plan.briefs);
+    assert.ok(briefs, 'no briefs on the report; keys: ' + Object.keys(rj).join(','));
+    const all = ['reels', 'carousels', 'stills'].flatMap(k => briefs[k] || []);
+    assert.ok(all.length >= 2, 'no briefs survived');
+    let gaps = 0, wins = 0;
+    for (const b of all) {
+        const why = state.cpCells[b.cell];
+        assert.ok(why, 'a brief for a cell the model was never offered survived: ' + b.cell);
+        if (why === 'gap') { gaps++; assert.strictEqual(b.boost, 'organic only', 'a gap cell kept "worth boosting"'); assert.strictEqual(b.boost_downgraded, true); assert.ok(!/put money/i.test(b.boost_why), 'the model\'s spending rationale survived the downgrade'); }
+        else { wins++; assert.strictEqual(b.boost, 'worth boosting', 'a proven cell was downgraded'); }
+        assert.strictEqual(b.sources.evidence, 'scraped');
+        assert.ok(['strong', 'healthy', 'mixed', 'weak', 'poor'].includes(b.predicted_band) || typeof b.predicted_band === 'string', 'the band comes from the computed index, never the model');
+    }
+    assert.ok(gaps >= 1, 'no gap cell was offered — the rival\'s carousels should have been one');
+    assert.ok(briefs.removed >= 1, 'the invented cell was not dropped');
+});
+test('the client can read the plan as ideas, in owner language', async () => {
+    const r = await call('GET', `/api/client/report/${state.cpReport}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.report.type, 'content_plan');
+    assert.ok(/things to post next|content plan/i.test(r.body.report.headline), r.body.report.headline);
+    assert.ok(Array.isArray(r.body.report.ideas));
 });
 
 section('\nrate limits do not bleed between routes');

@@ -120,7 +120,7 @@ Three rules the arrows enforce:
 | E9 | Build the monthly owner report, this month against last | **E2E** | `usecases` — *the monthly owner report, against a scripted Graph API*: queued under the client, finishes, deltas exact (47.2% up; zero last month reads "new", never a percentage; a 0.6% move reads "flat"), only the month's posts counted, the analyst reads the same numbers back |
 | E10 | Ask the analyst about one client only | **E2E** | `usecases` — *the analyst answers about one client only*: the model is scripted, and the test reads what the server actually sent it — the tool result held only that client's reports, the prompt named the client and the scope, a thread will not take a turn about another client |
 | E11 | Discover comparable local businesses; keep a stable comparison set | **UNIT** | `phase19` — size band, query shape |
-| E12 | Write a content plan; add manual audit findings; only proven cells may be boosted | **UNIT** | `phase17` — the boost gate, tested adversarially |
+| E12 | Write a content plan; add manual audit findings; only proven cells may be boosted | **E2E** | `usecases` — *the content plan, with the model told to overspend*: a real plan from stored rows (zero credit); the model, answering from the scorecard the server built, claims "worth boosting" on every cell and invents one; the run downgrades every gap, keeps every proven cell, strips the spending rationale, drops the invention; the client reads it as ideas. `phase17` covers the gate in isolation |
 | E13 | Share a report by link; revoke it | **E2E** | `usecases` — *a report goes out to someone with no account* |
 | E14 | Repeat a run on a schedule, under its client | **E2E** (create, list, pause, delete; carries the client) / **LIVE-ONLY** (the timer firing) | `usecases` — *a run is repeated on a schedule, under its client*; `phase11` for next-run arithmetic |
 | E15 | Bring my own Apify key; pause instead of using the pool | **E2E** (the own-key-only setting) / **BUILT** (the key itself) | `usecases` — own-key-only sticks; sidebar *Update key* |
@@ -174,9 +174,10 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 92 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
+| `tests/usecases.test.js` | 95 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
 | `tests/wiring.test.js` | 36 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~200 | The logic inside each engine |
+| `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
 
 **How the counting is kept honest:** the runner treats a test file that exits cleanly without a result line as a failure. It did not always; when `server.js` once threw at load and its crash handler exited 0, eleven files reported "ok" having run nothing. The server now exits non-zero on any exception before boot completes, so that state cannot deploy either.
