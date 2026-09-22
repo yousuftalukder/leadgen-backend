@@ -5684,6 +5684,100 @@ app.delete('/api/apify-keys/:id', async (req, res) => {
 // ADMIN: USER MANAGEMENT
 // ===========================================================================
 
+// ===========================================================================
+// TRIAL AND PLAN LIMITS (phase 21)
+//
+// These three settings decide what a trial gets, what a paying client gets,
+// and how long a trial lasts. The server has read them from system_settings
+// since phase 13 and enforced them on every run — and there has never been a
+// way to change them except by writing SQL against production.
+//
+// That is the same fault as the engine checkboxes: a capability the server
+// enforces that no human can reach. It is worse here, because the person who
+// most needs to change a trial cap is the person least likely to be holding a
+// psql prompt.
+// ===========================================================================
+
+/** The metrics a cap can be set on. Anything else is ignored rather than stored. */
+const QUOTA_METRICS = [
+    { key: 'ig_report',      label: 'Instagram reports',   kind: 'count' },
+    { key: 'fb_group_audit', label: 'Group audits',        kind: 'count' },
+    { key: 'leads',          label: 'Leads',               kind: 'count' },
+    { key: 'usd',            label: 'Apify spend ceiling', kind: 'usd'   }
+];
+
+app.get('/api/admin/settings', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+        const keys = ['trial_days', 'trial_caps', 'client_monthly_caps'];
+        const { data } = await supabase.from('system_settings').select('key, value').in('key', keys);
+        const raw = Object.fromEntries((data || []).map(r => [r.key, r.value]));
+
+        const parse = (v, fallback) => {
+            try { const p = v ? JSON.parse(v) : null; return (p && typeof p === 'object') ? p : fallback; }
+            catch { return fallback; }
+        };
+        const days = parseInt(raw.trial_days ?? '', 10);
+
+        res.json({
+            trialDays: Number.isFinite(days) && days > 0 && days <= 365 ? days : 7,
+            trialCaps: parse(raw.trial_caps, QUOTA_FALLBACK.trial),
+            clientMonthlyCaps: parse(raw.client_monthly_caps, QUOTA_FALLBACK.paid),
+            metrics: QUOTA_METRICS,
+            fallbacks: QUOTA_FALLBACK,
+            // Says out loud when a value is the built-in fallback rather than
+            // something anyone chose, so an unset limit does not look decided.
+            stored: { trial_days: raw.trial_days != null, trial_caps: raw.trial_caps != null, client_monthly_caps: raw.client_monthly_caps != null }
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/admin/settings', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+
+        const cleanCaps = obj => {
+            if (!obj || typeof obj !== 'object') return null;
+            const out = {};
+            for (const m of QUOTA_METRICS) {
+                const v = obj[m.key];
+                if (v === null || v === '') { out[m.key] = null; continue; }   // null = unlimited
+                const n = Number(v);
+                if (!Number.isFinite(n) || n < 0) continue;                    // junk is dropped, not stored
+                out[m.key] = m.kind === 'usd' ? Math.round(n * 100) / 100 : Math.floor(n);
+            }
+            return Object.keys(out).length ? out : null;
+        };
+
+        const writes = [];
+        if (req.body.trialDays !== undefined) {
+            const d = parseInt(req.body.trialDays, 10);
+            if (!Number.isFinite(d) || d < 1 || d > 365) {
+                return res.status(400).json({ error: 'Trial length must be between 1 and 365 days.' });
+            }
+            writes.push({ key: 'trial_days', value: String(d) });
+        }
+        for (const [field, key] of [['trialCaps', 'trial_caps'], ['clientMonthlyCaps', 'client_monthly_caps']]) {
+            if (req.body[field] === undefined) continue;
+            const caps = cleanCaps(req.body[field]);
+            if (!caps) return res.status(400).json({ error: `No usable values for ${key}.` });
+            writes.push({ key, value: JSON.stringify(caps) });
+        }
+        if (!writes.length) return res.status(400).json({ error: 'Nothing to change.' });
+
+        const now = new Date().toISOString();
+        const { error } = await supabase.from('system_settings')
+            .upsert(writes.map(w => ({ ...w, updated_at: now })), { onConflict: 'key' });
+        if (error) throw error;
+
+        // Caps are cached per process for the auth window. Without this an
+        // admin raises a limit, watches nothing change, and raises it again.
+        invalidateQuotaCaps();
+        logger.info('admin_settings_changed', { userId: ctx.user.id, keys: writes.map(w => w.key) });
+        res.json({ success: true, changed: writes.map(w => w.key) });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.get('/api/admin/users', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;

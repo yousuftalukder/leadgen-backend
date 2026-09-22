@@ -90,6 +90,7 @@
     <div class="segment-bar">
         <button class="segment-btn active" type="button" data-tab="users">People</button>
         <button class="segment-btn" type="button" data-tab="keys">Apify keys</button>
+        <button class="segment-btn" type="button" data-tab="plans">Trial &amp; plans</button>
         <button class="segment-btn" type="button" data-tab="health">Spend &amp; health</button>
     </div>
 
@@ -115,8 +116,12 @@
                 </div>
                 <div>
                     <label for="nu-role">Role</label>
+                    <!-- Client was missing here while the edit dropdown had it,
+                         so onboarding a client who paid out of band meant
+                         creating them as an employee and then changing it. -->
                     <select id="nu-role">
-                        <option value="user">User</option>
+                        <option value="user">Employee</option>
+                        <option value="client">Client</option>
                         <option value="admin">Admin</option>
                     </select>
                 </div>
@@ -221,6 +226,36 @@
     </section>
 
     <!-- ================= SPEND & HEALTH ================= -->
+    <!-- ================= TRIAL & PLANS =================
+         The server has enforced these since phase 13 and read them from
+         system_settings. Until now the only way to change one was SQL against
+         production, which is not a thing the person who needs to change a
+         trial cap is holding a prompt for. -->
+    <section id="tab-plans" class="hidden">
+        <div class="card">
+            <h2 class="card-title">Trial &amp; plans</h2>
+            <p class="card-subtitle">What a free trial gets, what a paying client gets each month, and how long a
+                trial lasts. Changes apply to every account on this plan immediately — they are not copied onto
+                accounts when they sign up.</p>
+
+            <label for="pl-days">Trial length (days)</label>
+            <input type="number" id="pl-days" min="1" max="365" style="max-width:160px">
+
+            <h3 class="block-title">Free trial allowance</h3>
+            <p class="card-subtitle" style="margin-bottom:12px">Spent once, across the whole trial — not per month.
+                Leave a field blank for unlimited.</p>
+            <div class="field-grid" id="pl-trial"></div>
+
+            <h3 class="block-title">Paying client, per month</h3>
+            <p class="card-subtitle" style="margin-bottom:12px">Resets on the 1st. The spend ceiling is the backstop
+                that stops one account draining the shared pool.</p>
+            <div class="field-grid" id="pl-paid"></div>
+
+            <button class="btn-primary" type="button" id="pl-save" style="max-width:260px">Save limits</button>
+            <div class="note" id="pl-note"></div>
+        </div>
+    </section>
+
     <section id="tab-health" class="hidden">
 
         <div class="card">
@@ -322,8 +357,9 @@
         btn.addEventListener('click', () => {
             document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            ['users', 'keys', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            ['users', 'keys', 'plans', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
             if (btn.dataset.tab === 'keys') { loadKeys(); loadGemini(); }
+            if (btn.dataset.tab === 'plans') loadPlans();
             if (btn.dataset.tab === 'health') loadMetrics();
         });
     });
@@ -374,6 +410,66 @@
             `<label class="check"><input type="checkbox" data-eng="${esc(e.key)}" ${granted.includes(e.key) ? 'checked' : ''}> ${esc(e.label)}</label>`
         ).join('');
     }
+
+    // ---- trial & plans ------------------------------------------------------
+    let PLAN_METRICS = [];
+
+    async function loadPlans() {
+        const note = $('pl-note');
+        try {
+            const d = await EL.api('/api/admin/settings');
+            PLAN_METRICS = d.metrics || [];
+            $('pl-days').value = d.trialDays;
+
+            const fields = (hostId, caps) => {
+                $(hostId).innerHTML = PLAN_METRICS.map(m => {
+                    const v = caps[m.key];
+                    return `<div><label>${esc(m.label)}${m.kind === 'usd' ? ' ($)' : ''}</label>
+                        <input type="number" min="0" ${m.kind === 'usd' ? 'step="0.01"' : 'step="1"'}
+                               data-cap="${esc(m.key)}" placeholder="unlimited"
+                               value="${v === null || v === undefined ? '' : esc(v)}"></div>`;
+                }).join('');
+            };
+            fields('pl-trial', d.trialCaps || {});
+            fields('pl-paid', d.clientMonthlyCaps || {});
+
+            // An unset limit is still enforced, from a built-in fallback. Saying
+            // so stops it reading as a decision somebody made.
+            const unset = Object.entries(d.stored || {}).filter(([, v]) => !v).map(([k]) => k);
+            note.textContent = unset.length
+                ? `Using built-in defaults for: ${unset.join(', ')}. Saving writes them down.`
+                : '';
+        } catch (err) {
+            note.textContent = err.message;
+        }
+    }
+
+    function readCaps(hostId) {
+        const out = {};
+        document.querySelectorAll(`#${hostId} input[data-cap]`).forEach(i => {
+            out[i.dataset.cap] = i.value.trim() === '' ? null : Number(i.value);
+        });
+        return out;
+    }
+
+    if ($('pl-save')) $('pl-save').addEventListener('click', async () => {
+        const btn = $('pl-save');
+        btn.disabled = true;
+        say($('pl-note'), 'Saving…');
+        try {
+            await EL.api('/api/admin/settings', {
+                method: 'PATCH',
+                body: {
+                    trialDays: Number($('pl-days').value),
+                    trialCaps: readCaps('pl-trial'),
+                    clientMonthlyCaps: readCaps('pl-paid')
+                }
+            });
+            say($('pl-note'), 'Saved. Every account on these plans is governed by the new numbers now.', true);
+        } catch (err) {
+            say($('pl-note'), err.message, false);
+        } finally { btn.disabled = false; }
+    });
 
     async function loadUsers() {
         const box = $('users-list');

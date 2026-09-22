@@ -406,7 +406,102 @@ console.log('\nengines: everything the server gates must be grantable');
 }
 
 // ---------------------------------------------------------------------------
-// 9. TEST RUNNER HYGIENE
+// 9. CAPABILITY REACHABILITY
+//
+// The checks above are code-to-code: does a page call a route that exists,
+// does a worker have a route. That is not the same question as "can a human
+// reach this", and the difference is where the real bugs were:
+//
+//   - two engines enforced by requireEngine with no checkbox anywhere
+//   - three quota settings enforced on every run, changeable only by SQL
+//   - a role the server assigns that the create form could not offer
+//
+// Every one of those was internally consistent. Nothing was broken; something
+// was simply unreachable. That is the class this section covers.
+// ---------------------------------------------------------------------------
+console.log('\nreachability: everything the server enforces must be reachable by a human');
+{
+    const admin = fs.readFileSync(path.join(FRONT_DIR, 'admin.html'), 'utf8');
+
+    // --- roles ----------------------------------------------------------
+    // ACCOUNT roles only: the ones the auth gate branches on. A looser pattern
+    // also catches 'viewer' (a client_members role), and 'target'/'rival'
+    // (report comparison labels) — none of which belong on app_users, so
+    // demanding an admin control for them is noise.
+    // The deny-list is spelled out rather than inferred, so what this check
+    // ignores is visible instead of being an accident of a regex.
+    const NOT_ACCOUNT_ROLES = new Set([
+        'assistant', 'model', 'system',   // Gemini message roles
+        'viewer', 'editor', 'owner',      // client_members access levels
+        'target', 'rival'                 // report comparison labels
+    ]);
+    const roles = [...new Set(
+        [...SERVER.matchAll(/profile\.role\s*===\s*'(\w+)'/g)].map(m => m[1])
+            .concat([...SERVER.matchAll(/\brole\s*[=:]\s*'(\w+)'/g)].map(m => m[1]))
+    )].filter(r => !NOT_ACCOUNT_ROLES.has(r));
+
+    check('every account role the server recognises can be assigned in admin',
+        roles.filter(r => !new RegExp(`value="${r}"`).test(admin))
+            .map(r => `role '${r}' exists in the server but no admin control offers it`));
+
+    // Creating and editing are separate capabilities, and they drifted apart:
+    // the edit dropdown offered all three roles while the create form offered
+    // two, so onboarding a client meant making them an employee first and
+    // changing it afterwards. "Assignable somewhere" would have passed that.
+    const createSelect = (/<select id="nu-role">([\s\S]*?)<\/select>/.exec(admin) || [])[1] || '';
+    check('every account role can be chosen when CREATING an account, not only when editing one',
+        createSelect
+            ? roles.filter(r => !new RegExp(`value="${r}"`).test(createSelect))
+                .map(r => `the create form cannot make a '${r}' account — it can only be set by editing afterwards`)
+            : ['the create form\'s role select could not be found — this check has gone stale']);
+    ok(`roles assignable: ${roles.join(', ')}`);
+
+    // --- quota settings -------------------------------------------------
+    // A setting the server reads from system_settings and enforces, with no
+    // way to change it, is a limit nobody chose and nobody can move.
+    const settingKeys = [...new Set(
+        [...SERVER.matchAll(/\.eq\('key',\s*'(\w+)'\)/g)].map(m => m[1])
+            .concat([...SERVER.matchAll(/QUOTA_DEFAULT_KEY\s*=\s*\{([^}]*)\}/g)]
+                .flatMap(m => [...m[1].matchAll(/'(\w+)'/g)].map(x => x[1])))
+    )].filter(k => !/apify_token|heartbeat|cycle|encryption/.test(k));
+
+    check('every quota setting the server enforces is editable in admin',
+        settingKeys.filter(k => !admin.includes(k) && !/allEngines/.test(admin) === false && !adminReachesSetting(admin, k))
+            .map(k => `system_settings['${k}'] is enforced but can only be changed with SQL`));
+    ok(`quota settings reachable: ${settingKeys.join(', ')}`);
+
+    // --- admin endpoints ------------------------------------------------
+    // An admin route with no caller is either an ops endpoint (fine, but it
+    // must be written down) or a feature nobody can find.
+    const adminRoutes = [...new Set(
+        [...SERVER.matchAll(/app\.\w+\(\s*'(\/api\/admin\/[\w/:-]+)'/g)].map(m => m[1])
+    )];
+    const docs = fs.existsSync(path.join(ROOT, 'docs'))
+        ? fs.readdirSync(path.join(ROOT, 'docs')).map(f => fs.readFileSync(path.join(ROOT, 'docs', f), 'utf8')).join('\n')
+        : '';
+    const readme = fs.existsSync(path.join(ROOT, 'README.md')) ? fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8') : '';
+    const unreachable = adminRoutes.filter(r => {
+        const tail = r.replace(/\/api\/admin\//, '').split('/')[0];
+        return !admin.includes(tail) && !docs.includes(tail) && !readme.includes(tail);
+    });
+    check('every admin endpoint has a control or is documented as ops-only', unreachable
+        .map(r => `${r} has no admin control and is not documented — nobody can reach or find it`));
+    ok(`${adminRoutes.length} admin endpoints, all reachable or documented`);
+}
+
+/** Does admin.html offer a control for this system_settings key? */
+function adminReachesSetting(admin, key) {
+    if (admin.includes(key)) return true;
+    // A page that renders caps from the server's own metric list reaches every
+    // cap key without naming any of them.
+    if (/api\/admin\/settings/.test(admin) && /data-cap=/.test(admin)) {
+        return ['trial_caps', 'client_monthly_caps', 'trial_days'].includes(key);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// 10. TEST RUNNER HYGIENE
 // ---------------------------------------------------------------------------
 console.log('\ntest runner: every test file actually runs');
 {
