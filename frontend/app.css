@@ -652,6 +652,23 @@ tbody tr:last-child td { border-bottom: none; }
 .el-side-actions .el-btn { flex: 1; justify-content: center; text-align: center; }
 .el-signout { width: 100%; text-align: center; }
 
+/* ---- what is waiting for an admin ----
+   A count on the Admin entry, so a client who asked to continue is seen
+   without anyone opening the admin page to look. */
+.el-badge { display: inline-block; min-width: 18px; padding: 1px 6px; margin-left: 8px; border-radius: 999px;
+    font-size: 0.66rem; font-weight: 800; text-align: center; line-height: 1.5;
+    background: var(--accent-glow); color: var(--on-accent); }
+
+/* ---- the trial banner's one action ----
+   The moment the business model turns on. Quiet until the last two days,
+   when the banner itself goes urgent and the button goes with it. */
+.el-plan-cta { margin-left: auto; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+    font-family: inherit; font-size: 0.76rem; font-weight: 800; letter-spacing: 0.01em;
+    background: rgba(255,255,255,0.08); color: var(--text-primary); border: 1px solid var(--card-border); }
+.el-plan.is-urgent .el-plan-cta { background: var(--accent-glow); color: var(--on-accent); border-color: transparent; }
+.el-plan-cta[disabled] { opacity: .75; cursor: default; }
+@media (max-width: 640px) { .el-plan-cta { margin-left: 0; } }
+
 /* ---- the work-for bar ----
    Top of every page where somebody presses Run. Jade when a client is chosen,
    gold when one is not — the empty state is the one that needs the eye. */

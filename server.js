@@ -636,7 +636,10 @@ function accountDenial(profile) {
                     : 'This account has no active plan. Contact us to get started.',
                 code: 'account_expired',
                 state: 'expired',
-                ended_at: had || null
+                ended_at: had || null,
+                // So the expired screen can say "you already asked, on <date>"
+                // instead of offering the button a second time.
+                activation_requested_at: profile?.activation_requested_at || null
             }
         };
     }
@@ -644,7 +647,13 @@ function accountDenial(profile) {
 }
 
 /** Resolves the caller. Returns null and writes the response on failure. */
-async function auth(req, res) {
+/**
+ * `allowLapsed`: let an EXPIRED account through, still refusing a suspended
+ * one. Exactly one route asks for it — the request to continue — because the
+ * moment a trial ends is the moment the business model needs the client to be
+ * able to say "yes", and the door was locked from the inside.
+ */
+async function auth(req, res, { allowLapsed = false } = {}) {
     const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
     if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
 
@@ -653,7 +662,7 @@ async function auth(req, res) {
     if (hit && Date.now() - hit.t < AUTH_CACHE_MS) {
         METRICS.authCache.hit += 1;
         const denyCached = accountDenial(hit.ctx.profile);
-        if (denyCached) { res.status(denyCached.status).json(denyCached.body); return null; }
+        if (denyCached && !(allowLapsed && denyCached.status === 402)) { res.status(denyCached.status).json(denyCached.body); return null; }
         const st0 = ELS.getStore(); if (st0) st0.userId = hit.ctx.user.id;
         return hit.ctx;
     }
@@ -675,7 +684,7 @@ async function auth(req, res) {
     const st1 = ELS.getStore(); if (st1) st1.userId = ctx.user.id;
 
     const denyFresh = profile ? accountDenial(profile) : null;
-    if (denyFresh) { res.status(denyFresh.status).json(denyFresh.body); return null; }
+    if (denyFresh && !(allowLapsed && denyFresh.status === 402)) { res.status(denyFresh.status).json(denyFresh.body); return null; }
 
     return ctx;
 }
@@ -5394,6 +5403,31 @@ app.post('/api/public/signup/password-check',
         res.json({ ok: true });
     });
 
+/**
+ * "I want to keep going." (phase 26)
+ *
+ * Reachable by a trial client at any time and by a LAPSED client — the one
+ * route that is. It records the wish on the account; the admin sees it as
+ * "wants to continue", first in the list, with the activation control next
+ * to it. Nothing is paid here; money is collected out of band by decision.
+ */
+app.post('/api/me/request-activation', rateLimit({ windowMs: 60000, max: 5, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+        if (ctx.profile.role !== 'client') return res.status(400).json({ error: 'Only a client account asks to continue.' });
+        const note = String(req.body?.note || '').trim().slice(0, 500) || null;
+        const now = new Date().toISOString();
+        const { error } = await supabase.from('app_users')
+            .update({ activation_requested_at: now, activation_note: note, updated_at: now }).eq('id', ctx.user.id);
+        if (error) throw error;
+        // The auth cache holds the old profile for a minute; the next /api/me
+        // must show the request as sent.
+        for (const [k, v] of _authCache) if (v.ctx?.user?.id === ctx.user.id) _authCache.delete(k);
+        logger.info('activation_requested', { userId: ctx.user.id, state: accountState(ctx.profile) });
+        res.json({ success: true, requestedAt: now, email: ctx.user.email || null });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.get('/api/me', async (req, res) => {
     const ctx = await auth(req, res); if (!ctx) return;
     const { data: access } = await supabase.from('user_engine_access')
@@ -5410,9 +5444,18 @@ app.get('/api/me', async (req, res) => {
 
     // Only a client needs a window and an allowance on screen. An employee
     // seeing "0 of 50 leads" would just be confusing.
+    if (ctx.profile.role === 'admin') {
+        // What is waiting for them, so the sidebar can say so without a
+        // trip to the admin page.
+        const { count } = await supabase.from('app_users').select('id', { count: 'exact', head: true })
+            .eq('role', 'client').not('activation_requested_at', 'is', null);
+        body.pendingActivations = count || 0;
+    }
+
     if (ctx.profile.role === 'client') {
         const own = await ownClientFor(ctx).catch(() => null);
         body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
+        body.activation_requested_at = ctx.profile.activation_requested_at || null;
         body.trial_ends_at = ctx.profile.trial_ends_at || null;
         body.paid_until    = ctx.profile.paid_until || null;
         body.plan_label    = ctx.profile.plan_label || null;
@@ -5898,6 +5941,10 @@ app.patch('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
         _roleCache.delete(String(req.params.id));   // a demoted admin must lose clientAccess now, not in a minute
+        // The auth cache holds the old profile for a minute. Without this, a
+        // client activated just now keeps seeing "your access has ended" —
+        // with a Reload button that changes nothing — until the cache turns.
+        for (const [k, v] of _authCache) if (v.ctx?.user?.id === String(req.params.id)) _authCache.delete(k);
         const {
             role, isActive, engines, password, byoKeyOnly,
             paidUntil, planLabel, trialDays
@@ -5924,6 +5971,8 @@ app.patch('/api/admin/users/:id', async (req, res) => {
                 return res.status(400).json({ error: 'paidUntil is not a valid date.' });
             }
             patch.paid_until   = when ? when.toISOString() : null;
+            // Activating answers the request. Revoking does not re-raise it.
+            if (when) { patch.activation_requested_at = null; patch.activation_note = null; }
             patch.activated_by = ctx.user.id;
             patch.activated_at = new Date().toISOString();
         }
@@ -13973,7 +14022,38 @@ function clientReportView(row) {
     const ideas   = isPlan  ? clientPlanIdeas(j)      : [];
     const rooms   = isRooms ? clientRooms(row, j)     : [];
 
-    const { working, fix } = clientPillars(main.scoreBreakdown || main.breakdown || j.breakdown);
+    // A Facebook Page report and the two owner-side Meta reports carry their
+    // findings in the narrative, not in an Instagram score breakdown. Until
+    // phase 26 they fell through to the Instagram path and came out as an
+    // empty page with a generic headline — "check their business report in
+    // FB and Instagram" was half-built. The page draws {title, why} points,
+    // a headline and a summary; that is what they become.
+    const isFb    = row.report_type === 'fb_page';
+    const isMeta  = row.report_type === 'meta_owned' || row.report_type === 'meta_monthly';
+    const ai      = row.ai_json || j.ai || {};
+    const li      = (arr, why) => (Array.isArray(arr) ? arr : []).filter(Boolean).slice(0, 6).map(t => ({ title: String(t), why }));
+    const first   = t => String(t || '').split(/(?<=[.!?])\s+/)[0] || null;
+
+    let { working, fix } = (isFb || isMeta)
+        ? { working: [], fix: [] }
+        : clientPillars(main.scoreBreakdown || main.breakdown || j.breakdown);
+    if (isFb) {
+        working = li(ai.what_is_working, 'Keep doing this');
+        fix     = [...li(ai.what_is_failing, 'What held the Page back'), ...li(ai.quick_wins, 'Quick to do')];
+    } else if (row.report_type === 'meta_owned') {
+        working = li(ai.what_is_working, 'From your own numbers');
+        fix     = [...li(ai.what_is_not, 'What is not landing'), ...li(ai.next_30_days, 'Next 30 days')];
+    } else if (row.report_type === 'meta_monthly') {
+        working = li(ai.what_worked, 'This month');
+        fix     = [...li(ai.what_did_not, 'What did not'), ...li(ai.next_month, 'Next month')];
+    }
+    const narrativeHeadline = isFb
+        ? (ai.state_of_the_page || first(ai.executive_summary) || 'Here is how your Page is doing.')
+        : row.report_type === 'meta_monthly'
+            ? (ai.headline || `${j.monthLabel || 'The month'} in review.`)
+        : isMeta
+            ? (first(ai.executive_summary) || 'Here is what your own numbers say.')
+        : null;
 
     // Profile gaps are the cheapest wins on the page and the easiest for an
     // owner to action without help, so they are surfaced separately rather
@@ -13998,8 +14078,10 @@ function clientReportView(row) {
                 : isRooms
                     ? (rooms.length ? `${rooms.length} local groups where your customers are talking.`
                                     : 'Your community report.')
+                : narrativeHeadline
+                    ? narrativeHeadline
                 : band ? HEADLINE[band] : 'Here is how your account is doing.',
-        band: isPlan || isRooms ? null : band,
+        band: isPlan || isRooms || isMeta ? null : band,
 
         // Present only on the type they belong to, so a page can render what
         // it is given without knowing the report types.
@@ -14015,7 +14097,14 @@ function clientReportView(row) {
             ? 'There were not many recent posts to look at, so treat this as a first read rather than a verdict.'
             : null,
 
-        standing: clientStanding(row, bench, main),
+        // A Page report's benchmark and an owner report have no peer table in
+        // the Instagram shape; guessing one would put a made-up rank on the page.
+        standing: (isFb || isMeta) ? null : clientStanding(row, bench, main),
+
+        // Month-over-month movement, present only on a monthly report.
+        movements: row.report_type === 'meta_monthly'
+            ? (Array.isArray(j.deltas) ? j.deltas : []).map(d => ({ label: d.label, now: d.now, before: d.before ?? null, pct: d.pct ?? null, kind: d.kind }))
+            : [],
 
         working,
         fix,
@@ -14025,7 +14114,7 @@ function clientReportView(row) {
             missing
         },
 
-        summary: row.ai_summary || null,
+        summary: ((isFb || isMeta) && ai.executive_summary) || row.ai_summary || null,
         followers: row.followers_snapshot ?? main.followers ?? null,
         posts_per_week: row.posts_per_week ?? null
     };
@@ -14624,12 +14713,20 @@ app.get('/api/client/reports', async (req, res) => {
             .limit(60);
         if (error) throw error;
 
+        // Keyed by reports.report_type — the value the row actually carries.
+        // Two of these were job-type names (fb_page_report, fb_community_audit)
+        // that no row has ever carried, so a client's Facebook report showed
+        // as "Report". The wiring audit now checks this map against every
+        // report_type the server writes.
         const TITLES = {
-            ig_report:          'Instagram check-up',
-            deep_audit:         'Instagram deep dive',
-            fb_page_report:     'Facebook page check-up',
-            fb_community_audit: 'Community report',
-            content_plan:       'Content plan'
+            ig_report:    'Instagram check-up',
+            deep_audit:   'Instagram deep dive',
+            fb_page:      'Facebook page check-up',
+            fb_community: 'Community report',
+            fb_group:     'Community report',
+            content_plan: 'Content plan',
+            meta_owned:   'Owner report',
+            meta_monthly: 'Monthly report'
         };
 
         res.json({
@@ -15489,5 +15586,7 @@ module.exports = {
     // phase 23
     linkLeadsToClient, dedupeLeads, MERGE_TABLES,
     // phase 24
-    metaParseSignedRequest, metaDeleteUserData
+    metaParseSignedRequest, metaDeleteUserData,
+    // phase 26
+    auth
 };

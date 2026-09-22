@@ -16,6 +16,7 @@
     /* ---- people, in buckets ---- */
     .bucket { margin-bottom: 30px; }
     .bucket:last-child { margin-bottom: 0; }
+    .tag-want { background: rgba(217,181,108,0.2); color: var(--accent-solid); }
     .bucket-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
         margin-bottom: 12px; padding-bottom: 9px; border-bottom: 1px solid var(--card-border); }
     .bucket-head h3 { font-size: 0.96rem; font-weight: 800; letter-spacing: -0.01em; }
@@ -507,6 +508,7 @@
                         <div>
                             <strong>${esc(u.email || '(no email)')}</strong>
                             ${u.role === 'client' ? `<span class="tag tag-state is-${esc(u.state || '')}">${esc(u.state || 'client')}</span>` : ''}
+                            ${u.activation_requested_at ? `<span class="tag tag-want" title="Asked on ${esc(dateStr(u.activation_requested_at))}">wants to continue</span>` : ''}
                             ${u.is_active ? '' : '<span class="tag tag-off">disabled</span>'}
                             ${isMe ? '<span class="tag tag-admin">you</span>' : ''}
                             <div class="meta">${esc(u.full_name || '—')} · joined ${dateStr(u.created_at)} ·
@@ -553,6 +555,7 @@
                             <label>Paid until</label>
                             <input type="date" data-paid value="${u.paid_until ? esc(u.paid_until.slice(0, 10)) : ''}">
                             <div class="meta" style="margin-top:6px;">Set a date to activate. Clear it to revoke — nothing is deleted.</div>
+                            ${u.activation_requested_at ? `<div class="meta" style="margin-top:6px;color:var(--accent-solid)">Asked to continue on ${esc(dateStr(u.activation_requested_at))}${u.activation_note ? ` — “${esc(u.activation_note)}”` : ''}. Setting a date answers it.</div>` : ''}
                         </div>
                         <div>
                             <label>Plan label</label>
@@ -582,11 +585,15 @@
             // yet" is information, and an empty section that vanishes makes the
             // page look different every time somebody signs up.
             box.innerHTML = BUCKETS.map(b => {
-                const people = users.filter(u => (u.role || 'user') === b.role);
+                // Whoever asked to continue comes first: that is the money
+                // moment, and it should not be found by scrolling.
+                const people = users.filter(u => (u.role || 'user') === b.role)
+                    .sort((a, c) => (c.activation_requested_at ? 1 : 0) - (a.activation_requested_at ? 1 : 0));
+                const waiting = people.filter(u => u.activation_requested_at).length;
                 return `
                 <section class="bucket">
                     <div class="bucket-head">
-                        <h3>${b.title} <span class="bucket-n">${people.length}</span></h3>
+                        <h3>${b.title} <span class="bucket-n">${people.length}</span>${waiting ? `<span class="tag tag-want" style="margin-left:10px">${waiting} waiting</span>` : ''}</h3>
                         <span class="bucket-note">${b.note}</span>
                     </div>
                     ${people.length ? people.map(card).join('')

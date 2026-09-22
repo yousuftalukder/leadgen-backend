@@ -275,6 +275,21 @@ console.log('\nreport types: everything written must be labelable and openable')
             .map(t => `report_type '${t}' would render as "undefined" in the client timeline`));
         check('every report_type the server writes has a page to open it', unopenable
             .map(t => `report_type '${t}' would link to '#'`));
+
+        // The client surface has its own naming, in owner language. It was
+        // keyed by JOB type for two entries (fb_page_report, fb_community_audit)
+        // that no row has ever carried, so a client's Facebook report read as
+        // "Report". Same check, other side of the product.
+        const titles = (/\/api\/client\/reports'[\s\S]*?const TITLES\s*=\s*\{([^}]*)\}/.exec(SERVER) || [])[1];
+        if (!titles) {
+            bad('the client-surface TITLES map is findable', 'the pattern matched nothing — this check has gone stale');
+        } else {
+            const keys = [...titles.matchAll(/^\s*(\w+):/gm)].map(m => m[1]);
+            check('every report_type the server writes has an owner-language title on the client surface',
+                written.filter(t => !keys.includes(t)).map(t => `report_type '${t}' would show a client "Report" with no name`));
+            check('no client title is keyed by something the server never writes',
+                keys.filter(k => !written.includes(k)).map(k => `TITLES['${k}'] can never match a row — is it a job type?`));
+        }
         ok(`${written.length} report types written: ${written.join(', ')}`);
     }
 }

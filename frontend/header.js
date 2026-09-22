@@ -666,6 +666,15 @@
             } catch (err) { EL._clientsErr = err.message || 'network error'; EL._clients = []; }
             return EL._clients;
         },
+        /**
+         * "I want to keep going." Works during the trial and after it has
+         * ended — the one call a lapsed account may still make. Nothing is
+         * paid here; the admin sees the request and activates by hand.
+         */
+        async requestActivation(note = '') {
+            return EL.api('/api/me/request-activation', { method: 'POST', body: { note: String(note || '').slice(0, 500) } });
+        },
+
         /** The selected client's row, or null. Sync once the picker has loaded. */
         currentClient() {
             const id = EL.clientId();
@@ -945,7 +954,8 @@
             ? `<div class="el-group">${t.group}</div>`
             : `<a class="el-tab ${t.href === here ? 'is-active' : ''}" href="${t.href}">
                    <span class="el-ico" aria-hidden="true">${t.icon || ''}</span>
-                   <span class="el-lab">${t.label}</span>
+                   <span class="el-lab">${t.label}${t.adminOnly && me && me.pendingActivations
+                       ? `<span class="el-badge" title="${me.pendingActivations} client(s) asked to continue">${me.pendingActivations}</span>` : ''}</span>
                </a>`).join('');
 
         // A rail rather than a top bar. Twelve destinations in a horizontal
@@ -1065,12 +1075,24 @@
 
         const bar = document.createElement('div');
         bar.className = 'el-plan' + (urgent ? ' is-urgent' : '');
+        // The one thing a trial banner is for. Sent once, it says so and stays
+        // said; the admin has it in front of them from that moment.
+        const asked = !!me.activation_requested_at;
+        const cta = me.state === 'trial'
+            ? `<button class="el-plan-cta" type="button" id="el-plan-continue" ${asked ? 'disabled' : ''}>${asked ? 'Request sent ✓' : 'Keep going after the trial'}</button>`
+            : '';
         bar.innerHTML = `
             <span class="el-plan-tag">${me.state === 'trial' ? 'Trial' : 'Plan'}</span>
             <span>${lead}</span>
-            <span class="el-plan-meters">${meters}</span>`;
+            <span class="el-plan-meters">${meters}</span>${cta}`;
         document.body.appendChild(bar);
         document.body.classList.add('el-has-plan');
+        const btn = document.getElementById('el-plan-continue');
+        if (btn && !asked) btn.addEventListener('click', async () => {
+            btn.disabled = true; btn.textContent = 'Sending…';
+            try { await EL.requestActivation(); btn.textContent = 'Request sent ✓'; }
+            catch (err) { btn.disabled = false; btn.textContent = 'Keep going after the trial'; if (!err.handled) alert(err.message); }
+        });
     }
 
     async function refreshStatus(opts = {}) {
@@ -1422,12 +1444,28 @@
             <p class="el-job-detail">Nothing has been deleted. Your reports and data are waiting,
                and everything returns the moment the account is reactivated.</p>
             <div class="el-job-actions">
+                ${data && data.activation_requested_at
+                    ? `<span class="el-note">You asked to continue on ${EL.escape(new Date(data.activation_requested_at).toLocaleDateString())}. The team has it.</span>`
+                    : `<button class="el-btn el-btn-go" type="button" id="el-req-continue">Ask to continue</button>`}
                 ${SUPPORT_EMAIL
                     ? `<a class="el-btn" href="mailto:${SUPPORT_EMAIL}?subject=EdgeLead%20access">Contact us</a>`
                     : ''}
                 <button class="el-btn" type="button" onclick="location.reload()">Reload</button>
             </div>`;
         document.body.appendChild(card);
+
+        // This used to be the end of the road: "contact us" with, when
+        // SUPPORT_EMAIL was blank, nobody to contact. The business model is
+        // try-then-buy, and the buy step had no button.
+        const ask = document.getElementById('el-req-continue');
+        if (ask) ask.addEventListener('click', async () => {
+            ask.disabled = true; ask.textContent = 'Sending…';
+            try {
+                const r = await EL.requestActivation();
+                ask.replaceWith(Object.assign(document.createElement('span'), { className: 'el-note',
+                    textContent: `Request sent. The team will be in touch${r && r.email ? ' at ' + r.email : ''}.` }));
+            } catch (err) { ask.disabled = false; ask.textContent = 'Ask to continue'; }
+        });
     }
 
     window.EL = EL;

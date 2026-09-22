@@ -826,6 +826,101 @@ test('a scraped bio that starts with = leaves the system neutralised', async () 
     }
 });
 
+section('\nthe money moment: a trial ends and the client asks to continue');
+test('a trial client can ask to continue; the admin sees it waiting, with the note', async () => {
+    // walkin@shop.test is the trial client the admin created earlier.
+    const r = await call('POST', '/api/me/request-activation', { token: 't-walkin@shop.test', body: { note: 'Loved the audit — how much for a year?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const me = await call('GET', '/api/me', { token: 't-walkin@shop.test' });
+    assert.ok(me.body.activation_requested_at, 'the client should see their request as sent');
+    const adminMe = await call('GET', '/api/me', { token: 't-admin' });
+    assert.ok(adminMe.body.pendingActivations >= 1, 'the admin should see something waiting');
+    const list = await call('GET', '/api/admin/users', { token: 't-admin' });
+    const u = list.body.users.find(x => x.id === state.walkin);
+    assert.ok(u && u.activation_requested_at && /how much/.test(u.activation_note), 'the request did not reach the admin list');
+});
+test('a LAPSED client can still ask — the one door that stays open', async () => {
+    const u = person('lapsed@shop.test'); TOKENS['t-lapsed'] = u;
+    const past = new Date(Date.now() - 3 * 86400000).toISOString();
+    tbl('app_users').push({ id: u.id, email: u.email, role: 'client', is_active: true, trial_started_at: past, trial_ends_at: past });
+    const shut = await call('GET', '/api/me', { token: 't-lapsed' });
+    assert.strictEqual(shut.statusCode, 402, 'this account should be lapsed');
+    assert.strictEqual(shut.body.activation_requested_at, null);
+    const ask = await call('POST', '/api/me/request-activation', { token: 't-lapsed', body: {} });
+    assert.strictEqual(ask.statusCode, 200, JSON.stringify(ask.body));
+    const again = await call('GET', '/api/me', { token: 't-lapsed' });
+    assert.strictEqual(again.statusCode, 402);
+    assert.ok(again.body.activation_requested_at, 'the expired screen should be able to say the request was sent');
+    state.lapsed = u.id;
+});
+test('the admin activates them, and the very next request is in', async () => {
+    const before = (await call('GET', '/api/me', { token: 't-admin' })).body.pendingActivations;
+    const until = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const r = await call('PATCH', `/api/admin/users/${state.lapsed}`, { token: 't-admin', body: { paidUntil: until, planLabel: 'Starter — 1 month' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const me = await call('GET', '/api/me', { token: 't-lapsed' });
+    assert.strictEqual(me.statusCode, 200, 'a just-activated client was still refused: ' + JSON.stringify(me.body));
+    assert.strictEqual(me.body.state, 'paid');
+    assert.strictEqual(me.body.activation_requested_at, null, 'activation should answer the request');
+    const after = (await call('GET', '/api/me', { token: 't-admin' })).body.pendingActivations;
+    assert.strictEqual(after, before - 1);
+});
+test('a suspended account cannot ask; an employee has nothing to ask for', async () => {
+    const no = await call('POST', '/api/me/request-activation', { token: 't-susp', body: {} });
+    assert.strictEqual(no.statusCode, 403, JSON.stringify(no.body));
+    const emp = await call('POST', '/api/me/request-activation', { token: 't-emp', body: {} });
+    assert.strictEqual(emp.statusCode, 400);
+});
+
+section('\nthe client surface names every kind of report');
+test('a Facebook page report and a monthly report are titled, not "Report"', async () => {
+    const fbAi = { state_of_the_page: 'Steady, with weekends dark.', executive_summary: 'The Page is steady; weekends are dark.', what_is_working: ['Photos of the counter'], what_is_failing: ['No posting on weekends'], quick_wins: ['Post Saturday mornings'], thirty_day_plan: ['Two weekend posts a week'] };
+    state.fbRep = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'facebook', report_type: 'fb_page', target_handle: 'harborcafe', ai_json: fbAi, ai_summary: fbAi.executive_summary, report_json: { target: { name: 'Harbor Cafe' }, ai: fbAi, benchmark: {} }, created_at: new Date().toISOString() };
+    tbl('reports').push(state.fbRep);
+    const moAi = { headline: 'August was the strongest month for reach.', executive_summary: 'Reach rose 47%.', what_moved: ['Reach up 47%'], what_worked: ['Reels'], what_did_not: ['Carousels'], next_month: ['Post eight Reels'], caveats: '' };
+    state.moRep = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'meta', report_type: 'meta_monthly', target_handle: 'harborcafe', snapshot_date: '2026-08-01', ai_json: moAi, ai_summary: moAi.executive_summary, report_json: { month: '2026-08', monthLabel: 'August 2026', comparable: true, prevMonthLabel: 'July 2026', deltas: [{ label: 'Accounts reached', now: 41820, before: 28410, pct: 47.2, kind: 'up' }], posting: { count: 14 }, ai: moAi }, created_at: new Date().toISOString() };
+    tbl('reports').push(state.moRep);
+    const r = await call('GET', '/api/client/reports', { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const fb = r.body.reports.find(x => x.id === state.fbRep.id);
+    const mo = r.body.reports.find(x => x.id === state.moRep.id);
+    assert.ok(fb && mo, 'both reports should list for the client');
+    assert.strictEqual(fb.title, 'Facebook page check-up');
+    assert.strictEqual(mo.title, 'Monthly report');
+    assert.ok(!r.body.reports.some(x => x.title === 'Report'), 'a report the client cannot name: ' + JSON.stringify(r.body.reports.filter(x => x.title === 'Report').map(x => x.id)));
+});
+
+test('a Facebook page report opens in owner language: a headline, what is working, what to change', async () => {
+    const r = await call('GET', `/api/client/report/${state.fbRep.id}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const v = r.body.report;
+    assert.strictEqual(v.headline, 'Steady, with weekends dark.');
+    assert.ok(v.working.some(p => p.title === 'Photos of the counter'), JSON.stringify(v.working));
+    assert.ok(v.fix.some(p => p.title === 'No posting on weekends') && v.fix.some(p => p.title === 'Post Saturday mornings'), JSON.stringify(v.fix));
+    assert.strictEqual(v.standing, null, 'a Page report must not invent a peer ranking');
+    assert.strictEqual(v.summary, 'The Page is steady; weekends are dark.');
+    for (const pt of [...v.working, ...v.fix]) assert.ok(pt.title && typeof pt.why === 'string', 'the page draws {title, why}: ' + JSON.stringify(pt));
+});
+test('a monthly report opens with its headline, its movements, and next month', async () => {
+    const r = await call('GET', `/api/client/report/${state.moRep.id}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const v = r.body.report;
+    assert.strictEqual(v.headline, 'August was the strongest month for reach.');
+    assert.strictEqual(v.band, null, 'an owner report has no scraped score to band');
+    assert.ok(v.working.some(p => p.title === 'Reels'));
+    assert.ok(v.fix.some(p => p.title === 'Post eight Reels' && p.why === 'Next month'), JSON.stringify(v.fix));
+    assert.strictEqual(v.movements.length, 1);
+    assert.strictEqual(v.movements[0].label, 'Accounts reached');
+    assert.strictEqual(v.movements[0].kind, 'up');
+});
+test('an Instagram report still comes out the Instagram way — bands, pillars, standing', async () => {
+    const rep = tbl('reports').find(x => x.client_id === state.C && x.report_type === 'ig_report');
+    const r = await call('GET', `/api/client/report/${rep.id}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.report.band, 'healthy', 'score 71 is the healthy band');
+    assert.ok(Array.isArray(r.body.report.working) && Array.isArray(r.body.report.fix));
+});
+
 section('\nrate limits do not bleed between routes');
 test('a page-load\'s worth of reads does not lock the next job start', async () => {
     // readLimit runs on every /api request; spendLimit on job starts. They
