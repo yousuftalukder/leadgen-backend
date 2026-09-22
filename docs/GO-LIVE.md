@@ -33,7 +33,7 @@ who can do it and about how long it takes.
 
 ## What "100%" honestly means here
 
-The 45 use cases in `USE-CASES.md` are built and reachable. 33 are walked end to end by tests that
+The 45 use cases in `USE-CASES.md` are built and reachable. 32 are walked end to end by tests that
 drive the real server; the rest are proven in logic or provable only live. Nothing in the vision is
 missing.
 
