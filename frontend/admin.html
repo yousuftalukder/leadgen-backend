@@ -276,6 +276,28 @@
             <div id="pl-pay"></div>
             <button class="btn-secondary btn-mini" type="button" id="pl-pay-add" style="margin-top:8px">+ Add a way to pay</button>
 
+            <h3 class="block-title">Email</h3>
+            <p class="card-subtitle" style="margin-bottom:12px">Sent from a Gmail account of yours, using an app password
+                (Google Account → Security → 2-Step Verification → App passwords). Three messages and nothing else: a
+                business starts a trial (to you), a client asks to continue (to you), you activate a plan (to the client).
+                Google allows roughly 500 messages a day from one account. The password is stored sealed and is never
+                shown again.</p>
+            <div class="field-grid">
+                <div><label for="pl-mail-from">Send from (Gmail address)</label>
+                    <input type="email" id="pl-mail-from" placeholder="you@gmail.com" autocomplete="off"></div>
+                <div><label for="pl-mail-pass">App password</label>
+                    <input type="password" id="pl-mail-pass" placeholder="xxxx xxxx xxxx xxxx" autocomplete="new-password"></div>
+                <div><label for="pl-mail-name">Sender name</label>
+                    <input type="text" id="pl-mail-name" placeholder="EdgeLead" maxlength="60"></div>
+                <div><label for="pl-mail-to">Send notifications to</label>
+                    <input type="email" id="pl-mail-to" placeholder="defaults to the sending address"></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px">
+                <button class="btn-secondary btn-mini" type="button" id="pl-mail-test">Send a test email</button>
+                <button class="btn-secondary btn-mini" type="button" id="pl-mail-clear" hidden>Remove the saved password</button>
+                <span class="note" id="pl-mail-state" style="margin:0"></span>
+            </div>
+
             <button class="btn-primary" type="button" id="pl-save" style="max-width:260px">Save</button>
             <div class="note" id="pl-note"></div>
         </div>
@@ -448,6 +470,7 @@
             $('pl-email').value = d.contactEmail || '';
             $('pl-pay').innerHTML = (d.paymentOptions || []).map(payRow).join('');
             wirePayRows();
+            fillMail(d.mail || {});
 
             const fields = (hostId, caps) => {
                 $(hostId).innerHTML = PLAN_METRICS.map(m => {
@@ -506,7 +529,37 @@
         return out;
     }
 
-    if ($('pl-save')) $('pl-save').addEventListener('click', async () => {
+    /**
+     * The mail block. Everything but the password comes back from the server;
+     * the password field is write-only and its placeholder says whether one
+     * is saved.
+     */
+    function fillMail(m) {
+        $('pl-mail-from').value = m.from || '';
+        $('pl-mail-name').value = m.fromName || '';
+        $('pl-mail-to').value = m.notifyTo && m.notifyTo !== m.from ? m.notifyTo : '';
+        $('pl-mail-pass').value = '';
+        $('pl-mail-pass').placeholder = m.hasPassword ? 'saved — type here only to replace it' : 'xxxx xxxx xxxx xxxx';
+        $('pl-mail-clear').hidden = !m.hasPassword;
+        const bits = [];
+        if (m.installed === false) bits.push('The mail library is not installed on the server yet — it arrives with the next deploy.');
+        else if (!m.configured) bits.push('Not sending yet: save a Gmail address and an app password.');
+        else bits.push(`Sending from ${m.from}; notifications go to ${m.notifyTo}.`);
+        if (m.lastSentAt) bits.push(`Last sent ${new Date(m.lastSentAt).toLocaleString()}.`);
+        if (m.lastError) bits.push(`Last error: ${m.lastError}`);
+        $('pl-mail-state').textContent = bits.join(' ');
+    }
+    function readMail() {
+        const out = {
+            from: $('pl-mail-from').value.trim(),
+            fromName: $('pl-mail-name').value.trim(),
+            notifyTo: $('pl-mail-to').value.trim()
+        };
+        if ($('pl-mail-pass').value.trim()) out.appPassword = $('pl-mail-pass').value;
+        return out;
+    }
+
+    async function savePlans() {
         const btn = $('pl-save');
         btn.disabled = true;
         say($('pl-note'), 'Saving…');
@@ -518,13 +571,43 @@
                     trialCaps: readCaps('pl-trial'),
                     clientMonthlyCaps: readCaps('pl-paid'),
                     contactEmail: $('pl-email').value.trim(),
-                    paymentOptions: readPay()
+                    paymentOptions: readPay(),
+                    mail: readMail()
                 }
             });
             say($('pl-note'), 'Saved. The limits govern every account on these plans now, and the contact details show wherever a client is asked to continue.', true);
+            // Re-read, so the mail line reflects what is now saved and the
+            // password field goes back to write-only.
+            const d = await EL.api('/api/admin/settings');
+            fillMail(d.mail || {});
+            return true;
         } catch (err) {
             say($('pl-note'), err.message, false);
+            return false;
         } finally { btn.disabled = false; }
+    }
+    if ($('pl-save')) $('pl-save').addEventListener('click', savePlans);
+
+    // Saves first, so a password just typed is the one tested.
+    if ($('pl-mail-test')) $('pl-mail-test').addEventListener('click', async () => {
+        const btn = $('pl-mail-test');
+        btn.disabled = true;
+        try {
+            if (!(await savePlans())) return;
+            $('pl-mail-state').textContent = 'Sending…';
+            const r = await EL.api('/api/admin/mail/test', { method: 'POST', body: {} });
+            $('pl-mail-state').textContent = `Sent to ${r.to}. Check that inbox — and its spam folder, the first time.`;
+        } catch (err) {
+            $('pl-mail-state').textContent = 'Not sent: ' + err.message;
+        } finally { btn.disabled = false; }
+    });
+    if ($('pl-mail-clear')) $('pl-mail-clear').addEventListener('click', async () => {
+        if (!confirm('Remove the saved app password? No mail goes out until a new one is saved.')) return;
+        try {
+            await EL.api('/api/admin/settings', { method: 'PATCH', body: { mail: { appPassword: '' } } });
+            const d = await EL.api('/api/admin/settings');
+            fillMail(d.mail || {});
+        } catch (err) { $('pl-mail-state').textContent = err.message; }
     });
 
     /**

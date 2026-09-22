@@ -63,12 +63,13 @@ flowchart LR
     C --> J & R & CP & MC & TH & SC & SH
 
     subgraph Leads
-        L[(leads<br/>master list · per owner)]
+        L[(leads<br/>one master list · every owner<br/>filed by industry · location)]
         CL[(client_leads)]
     end
     CP -- campaign_leads --> L
     C -- "for this client" --> CL --> L
-    EMP -- "owner_user_id" --> L
+    EMP -- "found by (owner_user_id)" --> L
+    ADM & EMP -- "read all of it (leads_master)" --> L
 
     SH -- "token, no session" --> PUB[Public viewer]
     SC -- "re-runs under the same client" --> J
@@ -84,6 +85,9 @@ Three rules the arrows enforce:
    report and the owner assistant read Meta only; the audits read scraped data only.
 3. **Access is by client, checked at every route.** Owner, member, or admin — `clientAccess` — and
    the public share link is the single deliberate exception, gated by its token.
+4. **One master list.** Every lead anyone collects lands in `leads`, filed by industry and location.
+   Admins and employees read all of it through `leads_master` (one row per business, saying who
+   found it); a client account reads only its own rows, however it asks.
 
 ---
 
@@ -94,7 +98,7 @@ Three rules the arrows enforce:
 | A1 | First account to sign in becomes admin (bootstrap) | **E2E** | `usecases` — *an agency starts up* |
 | A2 | Create an account as employee, client or admin | **E2E** | `usecases` — *the admin provisions people*: the new hire signs in and sees exactly the engine granted; the walk-in client sees a trial and an allowance |
 | A3 | Grant engines per employee; refuse an ungranted engine at its route | **E2E** | `usecases` — a grant added later shows on the next request; an ungranted engine is 403 at the route, not hidden in the page |
-| A4 | Set trial length, trial caps, monthly caps — and have them bite; set the contact email and the ways to pay | **E2E** | `usecases` — *the admin moves a limit, and it moves*: a changed cap is enforced on the client's very next request; contact and payment details are readable with no session, a bad address or a `javascript:` link is refused |
+| A4 | Set trial length, trial caps, monthly caps — and have them bite; set the contact email, the ways to pay, and the agency's Gmail | **E2E** | `usecases` — *the admin moves a limit, and it moves*: a changed cap is enforced on the client's very next request; contact and payment details are readable with no session, a bad address or a `javascript:` link is refused. Mail: A14 |
 | A13 | See the business in five numbers — on trial, ending this week, waiting to continue, paying, lapsed | **BUILT**, rendered | admin.html People; computed from the same rows the buckets draw; verified in a harness with every state present |
 | A5 | Activate a paying client, set expiry, plan label; see who is waiting to be | **E2E** | `usecases` — *the money moment*: activation answers the request, evicts the stale auth cache, and the admin's pending count falls; the Admin nav carries the count |
 | A6 | Create a client record | **E2E** | `usecases` — *the admin creates a client* |
@@ -104,6 +108,7 @@ Three rules the arrows enforce:
 | A10 | Manage Apify keys, the shared pool, Gemini keys | **BUILT** | admin.html *Apify keys*; phase-11 unit tests on key resolution |
 | A11 | Check real Apify cost against the estimates; rotate the encryption key | **BUILT** (ops-only) | `docs/OPS-ENDPOINTS.md` |
 | A12 | Watch spend and health | **BUILT** | admin.html *Spend & health*, `/api/admin/metrics` |
+| A14 | Send mail from the agency's own Gmail — a new trial and a request to continue reach the agency; an activation reaches the client | **E2E** | `usecases` — *email goes out from the agency's own Gmail*: the app password is saved sealed and never comes back to a browser; a test message goes through Gmail with the saved credentials; the three messages arrive with the right words; when Gmail refuses, the admin sees why and the client's request still succeeds; with nothing set up, nothing is attempted |
 
 ## Employee
 
@@ -114,7 +119,7 @@ Three rules the arrows enforce:
 | E3 | Run any granted engine — IG audit, competitor intel, FB page report, community audit, post advisor, content plan | **BUILT** / **LIVE-ONLY** | 13 workers, every one wired to a route and a page (audit); the run itself needs Apify credit |
 | E4 | Find Instagram leads (five methods) and have them filed under the client | **E2E** (link) / **LIVE-ONLY** (search) | `usecases` — *for this client, these are the leads*; the worker links via `linkLeadsToClient` |
 | E5 | Find Facebook Page leads | **BUILT** | Lead List → *Find Facebook Pages*; phase-16 unit tests on the row shape |
-| E6 | Read the master lead list, filter it, export it | **E2E** | `usecases` — *the export never hands a spreadsheet a formula*; `phase20` for the sort whitelist |
+| E6 | Read the **one** master list — every lead anyone here found, one row per business, filed by industry and location; narrow to mine; export it | **E2E** | `usecases` — *one master list for the whole agency*: two people finding the same business is one row that says who found it and how many did; an employee reads the same list an admin does; rows that only know their own category and city are still found by industry; a client account never sees it however it asks; the export carries industry, location and who found it. *The export never hands a spreadsheet a formula*; `phase20` for the sort whitelist |
 | E7 | See **this client's** leads, found by anyone, one row per business | **E2E** | `usecases` — client view, colleague's find, de-duplication, stranger refused, export follows scope |
 | E8 | Connect Meta as the client's Business Suite manager; turn a Page into a client | **E2E** (onboarding) / **LIVE-ONLY** (the OAuth handshake) | `usecases` — *an employee onboards a client from Business Suite*: unfiled Page → client with nothing retyped → filed, twice refused, colleague refused. The handshake itself needs a Tester role on the Meta app |
 | E9 | Build the monthly owner report, this month against last | **E2E** | `usecases` — *the monthly owner report, against a scripted Graph API*: queued under the client, finishes, deltas exact (47.2% up; zero last month reads "new", never a percentage; a 0.6% move reads "flat"), only the month's posts counted, the analyst reads the same numbers back |
@@ -137,7 +142,7 @@ Three rules the arrows enforce:
 | C6 | Be taken on by an agency and see the work they do for me | **E2E** | `usecases` — *the agency takes that business on* |
 | C7 | Lapse → refused with `account_expired`; be re-activated by an admin | **E2E** (refusal) / **BUILT** (activation) | `usecases` — *the account states a client can be in* |
 | C8 | Purchase | **PARTIAL by decision** | Admin activates manually; no payment gateway |
-| C10 | Ask to continue — during the trial or after it has ended — and be activated, and be told where to pay | **E2E** | `usecases` — *the money moment*: a trial client asks with a note; a **lapsed** client can still ask (the one door that stays open); the admin sees it waiting and activates; the very next request is in and the request is cleared. Rendered: the banner action, the expired screen's button, the "already asked" state, and the ways to pay in both places |
+| C10 | Ask to continue — during the trial or after it has ended — and be activated, and be told where to pay | **E2E** | `usecases` — *the money moment*: a trial client asks with a note; a **lapsed** client can still ask (the one door that stays open); the admin sees it waiting and activates; the very next request is in and the request is cleared; the client hears by mail that they were activated (A14). Rendered: the banner action, the expired screen's button, the "already asked" state, and the ways to pay in both places |
 | C9 | See the leads my agency found for me, marked as the team's | **E2E** | `usecases` — *the client sees the leads their team found for them* |
 
 ## Public viewer
@@ -164,8 +169,7 @@ Three rules the arrows enforce:
 |---|---|
 | **Payment gateway** | Your decision: admin activates manually. Right for an agency; a ceiling for "anyone can purchase". |
 | **Meta App Review** | Only gates *public* self-serve connection. Employees, as Testers, are unblocked. The pages and the deletion callback it requires exist (`privacy.html`, `terms.html`, `data-deletion.html`, `POST /api/meta/data-deletion`); the submission itself, and a review of the page wording by someone qualified, are still to do. |
-| **Per-industry scoring** | One scoring model for every niche. A bakery and a B2B consultancy are graded the same way. |
-| **Lead-list resale packaging** | Held on your legal call. The internal list is complete. |
+| **Per-industry scoring** | One scoring model for every niche. A bakery and a B2B consultancy are graded the same way. Explained in `GO-LIVE.md`; beyond the vision, only if the reports feel unfair to a kind of business. |
 | **Un-merge** | Merge is one-way by design; the archived record keeps a note naming where it went. |
 
 ---
@@ -174,8 +178,8 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 95 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
-| `tests/wiring.test.js` | 36 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
+| `tests/usecases.test.js` | 106 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
+| `tests/wiring.test.js` | 38 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~200 | The logic inside each engine |
 | `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |

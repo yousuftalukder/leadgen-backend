@@ -85,7 +85,8 @@
         .ll-table .col-scale, .ll-table th.col-scale { display: none; }
     }
     @media (max-width: 560px) {
-        .ll-table .col-where, .ll-table th.col-where { display: none; }
+        .ll-table .col-where, .ll-table th.col-where,
+        .ll-table .col-found, .ll-table th.col-found { display: none; }
     }
     </style>
 </head>
@@ -95,8 +96,9 @@
 
     <div class="card">
         <h2 class="card-title">Lead list</h2>
-        <p class="card-subtitle">Every lead this account has collected, across every campaign, every client
-            and both platforms. One list — the Lead Finder adds to it, this is where you read it.</p>
+        <p class="card-subtitle">Every lead anyone here has collected — every campaign, every client, both platforms —
+            in one list, one row per business, filed by industry and location. The Lead Finder and the Facebook search
+            add to it; this is where you read it.</p>
         <div class="ll-stats" id="ll-stats"></div>
         <p class="ll-note" id="ll-stats-note"></p>
     </div>
@@ -127,8 +129,8 @@
             <div><label for="f-platform">Platform</label><select id="f-platform">
                 <option value="">Both</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option>
             </select></div>
-            <div><label for="f-city">City</label><input type="text" id="f-city" placeholder="any"></div>
-            <div><label for="f-category">Category</label><input type="text" id="f-category" placeholder="any"></div>
+            <div><label for="f-industry">Industry</label><input type="text" id="f-industry" list="dl-industry" placeholder="any" autocomplete="off"><datalist id="dl-industry"></datalist></div>
+            <div><label for="f-location">Location</label><input type="text" id="f-location" list="dl-location" placeholder="any" autocomplete="off"><datalist id="dl-location"></datalist></div>
             <div><label for="f-min">Followers from</label><input type="number" id="f-min" placeholder="any" min="0"></div>
             <div><label for="f-max">Followers to</label><input type="number" id="f-max" placeholder="any" min="0"></div>
             <div><label for="f-sort">Sort</label><select id="f-sort">
@@ -139,11 +141,13 @@
                 <option value="username">Handle A–Z</option>
             </select></div>
         </div>
-        <!-- Which list this is. The master list is everything this account
-             collected; the client view is everything found FOR a client, by
-             anyone working on it, one row per business. -->
+        <!-- Which list this is. Everyone's is the one master list — every lead
+             anyone here collected, one row per business; Mine is the caller's own
+             rows; the client view is everything found FOR a client, by anyone
+             working on it. A client account only ever has its own. -->
         <div class="ll-toggles" id="ll-scope" style="margin-top:14px">
-            <button class="ll-tog is-on" type="button" data-scope="mine">All my leads</button>
+            <button class="ll-tog is-on" type="button" data-scope="agency" id="ll-scope-agency">Everyone's leads</button>
+            <button class="ll-tog" type="button" data-scope="mine" id="ll-scope-mine">Mine</button>
             <button class="ll-tog" type="button" data-scope="client" id="ll-scope-client" disabled>This client's leads</button>
         </div>
         <div class="ll-toggles">
@@ -180,7 +184,7 @@
     let esc = v => String(v ?? '');
     let page = 1, pages = 1, total = 0, busy = false;
     const flags = { reachable: false, has_email: false, enriched: false, business: false, verified: false };
-    let scope = 'mine';           // 'mine' | 'client'
+    let scope = 'agency';         // 'agency' | 'mine' | 'client'
     let debounce = null;
 
     const n = v => (v === null || v === undefined || v === '' ? '—' : Number(v).toLocaleString());
@@ -188,6 +192,14 @@
     document.addEventListener('DOMContentLoaded', async () => {
         await EL.init({ engine: 'leadgen', page: 'leads.html' });
         esc = EL.escape;
+
+        // A client account is its own business: no agency list and no "mine"
+        // switch. The server answers with its own rows whatever it asks.
+        if (EL.me && EL.me.role === 'client') {
+            scope = 'mine';
+            $('ll-scope-agency').hidden = true;
+            $('ll-scope-mine').hidden = true;
+        }
 
         // The client view needs a client. The work-for bar and the sidebar
         // picker choose it; this page only follows.
@@ -208,7 +220,7 @@
         loadSummary();
         load();
 
-        ['f-q', 'f-city', 'f-category'].forEach(id =>
+        ['f-q', 'f-industry', 'f-location'].forEach(id =>
             $(id).addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => { page = 1; load(); }, 350); }));
         ['f-platform', 'f-min', 'f-max', 'f-sort'].forEach(id =>
             $(id).addEventListener('change', () => { page = 1; load(); }));
@@ -224,7 +236,7 @@
         }));
 
         $('btn-reset').addEventListener('click', () => {
-            ['f-q', 'f-city', 'f-category', 'f-min', 'f-max'].forEach(id => { $(id).value = ''; });
+            ['f-q', 'f-industry', 'f-location', 'f-min', 'f-max'].forEach(id => { $(id).value = ''; });
             $('f-platform').value = ''; $('f-sort').value = 'newest';
             Object.keys(flags).forEach(k => { flags[k] = false; });
             document.querySelectorAll('.ll-tog').forEach(b => b.classList.remove('is-on'));
@@ -269,7 +281,7 @@
     }
 
     function setScope(next) {
-        scope = next === 'client' ? 'client' : 'mine';
+        scope = ['client', 'mine', 'agency'].includes(next) ? next : 'agency';
         document.querySelectorAll('#ll-scope .ll-tog').forEach(b => b.classList.toggle('is-on', b.dataset.scope === scope));
         page = 1;
         loadSummary();
@@ -282,11 +294,12 @@
         // client_id itself rides along from EL.api when a client is chosen;
         // client_only is what turns it from a filing hint into the scope.
         if (scope === 'client') p.set('client_only', '1');
+        if (scope === 'mine') p.set('mine', '1');
         const put = (k, v) => { if (v !== '' && v !== null && v !== undefined) p.set(k, v); };
         put('q', $('f-q').value.trim());
         put('platform', $('f-platform').value);
-        put('city', $('f-city').value.trim());
-        put('category', $('f-category').value.trim());
+        put('industry', $('f-industry').value.trim());
+        put('location', $('f-location').value.trim());
         put('min_followers', $('f-min').value);
         put('max_followers', $('f-max').value);
         put('sort', $('f-sort').value);
@@ -299,7 +312,8 @@
         let s;
         // The tiles must count the same list they sit above. client_id rides
         // along from EL.api; client_only is what makes it the scope.
-        try { s = await EL.api('/api/leads/summary' + (scope === 'client' ? '?client_only=1' : '')); }
+        const qs = scope === 'client' ? '?client_only=1' : (scope === 'mine' ? '?mine=1' : '');
+        try { s = await EL.api('/api/leads/summary' + qs); }
         catch { $('ll-stats').innerHTML = ''; return; }
 
         const tile = (k, v, sub) => `<div class="ll-stat"><div class="k">${k}</div>
@@ -313,22 +327,29 @@
             tile('Instagram', s.byPlatform.instagram, pc(s.byPlatform.instagram, s.total)) +
             tile('Facebook', s.byPlatform.facebook, pc(s.byPlatform.facebook, s.total));
 
+        const reach = '“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.';
         $('ll-stats-note').textContent = s.client
-            ? `Leads found for ${s.client.name} by anyone working on it — one row per business. “Reachable” means at least one of email, phone or WhatsApp is present.`
+            ? `Leads found for ${s.client.name} by anyone working on it — one row per business. ${reach}`
             : (s.total
-                ? `“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.`
+                ? (scope === 'mine'
+                    ? `Your own rows only. ${reach}`
+                    : `Found by ${s.people || 0} ${s.people === 1 ? 'person' : 'people'} here — one row per business. ${reach}`)
                 : '');
 
-        // Chips are a shortcut into the filters, so they carry their own count.
+        // Chips are a shortcut into the filters, so they carry their own count;
+        // the same lists feed the filter boxes' suggestions.
         const chip = (kind, x) => `<button class="ll-chip" type="button" data-${kind}="${esc(x.name)}">${esc(x.name)} · ${x.n}</button>`;
+        const industries = s.industries || [], locations = s.locations || [];
         const bits = [];
-        if ((s.topCities || []).length) bits.push(`<span class="ll-chip-lab">Cities</span>` + s.topCities.map(c => chip('city', c)).join(''));
-        if ((s.topCategories || []).length) bits.push(`<span class="ll-chip-lab">Categories</span>` + s.topCategories.map(c => chip('category', c)).join(''));
+        if (industries.length) bits.push(`<span class="ll-chip-lab">Industries</span>` + industries.slice(0, 12).map(c => chip('industry', c)).join(''));
+        if (locations.length) bits.push(`<span class="ll-chip-lab">Locations</span>` + locations.slice(0, 12).map(c => chip('location', c)).join(''));
         $('ll-chips').innerHTML = bits.join('');
-        $('ll-chips').querySelectorAll('[data-city]').forEach(b =>
-            b.addEventListener('click', () => { $('f-city').value = b.dataset.city; page = 1; load(); }));
-        $('ll-chips').querySelectorAll('[data-category]').forEach(b =>
-            b.addEventListener('click', () => { $('f-category').value = b.dataset.category; page = 1; load(); }));
+        $('dl-industry').innerHTML = industries.map(c => `<option value="${esc(c.name)}"></option>`).join('');
+        $('dl-location').innerHTML = locations.map(c => `<option value="${esc(c.name)}"></option>`).join('');
+        for (const kind of ['industry', 'location']) {
+            $('ll-chips').querySelectorAll(`[data-${kind}]`).forEach(b =>
+                b.addEventListener('click', () => { $('f-' + kind).value = b.dataset[kind]; page = 1; load(); }));
+        }
     }
 
     async function load() {
@@ -356,15 +377,16 @@
      */
     function hasFilters() {
         if (Object.values(flags).some(Boolean)) return true;
-        return ['f-q', 'f-city', 'f-category', 'f-min', 'f-max', 'f-platform']
+        return ['f-q', 'f-industry', 'f-location', 'f-min', 'f-max', 'f-platform']
             .some(id => String($(id).value || '').trim() !== '');
     }
 
     function render(rows) {
         const filtered = hasFilters();
         const who = scope === 'client' && $('ll-count').dataset.client ? ` for ${esc($('ll-count').dataset.client)}` : '';
+        const tail = filtered ? ' match' : (scope === 'client' ? '' : (scope === 'mine' ? ' of yours' : ' collected by everyone here'));
         $('ll-count').innerHTML = total
-            ? `<b>${n(total)}</b> lead${total === 1 ? '' : 's'}${filtered ? ' match' : (scope === 'client' ? '' : ' collected')}${who}`
+            ? `<b>${n(total)}</b> lead${total === 1 ? '' : 's'}${tail}${who}`
             : (filtered ? 'No leads match' : (scope === 'client' ? `No leads found${who} yet` : 'No leads yet'));
 
         if (!rows.length) {
@@ -383,8 +405,9 @@
         $('ll-body').innerHTML = `<table class="ll-table">
             <thead><tr>
                 <th>Who</th>
-                <th class="col-where">Where</th>
+                <th class="col-where">Filed under</th>
                 <th>Contact</th>
+                <th class="col-found">Found by</th>
                 <th class="num col-scale">Followers</th>
                 <th class="num col-scale">Eng.</th>
             </tr></thead>
@@ -405,8 +428,9 @@
                         ${r.is_verified ? '<span class="ll-tag">verified</span>' : ''}
                         ${r.full_name ? `<small>${esc(r.full_name)}</small>` : ''}
                     </td>
-                    <td class="col-where ll-contact">${[esc(r.category || ''), esc(r.city || '')].filter(Boolean).join('<br>') || '<span class="ll-none">—</span>'}</td>
+                    <td class="col-where ll-contact">${[esc(r.industry || r.category || ''), esc(r.location || r.city || '')].filter(Boolean).join('<br>') || '<span class="ll-none">—</span>'}</td>
                     <td class="ll-contact">${contact || '<span class="ll-none">no contact found</span>'}</td>
+                    <td class="col-found ll-contact">${finder(r)}</td>
                     <td class="num col-scale">${n(r.followers_count)}</td>
                     <td class="num col-scale">${r.engagement_rate != null ? Number(r.engagement_rate).toFixed(1) + '%' : '—'}</td>
                 </tr>`;
@@ -414,6 +438,14 @@
 
         renderPager();
         $('ll-foot').textContent = `Showing ${rows.length} of ${n(total)}. Contact details are the ones these accounts published publicly.`;
+    }
+
+    /** Who found it — their name, else the email's local part; “+1” when others found it too. */
+    function finder(r) {
+        const f = r.found_by || {};
+        const who = f.name || (f.email ? String(f.email).split('@')[0] : '');
+        const more = r.copies > 1 ? ` <span class="ll-tag" title="found by ${r.copies} people">+${r.copies - 1}</span>` : '';
+        return who ? esc(who) + more : '<span class="ll-none">—</span>';
     }
 
     function renderPager() {

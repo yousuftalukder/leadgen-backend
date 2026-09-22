@@ -33,7 +33,26 @@ const crypto = require('crypto');
 // AN IN-MEMORY POSTGREST
 // ===========================================================================
 const DB = {};
-const tbl = t => (DB[t] = DB[t] || []);
+const tbl = t => (t === 'leads_master' ? masterView() : (DB[t] = DB[t] || []));
+
+/**
+ * The phase-29 view, computed the way the SQL does: one row per business
+ * across every owner — enriched over not, then newest — with `copies`
+ * counting how many rows it stands for. Read-only, like the real one.
+ */
+function masterView() {
+    const groups = new Map();
+    for (const r of (DB.leads || [])) {
+        const k = `${r.platform || 'instagram'}:${String(r.username || '').toLowerCase()}`;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(r);
+    }
+    return [...groups.values()].map(g => {
+        g.sort((a, b) => ((!!b.is_enriched) - (!!a.is_enriched))
+            || (String(b.created_at) > String(a.created_at) ? 1 : String(b.created_at) < String(a.created_at) ? -1 : 0));
+        return { ...g[0], copies: g.length };
+    });
+}
 
 /**
  * Column defaults from the real schema, applied on insert the way Postgres
@@ -157,7 +176,20 @@ for (const m of ['get', 'post', 'patch', 'put', 'delete']) {
     // that for the two CSV exports. One entry per path, so matching stays flat.
     appStub[m] = (p, ...h) => { for (const one of [].concat(p)) ROUTES.push({ m: m.toUpperCase(), p: one, h }); };
 }
+// Outbound mail is nodemailer over Gmail SMTP. The stub keeps every message
+// and the transport options it was built with, so a test can read the
+// address, the credentials and the text the server actually sent.
+const MAIL = { sent: [], fail: null };
 const stubs = {
+    nodemailer: {
+        createTransport: (opts) => ({
+            sendMail: async (msg) => {
+                MAIL.sent.push({ opts, msg });
+                if (MAIL.fail) throw new Error(MAIL.fail);
+                return { messageId: 'stub-' + MAIL.sent.length };
+            }
+        })
+    },
     express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), static: () => () => {} }),
     cors: () => () => {},
     'apify-client': { ApifyClient: class {} },
@@ -519,16 +551,21 @@ test('the client view shows that lead; another client\'s view does not', async (
     const d = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.D } });
     assert.deepStrictEqual(d.body.leads.map(l => l.username), ['bloomflorist']);
 });
-test('a lead found by a colleague appears in the client\'s view but not in my own list', async () => {
-    // The admin found this one while working on Harbor Cafe. It is theirs in
-    // the master list and the client's in the client view.
+test('a lead found by a colleague is in the client\'s view and in the one master list; "mine" stays my own rows', async () => {
+    // The admin found this one while working on Harbor Cafe. Since phase 29
+    // there is one list for the whole agency, so the employee sees it there
+    // too; "mine" is the one view that is only their own rows.
     const theirs = { id: crypto.randomUUID(), owner_user_id: ADMIN.id, platform: 'instagram', username: 'harborbakery', created_at: new Date().toISOString() };
     tbl('leads').push(theirs);
     await S.linkLeadsToClient(state.C, [theirs.id], 'ig_campaign');
     const view = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
     assert.ok(view.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s find is missing from the client view');
-    const mine = await call('GET', '/api/leads', { token: 't-emp' });
-    assert.ok(!mine.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s lead leaked into my master list');
+    const agency = await call('GET', '/api/leads', { token: 't-emp' });
+    assert.strictEqual(agency.body.scope, 'agency');
+    assert.ok(agency.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s find is missing from the one master list');
+    const mine = await call('GET', '/api/leads', { token: 't-emp', query: { mine: '1' } });
+    assert.strictEqual(mine.body.scope, 'mine');
+    assert.ok(!mine.body.leads.some(l => l.username === 'harborbakery'), 'a colleague\'s lead is in my own rows');
 });
 test('the same business found twice for one client is one row in its view', async () => {
     const again = { id: crypto.randomUUID(), owner_user_id: ADMIN.id, platform: 'instagram', username: 'northendpizza', is_enriched: true, created_at: new Date(Date.now() + 1000).toISOString() };
@@ -1257,6 +1294,159 @@ test('when the model has nothing to say, the answer says so rather than inventin
     const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'Anything?', clientId: state.C } });
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.ok(/could not|try/i.test(r.body.answer), 'a failed model call should read as a failure, not an answer: ' + r.body.answer);
+});
+
+// ===========================================================================
+// PHASE 29 — one master list for the whole agency; mail from the agency's Gmail
+// ===========================================================================
+section('\none master list for the whole agency, filed by industry and location');
+const ago = n => new Date(Date.now() - n * 1000).toISOString();
+test('everything anyone finds lands in one place; the same business is one row', async () => {
+    tbl('leads').push(
+        { id: crypto.randomUUID(), owner_user_id: EMP.id,    platform: 'instagram', username: 'dhakabakes', industry: 'bakery',    location: 'Dhaka',  email: 'hi@dhakabakes.test', is_enriched: true,  created_at: ago(50) },
+        { id: crypto.randomUUID(), owner_user_id: EMP2.id,   platform: 'instagram', username: 'dhakabakes', industry: 'cake shop', location: 'Dhaka',  is_enriched: false, created_at: ago(10) },
+        { id: crypto.randomUUID(), owner_user_id: EMP2.id,   platform: 'facebook',  username: 'ctgflorist', industry: null, location: null, category: 'Florist', city: 'Chittagong', phone: '+880', created_at: ago(40) },
+        { id: crypto.randomUUID(), owner_user_id: CLIENT.id, platform: 'instagram', username: 'ownerfound', industry: 'cafe supplies', location: 'Sylhet', created_at: ago(30) }
+    );
+    const all = await call('GET', '/api/leads', { token: 't-admin', query: { q: 'dhakabakes' } });
+    assert.strictEqual(all.statusCode, 200, JSON.stringify(all.body));
+    assert.strictEqual(all.body.scope, 'agency');
+    const rows = all.body.leads.filter(l => l.username === 'dhakabakes');
+    assert.strictEqual(rows.length, 1, 'the same business should be one row in the master list');
+    assert.strictEqual(rows[0].is_enriched, true, 'the richer row should win');
+    assert.strictEqual(rows[0].copies, 2, 'the row should say two people found it');
+    assert.strictEqual(rows[0].found_by.email, EMP.email, 'the row should say who found it');
+});
+test('an employee reads the same one list; "mine" is their own rows', async () => {
+    const theirs = await call('GET', '/api/leads', { token: 't-emp2', query: { limit: '200' } });
+    const names = theirs.body.leads.map(l => l.username);
+    assert.ok(['ownerfound', 'dhakabakes', 'ctgflorist'].every(n => names.includes(n)), names.join(','));
+    const mine = await call('GET', '/api/leads', { token: 't-emp2', query: { mine: '1' } });
+    assert.strictEqual(mine.body.scope, 'mine');
+    assert.ok(mine.body.leads.length >= 2 && mine.body.leads.every(l => l.owner_user_id === EMP2.id), 'mine should be only my rows');
+});
+test('filed by industry and location — including rows that only know their own category and city', async () => {
+    const bakery = await call('GET', '/api/leads', { token: 't-admin', query: { industry: 'bakery' } });
+    assert.deepStrictEqual(bakery.body.leads.map(l => l.username), ['dhakabakes']);
+    const florist = await call('GET', '/api/leads', { token: 't-admin', query: { industry: 'florist' } });
+    assert.deepStrictEqual(florist.body.leads.map(l => l.username), ['ctgflorist'], 'a row with only a category should still be found by industry');
+    const ctg = await call('GET', '/api/leads', { token: 't-admin', query: { location: 'chittagong' } });
+    assert.deepStrictEqual(ctg.body.leads.map(l => l.username), ['ctgflorist']);
+    const dhaka = await call('GET', '/api/leads', { token: 't-admin', query: { location: 'dhaka' } });
+    assert.ok(dhaka.body.leads.some(l => l.username === 'dhakabakes'));
+});
+test('the summary lists the industries and locations, and how many people found them', async () => {
+    const s = await call('GET', '/api/leads/summary', { token: 't-admin' });
+    assert.strictEqual(s.statusCode, 200, JSON.stringify(s.body));
+    assert.strictEqual(s.body.scope, 'agency');
+    const ind = s.body.industries.map(x => x.name);
+    assert.ok(ind.includes('bakery') && ind.includes('Florist'), ind.join(','));
+    assert.ok(s.body.locations.map(x => x.name).includes('Chittagong'));
+    assert.ok(s.body.people >= 3, 'at least three people found leads: ' + s.body.people);
+    const list = await call('GET', '/api/leads', { token: 't-admin', query: { limit: '200' } });
+    assert.strictEqual(s.body.total, list.body.total, 'the tiles must count the list they sit above');
+});
+test('a client account never sees the agency\'s list, however it asks', async () => {
+    const r = await call('GET', '/api/leads', { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.scope, 'mine');
+    assert.ok(r.body.leads.length >= 1 && r.body.leads.every(l => l.owner_user_id === CLIENT.id), 'a client saw someone else\'s leads');
+    const csv = await call('GET', '/api/leads/export.csv', { token: 't-client' });
+    assert.ok(!String(csv.body).includes('dhakabakes'), 'the client\'s export carried the agency\'s leads');
+});
+test('the export carries industry, location and who found it', async () => {
+    const r = await call('GET', '/api/leads/export.csv', { token: 't-admin', query: { industry: 'florist' } });
+    assert.strictEqual(r.statusCode, 200);
+    const [head, ...body] = String(r.body).replace(/^\ufeff/, '').split('\r\n');
+    assert.ok(/(^|,)industry,location(,|$)/.test(head) && /found_by/.test(head), head);
+    assert.strictEqual(body.length, 1, String(r.body));
+    assert.ok(body[0].includes('ctgflorist') && body[0].includes('Florist') && body[0].includes('Chittagong') && body[0].includes(EMP2.email), body[0]);
+});
+
+section('\nemail goes out from the agency\'s own Gmail');
+const settle = () => new Promise(r => setTimeout(r, 30));
+test('the admin saves a Gmail address and an app password; the password never comes back', async () => {
+    const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'Agency@Gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency', notifyTo: '' } } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const g = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.strictEqual(g.body.mail.from, 'agency@gmail.com');
+    assert.strictEqual(g.body.mail.notifyTo, 'agency@gmail.com', 'notifications default to the sending address');
+    assert.strictEqual(g.body.mail.hasPassword, true);
+    assert.strictEqual(g.body.mail.configured, true);
+    const dump = JSON.stringify(g.body);
+    assert.ok(!dump.includes('abcdefghijklmnop') && !dump.includes('abcd efgh'), 'the app password was sent to the browser');
+    const emp = await call('PATCH', '/api/admin/settings', { token: 't-emp', body: { mail: { from: 'x@gmail.com' } } });
+    assert.strictEqual(emp.statusCode, 403);
+    const bad = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: 'short' } } });
+    assert.strictEqual(bad.statusCode, 400);
+    const badAddr = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'not an address' } } });
+    assert.strictEqual(badAddr.statusCode, 400);
+});
+test('a test message goes through Gmail with the saved credentials, spaces stripped', async () => {
+    MAIL.sent.length = 0;
+    const r = await call('POST', '/api/admin/mail/test', { token: 't-admin', body: {} });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.to, 'agency@gmail.com');
+    assert.strictEqual(MAIL.sent.length, 1);
+    const { opts, msg } = MAIL.sent[0];
+    assert.strictEqual(opts.host, 'smtp.gmail.com');
+    assert.strictEqual(opts.auth.user, 'agency@gmail.com');
+    assert.strictEqual(opts.auth.pass, 'abcdefghijklmnop');
+    assert.ok(msg.from.includes('Harbor Agency') && msg.from.includes('agency@gmail.com'), msg.from);
+    assert.strictEqual(msg.to, 'agency@gmail.com');
+    const emp = await call('POST', '/api/admin/mail/test', { token: 't-emp', body: {} });
+    assert.strictEqual(emp.statusCode, 403);
+});
+test('a new trial and a request to continue reach the agency; an activation reaches the client', async () => {
+    MAIL.sent.length = 0;
+    const NEWBIE = person('newtrial@shop.test'); TOKENS['t-newbie'] = NEWBIE;
+    const me = await call('GET', '/api/me', { token: 't-newbie' });
+    assert.strictEqual(me.body.role, 'client');
+    await settle();
+    let m = MAIL.sent.find(x => /new trial/i.test(x.msg.subject));
+    assert.ok(m, 'the agency should hear about a new trial');
+    assert.strictEqual(m.msg.to, 'agency@gmail.com');
+    assert.ok(m.msg.text.includes('newtrial@shop.test'), m.msg.text);
+
+    const ask = await call('POST', '/api/me/request-activation', { token: 't-newbie', body: { note: 'Monthly, please' } });
+    assert.strictEqual(ask.statusCode, 200, JSON.stringify(ask.body));
+    await settle();
+    m = MAIL.sent.find(x => /wants to continue/i.test(x.msg.subject));
+    assert.ok(m, 'the agency should hear a request to continue');
+    assert.ok(m.msg.text.includes('newtrial@shop.test') && m.msg.text.includes('Monthly, please'), m.msg.text);
+
+    const act = await call('PATCH', '/api/admin/users/' + NEWBIE.id, { token: 't-admin', body: { paidUntil: '2027-01-31T00:00:00Z', planLabel: 'Starter' } });
+    assert.strictEqual(act.statusCode, 200, JSON.stringify(act.body));
+    await settle();
+    m = MAIL.sent.find(x => x.msg.to === 'newtrial@shop.test');
+    assert.ok(m, 'the client should hear that they were activated');
+    assert.ok(/active/i.test(m.msg.subject) && m.msg.text.includes('Starter') && m.msg.text.includes('2027-01-31'), m.msg.text);
+});
+test('when Gmail refuses, the admin sees why and the client\'s request still succeeds', async () => {
+    MAIL.fail = '535-5.7.8 Username and Password not accepted';
+    MAIL.sent.length = 0;
+    const t = await call('POST', '/api/admin/mail/test', { token: 't-admin', body: {} });
+    assert.strictEqual(t.statusCode, 502, JSON.stringify(t.body));
+    assert.ok(/535/.test(t.body.error), t.body.error);
+    const g = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.ok(/535/.test(g.body.mail.lastError || ''), 'the last error should be on the admin page');
+    const ask = await call('POST', '/api/me/request-activation', { token: 't-newbie', body: {} });
+    assert.strictEqual(ask.statusCode, 200, 'a mail failure must not fail the request');
+    MAIL.fail = null;
+});
+test('with no mail set up, nothing is attempted and nothing breaks', async () => {
+    const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const g = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.strictEqual(g.body.mail.hasPassword, false);
+    assert.strictEqual(g.body.mail.configured, false);
+    MAIL.sent.length = 0;
+    const t = await call('POST', '/api/admin/mail/test', { token: 't-admin', body: {} });
+    assert.strictEqual(t.statusCode, 400);
+    const ask = await call('POST', '/api/me/request-activation', { token: 't-newbie', body: {} });
+    assert.strictEqual(ask.statusCode, 200);
+    await settle();
+    assert.strictEqual(MAIL.sent.length, 0, 'nothing should have been attempted');
 });
 
 (async () => {

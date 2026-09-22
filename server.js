@@ -564,6 +564,8 @@ async function ensureProfile(user) {
             // record exists before its first run rather than being conjured
             // by one. Everything it does files under this.
             await ownClientFor({ user, profile }).catch(e => logger.warn('own_client_create_failed', { message: e.message }));
+            // The agency hears about a new trial by mail, if mail is set up.
+            mailNewTrial(email, row.trial_ends_at).catch(e => logger.warn('mail_new_trial_failed', { message: e.message }));
         }
         // role 'user' is never minted here: employees are created by an admin.
     } else if (MASTER_ADMIN_EMAIL && email === MASTER_ADMIN_EMAIL && profile.role !== 'admin') {
@@ -3662,6 +3664,177 @@ function cleanPaymentOption(o) {
     return { label: label || 'Pay', details, ...(url ? { url } : {}) };
 }
 
+
+// ===========================================================================
+// OUTBOUND MAIL (phase 29)
+//
+// One Gmail account of the agency's, with an app password, set in Admin →
+// Trial & plans. Three messages and nothing else: a business starts a trial
+// (to the agency), a client asks to continue (to the agency), an admin
+// activates a plan (to the client). Mail is a courtesy on top of a request
+// that already succeeded, so nothing here ever throws into a route — the
+// result says what happened and the admin page shows the last outcome.
+//
+// The app password is sealed with the same key as the Apify tokens and is
+// never sent back to a browser; the settings endpoint says only that one is
+// saved. Gmail's own ceiling is about 500 messages a day, which is a large
+// multiple of what three notifications will ever produce.
+// ===========================================================================
+const MAIL_KEYS = ['mail_from', 'mail_from_name', 'mail_notify_to', 'mail_app_password'];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const _mailState = { lastSentAt: null, lastError: null, lastTo: null, sent: 0 };
+let _mailTransport = null;   // { sig, transport } — rebuilt when the settings change
+
+async function mailSettings() {
+    const hit = _capsCache.get('mail');
+    if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
+    const { data } = await supabase.from('system_settings').select('key, value').in('key', MAIL_KEYS);
+    const raw = Object.fromEntries((data || []).map(r => [r.key, r.value]));
+    let password = '';
+    if (raw.mail_app_password) {
+        try { password = String(decryptSecret(raw.mail_app_password) || ''); }
+        catch (e) { logger.error('mail_password_unreadable', { message: e.message }); password = ''; }
+    }
+    const from = String(raw.mail_from || '').trim().toLowerCase();
+    const v = {
+        from,
+        fromName: String(raw.mail_from_name || '').trim().slice(0, 60) || 'EdgeLead',
+        notifyTo: String(raw.mail_notify_to || '').trim().toLowerCase() || from,
+        password,
+        configured: !!(from && password)
+    };
+    _capsCache.set('mail', { v, t: Date.now() });
+    return v;
+}
+
+function mailInstalled() {
+    try { require('nodemailer'); return true; } catch { return false; }
+}
+
+function mailTransportFor(s) {
+    const sig = `${s.from}\n${s.password}`;
+    if (_mailTransport && _mailTransport.sig === sig) return _mailTransport.transport;
+    let nodemailer;
+    try { nodemailer = require('nodemailer'); }
+    catch { throw new Error('nodemailer is not installed on the server — run npm install and redeploy.'); }
+    const transport = nodemailer.createTransport({
+        host: 'smtp.gmail.com', port: 465, secure: true,
+        auth: { user: s.from, pass: s.password },
+        connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000
+    });
+    _mailTransport = { sig, transport };
+    return transport;
+}
+
+/** Send one message. Never throws. */
+async function sendMail({ to, subject, text }) {
+    const s = await mailSettings();
+    if (!s.configured) return { ok: false, skipped: true, error: 'Email is not set up (Admin → Trial & plans → Email).' };
+    const addr = String(to || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(addr)) return { ok: false, error: `"${addr}" is not an email address.` };
+    try {
+        const info = await mailTransportFor(s).sendMail({
+            from: `"${s.fromName.replace(/["\r\n]/g, '')}" <${s.from}>`,
+            to: addr,
+            subject: String(subject || '').replace(/[\r\n]+/g, ' ').slice(0, 200),
+            text: String(text || '')
+        });
+        Object.assign(_mailState, { lastSentAt: new Date().toISOString(), lastError: null, lastTo: addr, sent: _mailState.sent + 1 });
+        logger.info('mail_sent', { to: addr, subject, id: info?.messageId || null });
+        return { ok: true, id: info?.messageId || null };
+    } catch (e) {
+        _mailState.lastError = `${new Date().toISOString()} — ${e.message}`;
+        logger.error('mail_failed', { to: addr, subject, message: e.message });
+        return { ok: false, error: e.message };
+    }
+}
+
+/** What the admin page shows about mail: everything except the password. */
+async function mailStatus() {
+    const s = await mailSettings();
+    return {
+        from: s.from, fromName: s.fromName, notifyTo: s.notifyTo,
+        hasPassword: !!s.password, configured: s.configured, installed: mailInstalled(),
+        lastSentAt: _mailState.lastSentAt, lastError: _mailState.lastError, sent: _mailState.sent
+    };
+}
+
+/** Where the pages live, for links in mail. FRONTEND_URL, else the first allowed origin. */
+function appUrl() {
+    if (FRONTEND_URL) return FRONTEND_URL;
+    const o = ALLOWED.find(x => /^https?:\/\//i.test(x));
+    return o ? o.replace(/\/+$/, '') : '';
+}
+
+function fmtDay(iso) {
+    const d = iso ? new Date(iso) : null;
+    return d && !isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : 'a date not on file';
+}
+
+/** A trial client asked to continue → the agency. */
+async function mailActivationRequested(ctx, note) {
+    const s = await mailSettings();
+    if (!s.configured) return { ok: false, skipped: true };
+    const own = await ownClientFor(ctx).catch(() => null);
+    const email = ctx.user.email || ctx.profile.email || '';
+    const ended = accountState(ctx.profile) === 'expired';
+    const base = appUrl();
+    return sendMail({
+        to: s.notifyTo,
+        subject: `${email} wants to continue on EdgeLead`,
+        text: [
+            `${email}${own?.name && own.name !== email ? ` (${own.name})` : ''} asked to continue.`,
+            '',
+            `Their trial ${ended ? 'ended' : 'ends'} ${fmtDay(ctx.profile.trial_ends_at)}.`,
+            note ? `Their note: "${note}"` : 'They left no note.',
+            '',
+            base ? `Activate them: ${base}/admin.html` : 'Activate them from Admin → People.',
+            '',
+            '— EdgeLead'
+        ].join('\n')
+    });
+}
+
+/** An admin activated a plan → the client. */
+async function mailActivated(target, { planLabel, paidUntil }) {
+    const s = await mailSettings();
+    if (!s.configured) return { ok: false, skipped: true };
+    const { data: u } = await supabase.from('app_users').select('email, role, plan_label').eq('id', target).maybeSingle();
+    if (!u?.email || u.role !== 'client') return { ok: false, skipped: true };
+    const c = await contactSettings();
+    const base = appUrl();
+    const label = planLabel || u.plan_label || 'Your plan';
+    return sendMail({
+        to: u.email,
+        subject: 'Your EdgeLead plan is active',
+        text: [
+            `${label} is active on your EdgeLead account until ${fmtDay(paidUntil)}.`,
+            '',
+            base ? `Sign in: ${base}/client.html` : 'Sign in as usual.',
+            c.email ? `Questions: ${c.email}` : null,
+            '',
+            '— EdgeLead'
+        ].filter(l => l !== null).join('\n')
+    });
+}
+
+/** A business signed itself up → the agency. */
+async function mailNewTrial(email, trialEndsAt) {
+    const s = await mailSettings();
+    if (!s.configured) return { ok: false, skipped: true };
+    const base = appUrl();
+    return sendMail({
+        to: s.notifyTo,
+        subject: `New trial on EdgeLead: ${email}`,
+        text: [
+            `${email} just started a free trial. It ends ${fmtDay(trialEndsAt)}.`,
+            '',
+            base ? `See them: ${base}/admin.html` : null,
+            '— EdgeLead'
+        ].filter(l => l !== null).join('\n')
+    });
+}
+
 /** Length of the free trial, in days. Read once per cache window. */
 async function trialDaysSetting() {
     const hit = _capsCache.get('trial_days');
@@ -5473,6 +5646,9 @@ app.post('/api/me/request-activation', rateLimit({ windowMs: 60000, max: 5, key:
         // must show the request as sent.
         for (const [k, v] of _authCache) if (v.ctx?.user?.id === ctx.user.id) _authCache.delete(k);
         logger.info('activation_requested', { userId: ctx.user.id, state: accountState(ctx.profile) });
+        // The agency hears about it by mail, if mail is set up. Not awaited:
+        // an SMTP hiccup is not the client's problem.
+        mailActivationRequested(ctx, note).catch(e => logger.warn('mail_activation_requested_failed', { message: e.message }));
         res.json({ success: true, requestedAt: now, email: ctx.user.email || null });
     } catch (err) { sendErr(res, err); }
 });
@@ -5859,6 +6035,7 @@ app.get('/api/admin/settings', async (req, res) => {
             metrics: QUOTA_METRICS,
             fallbacks: QUOTA_FALLBACK,
             ...(await contactSettings().then(c => ({ contactEmail: c.email, paymentOptions: c.paymentOptions }))),
+            mail: await mailStatus(),
             // Says out loud when a value is the built-in fallback rather than
             // something anyone chose, so an unset limit does not look decided.
             stored: { trial_days: raw.trial_days != null, trial_caps: raw.trial_caps != null, client_monthly_caps: raw.client_monthly_caps != null }
@@ -5914,6 +6091,28 @@ app.patch('/api/admin/settings', async (req, res) => {
             }
             writes.push({ key: 'payment_options', value: JSON.stringify(cleaned) });
         }
+        if (req.body.mail !== undefined) {
+            const m = req.body.mail && typeof req.body.mail === 'object' ? req.body.mail : {};
+            if (m.from !== undefined) {
+                const from = String(m.from || '').trim().toLowerCase().slice(0, 120);
+                if (from && !EMAIL_RE.test(from)) return res.status(400).json({ error: 'The sending address does not look like an email address.' });
+                writes.push({ key: 'mail_from', value: from });
+            }
+            if (m.notifyTo !== undefined) {
+                const to = String(m.notifyTo || '').trim().toLowerCase().slice(0, 120);
+                if (to && !EMAIL_RE.test(to)) return res.status(400).json({ error: 'The notification address does not look like an email address.' });
+                writes.push({ key: 'mail_notify_to', value: to });
+            }
+            if (m.fromName !== undefined) writes.push({ key: 'mail_from_name', value: String(m.fromName || '').trim().slice(0, 60) });
+            if (m.appPassword !== undefined) {
+                // Google shows an app password as four groups of four; the
+                // spaces are display only.
+                const pw = String(m.appPassword || '').replace(/\s+/g, '');
+                if (pw && pw.length < 8) return res.status(400).json({ error: 'That app password looks too short — Google shows it as four groups of four characters.' });
+                writes.push({ key: 'mail_app_password', value: pw ? encryptSecret(pw) : '' });
+            }
+            _mailTransport = null;
+        }
         if (!writes.length) return res.status(400).json({ error: 'Nothing to change.' });
 
         const now = new Date().toISOString();
@@ -5926,6 +6125,23 @@ app.patch('/api/admin/settings', async (req, res) => {
         invalidateQuotaCaps();
         logger.info('admin_settings_changed', { userId: ctx.user.id, keys: writes.map(w => w.key) });
         res.json({ success: true, changed: writes.map(w => w.key) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Send one test message with the saved Gmail settings, and say exactly what happened. */
+app.post('/api/admin/mail/test', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+        const s = await mailSettings();
+        if (!s.configured) return res.status(400).json({ ok: false, error: 'Save a Gmail address and an app password first.' });
+        const to = String(req.body?.to || '').trim().toLowerCase() || s.notifyTo;
+        const r = await sendMail({
+            to,
+            subject: 'EdgeLead can send email',
+            text: `This is the test message from EdgeLead, sent from ${s.from} at ${new Date().toISOString()}.\n\n` +
+                  'If you are reading it, new trials and requests to continue will reach this address, and clients will hear when you activate them.'
+        });
+        res.status(r.ok ? 200 : 502).json({ ...r, to });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -6064,6 +6280,12 @@ app.patch('/api/admin/users/:id', async (req, res) => {
 
         await supabase.from('app_users').update(patch).eq('id', target);
 
+        // Activation is the one change a client should hear about. (phase 29)
+        if (paidUntil !== undefined && patch.paid_until) {
+            mailActivated(target, { planLabel: patch.plan_label, paidUntil: patch.paid_until })
+                .catch(e => logger.warn('mail_activated_failed', { message: e.message }));
+        }
+
         if (password) await supabase.auth.admin.updateUserById(target, { password });
 
         if (Array.isArray(engines)) {
@@ -6151,6 +6373,14 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     if (!units.length) {
         throw new Error('No discovery method selected, or the selected methods have no inputs.');
     }
+
+    // Where a lead is filed. (phase 29) The industry is the campaign's first
+    // keyword or hashtag unless the method that found the lead has its own;
+    // the location is the place searched — never a pasted explore URL.
+    const campaignIndustry = [...method1_keywords, ...(input.method3_1_keywords || []), ...method6_keywords, ...hashtags]
+        .map(k => String(k || '').replace(/^#/, '').trim()).filter(Boolean)[0] || null;
+    const filedLocation = String(location || '').split(',').map(x => x.trim())
+        .filter(x => x && !/instagram\.com/i.test(x))[0] || null;
 
     // Shape one raw Apify item into the row the save phase writes.
     const shape = (i) => {
@@ -6281,6 +6511,8 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
             logger.warn('leadgen_unit_failed', { jobId, unit: u.id, message: e.message });
         }
 
+        // Tagged before the checkpoint, so a resumed run files them the same way.
+        rows.forEach(r => { r.industry = u.kw || campaignIndustry; });
         discovered.push(...rows);
         await ck.done(u.id, rows);
     }
@@ -6344,6 +6576,8 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
             platform: 'instagram',          // explicit: it is part of the conflict key
             username: p.username,
             profile_url: `https://instagram.com/${p.username}`,
+            industry: p.industry || null,
+            location: filedLocation,
             is_enriched: false
         }));
         // Upsert since phase 16, which added the unique key this conflicts on.
@@ -6661,10 +6895,12 @@ app.get('/api/search-leads', async (req, res) => {
 // the second question: how many, from where, how many reachable, and give me
 // the slice that matches.
 //
-// SCOPE: owner_user_id only. The list is per-account and is not shared or
-// pooled across accounts. Packaging any of it for sale is deliberately NOT
-// built here and is not something this endpoint enables — it returns an
-// operator their own rows.
+// SCOPE (phase 29): one list for the whole agency. Every lead anyone here has
+// collected — an employee's campaign, a colleague's Facebook search, a trial
+// client's own draw — lands in the same place, filed by industry and
+// location, one row per business (the leads_master view). `mine=1` narrows
+// it to the caller's own rows; a client account only ever sees its own.
+// Packaging any of it for sale is still not built here.
 // ===========================================================================
 
 /**
@@ -6709,24 +6945,36 @@ async function linkLeadsToClient(clientId, leadIds, source, jobId = null) {
 }
 
 /**
- * The lead ids a client's view is made of, or null when the request is for
- * the caller's own master list. A client_only request the caller cannot
- * read is refused, not silently widened to their own leads.
+ * Whose rows a request reads. (phase 29)
+ *
+ *   client — the rows linked to one client (client_only=1), whoever found them.
+ *   agency — the master list: every lead anyone here has collected, one row
+ *            per business (the leads_master view). The default for an admin
+ *            or an employee.
+ *   mine   — the caller's own rows: mine=1, or a client account, which never
+ *            sees the agency's list however it asks.
+ *
+ * A client_only request the caller cannot read is refused, not silently
+ * widened to their own leads.
  */
 async function leadScope(req, ctx) {
-    if (String(req.query.client_only || '') !== '1') return null;
-    const cid = String(req.query.client_id || req.query.clientId || '');
-    const c = await clientAccess(ctx.user.id, cid, 'viewer');
-    if (!c) { const e = new Error('Client not found.'); e.statusCode = 404; throw e; }
-    const { data } = await supabase.from('client_leads').select('lead_id').eq('client_id', c.id);
-    return { client: c, ids: (data || []).map(r => r.lead_id) };
+    if (String(req.query.client_only || '') === '1') {
+        const cid = String(req.query.client_id || req.query.clientId || '');
+        const c = await clientAccess(ctx.user.id, cid, 'viewer');
+        if (!c) { const e = new Error('Client not found.'); e.statusCode = 404; throw e; }
+        const { data } = await supabase.from('client_leads').select('lead_id').eq('client_id', c.id);
+        return { kind: 'client', client: c, ids: (data || []).map(r => r.lead_id) };
+    }
+    if (ctx.profile?.role === 'client' || String(req.query.mine || '') === '1') return { kind: 'mine' };
+    return { kind: 'agency' };
 }
 
 /**
  * One row per business in a client's view. Two employees finding the same
  * Page for one client produce two lead rows (the key is per owner); the
  * client is asking about the business, not about who found it. The richer
- * row wins — enriched over not, then the most recently seen.
+ * row wins — enriched over not, then the most recently seen. The agency
+ * list gets the same rule from the leads_master view, in the database.
  */
 function dedupeLeads(rows) {
     const best = new Map();
@@ -6741,12 +6989,19 @@ function dedupeLeads(rows) {
     return [...best.values()];
 }
 
-/** Shared filter builder, so the CSV is always exactly what is on screen. */
-function leadFilters(q, userId, scopeIds = null) {
-    // The master list is the caller's own rows. A client's view is the rows
-    // linked to that client, whoever found them.
-    let s = supabase.from('leads').select('*', { count: 'exact' });
-    s = scopeIds ? s.in('id', scopeIds) : s.eq('owner_user_id', userId);
+/**
+ * Shared filter builder, so the CSV is always exactly what is on screen.
+ *
+ * Industry and location are how the list is filed: the search that found a
+ * lead, else the profile's own category and city. Rows from before phase 29
+ * may carry only the profile's values, so a filter word is looked for in
+ * both columns.
+ */
+function leadFilters(q, scope, userId) {
+    let s;
+    if (scope.kind === 'client')      s = supabase.from('leads').select('*', { count: 'exact' }).in('id', scope.ids);
+    else if (scope.kind === 'agency') s = supabase.from('leads_master').select('*', { count: 'exact' });
+    else                              s = supabase.from('leads').select('*', { count: 'exact' }).eq('owner_user_id', userId);
 
     const platform = String(q.platform || '').toLowerCase();
     if (platform === 'instagram' || platform === 'facebook') s = s.eq('platform', platform);
@@ -6768,13 +7023,15 @@ function leadFilters(q, userId, scopeIds = null) {
     if (Number.isFinite(max)) s = s.lte('followers_count', max);
 
     // Same sanitising as /api/search-leads: anything reaching PostgREST's .or()
-    // DSL is filter injection, bounded by the owner AND but still able to
+    // DSL is filter injection, bounded by the scope AND but still able to
     // redefine the query.
     const clean = v => String(v || '').toLowerCase().replace(/[@,().\\%*]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const city = clean(q.city);
-    if (city) s = s.ilike('city', `%${city}%`);
-    const category = clean(q.category);
-    if (category) s = s.ilike('category', `%${category}%`);
+    const industry = clean(q.industry || q.category);
+    if (industry) s = s.or(`industry.ilike.%${industry}%,category.ilike.%${industry}%`);
+    const where = clean(q.location || q.city);
+    if (where) s = s.or(`location.ilike.%${where}%,city.ilike.%${where}%`);
+    const finder = String(q.found_by || '');
+    if (scope.kind !== 'mine' && UUID_RE.test(finder)) s = s.eq('owner_user_id', finder);
     const text = clean(q.q);
     if (text) s = s.or(`username.ilike.%${text}%,full_name.ilike.%${text}%,bio.ilike.%${text}%`);
 
@@ -6789,6 +7046,24 @@ const LEAD_SORTS = {
     username:  { col: 'username',        asc: true  }
 };
 
+/**
+ * Who found each row, for the "found by" column. One lookup per page rather
+ * than per row; a name where they have one, else the email.
+ */
+async function withFinders(rows) {
+    const list = rows || [];
+    const ids = [...new Set(list.map(r => r.owner_user_id).filter(Boolean))];
+    if (!ids.length) return list;
+    const { data } = await supabase.from('app_users').select('id, email, full_name').in('id', ids);
+    const by = new Map((data || []).map(u => [u.id, { id: u.id, email: u.email || null, name: u.full_name || null }]));
+    return list.map(r => ({ ...r, found_by: by.get(r.owner_user_id) || { id: r.owner_user_id || null, email: null, name: null } }));
+}
+
+const LEAD_SCOPE_NOTE = {
+    agency: 'Every lead anyone here has collected, one row per business.',
+    mine:   'Your own rows only.'
+};
+
 app.get('/api/leads', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
@@ -6798,35 +7073,37 @@ app.get('/api/leads', async (req, res) => {
         const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
 
         const scope = await leadScope(req, ctx);
-        if (scope) {
+        if (scope.kind === 'client') {
             // A client's list is de-duplicated across the people who found it,
             // and a page cannot be cut before the duplicates are gone — so the
             // whole view is read (capped) and paged here. Per-client sets are
             // hundreds, not hundreds of thousands.
-            if (!scope.ids.length) return res.json({ leads: [], page: 1, limit, total: 0, pages: 1, client: { id: scope.client.id, name: scope.client.name } });
-            const { data, error } = await leadFilters(req.query, ctx.user.id, scope.ids)
+            const client = { id: scope.client.id, name: scope.client.name };
+            if (!scope.ids.length) return res.json({ leads: [], page: 1, limit, total: 0, pages: 1, scope: 'client', client });
+            const { data, error } = await leadFilters(req.query, scope, ctx.user.id)
                 .order(sort.col, { ascending: sort.asc, nullsFirst: false })
                 .range(0, 4999);
             if (error) throw error;
             const rows = dedupeLeads(data);
             return res.json({
-                leads: rows.slice((page - 1) * limit, page * limit),
+                leads: await withFinders(rows.slice((page - 1) * limit, page * limit)),
                 page, limit, total: rows.length,
                 pages: Math.max(1, Math.ceil(rows.length / limit)),
-                client: { id: scope.client.id, name: scope.client.name }
+                scope: 'client', client
             });
         }
 
-        const { data, error, count } = await leadFilters(req.query, ctx.user.id)
+        const { data, error, count } = await leadFilters(req.query, scope, ctx.user.id)
             .order(sort.col, { ascending: sort.asc, nullsFirst: false })
             .range((page - 1) * limit, page * limit - 1);
         if (error) throw error;
 
         res.json({
-            leads: data || [],
+            leads: await withFinders(data || []),
             page, limit,
             total: count || 0,
-            pages: Math.max(1, Math.ceil((count || 0) / limit))
+            pages: Math.max(1, Math.ceil((count || 0) / limit)),
+            scope: scope.kind
         });
     } catch (err) { sendErr(res, err); }
 });
@@ -6836,14 +7113,27 @@ app.get('/api/leads', async (req, res) => {
  *
  * Counted with head-only queries rather than by loading rows: the list is
  * meant to grow into six figures and a summary must not get slower as it does.
+ * Industries and locations are tallied from the most recent rows, capped,
+ * because they are a shortcut to a filter, not an analysis.
  */
 app.get('/api/leads/summary', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
         const U = ctx.user.id;
-
         const scope = await leadScope(req, ctx);
-        if (scope) {
+
+        const tally = (rows, pick) => {
+            const m = {};
+            for (const r of rows) { const v = String(pick(r) || '').trim(); if (v) m[v] = (m[v] || 0) + 1; }
+            return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([name, n]) => ({ name, n }));
+        };
+        const facets = rows => ({
+            industries: tally(rows, r => r.industry || r.category),
+            locations:  tally(rows, r => r.location || r.city),
+            people:     new Set(rows.map(r => r.owner_user_id).filter(Boolean)).size
+        });
+
+        if (scope.kind === 'client') {
             // Counted over the de-duplicated view, so the tiles agree with the
             // list underneath them.
             const { data } = scope.ids.length
@@ -6851,25 +7141,24 @@ app.get('/api/leads/summary', async (req, res) => {
                 : { data: [] };
             const rows = dedupeLeads(data);
             const has = f => rows.filter(r => r[f] != null && r[f] !== '').length;
-            const tally = key => {
-                const m = {};
-                for (const r of rows) { const v = String(r[key] || '').trim(); if (v) m[v] = (m[v] || 0) + 1; }
-                return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, n]) => ({ name, n }));
-            };
             return res.json({
                 total: rows.length,
                 byPlatform: { instagram: rows.filter(r => r.platform !== 'facebook').length, facebook: rows.filter(r => r.platform === 'facebook').length },
                 enriched: rows.filter(r => r.is_enriched).length,
                 withEmail: has('email'), withPhone: has('phone'),
                 reachable: rows.filter(r => r.email || r.phone || r.whatsapp).length,
-                topCities: tally('city'), topCategories: tally('category'),
+                ...facets(rows),
                 sampledFrom: rows.length,
+                scope: 'client',
                 client: { id: scope.client.id, name: scope.client.name },
                 note: `Leads found for ${scope.client.name}, by anyone working on it, one row per business.`
             });
         }
 
-        const countOf = fn => fn(supabase.from('leads').select('id', { count: 'exact', head: true }).eq('owner_user_id', U));
+        const base = () => scope.kind === 'agency'
+            ? supabase.from('leads_master').select('id', { count: 'exact', head: true })
+            : supabase.from('leads').select('id', { count: 'exact', head: true }).eq('owner_user_id', U);
+        const countOf = fn => fn(base());
 
         const [all, ig, fb, enriched, withEmail, withPhone, reachable] = await Promise.all([
             countOf(q => q),
@@ -6881,20 +7170,10 @@ app.get('/api/leads/summary', async (req, res) => {
             countOf(q => q.or('email.not.is.null,phone.not.is.null,whatsapp.not.is.null'))
         ]);
 
-        // Top cities and categories, for the filter chips. Capped because this
-        // is a shortcut to a filter, not an analysis.
-        const { data: sample } = await supabase.from('leads')
-            .select('city, category').eq('owner_user_id', U)
-            .order('created_at', { ascending: false }).limit(2000);
-        const tally = (rows, key) => {
-            const m = {};
-            for (const r of (rows || [])) {
-                const v = String(r[key] || '').trim();
-                if (v) m[v] = (m[v] || 0) + 1;
-            }
-            return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10)
-                .map(([name, n]) => ({ name, n }));
-        };
+        const sampleQ = scope.kind === 'agency'
+            ? supabase.from('leads_master').select('industry, category, location, city, owner_user_id')
+            : supabase.from('leads').select('industry, category, location, city, owner_user_id').eq('owner_user_id', U);
+        const { data: sample } = await sampleQ.order('created_at', { ascending: false }).limit(5000);
 
         res.json({
             total: all.count || 0,
@@ -6903,10 +7182,10 @@ app.get('/api/leads/summary', async (req, res) => {
             withEmail: withEmail.count || 0,
             withPhone: withPhone.count || 0,
             reachable: reachable.count || 0,
-            topCities: tally(sample, 'city'),
-            topCategories: tally(sample, 'category'),
+            ...facets(sample || []),
             sampledFrom: (sample || []).length,
-            note: 'Cities and categories are tallied from the 2,000 most recent leads.'
+            scope: scope.kind,
+            note: `${LEAD_SCOPE_NOTE[scope.kind]} Industries and locations are tallied from the 5,000 most recent.`
         });
     } catch (err) { sendErr(res, err); }
 });
@@ -6920,29 +7199,36 @@ app.get(['/api/leads/export', '/api/leads/export.csv'], async (req, res) => {
 
         const scope = await leadScope(req, ctx);
         let data;
-        if (scope) {
+        if (scope.kind === 'client') {
             const r = scope.ids.length
-                ? await leadFilters(req.query, ctx.user.id, scope.ids).order(sort.col, { ascending: sort.asc, nullsFirst: false }).range(0, 4999)
+                ? await leadFilters(req.query, scope, ctx.user.id).order(sort.col, { ascending: sort.asc, nullsFirst: false }).range(0, 4999)
                 : { data: [], error: null };
             if (r.error) throw r.error;
             data = dedupeLeads(r.data).slice(0, cap);
         } else {
-            const r = await leadFilters(req.query, ctx.user.id)
+            const r = await leadFilters(req.query, scope, ctx.user.id)
                 .order(sort.col, { ascending: sort.asc, nullsFirst: false })
                 .range(0, cap - 1);
             if (r.error) throw r.error;
             data = r.data;
         }
+        const rows = (await withFinders(data || [])).map(r => ({
+            ...r,
+            industry: r.industry || r.category || null,
+            location: r.location || r.city || null,
+            found_by: r.found_by?.email || r.found_by?.name || ''
+        }));
 
-        const cols = ['platform', 'username', 'full_name', 'email', 'phone', 'whatsapp', 'website',
+        const cols = ['platform', 'username', 'full_name', 'industry', 'location',
+            'email', 'phone', 'whatsapp', 'website',
             'followers_count', 'following_count', 'posts_count', 'engagement_rate',
             'category', 'city', 'address', 'is_business', 'is_verified', 'is_enriched',
-            'profile_url', 'bio', 'created_at'];
-        const csv = [cols.join(','), ...(data || []).map(r => cols.map(c => csvCell(r[c])).join(','))].join('\r\n');
+            'profile_url', 'bio', 'found_by', 'created_at'];
+        const csv = [cols.join(','), ...rows.map(r => cols.map(c => csvCell(r[c])).join(','))].join('\r\n');
 
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="edgelead-leads-${new Date().toISOString().slice(0, 10)}.csv"`);
-        res.send('﻿' + csv);       // BOM, or Excel mangles non-ASCII names
+        res.send('\ufeff' + csv);       // BOM, or Excel mangles non-ASCII names
     } catch (err) { sendErr(res, err); }
 });
 
@@ -10599,7 +10885,7 @@ function fbPageSearchRefs(items) {
  * does not, because the unique key is (owner, platform, username) and a page
  * without a vanity still has to land somewhere stable.
  */
-function fbPageToLead(profile, userId) {
+function fbPageToLead(profile, userId, filed = {}) {
     const handle = String(profile.username || profile.page_id || '')
         .replace(/^https?:\/\/(www\.)?facebook\.com\//i, '')
         .replace(/\/+$/, '')
@@ -10619,6 +10905,10 @@ function fbPageToLead(profile, userId) {
         category: profile.category || null,
         city: profile.city || null,
         address: profile.address || null,
+        // Filed under the search that found it; the Page's own category and
+        // city when the search said nothing. (phase 29)
+        industry: filed.industry || profile.category || null,
+        location: filed.location || profile.city || null,
         followers_count: profile.followers || profile.likes || null,
         bio: profile.about ? String(profile.about).slice(0, 2000) : null,
         is_business: true,
@@ -10640,9 +10930,11 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
 
     if (!keywords.length) throw new Error('Give it at least one thing to search for.');
 
-    const queries = [...new Set(
-        keywords.flatMap(k => location ? [`${k} ${location}`, k] : [k])
-    )].slice(0, 5);
+    // Each query remembers the keyword it came from, so a Page found by
+    // "bridal wear Dhaka" is filed under "bridal wear". (phase 29)
+    const keywordOf = new Map();
+    for (const k of keywords) { if (location) keywordOf.set(`${k} ${location}`, k); keywordOf.set(k, k); }
+    const queries = [...keywordOf.keys()].slice(0, 5);
 
     // ---- 1. find candidate pages -------------------------------------------
     const refs = new Map();
@@ -10651,7 +10943,7 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
         const unit = 'fbsearch:' + q;
 
         if (ck.isDone(unit)) {
-            (ck.get(unit) || []).forEach(r => refs.set(r.pageId, r));
+            (ck.get(unit) || []).forEach(r => { if (!refs.has(r.pageId)) refs.set(r.pageId, r); });
             await progress(5 + Math.floor(25 * i / queries.length), `"${q}" already searched — reusing`);
             continue;
         }
@@ -10666,8 +10958,8 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
                 resultsLimit: 25, maxResults: 25
             }, { maxItems: 25, estimateUsd: estimate, jobId });
 
-            const found = fbPageSearchRefs(items);
-            found.forEach(r => refs.set(r.pageId, r));
+            const found = fbPageSearchRefs(items).map(r => ({ ...r, keyword: keywordOf.get(q) || keywords[0] || null }));
+            found.forEach(r => { if (!refs.has(r.pageId)) refs.set(r.pageId, r); });
             await ck.done(unit, found);
         } catch (e) {
             if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
@@ -10729,7 +11021,8 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
             const { client } = await getWorkingClient('leadgen', userId,
                 { needUsd: COST_PER_FB_PAGE_PROFILE, jobId });
             const items = await fbScrapePageProfile(client, ref);
-            const lead  = fbPageToLead(fbPageProfile(items, ref), userId);
+            const lead  = fbPageToLead(fbPageProfile(items, ref), userId,
+                { industry: ref.keyword || keywords[0] || null, location: location || null });
 
             if (lead) { rows.push(lead); await ck.done(unit, lead); }
             else      { refunded += 1;  await ck.done(unit, null); }
@@ -15662,5 +15955,6 @@ module.exports = {
     // phase 26
     auth,
     // phase 27
-    contactSettings, cleanPaymentOption
+    contactSettings, cleanPaymentOption,
+    sendMail, mailSettings, MAIL_KEYS, leadScope, leadFilters, withFinders
 };
