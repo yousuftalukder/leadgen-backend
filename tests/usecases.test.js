@@ -170,7 +170,15 @@ const fakeSupabase = {
 // AN EXPRESS THAT REMEMBERS ITS ROUTES
 // ===========================================================================
 const ROUTES = [];
-const appStub = { set() {}, use() {}, listen() {} };
+const appStub = { set() {}, listen() {} };
+// app.use is recorded too, in order. Express runs middleware and routes
+// strictly in registration order, so a route registered after the API's 404
+// catch-all is unreachable. The harness once ignored app.use, and 383 checks
+// passed while every /api/xp route answered 404 on Render (22 Sep 2026).
+appStub.use = (p, ...h) => {
+    if (typeof p !== 'string') { h.unshift(p); p = ''; }
+    for (const one of [].concat(p)) ROUTES.push({ m: 'USE', p: one, h });
+};
 for (const m of ['get', 'post', 'patch', 'put', 'delete']) {
     // Express accepts an array of paths for one handler, and server.js uses
     // that for the two CSV exports. One entry per path, so matching stays flat.
@@ -198,8 +206,10 @@ const stubs = {
             }
         })
     },
-    express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), static: () => () => {} }),
-    cors: () => () => {},
+    // The framework middleware are pass-throughs: the body is already an object,
+    // there are no files to serve, and CORS is not what is under test.
+    express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), static: () => (_, __, n) => n && n() }),
+    cors: () => (_, __, n) => n && n(),
     'apify-client': { ApifyClient: class {} },
     '@supabase/supabase-js': { createClient: () => fakeSupabase },
     dotenv: { config() {} },
@@ -326,23 +336,22 @@ const GRAPH = {
 
 const S = require(path.join(__dirname, '..', 'server.js'));
 
-function findRoute(method, p) {
-    for (const r of ROUTES) {
-        if (r.m !== method) continue;
-        const keys = [];
-        const re = new RegExp('^' + r.p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
-        const m = re.exec(p);
-        if (m) return { r, params: Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])) };
-    }
-    return null;
+function matchPath(pattern, p) {
+    const keys = [];
+    const re = new RegExp('^' + pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
+    const m = re.exec(p);
+    return m ? Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])) : null;
 }
 
-/** Call a route the way Express would: middleware in order, stop at the first response. */
+/**
+ * Call a route the way Express would: every app.use and every route, in
+ * registration order, each handler running until one answers or declines
+ * to call next(). A path nothing registered throws; a path only the API's
+ * 404 catch-all answers comes back as that 404, as it would in production.
+ */
 async function call(method, p, { token, body, query } = {}) {
-    const hit = findRoute(method, p);
-    if (!hit) throw new Error(`no route ${method} ${p}`);
     const req = {
-        method, path: p, originalUrl: p, url: p, params: hit.params,
+        method, path: p, originalUrl: p, url: p, params: {},
         body: body || {}, query: query || {}, ip: '127.0.0.1',
         headers: token ? { authorization: 'Bearer ' + token } : {},
         get(h) { return this.headers[String(h).toLowerCase()]; }
@@ -360,12 +369,27 @@ async function call(method, p, { token, body, query } = {}) {
         type() { return this; },
         redirect(u) { this.statusCode = 302; this.headers.location = u; this.sent = true; }
     };
-    for (const fn of hit.r.h) {
-        if (res.sent) break;
-        let next = false;
-        await fn(req, res, () => { next = true; });
-        if (!next) break;
+    let matched = false;
+    for (const r of ROUTES) {
+        if (r.m === 'USE') {
+            const prefix = r.p.replace(/\/+$/, '');
+            if (prefix && p !== prefix && !p.startsWith(prefix + '/')) continue;
+        } else {
+            if (r.m !== method) continue;
+            const params = matchPath(r.p, p);
+            if (!params) continue;
+            req.params = params;
+            matched = true;
+        }
+        for (const fn of r.h) {
+            if (fn.length === 4) continue;      // an error handler; nothing has thrown
+            if (res.sent) return res;
+            let next = false;
+            await fn(req, res, () => { next = true; });
+            if (!next) return res;
+        }
     }
+    if (!matched && !res.sent) throw new Error(`no route ${method} ${p}`);
     return res;
 }
 

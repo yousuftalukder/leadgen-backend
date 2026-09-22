@@ -15801,6 +15801,12 @@ async function instanceHeartbeat() {
 loadGeminiPool(true).then(rows => logger.info('gemini_pool', { keys: rows.length, env: !!GEMINI_API_KEY, model: GEMINI_MODEL }));
 setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
 
+// Phase 31: the Owner Assistant's routes (chat, conversations, status, sync),
+// behind EdgeLead's own auth and client access. They must be registered
+// BEFORE the catch-all below: Express runs in registration order, and the
+// first deploy mounted them after it, so every /api/xp request was a 404.
+xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger });
+
 app.use('/api', (req, res) => {
     res.status(404).json({
         error: `No such endpoint: ${req.method} ${req.path}`,
@@ -16224,10 +16230,6 @@ if (require.main === module) {
 // server or touching Supabase. Nothing here changes runtime behaviour.
 // Every route above is registered. From here an uncaught exception is a
 // runtime fault to log and survive, not a boot failure to die on.
-
-// Phase 31: the Owner Assistant's routes (chat, conversations, status, sync),
-// behind EdgeLead's own auth and client access.
-xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger });
 
 BOOTED = true;
 

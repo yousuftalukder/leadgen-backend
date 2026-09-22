@@ -184,7 +184,7 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 126 | The workflows above marked E2E, as a person would do them — including both assistants, against scripted models whose every request the test reads back |
+| `tests/usecases.test.js` | 126 | The workflows above marked E2E, as a person would do them — including both assistants, against scripted models whose every request the test reads back. The harness runs every `app.use` and route in registration order, as Express does: a route registered behind the API's 404 catch-all fails here, which is how phase 31's first deploy failed in production and not in the suite |
 | `tests/wiring.test.js` | 38 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~220 | The logic inside each engine |
 | `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |

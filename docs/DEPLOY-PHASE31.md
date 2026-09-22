@@ -67,17 +67,20 @@ answers when ad data exists), and the Apify influencer ingestion (the tables exi
 
 1. **SQL**: `select count(*) from xp_clients;` answers (0 until a client is provisioned);
    `select proname from pg_proc where proname = 'fn_period_bundle';` returns one row.
-2. **Render logs** carry `xp_start` with `"enabled":true,"schedule":"0 9,21 * * *"` and, twenty
+2. **The routes are reachable**: `curl -s -o /dev/null -w '%{http_code}' https://leadgen-backend-1-mgzc.onrender.com/api/xp/status`
+   answers **401** (no token). A **404** means the routes sit behind the API's catch-all again; the first
+   deploy of this phase did exactly that, and the use-case harness now fails on it.
+3. **Render logs** carry `xp_start` with `"enabled":true,"schedule":"0 9,21 * * *"` and, twenty
    seconds later, `[xp] provisioned {"clients":N,…}` — N is the number of EdgeLead clients with an
    active Meta connection.
-3. **As a client whose business has a connection**: Ask shows *Your accounts are connected* and
+4. **As a client whose business has a connection**: Ask shows *Your accounts are connected* and
    *Read my numbers now*; pressing it answers 202 and, a few minutes later, `GET /api/xp/status`
    shows `runs[0].status: "OK"` and coverage with `account_days > 0`. Then any starter question
    streams an answer with a figure panel.
-4. **As a client with no connection**: Ask shows *Connect your Facebook Page and Instagram account
+5. **As a client with no connection**: Ask shows *Connect your Facebook Page and Instagram account
    first* with the link to My Reports.
-5. `npm test` — 383 checks across 12 files, 126 walked flows; `npm run audit` — 38.
-6. The sync itself, without Meta: `node xp/scripts/replay.js replay xp/fixtures/ig-shaking-seafood-salem-nh.json --twice --finalize`
+6. `npm test` — 383 checks across 12 files, 126 walked flows; `npm run audit` — 38.
+7. The sync itself, without Meta: `node xp/scripts/replay.js replay xp/fixtures/ig-shaking-seafood-salem-nh.json --twice --finalize`
    prints *IDEMPOTENT — the second run changed nothing* and *no finalized row was touched* (the seven
    cassette misses it reports are date windows that moved since the recording; XpulseAI's own copy
    reports the same seven today). The cassette is XpulseAI's private recording of a real account and stays out of this
