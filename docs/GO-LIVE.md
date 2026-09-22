@@ -15,6 +15,7 @@ who can do it and about how long it takes.
 | 5 | **Fund an Apify key and run each engine once** against a real account | 1 hour | The rows marked *built, never exercised*: the engines themselves. They spend credit, so no test starts one. |
 | 6 | **Submit Meta App Review** once someone qualified has read `privacy.html`, `terms.html` and `data-deletion.html` | days–weeks, on Meta's clock | Only gates *public* self-serve Meta connection. Employees as Testers are unblocked now. |
 | 7 | **Make the repository public** (you said you would) | 5 min | GitHub Actions run free on public repositories, so the CI that exists starts running. The history was scanned before this was suggested: the only key-shaped string in any of the 86 commits is the Supabase *anon* key, which is public by design and gated by RLS; no `.env`, no service key, no Apify, Gemini or Meta secret was ever committed. |
+| 8 | **Press *Deploy latest commit* on Render after every push** (or turn on Auto-Deploy under Settings → Build & Deploy) | 1 min | Render does not deploy from GitHub by itself here. On 22 September the first phase-31 build sat undeployed for an hour while the old one answered. Front-end-only commits need nothing: Netlify deploys them within a minute. To check a deploy, probe a route the new phase added (`/api/xp/status` → 401), not `/api/health`, whose version string never changes. |
 
 ## Settled on 22 September 2026
 
