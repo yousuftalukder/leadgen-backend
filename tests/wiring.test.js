@@ -354,7 +354,59 @@ console.log('\nthe source rule: owner and scraped data stay apart');
 }
 
 // ---------------------------------------------------------------------------
-// 8. TEST RUNNER HYGIENE
+// 8. EVERY ENGINE MUST BE GRANTABLE
+//
+// This check exists because the bug it catches shipped: the admin panel kept
+// its own hardcoded list of four engine checkboxes while the server had six,
+// so meta_owned and content_plan could not be granted to anyone. An admin
+// ticked every box on the screen, the employee was still refused by
+// requireEngine, and neither screen explained why.
+//
+// An engine the server enforces but nobody can grant is a permanently locked
+// door. The fix was to send the list from the server; this makes sure no page
+// starts keeping its own copy again.
+// ---------------------------------------------------------------------------
+console.log('\nengines: everything the server gates must be grantable');
+{
+    const m = /^const ENGINES\s*=\s*\[([^\]]*)\]/m.exec(SERVER);
+    const engines = m ? [...m[1].matchAll(/'([\w]+)'/g)].map(x => x[1]) : [];
+    const admin = fs.readFileSync(path.join(FRONT_DIR, 'admin.html'), 'utf8');
+
+    if (!engines.length) {
+        bad('the server ENGINES list is findable', 'the pattern matched nothing — this check has gone stale');
+    } else {
+        // Two shapes are acceptable: the page renders from a server-sent list,
+        // or it names every engine itself. Only the second needs auditing.
+        const derived = /allEngines/.test(admin);
+        if (derived) {
+            check('the admin panel renders engines from the server list',
+                /const ENGINES\s*=|data-eng="(leadgen|report|fb_community|fb_page)"/.test(admin)
+                    ? ['admin.html still has a hardcoded engine name alongside the server-sent list']
+                    : []);
+            // The server must actually send it, or the page renders nothing.
+            check('the server sends allEngines to the admin panel',
+                /allEngines:\s*ENGINES/.test(SERVER) ? [] : ['/api/admin/users does not send allEngines']);
+            ok(`${engines.length} engines, all grantable: ${engines.join(', ')}`);
+        } else {
+            check('every engine the server gates is offered in the admin panel',
+                engines.filter(e => !new RegExp(`["'\`]${e}["'\`]`).test(admin))
+                    .map(e => `engine '${e}' is enforced by requireEngine but has no checkbox — it can never be granted`));
+        }
+    }
+
+    // Whatever the trial hands out must be a real engine, or a trial account
+    // holds a grant that gates nothing.
+    const t = /^const TRIAL_ENGINES\s*=\s*\(process\.env\.TRIAL_ENGINES\s*\|\|\s*'([^']*)'/m.exec(SERVER);
+    if (t) {
+        const trial = t[1].split(',').map(x => x.trim()).filter(Boolean);
+        check('every default trial engine is a real engine',
+            trial.filter(e => !engines.includes(e))
+                .map(e => `TRIAL_ENGINES contains '${e}', which is not in ENGINES`));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. TEST RUNNER HYGIENE
 // ---------------------------------------------------------------------------
 console.log('\ntest runner: every test file actually runs');
 {

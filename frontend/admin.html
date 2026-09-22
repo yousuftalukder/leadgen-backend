@@ -123,12 +123,10 @@
             </div>
 
             <label>Engine access</label>
-            <div class="check-row">
-                <label class="check"><input type="checkbox" id="nu-leadgen" checked> Lead finder</label>
-                <label class="check"><input type="checkbox" id="nu-report" checked> Reports &amp; competitors</label>
-                <label class="check"><input type="checkbox" id="nu-fb" checked> Facebook communities</label>
-                <label class="check"><input type="checkbox" id="nu-fbpage" checked> Facebook Pages</label>
-            </div>
+            <!-- Rendered from the server's engine list, not written out here.
+                 The hardcoded version drifted and silently made two engines
+                 ungrantable. -->
+            <div class="check-row" id="nu-engines"></div>
 
             <button class="btn-primary" type="button" id="create-user">Create account</button>
             <div class="note" id="create-note"></div>
@@ -339,11 +337,8 @@
         if (!email || !password) return say($('create-note'), 'Email and a temporary password are both required.', false);
         if (password.length < 8) return say($('create-note'), 'Passwords need at least 8 characters.', false);
 
-        const engines = [];
-        if ($('nu-leadgen').checked) engines.push('leadgen');
-        if ($('nu-report').checked) engines.push('report');
-        if ($('nu-fb').checked) engines.push('fb_community');
-        if ($('nu-fbpage').checked) engines.push('fb_page');
+        const engines = [...document.querySelectorAll('#nu-engines input[data-eng]:checked')]
+            .map(b => b.dataset.eng);
 
         $('create-user').disabled = true;
         say($('create-note'), 'Creating…');
@@ -362,10 +357,38 @@
         }
     });
 
+    /**
+     * The engines this server can grant, as the server reports them.
+     *
+     * Never a list written out on this page. The page used to keep its own
+     * copy of four, the server had six, and the two silently disagreed — so
+     * meta_owned and content_plan could not be granted to anybody, and an
+     * admin who ticked every box they could see still produced an employee
+     * the server refused. One list, sent from where it is defined.
+     */
+    let ALL_ENGINES = [];
+
+    function engineBoxes(granted = []) {
+        if (!ALL_ENGINES.length) return '<span class="meta">Engine list unavailable — reload the page.</span>';
+        return ALL_ENGINES.map(e =>
+            `<label class="check"><input type="checkbox" data-eng="${esc(e.key)}" ${granted.includes(e.key) ? 'checked' : ''}> ${esc(e.label)}</label>`
+        ).join('');
+    }
+
     async function loadUsers() {
         const box = $('users-list');
         try {
-            const { users } = await EL.api('/api/admin/users');
+            const { users, allEngines } = await EL.api('/api/admin/users');
+            ALL_ENGINES = allEngines || [];
+            // The create form is rendered here too, so it can never offer a
+            // different set of engines from the edit rows below it.
+            const nu = $('nu-engines');
+            if (nu && !nu.dataset.ready) {
+                // Rendered even when the list came back empty, so the form says
+                // so instead of showing nothing and looking like a styling bug.
+                nu.innerHTML = engineBoxes(ALL_ENGINES.map(e => e.key));
+                if (ALL_ENGINES.length) nu.dataset.ready = '1';
+            }
             if (!users.length) { box.innerHTML = 'No accounts yet.'; return; }
 
             // Grouped into buckets and collapsed by default. Every account used
@@ -424,12 +447,7 @@
                         </div>
                         <div>
                             <label>Engine access</label>
-                            <div class="check-row">
-                                <label class="check"><input type="checkbox" data-eng="leadgen" ${engines.includes('leadgen') ? 'checked' : ''}> Lead finder</label>
-                                <label class="check"><input type="checkbox" data-eng="report" ${engines.includes('report') ? 'checked' : ''}> Reports</label>
-                                <label class="check"><input type="checkbox" data-eng="fb_community" ${engines.includes('fb_community') ? 'checked' : ''}> FB communities</label>
-                                <label class="check"><input type="checkbox" data-eng="fb_page" ${engines.includes('fb_page') ? 'checked' : ''}> FB Pages</label>
-                            </div>
+                            <div class="check-row">${engineBoxes(engines)}</div>
                         </div>
                     </div>
 

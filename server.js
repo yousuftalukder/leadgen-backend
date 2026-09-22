@@ -338,6 +338,15 @@ const MAX_COMPETITORS        = parseInt(process.env.MAX_COMPETITORS || '10', 10)
 const DEFAULT_POSTS_PER_ACC  = parseInt(process.env.DEFAULT_POSTS_PER_ACCOUNT || '30', 10);
 const MAX_POSTS_PER_ACC      = parseInt(process.env.MAX_POSTS_PER_ACCOUNT || '100', 10);
 const ENGINES                = ['leadgen', 'report', 'fb_community', 'fb_page', 'meta_owned', 'content_plan'];
+/** Human names for the engines, so the admin panel does not keep its own copy. */
+const ENGINE_LABELS = {
+    leadgen:      'Lead finder',
+    report:       'Reports & competitors',
+    fb_community: 'Facebook communities',
+    fb_page:      'Facebook Pages',
+    meta_owned:   'Meta owner data',
+    content_plan: 'Content plan'
+};
 
 // What a self-serve trial account is granted at signup. Everything here is
 // still held to the trial quota on top of the grant.
@@ -5693,7 +5702,17 @@ app.get('/api/admin/users', async (req, res) => {
                 engines: map[u.id] || [],
                 state: accountState(u),
                 expires_at: u.paid_until || u.trial_ends_at || null
-            }))
+            })),
+            // The grantable engines, sent rather than hardcoded in the page.
+            //
+            // They WERE hardcoded, and drifted: the admin panel offered four
+            // checkboxes while the server had six, so meta_owned and
+            // content_plan could not be granted to anyone at all. An admin
+            // ticking every box they could see still produced an employee who
+            // was refused by requireEngine, with nothing on either screen
+            // explaining why. Two lists that must agree, maintained by hand,
+            // will always end up like that — so now there is one list.
+            allEngines: ENGINES.map(e => ({ key: e, label: ENGINE_LABELS[e] || e }))
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
