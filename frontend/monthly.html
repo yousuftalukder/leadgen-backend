@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Monthly Report — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* monthly.html — page-specific only. Shared rules live in app.css. */
+
+    .mr-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 18px;
+        flex-wrap: wrap; margin-bottom: 4px; }
+    .mr-month { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+    .mr-vs { font-size: 0.85rem; color: var(--text-muted); margin-top: 6px; }
+    .mr-who { font-size: 0.86rem; color: var(--text-secondary); }
+    .mr-who b { color: var(--text-primary); }
+
+    .mr-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+    .mr-pick select { width: auto; min-width: 190px; }
+
+    /* The headline is the one sentence a client reads. It gets the weight. */
+    .mr-headline { font-size: 1.24rem; font-weight: 700; line-height: 1.5; letter-spacing: -0.015em;
+        color: var(--text-primary); margin-bottom: 14px; }
+    .mr-summary { font-size: 0.95rem; line-height: 1.7; color: var(--text-secondary); }
+    .mr-summary p { margin: 0 0 10px; }
+    .mr-summary p:last-child { margin: 0; }
+
+    /* ---- the movement table: the point of a monthly report ---------------
+       A table, not a chart. Eleven metrics on different scales cannot share
+       an axis, and two axes is the one thing never to draw — so the
+       comparison is read as numbers, which is also how it gets quoted.
+       These DO align vertically, so tabular figures are right here. */
+    .mr-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .mr-table th { text-align: left; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.07em;
+        text-transform: uppercase; color: var(--text-muted); padding: 0 12px 9px 0;
+        border-bottom: 1px solid var(--card-border); }
+    .mr-table th.num, .mr-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .mr-table td { padding: 11px 12px 11px 0; border-bottom: 1px solid rgba(240,211,154,0.05); }
+    .mr-table tr:last-child td { border-bottom: none; }
+    .mr-table td.metric { color: var(--text-primary); font-weight: 600; }
+    .mr-table td.now { font-weight: 800; color: var(--text-primary); }
+    .mr-table td.before { color: var(--text-muted); }
+
+    /* Direction never rides on colour alone — an arrow and a word carry it,
+       and the colour is the third signal, not the only one. */
+    .mr-dir { display: inline-flex; align-items: center; gap: 6px; font-weight: 700;
+        font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .mr-dir.up   { color: var(--jade); }
+    .mr-dir.down { color: #f0a38a; }
+    .mr-dir.flat, .mr-dir.no_baseline, .mr-dir.unknown { color: var(--text-muted); }
+    .mr-dir.new  { color: var(--accent-solid); }
+    .mr-dir i { font-style: normal; }
+
+    .mr-lvl { font-size: 0.66rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+        padding: 3px 7px; border-radius: 5px; background: rgba(255,255,255,0.05); color: var(--text-muted); }
+
+    /* ---- lists ---------------------------------------------------------- */
+    .mr-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 22px; }
+    .mr-list { list-style: none; }
+    .mr-list li { position: relative; padding: 0 0 11px 20px; font-size: 0.9rem; line-height: 1.6;
+        color: var(--text-secondary); }
+    .mr-list li::before { content: ''; position: absolute; left: 3px; top: 0.62em;
+        width: 6px; height: 6px; border-radius: 50%; background: var(--accent-solid); }
+    .mr-list.is-warn li::before { background: #f0a38a; }
+    .mr-list.is-do li::before { background: var(--jade); }
+
+    /* ---- posts ---------------------------------------------------------- */
+    .mr-posts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    .mr-post { padding: 14px 16px; border-radius: var(--r-md); background: rgba(255,255,255,0.035);
+        border: 1px solid var(--card-border); font-size: 0.85rem; }
+    .mr-post .mr-kind { font-size: 0.66rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--accent-solid); }
+    .mr-post .mr-cap { color: var(--text-secondary); line-height: 1.55; margin: 7px 0 10px;
+        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .mr-post .mr-nums { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-muted); }
+    .mr-post .mr-nums b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .mr-post a { color: var(--accent-solid); text-decoration: none; font-size: 0.78rem; font-weight: 700; }
+    .mr-post a:hover { text-decoration: underline; }
+
+    /* ---- format medians -------------------------------------------------- */
+    .mr-fmt { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .mr-fmt div { padding: 13px 15px; border-radius: var(--r-sm); background: rgba(255,255,255,0.035);
+        border: 1px solid var(--card-border); }
+    .mr-fmt .k { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--text-muted); }
+    .mr-fmt .v { font-size: 1.3rem; font-weight: 800; margin-top: 5px; }
+    .mr-fmt .s { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; }
+
+    /* ---- audience: one series, so no legend; labels carry identity ------- */
+    .mr-demo { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 22px; }
+    .mr-bar { display: grid; grid-template-columns: 1fr 46px; gap: 10px; align-items: center;
+        font-size: 0.82rem; margin-bottom: 7px; }
+    .mr-bar .lab { color: var(--text-secondary); }
+    .mr-bar .track { grid-column: 1 / -1; height: 6px; border-radius: 999px;
+        background: rgba(255,255,255,0.07); overflow: hidden; margin-top: -3px; }
+    /* The lifted jade, not the raw brand one. #0c7856 sits at 3.02:1 on this
+       surface — legal for a mark, but at 6px it reads as an empty track, and a
+       bar you cannot see is not encoding anything. The number beside it
+       carries the value regardless, so this is legibility, not identity. */
+    .mr-bar .fill { height: 100%; border-radius: 999px; background: var(--jade); }
+    .mr-bar .pc { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+    .mr-caveat { font-size: 0.83rem; line-height: 1.6; color: var(--text-muted);
+        padding: 13px 16px; border-radius: var(--r-sm);
+        background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); }
+    .mr-src { font-size: 0.76rem; color: var(--text-muted); margin-top: 22px; line-height: 1.6; }
+
+    .mr-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 0.9rem; line-height: 1.7; }
+    .mr-empty a { color: var(--accent-solid); }
+
+    @media (max-width: 640px) {
+        .mr-month { font-size: 1.5rem; }
+        /* Five columns do not fit a phone, and the one that overflowed was
+           Change — the whole point of the table. Two go, in order of least
+           loss: the previous value (the sentence needs the current one and the
+           direction), then the platform tag (every Facebook row already says
+           "Page" in its own label, so the tag was repeating itself). */
+        .mr-table .before, .mr-table th.before { display: none; }
+        .mr-table .lvl, .mr-table th.lvl { display: none; }
+        .mr-table { font-size: 0.82rem; }
+        .mr-table td, .mr-table th { padding-right: 8px; }
+        .mr-dir { font-size: 0.78rem; }
+    }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+    <div id="mr-boot" class="card"><div class="mr-empty">Loading…</div></div>
+    <div id="mr-body" class="hidden">
+        <div class="mr-pick" id="mr-pick"></div>
+        <div class="card">
+            <div class="mr-head">
+                <div>
+                    <div class="mr-month" id="mr-month"></div>
+                    <div class="mr-vs" id="mr-vs"></div>
+                </div>
+                <div class="mr-who" id="mr-who"></div>
+            </div>
+        </div>
+        <div class="card" id="mr-narr-card">
+            <div class="mr-headline" id="mr-headline"></div>
+            <div class="mr-summary" id="mr-summary"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">What moved</div>
+            <div class="card-subtitle" id="mr-moved-sub"></div>
+            <table class="mr-table" id="mr-table"></table>
+        </div>
+        <div class="card mr-cols" id="mr-works"></div>
+        <div class="card" id="mr-posting"></div>
+        <div class="card" id="mr-top"></div>
+        <div class="card" id="mr-audience"></div>
+        <div class="card" id="mr-next"></div>
+        <div class="card" id="mr-foot"></div>
+        <div id="report-actions"></div>
+    </div>
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    let months = [];
+
+    const n = v => (v === null || v === undefined || v === '' ? '—' : Number(v).toLocaleString());
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'meta_owned', page: 'monthly.html' });
+        esc = EL.escape;
+
+        try {
+            const r = await EL.api('/api/meta/monthly');
+            months = r.reports || [];
+        } catch (err) {
+            if (err.handled) return;
+            return boot(`Could not load monthly reports: ${esc(err.message)}`);
+        }
+
+        if (!months.length) {
+            return boot(`No monthly report has been built yet.
+                <br><br>A monthly report reads this account's own Meta Insights, so it needs Meta connected.
+                Build one from <a href="assistant.html">the Analyst</a>.`);
+        }
+
+        renderPicker();
+        const want = EL.reportParam();
+        await load((want && months.some(m => m.id === want)) ? want : months[0].id);
+    });
+
+    function boot(html) {
+        $('mr-boot').innerHTML = `<div class="mr-empty">${html}</div>`;
+    }
+
+    function renderPicker() {
+        $('mr-pick').innerHTML = `<label style="margin:0">Month</label>
+            <select id="mr-sel" aria-label="Which month to show">
+                ${months.map(m => `<option value="${esc(m.id)}">${esc(monthName(m.snapshot_date))}${m.target_handle ? ' · ' + esc(m.target_handle) : ''}</option>`).join('')}
+            </select>`;
+        $('mr-sel').addEventListener('change', e => load(e.target.value));
+    }
+
+    function monthName(snapshotDate) {
+        const d = new Date(String(snapshotDate) + 'T00:00:00Z');
+        return isNaN(d) ? String(snapshotDate) : d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    }
+
+    async function load(id) {
+        let rep;
+        try { rep = (await EL.api('/api/meta/report/' + encodeURIComponent(id))).report; }
+        catch (err) { if (!err.handled) boot(`Could not open that report: ${esc(err.message)}`); return; }
+
+        const r = rep.report_json || {};
+        const ai = rep.ai_json || r.ai || null;
+
+        $('mr-boot').classList.add('hidden');
+        $('mr-body').classList.remove('hidden');
+        if ($('mr-sel')) $('mr-sel').value = id;
+
+        $('mr-month').textContent = r.monthLabel || monthName(rep.snapshot_date);
+        $('mr-vs').textContent = r.comparable
+            ? `Compared against ${r.prevMonthLabel}`
+            : 'No previous month was available, so this month is shown on its own.';
+
+        const a = r.account || {};
+        $('mr-who').innerHTML = [
+            a.pageName ? `<b>${esc(a.pageName)}</b>` : null,
+            a.igUsername ? `Instagram <b>@${esc(a.igUsername)}</b>` : null,
+            a.igFollowers != null ? `${n(a.igFollowers)} followers` : null
+        ].filter(Boolean).join(' · ');
+
+        renderNarrative(ai, rep);
+        renderTable(r);
+        renderWorks(ai);
+        renderPosting(r);
+        renderTop(r);
+        renderAudience(r);
+        renderNext(ai);
+        renderFoot(r, ai);
+
+        EL.reportActions('report-actions', { reportId: rep.id });
+        history.replaceState(null, '', `monthly.html?report=${rep.id}`);
+    }
+
+    function paras(text) {
+        return String(text || '').split(/\n{2,}/).filter(Boolean)
+            .map(p => `<p>${esc(p.trim()).replace(/\n/g, '<br>')}</p>`).join('');
+    }
+
+    function renderNarrative(ai, rep) {
+        if (!ai) {
+            // The numbers are the report; the narrative is a convenience. Saying
+            // so beats an empty card that looks like a failure.
+            const why = rep.ai_status && rep.ai_status.message ? ` (${esc(rep.ai_status.message)})` : '';
+            $('mr-headline').textContent = 'The write-up is not available for this month.';
+            $('mr-summary').innerHTML = `<p>Every number below is still exact${why}. Ask
+                <a href="assistant.html" style="color:var(--accent-solid)">the Analyst</a> to summarise it instead.</p>`;
+            return;
+        }
+        $('mr-headline').textContent = ai.headline || '';
+        $('mr-summary').innerHTML = paras(ai.executive_summary);
+        if (!ai.headline) $('mr-headline').style.display = 'none';
+    }
+
+    /** The comparison table. Direction carries an arrow and a word, never colour alone. */
+    function renderTable(r) {
+        const rows = r.deltas || [];
+        $('mr-moved-sub').textContent = r.comparable
+            ? `Every figure is this account's own Meta Insights for ${r.monthLabel}, against ${r.prevMonthLabel}.`
+            : `Every figure is this account's own Meta Insights for ${r.monthLabel}. There is no previous month to compare against.`;
+
+        if (!rows.length) {
+            $('mr-table').innerHTML = `<tr><td class="metric">Meta returned no monthly figures for this account.</td></tr>`;
+            return;
+        }
+
+        const DIR = {
+            up:   { i: '▲', t: v => `up ${Math.abs(v)}%` },
+            down: { i: '▼', t: v => `down ${Math.abs(v)}%` },
+            flat: { i: '—', t: () => 'about the same' },
+            new:  { i: '★', t: () => 'new this month' },
+            no_baseline: { i: '·', t: () => 'no comparison' },
+            unknown:     { i: '·', t: () => 'not reported' }
+        };
+
+        $('mr-table').innerHTML = `
+            <thead><tr>
+                <th>Metric</th><th class="lvl"></th>
+                <th class="num">${esc(r.monthLabel || 'This month')}</th>
+                <th class="num before">${esc(r.prevMonthLabel || 'Previous')}</th>
+                <th class="num">Change</th>
+            </tr></thead>
+            <tbody>${rows.map(d => {
+                const k = DIR[d.kind] ? d.kind : 'unknown';
+                const cfg = DIR[k];
+                return `<tr>
+                    <td class="metric">${esc(d.label)}</td>
+                    <td class="lvl"><span class="mr-lvl">${d.level === 'ig' ? 'Instagram' : 'Facebook'}</span></td>
+                    <td class="num now">${n(d.now)}</td>
+                    <td class="num before">${n(d.before)}</td>
+                    <td class="num"><span class="mr-dir ${k}"><i>${cfg.i}</i>${esc(cfg.t(d.pct))}</span></td>
+                </tr>`;
+            }).join('')}</tbody>`;
+    }
+
+    function renderWorks(ai) {
+        if (!ai || (!(ai.what_worked || []).length && !(ai.what_did_not || []).length && !(ai.what_moved || []).length)) {
+            $('mr-works').classList.add('hidden'); return;
+        }
+        const block = (title, items, cls) => !(items || []).length ? '' : `<div>
+            <h3 class="block-title" style="margin-top:0">${title}</h3>
+            <ul class="mr-list ${cls}">${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
+        $('mr-works').innerHTML =
+            block('What worked', ai.what_worked, '') +
+            block('What did not', ai.what_did_not, 'is-warn');
+    }
+
+    function renderPosting(r) {
+        const p = r.posting || {};
+        const fmt = p.formats || {};
+        const keys = Object.keys(fmt);
+        if (!p.count && !keys.length) { $('mr-posting').classList.add('hidden'); return; }
+        const LABEL = { reel: 'Reels', carousel: 'Carousels', still: 'Single images', unknown: 'Other' };
+        $('mr-posting').innerHTML = `
+            <div class="card-title">Posting</div>
+            <div class="card-subtitle">${p.count || 0} post${p.count === 1 ? '' : 's'} published this month.
+                Medians, not averages — one viral post should not redraw the picture.</div>
+            ${keys.length ? `<div class="mr-fmt">${keys.map(k => `<div>
+                <div class="k">${esc(LABEL[k] || k)}</div>
+                <div class="v">${n(fmt[k].medianReach)}</div>
+                <div class="s">median reach · ${fmt[k].n} post${fmt[k].n === 1 ? '' : 's'}</div>
+            </div>`).join('')}</div>` : '<p class="mr-caveat">No per-format figures were returned for this month.</p>'}`;
+    }
+
+    function renderTop(r) {
+        const posts = (r.posting && r.posting.topByReach) || [];
+        if (!posts.length) { $('mr-top').classList.add('hidden'); return; }
+        const LABEL = { reel: 'Reel', carousel: 'Carousel', still: 'Image' };
+        $('mr-top').innerHTML = `
+            <div class="card-title">The month's best posts</div>
+            <div class="card-subtitle">Ranked by accounts reached — an owner-only number.</div>
+            <div class="mr-posts">${posts.map(p => `<div class="mr-post">
+                <div class="mr-kind">${esc(LABEL[p.kind] || p.kind || 'Post')}</div>
+                ${p.caption ? `<div class="mr-cap">${esc(p.caption)}</div>` : '<div class="mr-cap" style="opacity:.6">No caption</div>'}
+                <div class="mr-nums">
+                    <span>reach <b>${n(p.reach)}</b></span>
+                    <span>saves <b>${n(p.saved)}</b></span>
+                    <span>shares <b>${n(p.shares)}</b></span>
+                </div>
+                ${p.permalink ? `<div style="margin-top:9px"><a href="${EL.safeUrl(p.permalink)}" target="_blank" rel="noopener noreferrer">Open post ↗</a></div>` : ''}
+            </div>`).join('')}</div>`;
+    }
+
+    function renderAudience(r) {
+        const d = r.demographics || {};
+        const groups = [['age', 'Age'], ['gender', 'Gender'], ['city', 'Top cities'], ['country', 'Top countries']]
+            .filter(([k]) => (d[k] || []).length);
+        if (!groups.length) { $('mr-audience').classList.add('hidden'); return; }
+
+        $('mr-audience').innerHTML = `
+            <div class="card-title">Who follows this account</div>
+            <div class="card-subtitle">Follower demographics from Meta. Shares of the followers Meta could
+                classify, not of everyone reached.</div>
+            <div class="mr-demo">${groups.map(([k, title]) => {
+                const rows = (d[k] || []).slice(0, 6);
+                const total = rows.reduce((s, x) => s + (Number(x.value) || 0), 0) || 1;
+                return `<div><h3 class="block-title" style="margin-top:0">${title}</h3>
+                    ${rows.map(x => {
+                        const pc = Math.round((Number(x.value) || 0) / total * 100);
+                        return `<div class="mr-bar">
+                            <span class="lab">${esc(x.key || '—')}</span>
+                            <span class="pc">${pc}%</span>
+                            <span class="track"><span class="fill" style="width:${pc}%"></span></span>
+                        </div>`;
+                    }).join('')}</div>`;
+            }).join('')}</div>`;
+    }
+
+    function renderNext(ai) {
+        const items = (ai && ai.next_month) || [];
+        if (!items.length) { $('mr-next').classList.add('hidden'); return; }
+        $('mr-next').innerHTML = `
+            <div class="card-title">Next month</div>
+            <div class="card-subtitle">Each one doable by one person with a phone. No ad spend is suggested —
+                there is no ad data in this report to justify any.</div>
+            <ul class="mr-list is-do">${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`;
+    }
+
+    function renderFoot(r, ai) {
+        const bits = [];
+        if (ai && ai.caveats) bits.push(`<div class="mr-caveat">${esc(ai.caveats)}</div>`);
+        if ((r.warnings || []).length) {
+            bits.push(`<div class="mr-caveat" style="margin-top:10px">${r.warnings.map(w => esc(w)).join('<br>')}</div>`);
+        }
+        if ((r.gaps || []).length) {
+            // Naming what could not be read is the difference between a gap and
+            // a zero. A reader who is not told assumes the number is real.
+            bits.push(`<div class="mr-caveat" style="margin-top:10px"><b>Not available for this account:</b>
+                ${r.gaps.map(g => esc(String(g).split(':').slice(1).join(' ').replace(/_/g, ' '))).join(', ')}.
+                These are shown as “—” above rather than as zero.</div>`);
+        }
+        bits.push(`<p class="mr-src">Every figure in this report comes from this account's own Meta Insights —
+            numbers only the account owner can see. Nothing here is scraped, and nothing scraped is mixed in.
+            ${r.generatedAt ? `Built ${new Date(r.generatedAt).toLocaleString()}.` : ''}</p>`);
+
+        if (bits.length === 1) { $('mr-foot').innerHTML = bits[0]; return; }
+        $('mr-foot').innerHTML = `<div class="card-title">Notes</div>` + bits.join('');
+    }
+})();
+</script>
+
+</body>
+</html>

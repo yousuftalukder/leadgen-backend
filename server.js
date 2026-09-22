@@ -6364,6 +6364,187 @@ app.get('/api/search-leads', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===========================================================================
+// THE MASTER LEAD LIST (phase 20)
+//
+// Every lead this account has ever collected, across every campaign, every
+// client and both platforms — browsable rather than searchable.
+//
+// /api/search-leads needs a search term and returns 50 rows, which is right
+// for "find that florist" and useless for "what have we actually got". This is
+// the second question: how many, from where, how many reachable, and give me
+// the slice that matches.
+//
+// SCOPE: owner_user_id only. The list is per-account and is not shared or
+// pooled across accounts. Packaging any of it for sale is deliberately NOT
+// built here and is not something this endpoint enables — it returns an
+// operator their own rows.
+// ===========================================================================
+
+/**
+ * One CSV cell.
+ *
+ * Two separate jobs, and skipping either produces a broken file:
+ *
+ * 1. CSV quoting, for values containing a comma, a quote or a newline. Scraped
+ *    bios contain all three routinely.
+ * 2. Formula neutralisation. A value starting '=', '+', '-' or '@' is executed
+ *    as a formula by Excel, Sheets and LibreOffice on open — so a scraped bio
+ *    reading `=HYPERLINK(...)` becomes a live link in the operator's
+ *    spreadsheet, and `=cmd|...` is worse. A leading apostrophe makes the cell
+ *    literal text, which is what it always was.
+ *
+ * Every field written here came from a scrape, so none of it is trusted.
+ */
+function csvCell(v) {
+    let s = v === null || v === undefined ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/** Shared filter builder, so the CSV is always exactly what is on screen. */
+function leadFilters(q, userId) {
+    let s = supabase.from('leads').select('*', { count: 'exact' }).eq('owner_user_id', userId);
+
+    const platform = String(q.platform || '').toLowerCase();
+    if (platform === 'instagram' || platform === 'facebook') s = s.eq('platform', platform);
+
+    if (String(q.enriched || '') === '1') s = s.eq('is_enriched', true);
+    if (String(q.business || '') === '1') s = s.eq('is_business', true);
+    if (String(q.verified || '') === '1') s = s.eq('is_verified', true);
+
+    // "Reachable" is the only count that matters for outreach, and it is not a
+    // column — a lead is reachable if ANY channel is present.
+    if (String(q.reachable || '') === '1') {
+        s = s.or('email.not.is.null,phone.not.is.null,whatsapp.not.is.null');
+    }
+    if (String(q.has_email || '') === '1') s = s.not('email', 'is', null);
+
+    const min = parseInt(q.min_followers, 10);
+    const max = parseInt(q.max_followers, 10);
+    if (Number.isFinite(min)) s = s.gte('followers_count', min);
+    if (Number.isFinite(max)) s = s.lte('followers_count', max);
+
+    // Same sanitising as /api/search-leads: anything reaching PostgREST's .or()
+    // DSL is filter injection, bounded by the owner AND but still able to
+    // redefine the query.
+    const clean = v => String(v || '').toLowerCase().replace(/[@,().\\%*]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const city = clean(q.city);
+    if (city) s = s.ilike('city', `%${city}%`);
+    const category = clean(q.category);
+    if (category) s = s.ilike('category', `%${category}%`);
+    const text = clean(q.q);
+    if (text) s = s.or(`username.ilike.%${text}%,full_name.ilike.%${text}%,bio.ilike.%${text}%`);
+
+    return s;
+}
+
+const LEAD_SORTS = {
+    newest:    { col: 'created_at',      asc: false },
+    oldest:    { col: 'created_at',      asc: true  },
+    followers: { col: 'followers_count', asc: false },
+    smallest:  { col: 'followers_count', asc: true  },
+    username:  { col: 'username',        asc: true  }
+};
+
+app.get('/api/leads', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+        const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+        const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+
+        const { data, error, count } = await leadFilters(req.query, ctx.user.id)
+            .order(sort.col, { ascending: sort.asc, nullsFirst: false })
+            .range((page - 1) * limit, page * limit - 1);
+        if (error) throw error;
+
+        res.json({
+            leads: data || [],
+            page, limit,
+            total: count || 0,
+            pages: Math.max(1, Math.ceil((count || 0) / limit))
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * The shape of the whole list — what an operator needs before filtering it.
+ *
+ * Counted with head-only queries rather than by loading rows: the list is
+ * meant to grow into six figures and a summary must not get slower as it does.
+ */
+app.get('/api/leads/summary', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        const U = ctx.user.id;
+        const countOf = fn => fn(supabase.from('leads').select('id', { count: 'exact', head: true }).eq('owner_user_id', U));
+
+        const [all, ig, fb, enriched, withEmail, withPhone, reachable] = await Promise.all([
+            countOf(q => q),
+            countOf(q => q.eq('platform', 'instagram')),
+            countOf(q => q.eq('platform', 'facebook')),
+            countOf(q => q.eq('is_enriched', true)),
+            countOf(q => q.not('email', 'is', null)),
+            countOf(q => q.not('phone', 'is', null)),
+            countOf(q => q.or('email.not.is.null,phone.not.is.null,whatsapp.not.is.null'))
+        ]);
+
+        // Top cities and categories, for the filter chips. Capped because this
+        // is a shortcut to a filter, not an analysis.
+        const { data: sample } = await supabase.from('leads')
+            .select('city, category').eq('owner_user_id', U)
+            .order('created_at', { ascending: false }).limit(2000);
+        const tally = (rows, key) => {
+            const m = {};
+            for (const r of (rows || [])) {
+                const v = String(r[key] || '').trim();
+                if (v) m[v] = (m[v] || 0) + 1;
+            }
+            return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10)
+                .map(([name, n]) => ({ name, n }));
+        };
+
+        res.json({
+            total: all.count || 0,
+            byPlatform: { instagram: ig.count || 0, facebook: fb.count || 0 },
+            enriched: enriched.count || 0,
+            withEmail: withEmail.count || 0,
+            withPhone: withPhone.count || 0,
+            reachable: reachable.count || 0,
+            topCities: tally(sample, 'city'),
+            topCategories: tally(sample, 'category'),
+            sampledFrom: (sample || []).length,
+            note: 'Cities and categories are tallied from the 2,000 most recent leads.'
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** CSV of exactly what the filters select. Both spellings, as with demand-export. */
+app.get(['/api/leads/export', '/api/leads/export.csv'], async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        const cap = Math.min(Math.max(parseInt(req.query.limit, 10) || 5000, 1), 20000);
+        const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+
+        const { data, error } = await leadFilters(req.query, ctx.user.id)
+            .order(sort.col, { ascending: sort.asc, nullsFirst: false })
+            .range(0, cap - 1);
+        if (error) throw error;
+
+        const cols = ['platform', 'username', 'full_name', 'email', 'phone', 'whatsapp', 'website',
+            'followers_count', 'following_count', 'posts_count', 'engagement_rate',
+            'category', 'city', 'address', 'is_business', 'is_verified', 'is_enriched',
+            'profile_url', 'bio', 'created_at'];
+        const csv = [cols.join(','), ...(data || []).map(r => cols.map(c => csvCell(r[c])).join(','))].join('\r\n');
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="edgelead-leads-${new Date().toISOString().slice(0, 10)}.csv"`);
+        res.send('﻿' + csv);       // BOM, or Excel mangles non-ASCII names
+    } catch (err) { sendErr(res, err); }
+});
+
 app.delete('/api/campaign/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
@@ -14697,5 +14878,7 @@ module.exports = {
     cpBoostCall,
     // phase 19
     metaMonthWindow, metaPrevMonth, metaDefaultMonth, metaMonthLabel, pctDelta,
-    META_MONTH_METRICS, comparableBand, competitorQueries
+    META_MONTH_METRICS, comparableBand, competitorQueries,
+    // phase 20
+    csvCell, LEAD_SORTS
 };

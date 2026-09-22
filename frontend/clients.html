@@ -199,8 +199,8 @@
     let current = null;      // full client row
     let detail = null;       // { client, owner, members, metaConnections }
 
-    const TYPE_LABEL = { ig_report: 'IG audit', deep_audit: 'Competitor intel', content_plan: 'Content plan', fb_community: 'Community audit', fb_group: 'Room audit', fb_page: 'FB page report', meta_owned: 'Meta owner data' };
-    const TYPE_PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', content_plan: 'content-plan.html', fb_community: 'fb-audit.html', fb_group: 'fb-audit.html', fb_page: 'fb-report.html', meta_owned: 'content-plan.html' };
+    const TYPE_LABEL = { ig_report: 'IG audit', deep_audit: 'Competitor intel', content_plan: 'Content plan', fb_community: 'Community audit', fb_group: 'Room audit', fb_page: 'FB page report', meta_owned: 'Meta owner data', meta_monthly: 'Monthly report' };
+    const TYPE_PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', content_plan: 'content-plan.html', fb_community: 'fb-audit.html', fb_group: 'fb-audit.html', fb_page: 'fb-report.html', meta_owned: 'content-plan.html', meta_monthly: 'monthly.html' };
 
     async function loadList() {
         const archived = $('show-archived').checked ? '?archived=1' : '';

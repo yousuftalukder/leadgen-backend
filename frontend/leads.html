@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Lead List — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <style>
+    /* leads.html — page-specific only. Shared rules live in app.css. */
+
+    /* ---- the shape of the list -----------------------------------------
+       Five counts, not a chart. These are single values, and a single value
+       wears a stat tile: there is nothing to compare along an axis. */
+    .ll-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .ll-stat { padding: 15px 17px; border-radius: var(--r-md); background: rgba(255,255,255,0.035);
+        border: 1px solid var(--card-border); }
+    .ll-stat .k { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--text-muted); }
+    /* Hero numbers are read one at a time and never align in a column, so
+       proportional figures are right here — tabular would look gappy. */
+    .ll-stat .v { font-size: 1.62rem; font-weight: 800; margin-top: 5px; letter-spacing: -0.02em; }
+    .ll-stat .s { font-size: 0.74rem; color: var(--text-muted); margin-top: 2px; }
+
+    /* ---- filters in one row above the list ------------------------------ */
+    .ll-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0 14px; }
+    .ll-filters label { margin: 14px 0 6px; }
+    .ll-filters input, .ll-filters select { width: 100%; }
+    .ll-toggles { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+    .ll-tog { font-size: 0.79rem; padding: 8px 13px; border-radius: 999px; cursor: pointer;
+        background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+        color: var(--text-secondary); font-family: inherit; font-weight: 600; }
+    .ll-tog.is-on { background: rgba(12,120,86,0.18); border-color: var(--jade); color: var(--text-primary); }
+    .ll-chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+    .ll-chip { font-size: 0.75rem; padding: 6px 11px; border-radius: 999px; cursor: pointer;
+        background: rgba(255,255,255,0.035); border: 1px solid var(--card-border);
+        color: var(--text-muted); font-family: inherit; }
+    .ll-chip:hover { border-color: var(--accent-solid); color: var(--text-primary); }
+    .ll-chip-lab { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--text-muted); margin-right: 3px; }
+
+    .ll-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .ll-count { font-size: 0.86rem; color: var(--text-secondary); }
+    .ll-count b { color: var(--text-primary); font-weight: 800; }
+    .ll-bar .spacer { margin-left: auto; }
+
+    /* ---- the list ------------------------------------------------------- */
+    .ll-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .ll-table th { text-align: left; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.07em;
+        text-transform: uppercase; color: var(--text-muted); padding: 0 10px 9px 0;
+        border-bottom: 1px solid var(--card-border); white-space: nowrap; }
+    .ll-table td { padding: 10px 10px 10px 0; border-bottom: 1px solid rgba(240,211,154,0.05);
+        vertical-align: top; }
+    .ll-table th.num, .ll-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .ll-table a { color: var(--text-primary); text-decoration: none; font-weight: 700; }
+    .ll-table a:hover { color: var(--accent-solid); text-decoration: underline; }
+    .ll-name small { display: block; color: var(--text-muted); font-weight: 400; margin-top: 2px;
+        font-size: 0.78rem; }
+    .ll-contact { font-size: 0.78rem; color: var(--text-secondary); line-height: 1.55; }
+    .ll-contact span { display: block; }
+    .ll-none { color: var(--text-muted); }
+    .ll-tag { display: inline-block; font-size: 0.64rem; font-weight: 800; letter-spacing: 0.05em;
+        text-transform: uppercase; padding: 2px 6px; border-radius: 4px; margin-right: 4px;
+        background: rgba(255,255,255,0.05); color: var(--text-muted); }
+    .ll-tag.ig { background: rgba(236,72,153,0.14); color: #f9a8d4; }
+    .ll-tag.fb { background: rgba(59,130,246,0.14); color: #93c5fd; }
+
+    .ll-pager { display: flex; gap: 8px; align-items: center; justify-content: center;
+        margin-top: 20px; flex-wrap: wrap; }
+    .ll-pager .el-btn, .ll-pager button { font-family: inherit; }
+    .ll-page-num { font-size: 0.83rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+    .ll-empty { padding: 34px 20px; text-align: center; color: var(--text-muted);
+        font-size: 0.9rem; line-height: 1.7; }
+    .ll-empty a { color: var(--accent-solid); }
+
+    .ll-note { font-size: 0.78rem; color: var(--text-muted); line-height: 1.6; margin-top: 18px; }
+
+    @media (max-width: 760px) {
+        /* Scale and engagement go first — the name and how to reach them are
+           the reason anyone opens this page. */
+        .ll-table .col-scale, .ll-table th.col-scale { display: none; }
+    }
+    @media (max-width: 560px) {
+        .ll-table .col-where, .ll-table th.col-where { display: none; }
+    }
+    </style>
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+
+    <div class="card">
+        <h2 class="card-title">Lead list</h2>
+        <p class="card-subtitle">Every lead this account has collected, across every campaign, every client
+            and both platforms. One list — the Lead Finder adds to it, this is where you read it.</p>
+        <div class="ll-stats" id="ll-stats"></div>
+        <p class="ll-note" id="ll-stats-note"></p>
+    </div>
+
+    <div class="card">
+        <div class="card-title" style="font-size:1.05rem">Filter</div>
+        <div class="ll-filters">
+            <div><label for="f-q">Search</label><input type="text" id="f-q" placeholder="name, handle or bio"></div>
+            <div><label for="f-platform">Platform</label><select id="f-platform">
+                <option value="">Both</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option>
+            </select></div>
+            <div><label for="f-city">City</label><input type="text" id="f-city" placeholder="any"></div>
+            <div><label for="f-category">Category</label><input type="text" id="f-category" placeholder="any"></div>
+            <div><label for="f-min">Followers from</label><input type="number" id="f-min" placeholder="any" min="0"></div>
+            <div><label for="f-max">Followers to</label><input type="number" id="f-max" placeholder="any" min="0"></div>
+            <div><label for="f-sort">Sort</label><select id="f-sort">
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="followers">Most followers</option>
+                <option value="smallest">Fewest followers</option>
+                <option value="username">Handle A–Z</option>
+            </select></div>
+        </div>
+        <div class="ll-toggles">
+            <button class="ll-tog" type="button" data-flag="reachable">Has a contact</button>
+            <button class="ll-tog" type="button" data-flag="has_email">Has an email</button>
+            <button class="ll-tog" type="button" data-flag="enriched">Enriched</button>
+            <button class="ll-tog" type="button" data-flag="business">Business account</button>
+            <button class="ll-tog" type="button" data-flag="verified">Verified</button>
+        </div>
+        <div class="ll-chips" id="ll-chips"></div>
+    </div>
+
+    <div class="card">
+        <div class="ll-bar">
+            <span class="ll-count" id="ll-count">Loading…</span>
+            <span class="spacer"></span>
+            <button class="btn-secondary" id="btn-reset" type="button">Clear filters</button>
+            <button class="btn-secondary" id="btn-export" type="button">Export CSV</button>
+        </div>
+        <div id="ll-body"><div class="ll-empty">Loading…</div></div>
+        <div class="ll-pager" id="ll-pager"></div>
+        <p class="ll-note" id="ll-foot"></p>
+    </div>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    let page = 1, pages = 1, total = 0, busy = false;
+    const flags = { reachable: false, has_email: false, enriched: false, business: false, verified: false };
+    let debounce = null;
+
+    const n = v => (v === null || v === undefined || v === '' ? '—' : Number(v).toLocaleString());
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'leadgen', page: 'leads.html' });
+        esc = EL.escape;
+
+        loadSummary();
+        load();
+
+        ['f-q', 'f-city', 'f-category'].forEach(id =>
+            $(id).addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => { page = 1; load(); }, 350); }));
+        ['f-platform', 'f-min', 'f-max', 'f-sort'].forEach(id =>
+            $(id).addEventListener('change', () => { page = 1; load(); }));
+
+        document.querySelectorAll('.ll-tog').forEach(b => b.addEventListener('click', () => {
+            flags[b.dataset.flag] = !flags[b.dataset.flag];
+            b.classList.toggle('is-on', flags[b.dataset.flag]);
+            page = 1; load();
+        }));
+
+        $('btn-reset').addEventListener('click', () => {
+            ['f-q', 'f-city', 'f-category', 'f-min', 'f-max'].forEach(id => { $(id).value = ''; });
+            $('f-platform').value = ''; $('f-sort').value = 'newest';
+            Object.keys(flags).forEach(k => { flags[k] = false; });
+            document.querySelectorAll('.ll-tog').forEach(b => b.classList.remove('is-on'));
+            page = 1; load();
+        });
+
+        $('btn-export').addEventListener('click', exportCsv);
+    });
+
+    /** The query string both the list and the CSV are built from. */
+    function params(extra = {}) {
+        const p = new URLSearchParams();
+        const put = (k, v) => { if (v !== '' && v !== null && v !== undefined) p.set(k, v); };
+        put('q', $('f-q').value.trim());
+        put('platform', $('f-platform').value);
+        put('city', $('f-city').value.trim());
+        put('category', $('f-category').value.trim());
+        put('min_followers', $('f-min').value);
+        put('max_followers', $('f-max').value);
+        put('sort', $('f-sort').value);
+        for (const [k, on] of Object.entries(flags)) if (on) p.set(k, '1');
+        for (const [k, v] of Object.entries(extra)) put(k, v);
+        return p;
+    }
+
+    async function loadSummary() {
+        let s;
+        try { s = await EL.api('/api/leads/summary'); }
+        catch { $('ll-stats').innerHTML = ''; return; }
+
+        const tile = (k, v, sub) => `<div class="ll-stat"><div class="k">${k}</div>
+            <div class="v">${n(v)}</div><div class="s">${sub}</div></div>`;
+        const pc = (a, b) => (b ? Math.round(a / b * 100) + '% of all' : '—');
+
+        $('ll-stats').innerHTML =
+            tile('Total', s.total, 'leads collected') +
+            tile('Reachable', s.reachable, pc(s.reachable, s.total)) +
+            tile('With email', s.withEmail, pc(s.withEmail, s.total)) +
+            tile('Instagram', s.byPlatform.instagram, pc(s.byPlatform.instagram, s.total)) +
+            tile('Facebook', s.byPlatform.facebook, pc(s.byPlatform.facebook, s.total));
+
+        $('ll-stats-note').textContent = s.total
+            ? `“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.`
+            : '';
+
+        // Chips are a shortcut into the filters, so they carry their own count.
+        const chip = (kind, x) => `<button class="ll-chip" type="button" data-${kind}="${esc(x.name)}">${esc(x.name)} · ${x.n}</button>`;
+        const bits = [];
+        if ((s.topCities || []).length) bits.push(`<span class="ll-chip-lab">Cities</span>` + s.topCities.map(c => chip('city', c)).join(''));
+        if ((s.topCategories || []).length) bits.push(`<span class="ll-chip-lab">Categories</span>` + s.topCategories.map(c => chip('category', c)).join(''));
+        $('ll-chips').innerHTML = bits.join('');
+        $('ll-chips').querySelectorAll('[data-city]').forEach(b =>
+            b.addEventListener('click', () => { $('f-city').value = b.dataset.city; page = 1; load(); }));
+        $('ll-chips').querySelectorAll('[data-category]').forEach(b =>
+            b.addEventListener('click', () => { $('f-category').value = b.dataset.category; page = 1; load(); }));
+    }
+
+    async function load() {
+        if (busy) return;
+        busy = true;
+        $('ll-count').textContent = 'Loading…';
+        try {
+            const d = await EL.api('/api/leads?' + params({ page, limit: 50 }).toString());
+            total = d.total || 0; pages = d.pages || 1; page = d.page || 1;
+            render(d.leads || []);
+        } catch (err) {
+            if (!err.handled) $('ll-body').innerHTML = `<div class="ll-empty">${esc(err.message)}</div>`;
+            $('ll-count').textContent = '';
+        } finally { busy = false; }
+    }
+
+    /**
+     * Is anything actually narrowing the list?
+     *
+     * Stated explicitly rather than inferred from the query string: an empty
+     * account and an over-filtered one need different words, and getting it
+     * wrong tells someone their filters are too tight when in fact they have
+     * never run a search.
+     */
+    function hasFilters() {
+        if (Object.values(flags).some(Boolean)) return true;
+        return ['f-q', 'f-city', 'f-category', 'f-min', 'f-max', 'f-platform']
+            .some(id => String($(id).value || '').trim() !== '');
+    }
+
+    function render(rows) {
+        const filtered = hasFilters();
+        $('ll-count').innerHTML = total
+            ? `<b>${n(total)}</b> lead${total === 1 ? '' : 's'}${filtered ? ' match' : ' collected'}`
+            : (filtered ? 'No leads match' : 'No leads yet');
+
+        if (!rows.length) {
+            $('ll-body').innerHTML = filtered
+                ? `<div class="ll-empty">No lead matches these filters.<br>Widen them or clear them.</div>`
+                : `<div class="ll-empty">Nothing collected yet.<br>Run a search from the
+                     <a href="index.html">Lead Finder</a> and the results land here.</div>`;
+            $('ll-pager').innerHTML = '';
+            $('ll-foot').textContent = '';
+            return;
+        }
+
+        $('ll-body').innerHTML = `<table class="ll-table">
+            <thead><tr>
+                <th>Who</th>
+                <th class="col-where">Where</th>
+                <th>Contact</th>
+                <th class="num col-scale">Followers</th>
+                <th class="num col-scale">Eng.</th>
+            </tr></thead>
+            <tbody>${rows.map(r => {
+                const plat = r.platform === 'facebook' ? 'fb' : 'ig';
+                const url = r.profile_url || (plat === 'fb'
+                    ? `https://facebook.com/${r.username}` : `https://instagram.com/${r.username}`);
+                const contact = [
+                    r.email ? `<span>${esc(r.email)}</span>` : '',
+                    r.phone ? `<span>${esc(r.phone)}</span>` : '',
+                    r.whatsapp && r.whatsapp !== r.phone ? `<span>wa ${esc(r.whatsapp)}</span>` : '',
+                    r.website ? `<span>${esc(r.website)}</span>` : ''
+                ].filter(Boolean).join('');
+                return `<tr>
+                    <td class="ll-name">
+                        <span class="ll-tag ${plat}">${plat === 'fb' ? 'FB' : 'IG'}</span>
+                        <a href="${EL.safeUrl(url)}" target="_blank" rel="noopener noreferrer">${esc(r.username || '—')}</a>
+                        ${r.is_verified ? '<span class="ll-tag">verified</span>' : ''}
+                        ${r.full_name ? `<small>${esc(r.full_name)}</small>` : ''}
+                    </td>
+                    <td class="col-where ll-contact">${[esc(r.category || ''), esc(r.city || '')].filter(Boolean).join('<br>') || '<span class="ll-none">—</span>'}</td>
+                    <td class="ll-contact">${contact || '<span class="ll-none">no contact found</span>'}</td>
+                    <td class="num col-scale">${n(r.followers_count)}</td>
+                    <td class="num col-scale">${r.engagement_rate != null ? Number(r.engagement_rate).toFixed(1) + '%' : '—'}</td>
+                </tr>`;
+            }).join('')}</tbody></table>`;
+
+        renderPager();
+        $('ll-foot').textContent = `Showing ${rows.length} of ${n(total)}. Contact details are the ones these accounts published publicly.`;
+    }
+
+    function renderPager() {
+        if (pages <= 1) { $('ll-pager').innerHTML = ''; return; }
+        $('ll-pager').innerHTML = `
+            <button class="btn-secondary" type="button" id="pg-prev" ${page <= 1 ? 'disabled' : ''}>← Previous</button>
+            <span class="ll-page-num">Page ${page} of ${n(pages)}</span>
+            <button class="btn-secondary" type="button" id="pg-next" ${page >= pages ? 'disabled' : ''}>Next →</button>`;
+        const go = d => { page = Math.min(Math.max(1, page + d), pages); load(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        if ($('pg-prev')) $('pg-prev').addEventListener('click', () => go(-1));
+        if ($('pg-next')) $('pg-next').addEventListener('click', () => go(1));
+    }
+
+    /**
+     * The CSV needs a bearer token, so it cannot be a plain <a download>. It is
+     * fetched, turned into a blob and clicked — which also means an auth error
+     * surfaces as a message instead of a downloaded HTML error page.
+     */
+    async function exportCsv() {
+        const btn = $('btn-export');
+        btn.disabled = true;
+        const was = btn.textContent;
+        btn.textContent = 'Preparing…';
+        try {
+            const res = await fetch(`${EL.backendUrl()}/api/leads/export.csv?${params({ limit: 20000 }).toString()}`, {
+                headers: { Authorization: 'Bearer ' + await EL.token() }
+            });
+            if (!res.ok) {
+                let msg = `Export failed (${res.status})`;
+                try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+                throw new Error(msg);
+            }
+            const blob = await res.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `edgelead-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            btn.textContent = 'Downloaded';
+        } catch (err) {
+            btn.textContent = was;
+            $('ll-foot').textContent = err.message;
+            return;
+        } finally {
+            btn.disabled = false;
+            setTimeout(() => { btn.textContent = was; }, 2200);
+        }
+    }
+})();
+</script>
+
+</body>
+</html>

@@ -79,6 +79,7 @@
     const NAV = [
         { group: 'Instagram' },
         { href: 'index.html',          icon: '🎯', label: 'Lead Finder',       engine: 'leadgen' },
+        { href: 'leads.html',          icon: '📋', label: 'Lead List',         engine: 'leadgen' },
         { href: 'ig-report.html',      icon: '📊', label: 'Performance Audit', engine: 'report'  },
         { href: 'ig-competitors.html', icon: '🥊', label: 'Competitor Intel',  engine: 'report'  },
 
@@ -91,6 +92,7 @@
 
         { group: 'Workspace' },
         { href: 'assistant.html',      icon: '💬', label: 'Analyst',           engine: null },
+        { href: 'monthly.html',        icon: '📅', label: 'Monthly Report',   engine: 'meta_owned' },
         { href: 'content-plan.html',   icon: '🧭', label: 'Content Plan',      engine: 'content_plan' },
         { href: 'clients.html',        icon: '👥', label: 'Clients',           engine: null },
         { href: 'schedules.html',      icon: '⏱',  label: 'Schedules',         engine: null },
