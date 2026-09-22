@@ -131,7 +131,20 @@ const TOKENS = {};   // bearer token -> auth user
 const fakeSupabase = {
     from: t => new Query(t),
     rpc: () => Promise.resolve({ data: true, error: null }),
-    auth: { getUser: async token => TOKENS[token] ? { data: { user: TOKENS[token] }, error: null } : { data: null, error: { message: 'bad token' } } }
+    auth: {
+        getUser: async token => TOKENS[token] ? { data: { user: TOKENS[token] }, error: null } : { data: null, error: { message: 'bad token' } },
+        // The admin API the provisioning routes call. A created user gets a
+        // bearer token of 't-<email>' so the test can sign in as them next.
+        admin: {
+            createUser: async ({ email }) => {
+                const user = { id: crypto.randomUUID(), email: String(email).toLowerCase() };
+                TOKENS['t-' + user.email] = user;
+                return { data: { user }, error: null };
+            },
+            updateUserById: async () => ({ data: {}, error: null }),
+            deleteUser: async () => ({ data: {}, error: null })
+        }
+    }
 };
 
 // ===========================================================================
@@ -158,6 +171,36 @@ delete process.env.MASTER_ADMIN_EMAIL;      // the first account to sign in boot
 // A known app secret, so a Meta signed_request can be forged HERE and only
 // here: the deletion callback must accept exactly what this secret signs.
 process.env.META_APP_ID = '1234567890'; process.env.META_APP_SECRET = 'test-app-secret';
+
+// ---------------------------------------------------------------------------
+// A GEMINI THAT SAYS WHAT THE TEST TELLS IT TO
+//
+// The assistant is the one engine whose whole flow can be walked without
+// spending anything: its only outside call is the model. So the model is a
+// script — the test decides what the model "says" each turn — and every
+// request body is kept, so the test can read what the server actually sent:
+// which system prompt, and which tool results. That last part is the point:
+// scope is proven by what reached the model, not by what the code meant to.
+// ---------------------------------------------------------------------------
+process.env.GEMINI_API_KEY = 'test-gemini-key';
+const GEMINI = { script: [], requests: [] };
+global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const reply = (status, body) => ({
+        status, ok: status >= 200 && status < 300,
+        json: async () => body, text: async () => (typeof body === 'string' ? body : JSON.stringify(body))
+    });
+    if (/generativelanguage\.googleapis\.com\/v1beta\/models\?/.test(u)) {
+        return reply(200, { models: [{ name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] }] });
+    }
+    if (/:generateContent$/.test(u)) {
+        GEMINI.requests.push(JSON.parse(opts.body || '{}'));
+        const next = GEMINI.script.shift();
+        if (!next) return reply(500, 'the test scripted no reply for this turn');
+        return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
+    }
+    return reply(404, `the test fake has no answer for ${u}`);
+};
 
 const S = require(path.join(__dirname, '..', 'server.js'));
 
@@ -628,6 +671,253 @@ test('a request for someone we hold nothing on still completes, honestly', async
     assert.strictEqual(r.statusCode, 200);
     const s = await call('GET', `/api/public/meta/deletion/${r.body.confirmation_code}`);
     assert.strictEqual(s.body.connections, 0);
+});
+
+// ===========================================================================
+// PHASE 25 — the rows that were "built, never exercised"
+// ===========================================================================
+section('\nthe admin provisions people and hands out tools');
+test('the admin creates an employee with one engine, who can then sign in and sees exactly that', async () => {
+    const r = await call('POST', '/api/admin/users', { token: 't-admin', body: { email: 'New.Hire@agency.test', password: 'a-strong-password', fullName: 'New Hire', role: 'user', engines: ['report'] } });
+    assert.ok(r.statusCode === 200 || r.statusCode === 201, JSON.stringify(r.body));
+    const me = await call('GET', '/api/me', { token: 't-new.hire@agency.test' });
+    assert.strictEqual(me.statusCode, 200, JSON.stringify(me.body));
+    assert.strictEqual(me.body.role, 'user');
+    assert.deepStrictEqual(me.body.engines, ['report']);
+    state.hire = me.body.id;
+});
+test('a grant added later shows up on the next request, and own-key-only sticks', async () => {
+    const r = await call('PATCH', `/api/admin/users/${state.hire}`, { token: 't-admin', body: { engines: ['report', 'leadgen'], byoKeyOnly: true } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const me = await call('GET', '/api/me', { token: 't-new.hire@agency.test' });
+    assert.deepStrictEqual([...me.body.engines].sort(), ['leadgen', 'report']);
+    assert.strictEqual(tbl('app_users').find(u => u.id === state.hire).byo_key_only, true);
+});
+test('an engine that is not granted is refused at its route, not hidden in the page', async () => {
+    // The new hire has report and leadgen, not fb_community.
+    const r = await call('POST', '/api/fb/audit-community', { token: 't-new.hire@agency.test', body: { groupIds: ['1'], clientId: state.C } });
+    assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
+    assert.ok(/fb_community/.test(r.body.error));
+});
+test('an employee cannot use the provisioning routes', async () => {
+    const r = await call('POST', '/api/admin/users', { token: 't-emp', body: { email: 'x@x.test', password: 'a-strong-password', role: 'admin' } });
+    assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
+});
+test('the admin creates a client account directly — the manual-activation path', async () => {
+    const r = await call('POST', '/api/admin/users', { token: 't-admin', body: { email: 'walkin@shop.test', password: 'a-strong-password', role: 'client', trialDays: 7 } });
+    assert.ok(r.statusCode === 200 || r.statusCode === 201, JSON.stringify(r.body));
+    const me = await call('GET', '/api/me', { token: 't-walkin@shop.test' });
+    assert.strictEqual(me.statusCode, 200, JSON.stringify(me.body));
+    assert.strictEqual(me.body.role, 'client');
+    assert.strictEqual(me.body.state, 'trial');
+    assert.ok(me.body.usage && me.body.usage.leads, 'a client account must see its allowance');
+    state.walkin = me.body.id;
+});
+
+section('\nthe admin moves a limit, and it moves');
+test('the settings read back with their fallbacks named', async () => {
+    const r = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.trialDays, 7);
+    assert.ok(r.body.metrics.some(m => m.key === 'leads'));
+    assert.strictEqual(r.body.stored.trial_caps, false, 'nothing has been stored yet, so this must say fallback');
+});
+test('a changed trial cap is enforced on the very next request', async () => {
+    const before = await call('GET', '/api/me', { token: 't-walkin@shop.test' });
+    const was = before.body.usage.leads.cap;
+    const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { trialCaps: { ig_report: 1, fb_group_audit: 1, leads: 3, usd: 2 } } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const after = await call('GET', '/api/me', { token: 't-walkin@shop.test' });
+    assert.strictEqual(after.body.usage.leads.cap, 3, `cap was ${was}, set to 3, next request saw ${after.body.usage.leads.cap}`);
+    const again = await call('GET', '/api/admin/settings', { token: 't-admin' });
+    assert.strictEqual(again.body.stored.trial_caps, true);
+});
+test('a nonsense trial length is refused', async () => {
+    for (const bad of [0, -3, 400, 'soon']) {
+        const r = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { trialDays: bad } });
+        assert.strictEqual(r.statusCode, 400, `trialDays=${bad} was accepted`);
+    }
+});
+test('an employee cannot change limits', async () => {
+    const r = await call('PATCH', '/api/admin/settings', { token: 't-emp', body: { trialDays: 30 } });
+    assert.strictEqual(r.statusCode, 403);
+});
+
+section('\nan employee onboards a client from Business Suite');
+test('a Page the login manages arrives unfiled', async () => {
+    const conn = { id: crypto.randomUUID(), user_id: EMP.id, client_id: null, page_id: '55501', page_name: 'Rangpur Solar', ig_username: 'rangpursolar', status: 'active', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(conn);
+    state.conn = conn.id;
+    const r = await call('GET', '/api/meta/inbox', { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const p = r.body.pages.find(x => x.connectionId === conn.id);
+    assert.ok(p && p.needsClient, 'the unfiled Page is not in the inbox');
+    assert.strictEqual(r.body.unfiled, 1);
+});
+test('one step turns the Page into a client, with nothing retyped', async () => {
+    const r = await call('POST', `/api/meta/connections/${state.conn}/onboard`, { token: 't-emp', body: { niche: 'home solar', location: 'Rangpur' } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    const c = r.body.client;
+    assert.strictEqual(c.name, 'Rangpur Solar');
+    assert.strictEqual(c.ig_handle, 'rangpursolar');
+    assert.strictEqual(c.fb_page_id, '55501');
+    assert.strictEqual(c.niche, 'home solar');
+    state.solar = c.id;
+    assert.strictEqual(tbl('meta_connections').find(x => x.id === state.conn).client_id, c.id, 'the connection was not filed under the new client');
+    const inbox = await call('GET', '/api/meta/inbox', { token: 't-emp' });
+    assert.strictEqual(inbox.body.unfiled, 0);
+});
+test('it cannot be onboarded twice', async () => {
+    const r = await call('POST', `/api/meta/connections/${state.conn}/onboard`, { token: 't-emp', body: {} });
+    assert.strictEqual(r.statusCode, 409);
+});
+test('a colleague cannot onboard a Page from my login', async () => {
+    const other = { id: crypto.randomUUID(), user_id: EMP.id, client_id: null, page_id: '55502', page_name: 'Other', status: 'active', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(other);
+    const r = await call('POST', `/api/meta/connections/${other.id}/onboard`, { token: 't-emp2', body: {} });
+    assert.strictEqual(r.statusCode, 404);
+});
+test('the new client shows as Meta-connected on the list', async () => {
+    const r = await call('GET', '/api/clients', { token: 't-emp' });
+    const c = r.body.clients.find(x => x.id === state.solar);
+    assert.ok(c && c.meta.connected && c.meta.names.includes('Rangpur Solar'));
+});
+
+section('\na run is repeated on a schedule, under its client');
+test('the employee schedules their own run and it carries the client', async () => {
+    const r = await call('POST', '/api/schedules', { token: 't-emp', body: { jobId: state.job, cadence: 'weekly', dayOfWeek: 1, hourUtc: 9, label: 'Weekly audit' } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    state.sched = r.body.schedule ? r.body.schedule.id : (r.body.id || (r.body.data && r.body.data.id));
+    const row = tbl('schedules').find(s => s.id === state.sched);
+    assert.ok(row, 'no schedule row');
+    assert.strictEqual(row.client_id, state.C, 'the schedule does not carry the client the run was filed under');
+});
+test('it is listed for its owner and not for a stranger', async () => {
+    const mine = await call('GET', '/api/schedules', { token: 't-emp' });
+    assert.ok((mine.body.schedules || []).some(s => s.id === state.sched));
+    const theirs = await call('GET', '/api/schedules', { token: 't-emp2' });
+    assert.ok(!(theirs.body.schedules || []).some(s => s.id === state.sched), 'a stranger can see it');
+});
+test('a stranger cannot pause it; the owner can; the owner can delete it', async () => {
+    const no = await call('PATCH', `/api/schedules/${state.sched}`, { token: 't-emp2', body: { paused: true } });
+    assert.ok(no.statusCode === 403 || no.statusCode === 404, JSON.stringify(no.body));
+    const yes = await call('PATCH', `/api/schedules/${state.sched}`, { token: 't-emp', body: { paused: true } });
+    assert.strictEqual(yes.statusCode, 200, JSON.stringify(yes.body));
+    assert.strictEqual(tbl('schedules').find(s => s.id === state.sched).paused, true);
+    const del = await call('DELETE', `/api/schedules/${state.sched}`, { token: 't-emp' });
+    assert.strictEqual(del.statusCode, 200);
+    assert.ok(!tbl('schedules').some(s => s.id === state.sched));
+});
+test('a run cannot be scheduled by someone who did not start it', async () => {
+    const r = await call('POST', '/api/schedules', { token: 't-emp2', body: { jobId: state.job, cadence: 'weekly' } });
+    assert.strictEqual(r.statusCode, 404, JSON.stringify(r.body));
+});
+
+section('\nthe export never hands a spreadsheet a formula');
+test('a scraped bio that starts with = leaves the system neutralised', async () => {
+    tbl('leads').push({ id: crypto.randomUUID(), owner_user_id: EMP.id, platform: 'instagram', username: 'evilbio', bio: '=HYPERLINK("http://evil.test","click")', full_name: '+1 tricky', created_at: new Date().toISOString() });
+    const r = await call('GET', '/api/leads/export.csv', { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200);
+    const csv = String(r.body);
+    assert.ok(csv.includes("'=HYPERLINK"), 'the formula was not neutralised');
+    assert.ok(csv.includes("'+1 tricky"), 'the + lead was not neutralised');
+    for (const line of csv.split(/\r?\n/).slice(1)) {
+        for (const cell of line.split(',')) assert.ok(!/^[=+\-@]/.test(cell.replace(/^"/, '')), 'a cell begins with a formula character: ' + cell);
+    }
+});
+
+section('\nrate limits do not bleed between routes');
+test('a page-load\'s worth of reads does not lock the next job start', async () => {
+    // readLimit runs on every /api request; spendLimit on job starts. They
+    // used to share one bucket per user, so six reads in a minute made the
+    // seventh call — the job — a 429. The refusal here must be the client
+    // rule (400), never the limiter.
+    for (let i = 0; i < 10; i++) await call('GET', '/api/me', { token: 't-emp' });
+    const r = await call('POST', '/api/generate-ig-report', { token: 't-emp', body: { target: 'harborcafe' } });
+    assert.notStrictEqual(r.statusCode, 429, 'ten reads locked a job start: ' + JSON.stringify(r.body));
+    assert.strictEqual(r.statusCode, 400);
+    assert.strictEqual(r.body.code, 'client_required');
+});
+test('public traffic from an address does not lock the assistant for that address', async () => {
+    // Every earlier public call in this run came from 127.0.0.1 too. If the
+    // IP buckets were shared, this would be a 429 before the model was asked.
+    GEMINI.script = [{ parts: [{ text: 'Still here.' }] }];
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp2', body: { message: 'ping' } });
+    assert.notStrictEqual(r.statusCode, 429, JSON.stringify(r.body));
+});
+
+section('\nthe analyst answers about one client only');
+test('a question with a client chosen is answered from that client\'s reports, and the thread is filed under it', async () => {
+    GEMINI.script = [
+        { parts: [{ functionCall: { name: 'get_my_reports', args: {} } }] },
+        { parts: [{ text: 'Harbor Cafe has one Instagram check-up on file, in the healthy band.' }] }
+    ];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'How is this account doing?', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(/Harbor Cafe/.test(r.body.answer), r.body.answer);
+    assert.strictEqual(r.body.clientId, state.C);
+    assert.deepStrictEqual(r.body.used, ['get_my_reports']);
+    state.thread = r.body.conversationId;
+    const conv = tbl('ai_conversations').find(c => c.id === state.thread);
+    assert.ok(conv, 'no conversation row');
+    assert.strictEqual(conv.client_id, state.C, 'the thread is not filed under the client');
+    assert.strictEqual(tbl('ai_messages').filter(m => m.conversation_id === state.thread).length, 2);
+});
+test('the tool result the model actually received held only that client\'s reports', async () => {
+    assert.strictEqual(GEMINI.requests.length, 2, 'expected a tool round and an answer round');
+    const fr = GEMINI.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse);
+    assert.ok(fr, 'no functionResponse went back to the model');
+    const rows = fr.functionResponse.response.result;
+    assert.ok(Array.isArray(rows) && rows.length >= 1, 'the model saw no reports');
+    const foreign = rows.filter(x => x.handle && x.handle !== 'harborcafe');
+    assert.strictEqual(foreign.length, 0, 'a report from another client reached the model: ' + JSON.stringify(foreign.map(x => x.handle)));
+});
+test('the operator prompt names the client and says the others are out of reach', async () => {
+    const sys = GEMINI.requests[0].systemInstruction.parts[0].text;
+    assert.ok(/cannot see the operator's other clients/i.test(sys), 'the scope was not stated to the model');
+    assert.ok(/Harbor Cafe/.test(sys), 'the client is not named');
+    assert.ok(/analyst/i.test(sys), 'an employee should get the operator register');
+    assert.ok(!/knowledgeable friend/i.test(sys));
+});
+test('the tools were declared to the model, none of them taking a client argument', async () => {
+    const decls = GEMINI.requests[0].tools[0].functionDeclarations;
+    assert.ok(decls.some(d => d.name === 'get_monthly_report'));
+    for (const d of decls) {
+        for (const p of Object.keys(d.parameters.properties || {})) {
+            assert.ok(!/client|user|owner|account|scope/i.test(p), `${d.name} exposes "${p}" — the model could widen its own scope`);
+        }
+    }
+});
+test('the same thread will not take a turn about a different client', async () => {
+    GEMINI.script = [{ parts: [{ text: 'Bloom Florist has nothing on file yet.' }] }];
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'And this one?', clientId: state.D, conversationId: state.thread } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.notStrictEqual(r.body.conversationId, state.thread, 'a thread started for one client accepted a turn about another');
+    assert.strictEqual(tbl('ai_conversations').find(c => c.id === r.body.conversationId).client_id, state.D);
+});
+test('threads are listed per client, and none of them leak into the no-client list', async () => {
+    const c = await call('GET', '/api/assistant/conversations', { token: 't-emp', query: { client_id: state.C } });
+    assert.ok(c.body.conversations.some(x => x.id === state.thread));
+    assert.ok(!c.body.conversations.some(x => x.client_id === state.D));
+    const none = await call('GET', '/api/assistant/conversations', { token: 't-emp' });
+    assert.strictEqual(none.body.conversations.filter(x => x.client_id).length, 0);
+});
+test('a client account is answered in the owner register, about itself', async () => {
+    GEMINI.script = [{ parts: [{ text: 'You are doing well — one check-up on file.' }] }];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-client', body: { message: 'How am I doing?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const sys = GEMINI.requests[0].systemInstruction.parts[0].text;
+    assert.ok(/knowledgeable friend/i.test(sys), 'a client should get the owner register');
+    assert.ok(!/analyst/i.test(sys));
+    assert.ok(/never mention tools/i.test(sys), 'the owner is not told how it is built');
+});
+test('when the model has nothing to say, the answer says so rather than inventing', async () => {
+    GEMINI.script = [];                                    // the fake answers 500
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'Anything?', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(/could not|try/i.test(r.body.answer), 'a failed model call should read as a failure, not an answer: ' + r.body.answer);
 });
 
 (async () => {

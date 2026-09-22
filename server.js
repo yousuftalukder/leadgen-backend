@@ -278,9 +278,19 @@ app.use(express.json({ limit: '2mb' }));
 // ---------------------------------------------------------------------------
 const _buckets = new Map();
 
+// Each limiter counts in its own namespace. They used to share the map by
+// bare key, which made every limiter with the same key type ONE bucket: the
+// per-request read limit (240/min) and the job-start limit (6/min) both
+// keyed by bearer, so any user who had made six API calls in the last minute
+// — one page load — was refused their next job start with 429. And every
+// IP-keyed limiter shared too, so a dozen share-link opens from one office
+// locked the assistant for the whole office. The sweep below is key-agnostic
+// and needs no change.
+let _limiterSeq = 0;
 function rateLimit({ windowMs = 60000, max = 60, key = null } = {}) {
+    const ns = `L${_limiterSeq++}:`;
     return (req, res, next) => {
-        const id = (key ? key(req) : null) || req.ip || 'anon';
+        const id = ns + ((key ? key(req) : null) || req.ip || 'anon');
         const now = Date.now();
         let b = _buckets.get(id);
         if (!b || now > b.reset) { b = { count: 0, reset: now + windowMs }; _buckets.set(id, b); }

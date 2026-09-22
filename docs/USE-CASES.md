@@ -92,9 +92,9 @@ Three rules the arrows enforce:
 | # | Use case | Status | Proof / where |
 |---|---|---|---|
 | A1 | First account to sign in becomes admin (bootstrap) | **E2E** | `usecases` — *an agency starts up* |
-| A2 | Create an account as employee, client or admin | **BUILT** | admin.html create form; audit checks every role is creatable |
-| A3 | Grant engines per employee | **BUILT** | admin.html; audit proves every engine has a checkbox |
-| A4 | Set trial length, trial caps, monthly caps | **BUILT** | admin.html *Trial & plans*; `PATCH /api/admin/settings` |
+| A2 | Create an account as employee, client or admin | **E2E** | `usecases` — *the admin provisions people*: the new hire signs in and sees exactly the engine granted; the walk-in client sees a trial and an allowance |
+| A3 | Grant engines per employee; refuse an ungranted engine at its route | **E2E** | `usecases` — a grant added later shows on the next request; an ungranted engine is 403 at the route, not hidden in the page |
+| A4 | Set trial length, trial caps, monthly caps — and have them bite | **E2E** | `usecases` — *the admin moves a limit, and it moves*: a changed cap is enforced on the client's very next request |
 | A5 | Activate a paying client, set expiry, plan label | **E2E** (state) / **BUILT** (control) | `usecases` — *a paying client is active until paid_until* |
 | A6 | Create a client record | **E2E** | `usecases` — *the admin creates a client* |
 | A7 | Assign an employee to **any** client, including one an employee created | **E2E** | `usecases` — *the admin can hand out work on a client an employee created* |
@@ -113,16 +113,16 @@ Three rules the arrows enforce:
 | E3 | Run any granted engine — IG audit, competitor intel, FB page report, community audit, post advisor, content plan | **BUILT** / **LIVE-ONLY** | 13 workers, every one wired to a route and a page (audit); the run itself needs Apify credit |
 | E4 | Find Instagram leads (five methods) and have them filed under the client | **E2E** (link) / **LIVE-ONLY** (search) | `usecases` — *for this client, these are the leads*; the worker links via `linkLeadsToClient` |
 | E5 | Find Facebook Page leads | **BUILT** | Lead List → *Find Facebook Pages*; phase-16 unit tests on the row shape |
-| E6 | Read the master lead list, filter it, export it | **UNIT** | `phase20` — CSV formula neutralisation, sort whitelist |
+| E6 | Read the master lead list, filter it, export it | **E2E** | `usecases` — *the export never hands a spreadsheet a formula*; `phase20` for the sort whitelist |
 | E7 | See **this client's** leads, found by anyone, one row per business | **E2E** | `usecases` — client view, colleague's find, de-duplication, stranger refused, export follows scope |
-| E8 | Connect Meta as the client's Business Suite manager; turn a Page into a client | **BUILT** / **LIVE-ONLY** | `/api/meta/inbox`, `/onboard`; needs a Tester role on the Meta app in Development Mode |
+| E8 | Connect Meta as the client's Business Suite manager; turn a Page into a client | **E2E** (onboarding) / **LIVE-ONLY** (the OAuth handshake) | `usecases` — *an employee onboards a client from Business Suite*: unfiled Page → client with nothing retyped → filed, twice refused, colleague refused. The handshake itself needs a Tester role on the Meta app |
 | E9 | Build the monthly owner report, this month against last | **UNIT** | `phase19` — month bounds, deltas, "new" vs "no baseline" |
-| E10 | Ask the analyst about one client only | **UNIT** | `phase15`/`phase19` — tools cannot widen scope; prompt splits by audience |
+| E10 | Ask the analyst about one client only | **E2E** | `usecases` — *the analyst answers about one client only*: the model is scripted, and the test reads what the server actually sent it — the tool result held only that client's reports, the prompt named the client and the scope, a thread will not take a turn about another client |
 | E11 | Discover comparable local businesses; keep a stable comparison set | **UNIT** | `phase19` — size band, query shape |
 | E12 | Write a content plan; add manual audit findings; only proven cells may be boosted | **UNIT** | `phase17` — the boost gate, tested adversarially |
 | E13 | Share a report by link; revoke it | **E2E** | `usecases` — *a report goes out to someone with no account* |
-| E14 | Repeat a run on a schedule, under its client | **UNIT** / **LIVE-ONLY** | `phase11`; the scheduler itself is live-checks |
-| E15 | Bring my own Apify key; top it up; pause instead of using the pool | **BUILT** | Sidebar *Update key*; `byo_key_only` per user |
+| E14 | Repeat a run on a schedule, under its client | **E2E** (create, list, pause, delete; carries the client) / **LIVE-ONLY** (the timer firing) | `usecases` — *a run is repeated on a schedule, under its client*; `phase11` for next-run arithmetic |
+| E15 | Bring my own Apify key; pause instead of using the pool | **E2E** (the own-key-only setting) / **BUILT** (the key itself) | `usecases` — own-key-only sticks; sidebar *Update key* |
 
 ## Client
 
@@ -131,7 +131,7 @@ Three rules the arrows enforce:
 | C1 | Sign up → 7-day trial → I am my own business from the first login | **E2E** | `usecases` — *a business signs itself up* |
 | C2 | See my reports in owner language, banded not scored | **UNIT** | `phase14` — `clientReportView`, pillars, standing |
 | C3 | Draw a limited number of leads; audit a limited number of groups; stay under a dollar ceiling | **UNIT** | `phase13` — 32 checks on caps, periods, refunds |
-| C4 | Ask the assistant | **UNIT** | `phase15` |
+| C4 | Ask the assistant | **E2E** | `usecases` — a client account is answered in the owner register, about itself, never told how it is built |
 | C5 | Connect my own Meta and get the owner assistant | **BUILT** / **PARTIAL** | Works for accounts with a role on the Meta app. The privacy, terms and data-deletion pages and the deletion callback App Review asks for now exist; **public self-serve still needs the review itself** |
 | C6 | Be taken on by an agency and see the work they do for me | **E2E** | `usecases` — *the agency takes that business on* |
 | C7 | Lapse → refused with `account_expired`; be re-activated by an admin | **E2E** (refusal) / **BUILT** (activation) | `usecases` — *the account states a client can be in* |
@@ -152,6 +152,7 @@ Three rules the arrows enforce:
 | S1 | Quota is consumed atomically; two runs cannot both see room | **UNIT** + **LIVE-ONLY** | SQL RPCs; `live-checks.js` proves the race with two real accounts |
 | S2 | A job checkpoints and resumes; a paused run is not a hang | **LIVE-ONLY** | `live-checks.js` |
 | S3 | One Render instance; a second one alarms | **LIVE-ONLY** | heartbeat guard, `/api/health` |
+| S4 | Rate limits are per route: a page-load's reads never lock a job start; public traffic never locks the assistant | **E2E** | `usecases` — *rate limits do not bleed between routes*. Found by the assistant flow: every limiter shared one bucket by key, so six reads in a minute made the next job start a 429 |
 
 ---
 
@@ -171,7 +172,7 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 49 | The workflows above marked E2E, as a person would do them |
+| `tests/usecases.test.js` | 78 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
 | `tests/wiring.test.js` | 36 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
 | `tests/phase*.test.js` | ~200 | The logic inside each engine |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
