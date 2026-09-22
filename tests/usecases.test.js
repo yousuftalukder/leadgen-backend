@@ -236,7 +236,11 @@ global.fetch = async (url, opts = {}) => {
         if (typeof next === 'function') next = next(body);
         return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
     }
-    if (/graph\.facebook\.com\//.test(u)) return reply(200, GRAPH.answer(new URL(u)));
+    if (/graph\.facebook\.com\//.test(u)) {
+        // A refused token, for the daily read's expiry path.
+        if (GRAPH.fail) return reply(GRAPH.fail.status || 401, { error: { message: GRAPH.fail.message || 'Error validating access token', code: 190 } });
+        return reply(200, GRAPH.answer(new URL(u)));
+    }
     return reply(404, `the test fake has no answer for ${u}`);
 };
 
@@ -253,6 +257,9 @@ global.fetch = async (url, opts = {}) => {
 const GRAPH = {
     PAGE: '77001', IG: '17841400000000001',
     AUG_1: Date.UTC(2026, 7, 1) / 1000,
+    daily: null,          // { 'YYYY-MM-DD': { reach, … } } — answers per-day total_value reads (phase 30)
+    igFollowers: null,    // today's follower count, when a test moves it
+    fail: null,           // { status } — every Graph call refused, for the expiry path
     cur:  { page: { page_impressions_unique: 8120, page_post_engagements: 940, page_views_total: 500, page_fan_adds_unique: 40 },
             ig:   { reach: 41820, views: 96400, accounts_engaged: 3180, total_interactions: 5910, profile_views: 1204, website_clicks: 77, follower_count: 412 } },
     prev: { page: { page_impressions_unique: 7000, page_post_engagements: 1120, page_views_total: 480, page_fan_adds_unique: 35 },
@@ -264,6 +271,11 @@ const GRAPH = {
         const metrics = String(q.get('metric') || '').split(',').filter(Boolean);
         if (seg[0] === GRAPH.PAGE && seg[1] === 'insights') {
             return { data: metrics.map(name => ({ name, values: [{ end_time: '2026-08-31T07:00:00+0000', value: set.page[name] ?? 0 }] })) };
+        }
+        if (seg[0] === GRAPH.IG && seg[1] === 'insights' && GRAPH.daily && q.get('metric_type') === 'total_value' && q.get('since')) {
+            const day = new Date(Number(q.get('since')) * 1000).toISOString().slice(0, 10);
+            const row = GRAPH.daily[day] || {};
+            return { data: metrics.map(name => ({ name, total_value: { value: row[name] ?? 0 } })) };
         }
         if (seg[0] === GRAPH.IG && seg[1] === 'insights') {
             if (metrics[0] === 'follower_demographics') {
@@ -282,7 +294,7 @@ const GRAPH = {
             return { data: [['reach', 11240], ['saved', 184], ['shares', 96], ['views', 30000], ['total_interactions', 600]].map(([name, v]) => ({ name, values: [{ value: v }] })) };
         }
         if (seg[0] === GRAPH.PAGE) return { id: GRAPH.PAGE, name: 'Harbor Cafe', fan_count: 4800, followers_count: 4820, category: 'Cafe' };
-        if (seg[0] === GRAPH.IG)   return { id: GRAPH.IG, username: 'harborcafe', name: 'Harbor Cafe', followers_count: 9240, follows_count: 300, media_count: 120 };
+        if (seg[0] === GRAPH.IG)   return { id: GRAPH.IG, username: 'harborcafe', name: 'Harbor Cafe', followers_count: GRAPH.igFollowers ?? 9240, follows_count: 300, media_count: 120 };
         return { data: [] };
     }
 };
@@ -1447,6 +1459,148 @@ test('with no mail set up, nothing is attempted and nothing breaks', async () =>
     assert.strictEqual(ask.statusCode, 200);
     await settle();
     assert.strictEqual(MAIL.sent.length, 0, 'nothing should have been attempted');
+});
+
+// ===========================================================================
+// PHASE 30 — the owner assistant, and the numbers every day
+// ===========================================================================
+section('\nthe owner assistant reads the Meta its agency connected');
+test('a client asking is scoped to its own business, where the agency\'s connection lives', async () => {
+    GEMINI.script = [{ parts: [{ text: 'Your reach is up this month.' }] }];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-client', body: { message: 'How is my reach?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.clientId, state.C, 'the client should be scoped to its business');
+    const sys = GEMINI.requests[0].systemInstruction.parts[0].text;
+    assert.ok(/has connected Meta/i.test(sys), 'the connection the agency made should count for the owner: ' + sys.slice(0, 400));
+    assert.ok(/knowledgeable friend/i.test(sys), 'still the owner register');
+    assert.ok(/synced from Meta every day/i.test(sys), 'the daily numbers should be offered to the model');
+    const decls = GEMINI.requests[0].tools[0].functionDeclarations;
+    assert.ok(decls.some(x => x.name === 'get_daily_growth'), 'the growth tool should be declared');
+    const conv = tbl('ai_conversations').find(c => c.id === r.body.conversationId);
+    assert.strictEqual(conv.client_id, state.C, 'the thread should be filed under the business');
+});
+test('the client sees its threads, filed under its business', async () => {
+    const r = await call('GET', '/api/assistant/conversations', { token: 't-client', query: { client_id: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(r.body.conversations.some(c => c.client_id === state.C), 'the thread just started is missing');
+});
+
+section('\nthe numbers every day, and growth from the change between them');
+const TODAY = new Date().toISOString().slice(0, 10);
+const dd = n => S.shiftDay(TODAY, n);
+// An employee with no client at all. EMP2 is a member of Harbor Cafe by now
+// (the merge carried its membership across), so it is no stranger to it.
+const STRANGER = person('stranger@agency.test'); TOKENS['t-stranger'] = STRANGER;
+tbl('app_users').push({ id: STRANGER.id, email: STRANGER.email, role: 'user', is_active: true });
+test('the daily read writes today\'s counts and the ended days\' activity, from the Graph API', async () => {
+    // Older days, as earlier reads would have left them: 8800 followers a
+    // month ago, 9000 a week ago, 9200 four days ago; reach 1000 a day in the
+    // week before last, 1200 a day since.
+    for (let i = 30; i >= 4; i--) {
+        const followers = i === 30 ? 8800 : (i === 7 ? 9000 : (i === 4 ? 9200 : (i > 7 ? 8800 + (30 - i) * 8 : 9100)));
+        tbl('meta_daily').push({ id: crypto.randomUUID(), connection_id: state.moConn.id, user_id: EMP.id, level: 'ig', day: dd(-i),
+            followers, reach: i > 7 ? 1000 : 1200, profile_views: 40, interactions: 70, created_at: new Date().toISOString() });
+    }
+    GRAPH.daily = {};
+    for (const n of [1, 2, 3]) GRAPH.daily[dd(-n)] = { reach: 1200, views: 3000, accounts_engaged: 100, total_interactions: 70, profile_views: 40, website_clicks: 3, follower_count: 10 + n };
+    GRAPH.igFollowers = 9240;
+
+    const r = await S.metaDailySync(state.moConn, { days: 3 });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.ig, true); assert.strictEqual(r.page, true); assert.strictEqual(r.days, 3);
+    const today = tbl('meta_daily').find(x => x.connection_id === state.moConn.id && x.level === 'ig' && x.day === TODAY);
+    assert.ok(today, 'no row for today');
+    assert.strictEqual(today.followers, 9240);
+    const y = tbl('meta_daily').find(x => x.connection_id === state.moConn.id && x.level === 'ig' && x.day === dd(-1));
+    assert.ok(y, 'no row for yesterday');
+    assert.strictEqual(y.reach, 1200);
+    assert.strictEqual(y.follows, 11, 'follower_count is the day\'s new follows');
+    assert.ok(state.moConn.daily_synced_at, 'the connection should say when it was read');
+    assert.strictEqual(state.moConn.daily_error, null);
+    const page = tbl('meta_daily').find(x => x.connection_id === state.moConn.id && x.level === 'page' && x.day === TODAY);
+    assert.ok(page && page.followers === 4820, 'the Page count should be there too');
+});
+test('reading again is idempotent: one row per day, the count refreshed', async () => {
+    GRAPH.igFollowers = 9241;
+    await S.metaDailySync(state.moConn, { days: 3 });
+    const rows = tbl('meta_daily').filter(x => x.connection_id === state.moConn.id && x.level === 'ig' && x.day === TODAY);
+    assert.strictEqual(rows.length, 1, 'a second read must not add a second row for today');
+    assert.strictEqual(rows[0].followers, 9241);
+    GRAPH.igFollowers = 9240;
+    await S.metaDailySync(state.moConn, { days: 3 });
+});
+test('the client reads its growth: followers against a week and a month ago, reach this week against last', async () => {
+    const r = await call('GET', '/api/client/growth', { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.connected, true);
+    assert.strictEqual(r.body.level, 'ig');
+    assert.strictEqual(r.body.source, 'meta_owner_insights');
+    const g = r.body.growth;
+    assert.strictEqual(g.followers.now, 9240);
+    assert.strictEqual(g.followers.day, 40, 'the latest earlier count was 9200');
+    assert.strictEqual(g.followers.week, 240, 'a week ago it was 9000');
+    assert.strictEqual(g.followers.month, 440, 'a month ago it was 8800');
+    assert.strictEqual(g.reach.now, 8400);
+    assert.strictEqual(g.reach.before, 7000);
+    assert.strictEqual(g.reach.kind, 'up');
+    assert.strictEqual(g.reach.pct, 20);
+    assert.ok(g.series.length >= 14 && g.series[g.series.length - 1].day === TODAY);
+});
+test('the agency reads the same growth for the client; a stranger is refused', async () => {
+    const r = await call('GET', '/api/meta/growth', { token: 't-emp', query: { client_id: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.growth.followers.now, 9240);
+    const s = await call('GET', '/api/meta/growth', { token: 't-stranger', query: { client_id: state.C } });
+    assert.strictEqual(s.statusCode, 403, JSON.stringify(s.body));
+    const byConn = await call('GET', '/api/meta/growth', { token: 't-emp', query: { connection_id: state.moConn.id } });
+    assert.strictEqual(byConn.body.growth.followers.week, 240);
+});
+test('"sync now" reads at once; a stranger has nothing to read', async () => {
+    const r = await call('POST', '/api/meta/daily-sync', { token: 't-client', body: {} });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.sync.ok, true);
+    assert.strictEqual(r.body.growth.followers.now, 9240);
+    const e = await call('POST', '/api/meta/daily-sync', { token: 't-emp', body: { connectionId: state.moConn.id } });
+    assert.strictEqual(e.statusCode, 200, JSON.stringify(e.body));
+    const s = await call('POST', '/api/meta/daily-sync', { token: 't-stranger', body: { connectionId: state.moConn.id } });
+    assert.strictEqual(s.statusCode, 404);
+});
+test('the assistant answers "am I growing" from the same numbers', async () => {
+    GEMINI.script = [
+        { parts: [{ functionCall: { name: 'get_daily_growth', args: {} } }] },
+        { parts: [{ text: 'Yes — 240 more followers than a week ago, and reach is up a fifth.' }] }
+    ];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-client', body: { message: 'Am I growing?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual(r.body.used, ['get_daily_growth']);
+    const fr = GEMINI.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse);
+    assert.ok(fr, 'no tool result went back to the model');
+    const res = fr.functionResponse.response.result;
+    assert.strictEqual(res.followers.now, 9240);
+    assert.strictEqual(res.followers.week, 240);
+    assert.strictEqual(res.reach.kind, 'up');
+    assert.ok(/240/.test(r.body.answer));
+});
+test('the hourly pass reads only what is due', async () => {
+    const before = state.moConn.daily_synced_at;
+    await S.metaDailyTick();
+    assert.strictEqual(state.moConn.daily_synced_at, before, 'just read — it must not be read again');
+    state.moConn.daily_synced_at = new Date(Date.now() - 26 * 3600000).toISOString();
+    const t = await S.metaDailyTick();
+    assert.ok(t.due >= 1 && t.synced >= 1, JSON.stringify(t));
+    assert.ok(Date.now() - Date.parse(state.moConn.daily_synced_at) < 60000, 'the due connection should have been read');
+});
+test('a refused token marks the connection expired and never throws', async () => {
+    GRAPH.fail = { status: 401 };
+    const r = await S.metaDailySync(state.moConn, { days: 1 });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.expired, true);
+    assert.strictEqual(state.moConn.status, 'expired');
+    assert.ok(/access token/i.test(state.moConn.daily_error || ''), state.moConn.daily_error);
+    GRAPH.fail = null; GRAPH.daily = null; GRAPH.igFollowers = null;
+    state.moConn.status = 'active'; state.moConn.daily_error = null;
 });
 
 (async () => {

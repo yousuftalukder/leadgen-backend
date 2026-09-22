@@ -55,6 +55,7 @@ flowchart LR
         R[(reports<br/>ig · competitor · fb page · community<br/>content plan · meta owner · monthly)]
         CP[(campaigns)]
         MC[(meta_connections)]
+        MD[(meta_daily<br/>one row per day)]
         TH[(ai_conversations)]
         SC[(schedules)]
         SH[(report_shares)]
@@ -74,6 +75,7 @@ flowchart LR
     SH -- "token, no session" --> PUB[Public viewer]
     SC -- "re-runs under the same client" --> J
     MC -- "owner-only numbers" --> R
+    MC -- "read every day" --> MD
 ```
 
 Three rules the arrows enforce:
@@ -137,13 +139,15 @@ Three rules the arrows enforce:
 | C1 | Sign up → 7-day trial → I am my own business from the first login | **E2E** | `usecases` — *a business signs itself up* |
 | C2 | See my reports in owner language — Instagram banded and ranked; Facebook, owner and monthly reports as headline, what is working, what to change | **E2E** | `usecases` — *the client surface names every kind of report*: titles for every stored type; a Page report and a monthly report open as points, with no invented standing; an Instagram report still bands and ranks |
 | C3 | Draw a limited number of leads; audit a limited number of groups; stay under a dollar ceiling | **UNIT** | `phase13` — 32 checks on caps, periods, refunds |
-| C4 | Ask the assistant | **E2E** | `usecases` — a client account is answered in the owner register, about itself, never told how it is built |
-| C5 | Connect my own Meta and get the owner assistant | **BUILT** / **PARTIAL** | Works for accounts with a role on the Meta app. The privacy, terms and data-deletion pages and the deletion callback App Review asks for now exist; **public self-serve still needs the review itself** |
+| C4 | Ask the assistant — the owner assistant, exactly the analyst's engine, tools and numbers, in the owner register | **E2E** | `usecases` — *the owner assistant reads the Meta its agency connected*: a client's question is scoped to its own business, the connection its agency made counts, the daily numbers are offered, the thread is filed under the business; *a client account is answered in the owner register, about itself* |
+| C5 | Connect my own Meta from My Reports and get the owner assistant | **BUILT** / **PARTIAL** | *Connect Meta* on the client dashboard files the connection under the client's own business and lands them back on it. Works for accounts with a role on the Meta app; the privacy, terms and data-deletion pages and the deletion callback App Review asks for exist; **public self-serve still needs the review itself** |
 | C6 | Be taken on by an agency and see the work they do for me | **E2E** | `usecases` — *the agency takes that business on* |
 | C7 | Lapse → refused with `account_expired`; be re-activated by an admin | **E2E** (refusal) / **BUILT** (activation) | `usecases` — *the account states a client can be in* |
 | C8 | Purchase | **PARTIAL by decision** | Admin activates manually; no payment gateway |
 | C10 | Ask to continue — during the trial or after it has ended — and be activated, and be told where to pay | **E2E** | `usecases` — *the money moment*: a trial client asks with a note; a **lapsed** client can still ask (the one door that stays open); the admin sees it waiting and activates; the very next request is in and the request is cleared; the client hears by mail that they were activated (A14). Rendered: the banner action, the expired screen's button, the "already asked" state, and the ways to pay in both places |
-| C9 | See the leads my agency found for me, marked as the team's | **E2E** | `usecases` — *the client sees the leads their team found for them* |
+| C9 | See the leads my agency found for me, marked as the team's | **E2E** | `usecases` — *the client sees the leads their team found for them* |
+| C11 | See my numbers every day, and how they moved: followers against a week and a month ago, reach this week against last | **E2E** | `usecases` — *the numbers every day, and growth from the change between them*: the daily read writes today's counts and the ended days' activity from the Graph API, twice is one row per day, the client reads its growth (240 followers on the week, reach up 20%), the agency reads the same, a stranger is refused, *Sync now* reads at once, the assistant answers "am I growing" from the same numbers; `phase30` for the arithmetic (a missed day, a zero baseline, today never against itself) |
+| C12 | Put EdgeLead on my phone's home screen and open it like an app | **UNIT** + rendered | `phase30` — the manifest is valid and starts on the dashboard, the worker is network-first and never caches the API, every client page carries the manifest and the iOS tags, the prompt is caught at parse time, "not now" is remembered; the card and the dashboard verified in a harness at phone width. The tap itself is the phone's |
 
 ## Public viewer
 
@@ -159,7 +163,8 @@ Three rules the arrows enforce:
 | S1 | Quota is consumed atomically; two runs cannot both see room | **UNIT** + **LIVE-ONLY** | SQL RPCs; `live-checks.js` proves the race with two real accounts |
 | S2 | A job checkpoints and resumes; a paused run is not a hang | **LIVE-ONLY** | `live-checks.js` |
 | S3 | One Render instance; a second one alarms | **LIVE-ONLY** | heartbeat guard, `/api/health` |
-| S4 | Rate limits are per route: a page-load's reads never lock a job start; public traffic never locks the assistant | **E2E** | `usecases` — *rate limits do not bleed between routes*. Found by the assistant flow: every limiter shared one bucket by key, so six reads in a minute made the next job start a 429 |
+| S4 | Rate limits are per route: a page-load's reads never lock a job start; public traffic never locks the assistant | **E2E** | `usecases` — *rate limits do not bleed between routes*. Found by the assistant flow: every limiter shared one bucket by key, so six reads in a minute made the next job start a 429 |
+| S5 | Every active Meta connection is read once a day, by itself; a refused token expires the connection and nothing throws | **E2E** | `usecases` — *the hourly pass reads only what is due*; *a refused token marks the connection expired and never throws* |
 
 ---
 
@@ -178,9 +183,9 @@ Three rules the arrows enforce:
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `tests/usecases.test.js` | 106 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
+| `tests/usecases.test.js` | 116 | The workflows above marked E2E, as a person would do them — including the assistant, against a scripted model whose every request the test reads back |
 | `tests/wiring.test.js` | 38 | Every page reaches a real route, every worker is startable, every engine grantable, every job page carries the client bar |
-| `tests/phase*.test.js` | ~200 | The logic inside each engine |
+| `tests/phase*.test.js` | ~220 | The logic inside each engine |
 | `.github/workflows/test.yml` | — | Every push and pull request runs the syntax check, the suite and the audit. A broken push no longer goes live unnoticed. |
 | `scripts/live-checks.js` | — | The things only production can prove: quota races, resume, isolation between two real accounts. **Has never been run against this deployment — it needs a second account.** |
 

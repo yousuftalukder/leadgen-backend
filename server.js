@@ -11855,8 +11855,10 @@ app.get('/api/meta/oauth/start', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
         if (!metaConfigured()) return res.status(503).json({ error: 'META_APP_ID / META_APP_SECRET are not set on the server.' });
-        const clientId = req.query.client_id ? (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null : null;
+        let clientId = req.query.client_id ? (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null : null;
         if (req.query.client_id && !clientId) return res.status(403).json({ error: 'No edit access to that client.' });
+        // A client account connects its own business; it is never asked which. (phase 30)
+        if (ctx.profile?.role === 'client') clientId = (await ownClientFor(ctx)).id;
 
         const state = crypto.randomBytes(24).toString('hex');
         const { error } = await supabase.from('meta_oauth_states').insert([{
@@ -11877,8 +11879,11 @@ app.get('/api/meta/oauth/start', async (req, res) => {
 
 /** Public: Facebook redirects the browser here. State row is the auth. */
 app.get('/api/meta/oauth/callback', async (req, res) => {
+    // Staff land on the Clients page; a client account lands on its own
+    // dashboard, which is the only page it can open anyway.
+    let landing = 'clients.html';
     const back = (q) => {
-        const base = FRONTEND_URL ? `${FRONTEND_URL}/clients.html` : '/clients.html';
+        const base = FRONTEND_URL ? `${FRONTEND_URL}/${landing}` : `/${landing}`;
         res.redirect(`${base}?${new URLSearchParams(q).toString()}`);
     };
     try {
@@ -11889,6 +11894,7 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         const { data: st } = await supabase.from('meta_oauth_states').select('*').eq('state', String(state)).maybeSingle();
         await supabase.from('meta_oauth_states').delete().eq('state', String(state));
         if (!st || new Date(st.expires_at).getTime() < Date.now()) return back({ meta: 'error', message: 'Login link expired. Try again.' });
+        if ((await userRole(st.user_id).catch(() => null)) === 'client') landing = 'client.html';
 
         const shortTok = await graphGet('oauth/access_token', {
             client_id: META_APP_ID, client_secret: META_APP_SECRET,
@@ -12179,6 +12185,283 @@ app.post('/api/meta/sync', spendLimit, async (req, res) => {
 
 function seriesSum(arr) { return Array.isArray(arr) ? arr.reduce((s, v) => s + (Number(v.value) || 0), 0) : Number(arr) || 0; }
 function seriesLast(arr) { return Array.isArray(arr) && arr.length ? Number(arr[arr.length - 1].value) || 0 : Number(arr) || 0; }
+
+
+// ===========================================================================
+// THE NUMBERS EVERY DAY (phase 30)
+//
+// A connected account is read once a day whether or not anyone runs a report,
+// so growth is read from the change between days rather than from whichever
+// two reports happen to exist. Graph API only — it costs nothing. One row per
+// connection, level and day in meta_daily: the lifetime counts (followers)
+// are what the account says today; the activity numbers (reach, profile
+// visits, interactions) are a day's totals and are written for the days that
+// have ended. The hourly pass is quiet unless a connection is due.
+// ===========================================================================
+const META_DAILY_POLL_MS    = parseInt(process.env.META_DAILY_POLL_MS || '3600000', 10);
+const META_DAILY_EVERY_MS   = 20 * 3600000;        // a connection is due again after 20 hours
+const META_DAILY_RETRY_MS   = 4 * 3600000;         // a failed read is tried again after 4
+const META_DAILY_FIRST_DAYS = 30;                  // the first read backfills a month of activity
+const META_DAILY_IG_METRICS   = ['reach', 'views', 'accounts_engaged', 'total_interactions', 'profile_views', 'website_clicks', 'follower_count'];
+const META_DAILY_PAGE_METRICS = ['page_impressions_unique', 'page_post_engagements', 'page_views_total', 'page_fan_adds_unique'];
+
+function dayStr(d) { return new Date(d).toISOString().slice(0, 10); }
+function shiftDay(iso, n) { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function dayEpoch(iso) { return Math.floor(Date.parse(`${iso}T00:00:00Z`) / 1000); }
+const numOrNull = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+
+async function metaDailyUpsert(rows) {
+    if (!rows.length) return;
+    const { error } = await supabase.from('meta_daily').upsert(rows, { onConflict: 'connection_id,level,day' });
+    if (error) throw new Error(`meta_daily: ${error.message}`);
+}
+
+async function metaDailyFail(conn, err, out) {
+    const expired = err.statusCode === 401;
+    const patch = {
+        // Tried again in four hours rather than every hour, and not left for a
+        // day either: a transient Graph error should not cost a day of numbers.
+        daily_synced_at: new Date(Date.now() - (META_DAILY_EVERY_MS - META_DAILY_RETRY_MS)).toISOString(),
+        daily_error: String(err.message || err).slice(0, 300)
+    };
+    if (expired) { patch.status = 'expired'; patch.last_error = patch.daily_error; }
+    await supabase.from('meta_connections').update(patch).eq('id', conn.id);
+    logger.warn('meta_daily_failed', { connectionId: conn.id, message: err.message, expired });
+    return { ...out, ok: false, error: patch.daily_error, expired };
+}
+
+/**
+ * Read one connection's numbers: today's lifetime counts, and the activity of
+ * the last `days` ended days. Never throws — the result says what happened
+ * and the connection row carries the last error, so the client page can show
+ * it. A 401 marks the connection expired, as the report worker does.
+ */
+async function metaDailySync(conn, { days = 3, now = new Date() } = {}) {
+    const today = dayStr(now);
+    const out = { ok: true, connectionId: conn.id, today, days: 0, ig: false, page: false, warnings: [] };
+    let pageToken = null;
+    try { pageToken = decryptSecret(conn.page_token_enc); }
+    catch (e) { return metaDailyFail(conn, e, out); }
+    if (!pageToken) return metaDailyFail(conn, new Error('The connection has no Page token.'), out);
+
+    const stamp = { connection_id: conn.id, user_id: conn.user_id, synced_at: now.toISOString() };
+    const span = Math.min(Math.max(parseInt(days, 10) || 3, 1), 90);
+    try {
+        // --- the Page: lifetime counts today, activity per ended day ---------
+        const pm = await graphGet(conn.page_id, { fields: 'id,fan_count,followers_count' }, pageToken);
+        const rows = [{ ...stamp, level: 'page', day: today, followers: numOrNull(pm.followers_count), fans: numOrNull(pm.fan_count) }];
+        const ins = await graphInsights(conn.page_id, META_DAILY_PAGE_METRICS,
+            { period: 'day', since: dayEpoch(shiftDay(today, -span)), until: dayEpoch(today) }, pageToken);
+        const map = { page_impressions_unique: 'reach', page_post_engagements: 'interactions', page_views_total: 'profile_views', page_fan_adds_unique: 'follows' };
+        const byDay = {};
+        for (const [metric, series] of Object.entries(ins.values)) {
+            if (!Array.isArray(series) || !map[metric]) continue;
+            for (const v of series) {
+                if (!v || !v.end_time) continue;
+                // end_time closes the day; the value belongs to the day before it.
+                const day = shiftDay(dayStr(v.end_time), -1);
+                if (day >= today) continue;
+                (byDay[day] = byDay[day] || {})[map[metric]] = numOrNull(v.value);
+            }
+        }
+        for (const [day, m] of Object.entries(byDay)) rows.push({ ...stamp, level: 'page', day, ...m });
+        await metaDailyUpsert(rows);
+        out.page = true;
+        if (ins.unsupported.length) out.warnings.push(`page: ${ins.unsupported.join(', ')} not available`);
+
+        // --- Instagram: lifetime counts today, one read per ended day --------
+        if (conn.ig_user_id) {
+            const im = await graphGet(conn.ig_user_id, { fields: 'id,followers_count,follows_count,media_count' }, pageToken);
+            const igRows = [{ ...stamp, level: 'ig', day: today,
+                followers: numOrNull(im.followers_count), following: numOrNull(im.follows_count), media_count: numOrNull(im.media_count) }];
+            const unsupported = new Set();
+            for (let i = 1; i <= span; i++) {
+                const day = shiftDay(today, -i);
+                const want = META_DAILY_IG_METRICS.filter(m => !unsupported.has(m));
+                if (!want.length) break;
+                const r = await graphInsights(conn.ig_user_id, want,
+                    { period: 'day', metric_type: 'total_value', since: dayEpoch(day), until: dayEpoch(shiftDay(day, 1)) }, pageToken);
+                r.unsupported.forEach(m => unsupported.add(m));
+                const v = k => (r.values[k] === undefined ? null : (Array.isArray(r.values[k]) ? seriesSum(r.values[k]) : numOrNull(r.values[k])));
+                igRows.push({ ...stamp, level: 'ig', day,
+                    reach: v('reach'), views: v('views'), accounts_engaged: v('accounts_engaged'), interactions: v('total_interactions'),
+                    profile_views: v('profile_views'), website_clicks: v('website_clicks'), follows: v('follower_count') });
+                out.days += 1;
+            }
+            await metaDailyUpsert(igRows);
+            out.ig = true;
+            if (unsupported.size) out.warnings.push(`ig: ${[...unsupported].join(', ')} not available`);
+        }
+
+        await supabase.from('meta_connections').update({ daily_synced_at: now.toISOString(), daily_error: null }).eq('id', conn.id);
+        return out;
+    } catch (e) { return metaDailyFail(conn, e, out); }
+}
+
+/** The hourly pass: every active connection not read in the last 20 hours. */
+let _dailyBusy = false;
+async function metaDailyTick({ now = new Date(), limit = 10 } = {}) {
+    if (!SCHEDULER_ENABLED || _dailyBusy || _shuttingDown) return { due: 0, synced: 0, failed: 0, skipped: true };
+    _dailyBusy = true;
+    const out = { due: 0, synced: 0, failed: 0 };
+    try {
+        const { data } = await supabase.from('meta_connections').select('*').eq('status', 'active').limit(500);
+        const cutoff = now.getTime() - META_DAILY_EVERY_MS;
+        const due = (data || []).filter(c => !c.daily_synced_at || Date.parse(c.daily_synced_at) < cutoff).slice(0, limit);
+        out.due = due.length;
+        for (const conn of due) {
+            const r = await metaDailySync(conn, { days: conn.daily_synced_at ? 3 : META_DAILY_FIRST_DAYS, now });
+            if (r.ok) out.synced += 1; else out.failed += 1;
+        }
+        if (out.due) logger.info('meta_daily_tick', out);
+    } catch (e) {
+        logger.error('meta_daily_tick_failed', { message: e.message });
+    } finally { _dailyBusy = false; }
+    return out;
+}
+
+/**
+ * Growth from a run of daily rows. Pure, so a test can hand it any days.
+ *
+ * Followers are compared with the latest row on or before N days ago — "on
+ * or before" because one missed day must not turn a week's growth into
+ * "unknown". Activity is summed over the last seven ended days against the
+ * seven before. Anything with no baseline says so rather than computing a
+ * percentage against nothing (pctDelta).
+ */
+function growthFrom(rows, today = new Date().toISOString().slice(0, 10)) {
+    const days = (rows || []).filter(r => r && r.day).map(r => ({ ...r, day: (r.day instanceof Date ? r.day.toISOString() : String(r.day)).slice(0, 10) }))
+        .sort((a, b) => a.day.localeCompare(b.day));
+    if (!days.length) return { empty: true, days: 0, since: null, latest: null, today, followers: null, series: [] };
+
+    const withF = days.filter(r => r.followers !== null && r.followers !== undefined);
+    const nowRow = withF.length ? withF[withF.length - 1] : null;
+    const at = n => { const cut = shiftDay(today, -n); for (let i = withF.length - 1; i >= 0; i--) if (withF[i].day <= cut) return withF[i]; return null; };
+    const diff = (a, b) => (a && b && a !== b ? a.followers - b.followers : null);
+    const pctOf = (a, b) => (a && b && a !== b ? pctDelta(a.followers, b.followers).pct : null);
+    const sumWin = (key, from, to) => {
+        let sum = 0, n = 0;
+        for (const r of days) if (r.day >= from && r.day <= to && r[key] !== null && r[key] !== undefined) { sum += Number(r[key]) || 0; n += 1; }
+        return n ? sum : null;
+    };
+    const win = key => {
+        const now = sumWin(key, shiftDay(today, -7), shiftDay(today, -1));
+        const before = sumWin(key, shiftDay(today, -14), shiftDay(today, -8));
+        return { now, before, ...pctDelta(now, before) };
+    };
+    const d1 = at(1), d7 = at(7), d30 = at(30);
+    return {
+        empty: false, days: days.length, since: days[0].day, latest: days[days.length - 1].day, today,
+        followers: nowRow ? {
+            now: nowRow.followers, asOf: nowRow.day,
+            day: diff(nowRow, d1), week: diff(nowRow, d7), month: diff(nowRow, d30),
+            week_pct: pctOf(nowRow, d7), month_pct: pctOf(nowRow, d30)
+        } : null,
+        reach: win('reach'), views: win('views'), profile_views: win('profile_views'),
+        interactions: win('interactions'), follows: win('follows'),
+        series: days.slice(-30).map(r => ({
+            day: r.day, followers: r.followers ?? null, reach: r.reach ?? null, views: r.views ?? null,
+            profile_views: r.profile_views ?? null, interactions: r.interactions ?? null, follows: r.follows ?? null
+        }))
+    };
+}
+
+/** The daily rows of one connection (the one with the most rows, Instagram level first), as growth. */
+async function growthForConnections(connIds, today = dayStr(new Date())) {
+    const ids = (connIds || []).filter(Boolean);
+    if (!ids.length) return { level: null, growth: growthFrom([], today) };
+    const { data } = await supabase.from('meta_daily').select('*').in('connection_id', ids)
+        .gte('day', shiftDay(today, -45)).order('day', { ascending: true }).limit(600);
+    const rows = data || [];
+    const level = rows.some(r => r.level === 'ig') ? 'ig' : 'page';
+    const perConn = {};
+    for (const r of rows) if (r.level === level) (perConn[r.connection_id] = perConn[r.connection_id] || []).push(r);
+    const best = Object.values(perConn).sort((a, b) => b.length - a.length)[0] || [];
+    return { level: best.length ? level : null, growth: growthFrom(best, today) };
+}
+
+/**
+ * The connection a client is shown, and the one "sync now" reads: active over
+ * not, with an Instagram account over without, with a token over without,
+ * newest last. A business can end up with two rows — one from onboarding
+ * before the Page was fully authorised, one from the real connection — and
+ * the first row is not the right one.
+ */
+function primaryConnection(list) {
+    return (list || []).slice().sort((a, b) =>
+        ((b.status === 'active') - (a.status === 'active'))
+        || ((!!b.ig_user_id) - (!!a.ig_user_id))
+        || ((!!b.page_token_enc) - (!!a.page_token_enc))
+        || String(b.created_at || '').localeCompare(String(a.created_at || '')))[0] || null;
+}
+
+async function growthPayload(connections, today = dayStr(new Date())) {
+    const list = connections || [];
+    const active = list.filter(c => c.status === 'active');
+    const use = active.length ? active : list;
+    const { level, growth } = await growthForConnections(use.map(c => c.id), today);
+    const conn = primaryConnection(use);
+    return {
+        configured: metaConfigured(),
+        connected: !!conn,
+        connection: conn ? {
+            id: conn.id, page_name: conn.page_name || null, ig_username: conn.ig_username || null, status: conn.status,
+            daily_synced_at: conn.daily_synced_at || null, daily_error: conn.daily_error || null
+        } : null,
+        level, growth,
+        source: 'meta_owner_insights'
+    };
+}
+
+/** The client's own numbers. A client account is its business, so it is never asked which. */
+app.get('/api/client/growth', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile.role !== 'client') return res.status(400).json({ error: 'This is the client view. Staff read growth from /api/meta/growth with a client.' });
+        const own = await ownClientFor(ctx);
+        const { data } = await supabase.from('meta_connections').select('*').eq('client_id', own.id).order('created_at', { ascending: false });
+        res.json({ business: { id: own.id, name: own.name }, ...(await growthPayload(data || [])) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Staff: one connection, or every connection filed under a client the caller can read. */
+app.get('/api/meta/growth', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let conns;
+        if (req.query.connection_id) {
+            const c = await metaLoadConnection(ctx.user.id, String(req.query.connection_id));
+            if (!c) return res.status(404).json({ error: 'Connection not found.' });
+            conns = [c];
+        } else {
+            const cid = String(req.query.client_id || req.query.clientId || '');
+            const c = cid ? await clientAccess(ctx.user.id, cid, 'viewer') : null;
+            if (!c) return res.status(403).json({ error: 'No access to that client.' });
+            const { data } = await supabase.from('meta_connections').select('*').eq('client_id', c.id).order('created_at', { ascending: false });
+            conns = data || [];
+        }
+        res.json(await growthPayload(conns));
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Read the numbers now rather than waiting for the hourly pass. */
+app.post('/api/meta/daily-sync', rateLimit({ windowMs: 60000, max: 4, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        let conn = null;
+        if (ctx.profile.role === 'client') {
+            const own = await ownClientFor(ctx);
+            const { data } = await supabase.from('meta_connections').select('*').eq('client_id', own.id).eq('status', 'active');
+            conn = primaryConnection(data || []);
+        } else {
+            conn = await metaLoadConnection(ctx.user.id, String(req.body?.connectionId || ''));
+        }
+        if (!conn) return res.status(404).json({ error: 'No connected Meta account to read.' });
+        const r = await metaDailySync(conn, { days: conn.daily_synced_at ? 3 : META_DAILY_FIRST_DAYS });
+        const { data: fresh } = await supabase.from('meta_connections').select('*').eq('id', conn.id).maybeSingle();
+        res.status(r.ok ? 200 : 502).json({ sync: r, ...(await growthPayload(fresh ? [fresh] : [conn])) });
+    } catch (err) { sendErr(res, err); }
+});
 
 registerWorker('meta_insights', (userId, input, jobId) => async (progress, ck) => {
     const conn = await supabase.from('meta_connections').select('*').eq('id', input.connectionId).maybeSingle().then(r => r.data);
@@ -14798,13 +15081,34 @@ const ASSISTANT_TOOLS = {
             const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
             const { data } = await supabase.from('meta_snapshots')
                 .select('snapshot_date, level, metrics')
-                .eq('user_id', s.userId).gte('snapshot_date', since)
+                .in('connection_id', s.connectionIds || []).gte('snapshot_date', since)
                 .order('snapshot_date', { ascending: true }).limit(120);
             if (!data || !data.length) {
                 return { connected_but_empty: true,
                          note: 'Meta is connected but no insights have synced yet.' };
             }
             return { days, snapshots: data };
+        }
+    },
+
+    get_daily_growth: {
+        decl: {
+            name: 'get_daily_growth',
+            description: 'How followers, reach, profile visits and interactions have moved day by day, from the numbers synced from Meta every day. Use for "am I growing", "how many followers did I gain this week", "what changed since yesterday", "is this week better than last". Only available when the business has connected Meta; if it returns not_connected, say plainly that connecting Meta would let you answer that.',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            if (!s.metaConnected) {
+                return { not_connected: true, note: 'This business has not connected Meta, so there are no daily numbers.' };
+            }
+            const { level, growth } = await growthForConnections(s.connectionIds || []);
+            if (growth.empty) {
+                return { connected_but_empty: true, note: 'Meta is connected but the first daily numbers have not arrived yet; they sync within the hour.' };
+            }
+            return {
+                level, ...growth,
+                how_to_read: 'followers.now is the count today; followers.day/week/month are the change since yesterday, 7 and 30 days ago (null = not enough days yet); reach, views, profile_views and interactions compare the last 7 ended days with the 7 before.'
+            };
         }
     }
 };
@@ -14857,6 +15161,9 @@ function assistantSystemPrompt(scope) {
             : (operator
                 ? '- Meta is NOT connected for this account, so there are no owner-only numbers: no reach, saves, impressions, profile visits or demographics. Everything you have is observable from outside. Say which is missing when it matters; do not pitch connecting, they already know.'
                 : '- This business has NOT connected Meta. You can only see what is visible from outside the account. If they ask about reach, saves, impressions, profile visits or who their audience is, say plainly that those are owner-only numbers and connecting Meta would let you answer properly. Say it once, naturally, not as a sales pitch every time.'),
+        scope.metaConnected
+            ? '- Their numbers are synced from Meta every day. For "am I growing", "followers this week" or "this week against last", use get_daily_growth and say which days it covers.'
+            : '',
         scope.handle ? `- ${operator ? 'The' : 'Their'} Instagram is @${scope.handle}.` : '',
         operator && scope.client?.niche ? `- Niche: ${scope.client.niche}${scope.client.location ? `, in ${scope.client.location}` : ''}.` : '',
         operator && scope.clientId
@@ -14911,9 +15218,10 @@ async function assistantScope(userId, clientId = null, role = null) {
     // Meta is checked against the same narrowing. A connection filed under a
     // different client must not make THIS client look connected, or the
     // assistant will confidently offer owner numbers it cannot read.
-    let cq = supabase.from('meta_connections').select('id').eq('status', 'active');
+    let cq = supabase.from('meta_connections').select('id, status');
     cq = scoped ? cq.eq('client_id', scoped) : cq.eq('user_id', userId);
-    const { data: conn } = await cq.limit(1);
+    const { data: conns } = await cq.limit(10);
+    const connectionIds = (conns || []).filter(c => c.status === 'active').map(c => c.id);
 
     const ors = scoped
         ? [`client_id.eq.${scoped}`]
@@ -14927,7 +15235,8 @@ async function assistantScope(userId, clientId = null, role = null) {
         clientId: scoped,
         client,
         reportScope: ors.join(','),
-        metaConnected: !!(conn && conn.length),
+        metaConnected: connectionIds.length > 0,
+        connectionIds,
         handle: client?.ig_handle
             || (scoped ? null : (owned || []).find(c => c.ig_handle)?.ig_handle || prof?.[0]?.target_handle)
             || null
@@ -14986,7 +15295,8 @@ async function assistantAnswer({ userId, message, conversationId, clientId = nul
         get_best_posts:        'Going through your posts',
         get_best_times:        'Working out your best times',
         get_community_demand:  'Checking what people are asking for',
-        get_owner_insights:    'Reading your Meta numbers'
+        get_owner_insights:    'Reading your Meta numbers',
+        get_daily_growth:      'Checking your growth day by day'
     };
 
     const used = [];
@@ -15133,8 +15443,13 @@ app.post('/api/assistant/ask', rateLimit({ windowMs: 60000, max: 12 }), async (r
     // EL.api puts the selected client on every body automatically, so an
     // employee's question is scoped by the header picker without the page
     // having to think about it.
-    const clientId = req.body?.clientId || null;
+    // A client account is its own business: its questions are scoped to that
+    // record, which is where a connection made FOR it by its agency lives.
+    // Before phase 30 a client was scoped to its user id, so the Meta its
+    // agency connected was invisible and the assistant kept asking for it.
+    let clientId = req.body?.clientId || null;
     const role = ctx.profile?.role || null;
+    if (role === 'client') clientId = (await ownClientFor(ctx).catch(() => null))?.id || null;
 
     if (String(req.query.stream || '') !== '1') {
         try {
@@ -15831,6 +16146,9 @@ async function start() {
         if (SCHEDULER_ENABLED) {
             setTimeout(() => schedulerTick().catch(() => {}), 15000).unref?.();
             setInterval(schedulerTick, Math.max(15000, SCHEDULER_POLL_MS)).unref?.();
+            // Phase 30: the daily Meta read. Quiet unless a connection is due.
+            setTimeout(() => metaDailyTick().catch(() => {}), 45000).unref?.();
+            setInterval(() => metaDailyTick().catch(() => {}), Math.max(60000, META_DAILY_POLL_MS)).unref?.();
         }
         logger.info('phase11_ready', { instance: INSTANCE_ID, scheduler: SCHEDULER_ENABLED, pollMs: SCHEDULER_POLL_MS });
     });
@@ -15956,5 +16274,6 @@ module.exports = {
     auth,
     // phase 27
     contactSettings, cleanPaymentOption,
-    sendMail, mailSettings, MAIL_KEYS, leadScope, leadFilters, withFinders
+    sendMail, mailSettings, MAIL_KEYS, leadScope, leadFilters, withFinders,
+    metaDailySync, metaDailyTick, growthFrom, growthForConnections, shiftDay, dayStr
 };

@@ -11,7 +11,7 @@ who can do it and about how long it takes.
 | 1 | **Create one client-role account** (Admin → People → Add someone → Client, or `signup.html` with a second email) | 5 min | The entire client surface — four pages, the trial banner, the assistant, the money moment — rendered by a real client for the first time. Everything built for clients is unproven in production until this exists. |
 | 2 | **Run `scripts/live-checks.js`** with that account and yours | 10 min | The three things only production can prove: quota races between two real accounts, job resume, and isolation. It has never been run against this deployment. |
 | 3 | **Set the contact email, a way to pay, and your Gmail** (Admin → Trial & plans) — then press *Send a test email* | 5 min | Until then a client who asks to continue is told the team has it — true — but not where to send anything, and nobody is emailed. |
-| 4 | **Add your employees as Testers on the Meta app** (App Dashboard → App Roles) and connect one Page | 10 min | The first real Meta connection. Everything downstream of Meta — the owner report, the monthly report, the owner assistant's numbers, the deletion callback — is walked in tests and has never run live. |
+| 4 | **Add your employees as Testers on the Meta app** (App Dashboard → App Roles) and connect one Page | 10 min | The first real Meta connection. Everything downstream of Meta — the owner report, the monthly report, the owner assistant's numbers, the deletion callback — is walked in tests and has never run live. Within an hour of connecting, the daily read starts by itself and the client's dashboard shows *Your numbers, every day*. |
 | 5 | **Fund an Apify key and run each engine once** against a real account | 1 hour | The rows marked *built, never exercised*: the engines themselves. They spend credit, so no test starts one. |
 | 6 | **Submit Meta App Review** once someone qualified has read `privacy.html`, `terms.html` and `data-deletion.html` | days–weeks, on Meta's clock | Only gates *public* self-serve Meta connection. Employees as Testers are unblocked now. |
 | 7 | **Make the repository public** (you said you would) | 5 min | GitHub Actions run free on public repositories, so the CI that exists starts running. The history was scanned before this was suggested: the only key-shaped string in any of the 86 commits is the Supabase *anon* key, which is public by design and gated by RLS; no `.env`, no service key, no Apify, Gemini or Meta secret was ever committed. |
@@ -33,7 +33,7 @@ who can do it and about how long it takes.
 
 ## What "100%" honestly means here
 
-The 45 use cases in `USE-CASES.md` are built and reachable. 32 are walked end to end by tests that
+The 48 use cases in `USE-CASES.md` are built and reachable. 34 are walked end to end by tests that
 drive the real server; the rest are proven in logic or provable only live. Nothing in the vision is
 missing.
 

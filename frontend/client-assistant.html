@@ -9,6 +9,13 @@
     <title>Ask — EdgeLead</title>
     <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#06140f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="EdgeLead">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
     <style>
     /* client-assistant.html — page-specific only. Shared rules live in app.css. */
 
@@ -96,8 +103,8 @@
         <textarea id="as-input" placeholder="How did we do last month?" rows="1"></textarea>
         <button class="btn-primary" id="as-send" type="button">Ask</button>
     </div>
-    <p class="as-hint">Answers come from your own reports and, if you have connected Meta,
-       your owner numbers. Nothing here is shared with anyone else.</p>
+    <p class="as-hint">Answers come from your own reports and, once Meta is connected, your own numbers,
+       read every day. Nothing here is shared with anyone else.</p>
 
 </div>
 
@@ -118,25 +125,31 @@
         'What should I post more of?',
         'When is the best time for me to post?'
     ];
-    const STARTERS_META = ['What did my reach do last month?', 'Who is actually following me?'];
+    const STARTERS_META = ['Am I growing?', 'How many followers did I gain this week?',
+        'What did my reach do last month?', 'Who is actually following me?'];
 
     document.addEventListener('DOMContentLoaded', async () => {
         const me = await EL.init({ engine: null, page: 'client-assistant.html' });
         esc = EL.escape;
 
-        const connected = (me.engines || []).includes('meta_owned');
+        // Connected means a connection filed under this business — made by
+        // the owner here or by their agency — not merely the engine grant a
+        // trial holds. (phase 30)
+        let connected = false, configured = true;
+        try { const g = await EL.api('/api/client/growth'); connected = !!g.connected; configured = !!g.configured; }
+        catch { /* the starters still work without it */ }
         renderStarters(connected);
 
         // The nudge is shown once, above the thread — not injected into every
         // answer. The assistant is told the same thing in its prompt.
-        if (!connected) {
+        if (!connected && configured) {
             $('as-connect-note').innerHTML = `<div class="as-connect">
                 Right now I can only see what is visible from outside your account.
-                <b>Connect Meta</b> and I can also read your reach, saves, profile visits
-                and who your audience actually is — the numbers only you can see.</div>`;
+                <b>Connect Meta</b> from <a href="client.html">My Reports</a> and I can also read your reach,
+                profile visits and who your audience actually is — your own numbers, every day.</div>`;
         }
 
-        loadThreads();
+        loadThreads(me.business ? me.business.id : null);
 
         $('as-send').addEventListener('click', send);
         $('as-input').addEventListener('keydown', e => {
@@ -146,10 +159,11 @@
     });
 
     /** Recent threads, so a reload does not throw away yesterday's question. */
-    async function loadThreads() {
+    async function loadThreads(businessId) {
         let list = [];
         try {
-            const r = await EL.api('/api/assistant/conversations');
+            // Threads are filed under the business (phase 30), so they are asked for by it.
+            const r = await EL.api('/api/assistant/conversations' + (businessId ? '?client_id=' + encodeURIComponent(businessId) : ''));
             list = (r.conversations || []).slice(0, 5);
         } catch { return; }                       // never block the ask box on this
         if (!list.length) return;

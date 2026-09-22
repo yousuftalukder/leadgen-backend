@@ -9,6 +9,13 @@
     <title>My Reports — EdgeLead</title>
     <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#06140f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="EdgeLead">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
     <style>
     /* client.html — page-specific only. Shared rules live in app.css. */
 
@@ -99,6 +106,35 @@
     .cl-empty .cl-mark { font-size: 2.6rem; margin-bottom: 14px; }
     .cl-empty h3 { font-size: 1.1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 10px; }
     .cl-empty p { font-size: 0.9rem; line-height: 1.6; max-width: 420px; margin: 0 auto 8px; }
+
+    /* ---- the numbers every day (phase 30) ----
+       Four single values wear stat tiles; the day-by-day run is a table, not
+       a chart — fourteen rows read faster on a phone than a sparkline nobody
+       can hover, and a table never hides a gap. Direction is an arrow and a
+       word, never colour alone. */
+    .cl-growth { margin-bottom: 22px; }
+    .cl-gtop { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .cl-gtop h3 { font-size: 1.05rem; font-weight: 800; margin: 0; }
+    .cl-gsub { font-size: 0.78rem; color: var(--text-muted); }
+    .cl-gsync { margin-left: auto; }
+    .cl-gtiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .cl-gtile { padding: 14px 16px; border-radius: var(--r-md, 12px); background: rgba(255,255,255,0.035);
+        border: 1px solid var(--card-border); }
+    .cl-gtile .k { font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+    .cl-gtile .v { font-size: 1.55rem; font-weight: 800; margin-top: 4px; letter-spacing: -0.02em; }
+    .cl-gtile .s { font-size: 0.76rem; color: var(--text-secondary); margin-top: 3px; line-height: 1.45; }
+    .cl-gtile .s.up { color: #6ee7b7; }
+    .cl-gtile .s.down { color: #fdba74; }
+    .cl-gtable { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 16px; }
+    .cl-gtable th { text-align: left; font-size: 0.64rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase;
+        color: var(--text-muted); padding: 0 8px 8px 0; border-bottom: 1px solid var(--card-border); white-space: nowrap; }
+    .cl-gtable td { padding: 7px 8px 7px 0; border-bottom: 1px solid rgba(240,211,154,0.05); }
+    .cl-gtable th.num, .cl-gtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .cl-gfoot { font-size: 0.76rem; color: var(--text-muted); margin-top: 12px; line-height: 1.55; }
+    .cl-gconnect { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .cl-gconnect p { font-size: 0.88rem; line-height: 1.6; color: var(--text-secondary); flex: 1 1 320px; margin: 0; }
+    .cl-gconnect p b { color: var(--text-primary); }
+    @media (max-width: 560px) { .cl-gtable .col-x, .cl-gtable th.col-x { display: none; } }
     </style>
 </head>
 <body class="el-has-header">
@@ -115,9 +151,13 @@
             </div>
         </aside>
 
-        <main id="cl-body">
-            <div class="cl-empty"><div class="cl-mark">📊</div><h3>Loading your report…</h3></div>
-        </main>
+        <div>
+            <!-- The numbers every day: shown once Meta is connected, offered until then. -->
+            <section id="cl-growth" class="cl-growth" hidden></section>
+            <main id="cl-body">
+                <div class="cl-empty"><div class="cl-mark">📊</div><h3>Loading your report…</h3></div>
+            </main>
+        </div>
 
     </div>
 </div>
@@ -152,6 +192,7 @@
         canRun = (me.engines || []).includes('report');
         $('cl-new').style.display = canRun ? '' : 'none';
         $('cl-new').addEventListener('click', () => showRunForm(false));
+        loadGrowth(me);
 
         renderList();
         if (reports.length) open(reports[0].id);
@@ -161,6 +202,105 @@
         else showEmpty('No reports yet',
             'Once a report has been run for your business it will appear here.');
     });
+
+    // ---- the numbers every day (phase 30) ---------------------------------
+
+    /** Today's numbers and how they moved — the owner-side read, every day. */
+    async function loadGrowth(me) {
+        const host = $('cl-growth');
+        let g;
+        try { g = await EL.api('/api/client/growth'); } catch { return; }
+        if (!g.configured && !g.connected) return;      // no Meta app on this server: say nothing
+        host.hidden = false;
+        if (!g.connected) {
+            const canConnect = (me.engines || []).includes('meta_owned') && g.configured;
+            host.innerHTML = `<div class="card"><div class="cl-gconnect">
+                <p><b>See your growth every day.</b> Connect your Facebook Page and Instagram and EdgeLead reads your
+                   numbers daily — followers, reach, profile visits — so you can see what moved, not just what a
+                   report said. The assistant reads the same numbers.</p>
+                ${canConnect ? `<button class="btn-primary" type="button" id="cl-gconnect">Connect Meta</button>` : ''}
+            </div></div>`;
+            const b = $('cl-gconnect');
+            if (b) b.addEventListener('click', async () => {
+                b.disabled = true;
+                try { const d = await EL.api('/api/meta/oauth/start'); window.location.href = d.url; }
+                catch (err) { b.disabled = false; if (!err.handled) alert(err.message); }
+            });
+            return;
+        }
+        renderGrowth(g);
+    }
+
+    const gnum = v => (v === null || v === undefined ? '—' : Number(v).toLocaleString());
+    const gsigned = v => (v === null || v === undefined ? null : (v > 0 ? '+' : '') + Number(v).toLocaleString());
+    const gword = k => ({ up: '↑ up', down: '↓ down', flat: '→ flat', new: '↑ new' }[k] || '');
+    const gpct = p => (p === null || p === undefined ? '' : ` (${p > 0 ? '+' : ''}${p}%)`);
+
+    function renderGrowth(g) {
+        const host = $('cl-growth');
+        const gr = g.growth || {};
+        const c = g.connection || {};
+        const name = c.ig_username ? '@' + c.ig_username : (c.page_name || 'your account');
+        const syncedAt = c.daily_synced_at ? new Date(c.daily_synced_at) : null;
+        const syncBtn = `<button class="btn-secondary btn-mini cl-gsync" type="button" id="cl-gsync">Sync now</button>`;
+        const lastTry = c.daily_error ? ` Last try did not finish: ${esc(c.daily_error)}` : '';
+
+        if (gr.empty) {
+            host.innerHTML = `<div class="card"><div class="cl-gtop"><h3>Your numbers, every day</h3>
+                <span class="cl-gsub">${esc(name)} is connected. The first numbers arrive within the hour.${lastTry}</span>${syncBtn}</div></div>`;
+            wireSync();
+            return;
+        }
+
+        const f = gr.followers || {};
+        const noWeek = f.week === null || f.week === undefined;
+        const weekLine = noWeek
+            ? (f.day === null || f.day === undefined ? 'first day of numbers — growth shows from tomorrow' : `${gsigned(f.day)} since yesterday · a week of days needed for more`)
+            : `${gsigned(f.week)} this week${gpct(f.week_pct)}${f.day !== null && f.day !== undefined ? ` · ${gsigned(f.day)} since yesterday` : ''}`;
+        const weekKind = noWeek ? '' : (f.week > 0 ? 'up' : (f.week < 0 ? 'down' : ''));
+
+        const winTile = (label, w) => {
+            const x = w || {};
+            const none = x.now === null || x.now === undefined;
+            const sub = none
+                ? 'no complete days yet'
+                : (x.before === null || x.before === undefined
+                    ? 'last 7 days · nothing yet to compare with'
+                    : `${gword(x.kind)} vs ${gnum(x.before)} the week before${gpct(x.pct)}`);
+            const cls = none ? '' : (x.kind === 'up' || x.kind === 'new' ? 'up' : (x.kind === 'down' ? 'down' : ''));
+            return `<div class="cl-gtile"><div class="k">${label}</div><div class="v">${gnum(x.now)}</div><div class="s ${cls}">${sub}</div></div>`;
+        };
+
+        const rows = (gr.series || []).slice(-14).reverse();
+        host.innerHTML = `<div class="card">
+            <div class="cl-gtop"><h3>Your numbers, every day</h3>
+                <span class="cl-gsub">${esc(name)} · since ${esc(gr.since || '')} · ${gr.days} day${gr.days === 1 ? '' : 's'}</span>${syncBtn}</div>
+            <div class="cl-gtiles">
+                <div class="cl-gtile"><div class="k">Followers</div><div class="v">${gnum(f.now)}</div><div class="s ${weekKind}">${weekLine}</div></div>
+                ${winTile('Reach, last 7 days', gr.reach)}
+                ${winTile('Profile visits, last 7 days', gr.profile_views)}
+                ${winTile('Interactions, last 7 days', gr.interactions)}
+            </div>
+            <table class="cl-gtable">
+                <thead><tr><th>Day</th><th class="num">Followers</th><th class="num">Reach</th><th class="num col-x">Profile visits</th><th class="num col-x">Interactions</th></tr></thead>
+                <tbody>${rows.map(r => `<tr><td>${esc(r.day)}</td><td class="num">${gnum(r.followers)}</td><td class="num">${gnum(r.reach)}</td>
+                    <td class="num col-x">${gnum(r.profile_views)}</td><td class="num col-x">${gnum(r.interactions)}</td></tr>`).join('')}</tbody>
+            </table>
+            <p class="cl-gfoot">Read from your own Meta account${syncedAt ? ', last at ' + esc(syncedAt.toLocaleString()) : ''}. A day's reach, visits and
+               interactions are written the day after, once the day is complete; followers are the count on that day.${lastTry}</p>
+        </div>`;
+        wireSync();
+    }
+
+    function wireSync() {
+        const b = $('cl-gsync');
+        if (!b) return;
+        b.addEventListener('click', async () => {
+            b.disabled = true; b.textContent = 'Reading…';
+            try { renderGrowth(await EL.api('/api/meta/daily-sync', { method: 'POST', body: {} })); }
+            catch (err) { b.disabled = false; b.textContent = 'Sync now'; if (!err.handled) alert(err.message); }
+        });
+    }
 
     function showRunForm(firstRun) {
         activeId = null;

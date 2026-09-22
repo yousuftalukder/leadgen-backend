@@ -32,6 +32,17 @@
 (function () {
     'use strict';
 
+    // The browser's install prompt fires once, early, and only if nobody has
+    // called preventDefault on it yet — so it is caught here at parse time
+    // and offered later, from the client pages, when there is a place for it.
+    let _installEvt = null;
+    if (typeof window.addEventListener === 'function') window.addEventListener('beforeinstallprompt', e => {
+        e.preventDefault();
+        _installEvt = e;
+        const b = document.getElementById('el-install-go');
+        if (b) b.textContent = 'Add to home screen';
+    });
+
     const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
     const BACKEND_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
@@ -540,6 +551,9 @@
 
             renderShell(page, me);
             renderPlanBanner(me);
+            // A client's pages are installable: the service worker for the
+            // shell, and one nudge to put it on the home screen. (phase 30)
+            if (me.role === 'client') { registerServiceWorker(); mountInstallNudge(); }
             refreshStatus();
             // A client-role account IS its business, so it is never asked
             // which one. Everyone else is asked on every page where work starts.
@@ -1050,6 +1064,98 @@
         bar.querySelector('#el-key-btn').addEventListener('click', openKeyModal);
         bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
         bar.querySelector('#el-out').addEventListener('click', () => EL.signOut());
+    }
+
+    // ---- installable client surface (phase 30) ----------------------------
+
+    function registerServiceWorker() {
+        if (!('serviceWorker' in navigator) || location.protocol !== 'https:') return;
+        navigator.serviceWorker.register('sw.js').catch(() => { /* the pages work without it */ });
+    }
+
+    function isStandalone() {
+        return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+            || window.navigator.standalone === true
+            || /[?&]source=pwa\b/.test(location.search);
+    }
+
+    /**
+     * One card, at the top of the page, on the client's pages only: put
+     * EdgeLead on the home screen. Chrome on Android and desktop hand over a
+     * real prompt; Safari on iPhone has no such thing, so it gets the three
+     * taps written out. "Not now" is remembered for two weeks; an installed
+     * app never sees it.
+     */
+    function mountInstallNudge() {
+        if (isStandalone() || document.getElementById('el-install')) return;
+        let dismissed = 0;
+        try { dismissed = Number(localStorage.getItem('el-install-dismissed') || 0); } catch { /* private mode */ }
+        if (dismissed && Date.now() - dismissed < 14 * 86400000) return;
+
+        const host = document.querySelector('.el-page') || document.body;
+        const card = document.createElement('div');
+        card.className = 'el-install';
+        card.id = 'el-install';
+        card.innerHTML = `
+            <div class="el-install-ico" aria-hidden="true">⚡</div>
+            <div class="el-install-txt">
+                <b>Put EdgeLead on your home screen</b>
+                <span>Opens like an app, full screen, one tap from your phone — your reports, your numbers every day, and a place to ask.</span>
+            </div>
+            <div class="el-install-act">
+                <button class="el-btn el-mini el-install-go" type="button" id="el-install-go">${_installEvt ? 'Add to home screen' : 'Show me how'}</button>
+                <button class="el-btn el-mini" type="button" id="el-install-no">Not now</button>
+            </div>`;
+        host.prepend(card);
+
+        card.querySelector('#el-install-go').addEventListener('click', async () => {
+            if (_installEvt) {
+                const evt = _installEvt; _installEvt = null;
+                try {
+                    evt.prompt();
+                    const choice = await evt.userChoice;
+                    if (choice && choice.outcome === 'accepted') { card.remove(); return; }
+                } catch { /* fall through to the written steps */ }
+            }
+            showInstallHow();
+        });
+        card.querySelector('#el-install-no').addEventListener('click', () => {
+            try { localStorage.setItem('el-install-dismissed', String(Date.now())); } catch { /* private mode */ }
+            card.remove();
+        });
+        window.addEventListener('appinstalled', () => card.remove());
+    }
+
+    function showInstallHow() {
+        if (document.getElementById('el-install-how')) return;
+        const ua = navigator.userAgent || '';
+        const iOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const steps = iOS
+            ? ['Open this page in <b>Safari</b> if you are not already in it.',
+               'Tap the <b>Share</b> button — the square with an arrow, at the bottom of the screen.',
+               'Scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.']
+            : ['Open your browser\'s menu — the three dots, top right.',
+               'Tap <b>Add to Home screen</b> (or <b>Install app</b>).',
+               'Tap <b>Add</b> or <b>Install</b>. EdgeLead appears next to your other apps.'];
+        const scrim = document.createElement('div');
+        scrim.className = 'el-scrim';
+        scrim.id = 'el-install-how';
+        scrim.innerHTML = `
+            <div class="el-modal" role="dialog" aria-modal="true" aria-labelledby="el-install-title">
+                <h3 id="el-install-title">Add EdgeLead to your home screen</h3>
+                <p>Three taps. It then opens full screen, like an app, and stays signed in.</p>
+                <ol class="el-install-steps">${steps.map(t => `<li>${t}</li>`).join('')}</ol>
+                <div class="el-modal-actions">
+                    <button class="el-btn el-btn-go" type="button" id="el-install-ok">Got it</button>
+                </div>
+            </div>`;
+        document.body.appendChild(scrim);
+        const close = () => scrim.remove();
+        scrim.querySelector('#el-install-ok').addEventListener('click', close);
+        scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
+        document.addEventListener('keydown', function esc(e) {
+            if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+        });
     }
 
     function renderShareBar() {
