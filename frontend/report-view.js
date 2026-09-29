@@ -273,7 +273,7 @@
         if (c.chip) return `<span class="el-chip ${c.tone === 'good' ? 'is-jade' : c.tone === 'watch' ? 'is-warn' : c.tone === 'bad' ? 'is-bad' : c.tone === 'gold' ? 'is-gold' : ''}">${esc(c.chip)}</span>`;
         return `<span class="${TONE[c.tone] || ''}">${esc(c.text)}</span>`;
     };
-    const barVal = (v, unit) => unit === 'x' ? `${Number(v).toFixed(1)}×` : unit === '%' ? `${Number(v).toFixed(2)}%` : fmt(v);
+    const barVal = (v, unit) => unit === 'x' ? `${Number(v).toFixed(1)}×` : unit === '%' ? `${+Number(v).toFixed(Math.abs(v) < 10 ? 2 : 1)}%` : fmt(v);
     const HOUR_BANDS = [[6, 9, '6a'], [9, 12, '9a'], [12, 15, '12p'], [15, 18, '3p'], [18, 21, '6p'], [21, 24, '9p']];
     const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -293,6 +293,8 @@
                 <div class="rd-img" data-kind="${esc(pc.kind)}">${pc.image ? `<img src="${esc(pc.image)}" alt="${esc(pc.title)}" loading="lazy">` : ''}<span>${esc(pc.by ? pc.by + ' · ' : '')}${esc(pc.kind)}</span></div>
                 <figcaption><b>${esc(pc.title)}</b><span class="m">${esc([pc.date, pc.meta].filter(Boolean).join(' · '))}</span>
                 ${pc.chip ? `<span class="el-chip ${pc.chip.tone === 'good' ? 'is-jade' : pc.chip.tone === 'bad' ? 'is-bad' : ''}">${esc(pc.chip.text)}</span>` : ''}${pc.link ? ` <a class="rd-link" href="${esc(pc.link)}" target="_blank" rel="noopener noreferrer">Open the post</a>` : ''}</figcaption></figure>`).join('')}</div>`;
+            case 'quotes': return `<div class="rd-quotes">${b.items.map(q => `<figure class="rd-quote"><span class="el-chip">${esc(q.tag)}</span><blockquote>${esc(q.text)}</blockquote>
+                <figcaption><span class="m">${esc(q.meta || '')}</span>${q.chip ? ` <span class="el-chip ${q.chip.tone === 'good' ? 'is-jade' : ''}">${esc(q.chip.text)}</span>` : ''}${q.link ? ` <a class="rd-link" href="${esc(q.link)}" target="_blank" rel="noopener noreferrer">Open the post</a>` : ''}</figcaption></figure>`).join('')}</div>`;
             case 'points': return `<div class="rp-col ${b.tone === 'good' ? 'is-good' : b.tone === 'watch' ? 'is-watch' : ''}">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<ol class="rd-points">${b.items.map(it => `<li><b>${esc(it.title)}</b>${it.text ? `<span>${esc(it.text)}</span>` : ''}</li>`).join('')}</ol></div>`;
             case 'weeks': return `<div class="rd-weeks">${b.items.map(w => `<div class="rd-week"><span class="w">${esc(w.week)}</span><ul>${w.actions.map(a => `<li>${esc(a)}</li>`).join('')}</ul></div>`).join('')}</div>`;
             case 'checks': return `<div class="rd-box">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<ul class="rd-checks">${b.items.map(c => `<li class="${c.ok ? 'ok' : 'no'}">${esc(c.label)}</li>`).join('')}</ul></div>`;

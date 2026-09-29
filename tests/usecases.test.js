@@ -1537,6 +1537,47 @@ test('the owner and a share link get the document; the assistant does not', asyn
     assert.ok(!('doc' in detail));
 });
 
+
+section('\nphase 37 — the Facebook Page report as a document');
+function fbPage(name, extra = {}) {
+    return { name, pageId: name.toLowerCase().replace(/\W/g, ''), followers: 3104, rating: 4.6, reviewsCount: 212, category: 'Japanese restaurant', postsAnalyzed: 38, grade: 'B', score: 71,
+        medians: { engagement: 47 }, conversationRate: 9, amplificationRate: 14, cadence: { postsPerWeek: 3, spanDays: 90, lastPostDaysAgo: 2 },
+        completeness: { checks: [{ label: 'Opening hours', ok: false }, { label: 'Website', ok: true }] }, sentiment: { available: true, positiveShare: 81, negativeShare: 6, highEffortShare: 34 },
+        formats: [{ key: 'video', posts: 9, avgEngagement: 88, avgIndex: 1.9 }, { key: 'link', posts: 10, avgEngagement: 9, avgIndex: 0.2 }], intents: [{ key: 'event_offer', avgIndex: 2.1 }, { key: 'link_out', avgIndex: 0.2 }],
+        video: { posts: 9, share: 24, avgIndex: 1.9, avgViews: 1240 },
+        topPosts: [{ format: 'video', excerpt: 'Kids eat free every Tuesday in September. Tag a parent who needs a night off.', reactions: 312, comments: 88, shares: 41, index: 3.1, postedAt: '2026-08-22T18:00:00Z', url: 'https://www.facebook.com/sakura/posts/1' }, { format: 'photo', excerpt: 'Table 6 set a record', reactions: 254, comments: 36, shares: 12, index: 2.4, url: 'https://evil.example/x' }],
+        heatmap: { cells: [{ dow: 2, hour: 18, posts: 3, avgIndex: 1.8 }], bestHours: [], bestDays: [] }, momentum: { months: [{ month: '2026-07', posts: 12, medEngagement: 38 }, { month: '2026-08', posts: 13, medEngagement: 44 }] }, ...extra };
+}
+test('a Facebook Page report becomes a document, and a rival Page is compared row by row', async () => {
+    const target = fbPage('Sakura Hibachi Grill'), rival = fbPage('Ginza Hibachi', { followers: 5870, cadence: { postsPerWeek: 5.2 } });
+    const benchmark = { verdict: 'Sakura Hibachi Grill leads on 4 of 7 measures.', rows: [{ metric: 'Followers', target: 3104, rival: 5870, winner: 'rival' }, { metric: 'Shares per 100 reactions', target: 14, rival: 6, winner: 'target' }], shareOfVoice: { target: 38, rival: 62 }, formatGaps: [{ format: 'video', rivalIndex: 1.4 }] };
+    const row = { id: 'f', report_type: 'fb_page', created_at: '2026-09-28T10:00:00Z',
+        report_json: { mode: 'versus', windowDays: 90, target, rival, benchmark, recommendations: [{ priority: 'critical', title: 'Add opening hours', action: 'Add opening hours and email to the Page', why: 'Facebook shows “hours not listed” to every visitor.' }], generatedAt: '2026-09-28T10:00:00Z' },
+        ai_json: { executive_summary: 'A well-rated Page whose videos travel. Half its posts are links nobody reacts to.', what_is_working: ['Video: 1.9× typical'], what_is_failing: ['Links: 0.2× typical'], quick_wins: ['Post Tuesday 6 pm'], thirty_day_plan: [{ week: 'Week 1', actions: ['Fill in hours'] }], kpis_to_watch: [{ kpi: 'Median engagement', current: '47', target: '55' }] } };
+    const d = S.reportDoc(row);
+    assert.strictEqual(d.cover.title, 'Sakura Hibachi Grill');
+    assert.deepStrictEqual(d.cover.receipt[1], ['4.6★', '212 reviews']);
+    const titles = d.sections.map(x => x.title);
+    for (const x of ['At a glance', 'Page health', 'What you post, and what works', 'Best posts', 'Timing and momentum', 'Against Ginza Hibachi', 'Recommendations', 'What is working, what is not', '30-day plan and what we will watch']) assert.ok(titles.includes(x), 'missing ' + x + ': ' + titles.join(' | '));
+    const vs = d.sections.find(x => x.title === 'Against Ginza Hibachi');
+    assert.strictEqual(vs.lead, 'Sakura Hibachi Grill leads on 4 of 7 measures.');
+    const table = vs.blocks[0];
+    assert.deepStrictEqual(table.rows.map(r => r[3].chip), ['Ginza Hibachi', 'Sakura Hibachi Grill']);
+    const quotes = d.sections.find(x => x.title === 'Best posts').blocks[0].items;
+    assert.strictEqual(quotes[0].link, 'https://www.facebook.com/sakura/posts/1');
+    assert.strictEqual(quotes[1].link, null, 'a link off Facebook must not be shown');
+    const rec = d.sections.find(x => x.title === 'Recommendations').blocks[0].rows[0];
+    assert.deepStrictEqual(rec[0], { chip: 'Critical', tone: 'bad' });
+    assert.ok(!d.sections.some(x => x.title === 'Against Ginza Hibachi' && false));
+});
+test('a single-Page report has no rival section, and the owner gets the document', async () => {
+    const d = S.fbDoc({ id: 'g', report_type: 'fb_page', created_at: '2026-09-28T10:00:00Z', report_json: { mode: 'single', target: fbPage('Harbor Cafe') }, ai_json: null });
+    assert.ok(!d.sections.some(x => /^Against /.test(x.title)));
+    const r = await call('GET', `/api/client/report/${state.fbRep.id}`, { token: 't-client' });
+    assert.strictEqual(r.body.report.doc && r.body.report.doc.type, 'fb_page');
+    assert.strictEqual(r.body.report.headline, 'Steady, with weekends dark.', 'the older owner fields stay for the list and the assistant');
+});
+
 section('\nthe content plan, with the model told to overspend');
 /** Stored posts for one Instagram handle, varied enough to produce cells. */
 function seedPosts(handle, spec) {

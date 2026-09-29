@@ -16087,13 +16087,125 @@ function ciDoc(row) {
     });
 }
 
+/** The Facebook Page report (fb_page): one Page, or one Page against a rival (phase 37). */
+function fbDoc(row) {
+    const j = row.report_json || {};
+    const t = j.target || {};
+    if (!t.name && !t.pageId) return null;
+    const ai = row.ai_json || j.ai || {};
+    const rv = j.rival || null, bm = j.benchmark || null;
+    const cad = t.cadence || {};
+    const nice = k => String(k || '').replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+    const name = t.name || 'This Page';
+    const summary = String(ai.executive_summary || '').trim();
+    const firstStop = summary.search(/(?<=[.!?])\s/);
+    const state = Array.isArray(ai.state_of_the_page) ? docLines(ai.state_of_the_page)[0] : oneLine(ai.state_of_the_page, 300);
+    const sections = [];
+
+    sections.push({ title: 'At a glance', source: ['pub', 'ai'], blocks: [
+        { type: 'kpis', items: [
+            { label: 'Engagement per post', value: docFmt(t.medians && t.medians.engagement), sub: 'median reactions, comments and shares' },
+            { label: 'Comments per 100 reactions', value: docNum(t.conversationRate) === null ? '—' : String(t.conversationRate), sub: t.conversationRate < 2 ? 'people react but rarely talk' : 'people talk back', tone: t.conversationRate < 2 ? 'watch' : 'good' },
+            { label: 'Shares per 100 reactions', value: docNum(t.amplificationRate) === null ? '—' : String(t.amplificationRate), sub: t.amplificationRate > 8 ? 'strong word of mouth' : 'how often posts are passed on', tone: t.amplificationRate > 8 ? 'good' : '' },
+            { label: 'Posts a week', value: docNum(cad.postsPerWeek) === null ? '—' : String(cad.postsPerWeek), sub: rv && rv.cadence ? `${rv.name} posts ${rv.cadence.postsPerWeek}` : (cad.lastPostDaysAgo != null ? `last post ${Math.round(cad.lastPostDaysAgo)} days ago` : ''), tone: cad.silent ? 'bad' : '' }
+        ] },
+        state || summary ? { type: 'verdict', text: state || (firstStop > 0 ? summary.slice(0, firstStop) : summary) } : null,
+        summary ? { type: 'prose', paras: [state ? summary : (firstStop > 0 ? summary.slice(firstStop + 1).trim() : '')].filter(Boolean) } : null
+    ] });
+
+    const checks = (t.completeness && t.completeness.checks) || [];
+    const sent = t.sentiment && t.sentiment.available ? t.sentiment : null;
+    if (checks.length || sent) sections.push({ title: 'Page health', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            checks.length ? { type: 'checks', title: `Page checklist · ${checks.filter(c => c.ok).length} of ${checks.length}`, items: checks.map(c => ({ label: c.label, ok: !!c.ok })) } : null,
+            sent ? { type: 'bars', title: 'How people react', unit: '%', max: 100, rows: [
+                sent.positiveShare != null ? { label: 'Warm reactions (love, care, wow)', value: sent.positiveShare, tone: 'good' } : null,
+                sent.negativeShare != null ? { label: 'Negative reactions (sad, angry)', value: sent.negativeShare, tone: 'bad' } : null,
+                sent.highEffortShare != null ? { label: 'Reactions beyond a Like', value: sent.highEffortShare, tone: 'gold' } : null
+            ].filter(Boolean) } : null
+        ].filter(Boolean) },
+        t.rating ? { type: 'note', text: `Rated ${t.rating} out of 5${t.reviewsCount ? ` from ${docFmt(t.reviewsCount)} reviews` : ''}.` } : null
+    ] });
+
+    const formats = (t.formats || []).slice(0, 6), intents = (t.intents || []).slice(0, 5);
+    if (formats.length || intents.length) sections.push({ title: 'What you post, and what works', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            formats.length ? { type: 'table', title: 'By format', cols: [{ label: 'Format' }, { label: 'Posts', num: true }, { label: 'Avg engagement', num: true }, { label: 'vs typical', num: true }],
+                rows: formats.map(f => [nice(f.key), f.posts, docFmt(f.avgEngagement), { text: docX(f.avgIndex), tone: f.avgIndex >= 1.2 ? 'good' : f.avgIndex < 0.8 ? 'bad' : '' }]) } : null,
+            intents.length ? { type: 'bars', title: 'By what the post is for', unit: 'x', rows: intents.map(i => ({ label: nice(i.key), value: i.avgIndex, tone: i.avgIndex >= 1.2 ? 'good' : i.avgIndex < 0.8 ? 'watch' : 'gold' })) } : null
+        ].filter(Boolean) },
+        t.video && t.video.posts ? { type: 'note', text: `Video is ${t.video.share}% of posts at ${docX(t.video.avgIndex)} typical${t.video.avgViews ? `, averaging ${docFmt(t.video.avgViews)} views where Facebook shows them` : ''}.` } : null
+    ] });
+
+    const top = (t.topPosts || []).slice(0, 3);
+    if (top.length) sections.push({ title: 'Best posts', lead: 'What earned the most, word for word.', source: ['pub'], blocks: [
+        { type: 'quotes', items: top.map(p => ({ tag: `${nice(p.format)}${p.postedAt ? ' · ' + docDay(p.postedAt) : ''}`, text: oneLine(p.excerpt, 240) || '(no text)', meta: [p.reactions != null ? `${docFmt(p.reactions)} reactions` : null, p.comments != null ? `${docFmt(p.comments)} comments` : null, p.shares != null ? `${docFmt(p.shares)} shares` : null, p.views ? `${docFmt(p.views)} views` : null].filter(Boolean).join(' · '), chip: docNum(p.index) === null ? null : { text: `${docX(p.index)} typical`, tone: 'good' }, link: /^https:\/\/(www\.|m\.)?facebook\.com\//.test(String(p.url || '')) ? p.url : null })) }
+    ] });
+
+    const heat = docHeat(t.heatmap);
+    const months = ((t.momentum && t.momentum.months) || []).filter(x => x.posts);
+    if (heat || months.length >= 2) sections.push({ title: 'Timing and momentum', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            heat ? { ...heat, title: 'Engagement by day and hour' } : null,
+            months.length >= 2 ? { type: 'line', title: 'Median engagement per post, by month', labels: months.map(x => new Date(x.month + '-01T00:00:00Z').toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })), series: [{ name, values: months.map(x => x.medEngagement ?? x.avgEngagement ?? 0) }] } : null
+        ].filter(Boolean) }
+    ] });
+
+    if (bm && rv) {
+        const lead = r => r.winner === 'target' ? { chip: name, tone: 'good' } : r.winner === 'rival' ? { chip: rv.name, tone: 'watch' } : { chip: 'Level', tone: '' };
+        const show = v => v === null || v === undefined ? '—' : (Number.isFinite(Number(v)) ? Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }) : String(v));
+        sections.push({ title: `Against ${rv.name}`, lead: bm.verdict, source: ['pub'], blocks: [
+            { type: 'table', cols: [{ label: 'Measure' }, { label: name, num: true }, { label: rv.name, num: true }, { label: 'Leader' }], rows: bm.rows.slice(0, 12).map(r => [r.metric, show(r.target), show(r.rival), lead(r)]) },
+            bm.shareOfVoice ? { type: 'bars', title: 'Share of all engagement between the two Pages', unit: '%', max: 100, rows: [{ label: name, value: bm.shareOfVoice.target, tone: 'good' }, { label: rv.name, value: bm.shareOfVoice.rival, tone: 'gold' }] } : null,
+            (bm.formatGaps || []).length ? { type: 'note', text: `${rv.name} does well with ${bm.formatGaps.map(g => `${nice(g.format)} (${docX(g.rivalIndex)})`).join(', ')}, which ${name} barely posts.` } : null
+        ] });
+    }
+
+    const recs = (Array.isArray(j.recommendations) ? j.recommendations : []).filter(r => r && r.title).slice(0, 6);
+    const P = { critical: ['Critical', 'bad'], high: ['High', 'watch'], medium: ['Medium', 'gold'], low: ['Low', ''] };
+    const quick = docLines(ai.quick_wins);
+    if (recs.length || quick.length) sections.push({ title: 'Recommendations', lead: 'In order of priority.', source: ['pub', 'ai'], blocks: [
+        recs.length ? { type: 'table', cols: [{ label: 'Priority' }, { label: 'Action' }, { label: 'Why' }], rows: recs.map(r => [{ chip: (P[r.priority] || P.low)[0], tone: (P[r.priority] || P.low)[1] }, oneLine(r.action || r.title, 200), oneLine(r.why, 240) || '—']) } : null,
+        quick.length ? { type: 'points', title: 'Quick wins', tone: 'good', items: quick.slice(0, 4).map(docPoint) } : null
+    ] });
+
+    const working = docLines(ai.what_is_working), failing = docLines(ai.what_is_failing);
+    if (working.length || failing.length) sections.push({ title: 'What is working, what is not', source: ['ai', 'pub'], blocks: [
+        { type: 'row', blocks: [
+            { type: 'points', title: 'What is working', tone: 'good', items: working.slice(0, 4).map(docPoint) },
+            { type: 'points', title: 'What is holding the Page back', tone: 'watch', items: failing.slice(0, 4).map(docPoint) }
+        ] }
+    ] });
+
+    const plan = (Array.isArray(ai.thirty_day_plan) ? ai.thirty_day_plan : []).slice(0, 4).map(w => ({ week: oneLine(w.week, 30), actions: docLines(w.actions).slice(0, 4) })).filter(w => w.actions.length);
+    const kpis = (Array.isArray(ai.kpis_to_watch) ? ai.kpis_to_watch : []).filter(k => k && k.kpi).slice(0, 5);
+    if (plan.length || kpis.length) sections.push({ title: '30-day plan and what we will watch', source: ['ai'], blocks: [
+        plan.length ? { type: 'weeks', items: plan } : null,
+        kpis.length ? { type: 'table', cols: [{ label: 'Watch' }, { label: 'Now', num: true }, { label: 'In 30 days', num: true }], rows: kpis.map(k => [oneLine(k.kpi, 80), oneLine(k.current, 30) || '—', oneLine(k.target, 30) || '—']) } : null
+    ] });
+
+    return docFinish({
+        type: 'fb_page',
+        cover: { kind: `Facebook Page report · ${docMonth(row.created_at)}`, title: name,
+            sub: `${t.category ? t.category + ' · ' : ''}the last ${docFmt(j.windowDays || cad.spanDays)} days of public posts${rv ? `, set against ${rv.name}` : ''}.`,
+            receipt: [[t.grade || '—', 'Page grade'], [t.rating ? `${t.rating}★` : '—', t.reviewsCount ? `${docFmt(t.reviewsCount)} reviews` : 'rating'], [docFmt(t.postsAnalyzed), 'posts read'], [docFmt(t.followers), 'followers']],
+            builtAt: j.generatedAt || row.created_at },
+        sections,
+        about: [
+            `Built from the Page’s public posts and details, collected ${docDay(j.generatedAt || row.created_at)}. Reactions, comments, shares and (where Facebook shows them) video views are public counts.`,
+            'Reach, impressions, clicks and Page visits are visible only to the Page owner and are not estimated. Connecting Meta adds them to the monthly report.',
+            'Written sections are by AI from these numbers only.'
+        ]
+    });
+}
+
 /** Drop empty blocks and sections, so a document only draws what it has. */
 function docFinish(doc) {
     const keep = b => {
         if (!b) return false;
         if (b.type === 'row') { b.blocks = (b.blocks || []).filter(keep); return b.blocks.length > 0; }
         if (b.type === 'kpis') { b.items = (b.items || []).filter(Boolean); return b.items.length > 0; }
-        if (['posts', 'points', 'weeks', 'checks'].includes(b.type)) return Array.isArray(b.items) && b.items.filter(Boolean).length > 0;
+        if (['posts', 'points', 'weeks', 'checks', 'quotes'].includes(b.type)) return Array.isArray(b.items) && b.items.filter(Boolean).length > 0;
         if (b.type === 'table') return Array.isArray(b.rows) && b.rows.length > 0;
         if (b.type === 'bars') return Array.isArray(b.rows) && b.rows.length > 0;
         return true;
@@ -16108,6 +16220,7 @@ function reportDoc(row) {
     try {
         if (row.report_type === 'ig_report') return igDoc(row);
         if (row.report_type === 'deep_audit') return ciDoc(row);
+        if (row.report_type === 'fb_page') return fbDoc(row);
     } catch (err) {
         logger.warn('report_doc_failed', { type: row.report_type, message: err.message });
     }
@@ -17837,5 +17950,5 @@ module.exports = {
     // phase 35
     assistantScope, assistantAnswer,
     // phase 36
-    reportDoc, igDoc, ciDoc, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
+    reportDoc, igDoc, ciDoc, fbDoc, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
 };
