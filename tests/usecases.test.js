@@ -63,7 +63,8 @@ function masterView() {
 const DEFAULTS = {
     clients:   { archived: false },
     app_users: { is_active: true, byo_key_only: false },
-    jobs:      { status: 'queued', progress: 0 }
+    jobs:      { status: 'queued', progress: 0 },
+    client_tasks: { status: 'todo', position: 0, assigned_to_client: false, visible_to_client: false }
 };
 
 /** The .or() DSL subset server.js uses: eq, in, is.null, not.is.null, ilike. */
@@ -161,7 +162,12 @@ const fakeSupabase = {
                 return { data: { user }, error: null };
             },
             updateUserById: async () => ({ data: {}, error: null }),
-            deleteUser: async () => ({ data: {}, error: null })
+            deleteUser: async () => ({ data: {}, error: null }),
+            // A one-time sign-in link, as Supabase makes it: nothing is sent.
+            generateLink: async ({ type, email, options }) => ({
+                data: { properties: { action_link: `https://stub.supabase.co/auth/v1/verify?token=once-${encodeURIComponent(email)}&type=${type}&redirect_to=${encodeURIComponent((options && options.redirectTo) || '')}` } },
+                error: null
+            })
         }
     }
 };
@@ -1833,6 +1839,286 @@ test('the admin sees every asset\'s health and the last runs; an employee does n
     assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
     const e = await call('GET', '/api/xp/admin/health', { token: 't-emp' });
     assert.strictEqual(e.statusCode, 403);
+});
+
+// ===========================================================================
+// PHASE 32 — every client has a task board, and the owner a way in
+// ===========================================================================
+section('\nphase 32: the client\'s task board');
+test('a new client\'s board is empty, and lists who can be given work — never a client login', async () => {
+    const r = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Kite Surf School' } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    state.T = r.body.client.id;
+    assert.strictEqual((await call('POST', `/api/clients/${state.T}/members`, { token: 't-admin', body: { email: EMP.email, role: 'editor' } })).statusCode, 200);
+    assert.strictEqual((await call('POST', `/api/clients/${state.T}/members`, { token: 't-admin', body: { email: EMP2.email, role: 'viewer' } })).statusCode, 200);
+    const b = await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-emp' });
+    assert.strictEqual(b.statusCode, 200, JSON.stringify(b.body));
+    assert.deepStrictEqual(b.body.tasks, []);
+    assert.strictEqual(b.body.canEdit, true);
+    assert.deepStrictEqual(b.body.statuses, ['todo', 'doing', 'waiting', 'done']);
+    const ids = b.body.people.map(p => p.id);
+    assert.ok(ids.includes(ADMIN.id) && ids.includes(EMP.id) && ids.includes(EMP2.id), JSON.stringify(b.body.people));
+    assert.ok(!b.body.people.some(p => p.role === 'client'), 'a client login offered as a team assignee');
+});
+test('an editor adds a task, cleaned; a viewer sees it but cannot change it', async () => {
+    const r = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body: {
+        title: '  Film 2 Reels\u0000 at the   beach ', assignee: EMP.id, dueDate: '2026-10-02',
+        labels: ['Content', 'content', 'Reels', ''], checklist: [{ text: 'Shot list' }, { text: '   ' }, { text: 'Edit', done: true }]
+    } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    const t = r.body.task;
+    assert.strictEqual(t.title, 'Film 2 Reels at the beach');
+    assert.deepStrictEqual(t.labels, ['Content', 'Reels'], 'labels are de-duplicated without regard to case');
+    assert.deepStrictEqual(t.checklist, [{ text: 'Shot list', done: false }, { text: 'Edit', done: true }]);
+    assert.strictEqual(t.status, 'todo');
+    assert.strictEqual(t.assignee.kind, 'person'); assert.strictEqual(t.assignee.id, EMP.id);
+    assert.strictEqual(t.visibleToClient, false);
+    state.task1 = t.id;
+    const v = await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-emp2' });
+    assert.strictEqual(v.statusCode, 200);
+    assert.strictEqual(v.body.canEdit, false, 'a viewer is told they cannot edit');
+    assert.ok(v.body.tasks.some(x => x.id === state.task1), 'a viewer on the client cannot see its board');
+    assert.strictEqual((await call('PATCH', `/api/tasks/${state.task1}`, { token: 't-emp2', body: { status: 'doing' } })).statusCode, 404);
+    assert.strictEqual((await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp2', body: { title: 'x' } })).statusCode, 404);
+    assert.strictEqual((await call('DELETE', `/api/tasks/${state.task1}`, { token: 't-emp2' })).statusCode, 404);
+});
+test('a stranger sees nothing and changes nothing', async () => {
+    assert.strictEqual((await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-stranger' })).statusCode, 404);
+    assert.strictEqual((await call('PATCH', `/api/tasks/${state.task1}`, { token: 't-stranger', body: { title: 'mine now' } })).statusCode, 404);
+    assert.strictEqual((await call('GET', `/api/tasks/${state.task1}/comments`, { token: 't-stranger' })).statusCode, 404);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.task1}/comments`, { token: 't-stranger', body: { body: 'hi' } })).statusCode, 404);
+    assert.strictEqual(tbl('client_tasks').find(x => x.id === state.task1).title, 'Film 2 Reels at the beach');
+});
+test('bad input is refused with the reason, and nothing is written', async () => {
+    const before = tbl('client_tasks').length;
+    const cases = [
+        [{ title: '   ' }, /name/],
+        [{ title: 'x', status: 'blocked' }, /Status/],
+        [{ title: 'x', dueDate: '10/02/2026' }, /due date/i],
+        [{ title: 'x', assignee: STRANGER.id }, /cannot open this client/],
+        [{ title: 'x', assignee: CLIENT.id }, /cannot open this client/],
+        [{ title: 'x', labels: 'Content' }, /list/]
+    ];
+    for (const [body, why] of cases) {
+        const r = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body });
+        assert.strictEqual(r.statusCode, 400, JSON.stringify(body) + ' → ' + JSON.stringify(r.body));
+        assert.ok(why.test(r.body.error), r.body.error);
+    }
+    assert.strictEqual(tbl('client_tasks').length, before);
+});
+test('a card moved to Done is stamped and goes to the bottom of Done; moved back, the stamp goes', async () => {
+    const a = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body: { title: 'Book the drone pilot', status: 'done' } });
+    assert.strictEqual(a.statusCode, 201);
+    assert.ok(a.body.task.completedAt, 'created in Done without a completion stamp');
+    const r = await call('PATCH', `/api/tasks/${state.task1}`, { token: 't-emp', body: { status: 'done' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(r.body.task.completedAt);
+    assert.ok(r.body.task.position > a.body.task.position, 'a card moved into a column goes below what is there');
+    const back = await call('PATCH', `/api/tasks/${state.task1}`, { token: 't-emp', body: { status: 'doing' } });
+    assert.strictEqual(back.body.task.completedAt, null);
+    const ren = await call('PATCH', `/api/tasks/${state.task1}`, { token: 't-emp', body: { title: '' } });
+    assert.strictEqual(ren.statusCode, 400, 'a task cannot be renamed to nothing');
+});
+
+section('\nphase 32: the owner\'s portal, opened by the agency');
+test('only the client\'s owner or an admin can invite its owner; a team email is refused', async () => {
+    const e = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-emp', body: { email: 'owner@kitesurf.test' } });
+    assert.strictEqual(e.statusCode, 404, 'an editor is not the client\'s owner');
+    const team = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-admin', body: { email: EMP.email } });
+    assert.strictEqual(team.statusCode, 400);
+    assert.ok(/team/.test(team.body.error), team.body.error);
+    const bad = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-admin', body: { email: 'not-an-email' } });
+    assert.strictEqual(bad.statusCode, 400);
+});
+test('with no mail set up, the admin gets a one-time link to pass on, and the owner lands in THIS business', async () => {
+    MAIL.sent.length = 0;
+    const r = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-admin', body: { email: 'Owner@KiteSurf.test', name: 'Lena Park' } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.body.created, true);
+    assert.strictEqual(r.body.emailed, false);
+    assert.ok(/type=recovery/.test(r.body.link || ''), 'no link to pass on: ' + r.body.link);
+    assert.ok(/welcome\.html/.test(decodeURIComponent(r.body.link)) || !/redirect_to=http/.test(r.body.link), 'the link should land on the page that asks for a password');
+    assert.strictEqual(MAIL.sent.length, 0);
+    state.ownerT = r.body.owner.id;
+    const row = tbl('app_users').find(u => u.id === state.ownerT);
+    assert.strictEqual(row.role, 'client');
+    assert.strictEqual(row.email, 'owner@kitesurf.test');
+    assert.ok(row.trial_ends_at && Date.parse(row.trial_ends_at) > Date.now(), 'an invited owner must not start locked out');
+    const me = await call('GET', '/api/me', { token: 't-owner@kitesurf.test' });
+    assert.strictEqual(me.statusCode, 200, JSON.stringify(me.body));
+    assert.strictEqual(me.body.role, 'client');
+    assert.strictEqual(me.body.business.id, state.T, 'the owner landed in a business of their own instead of the agency\'s record');
+    assert.ok(!tbl('clients').some(c => c.owner_user_id === state.ownerT && !c.archived), 'an empty duplicate record was made for the owner');
+    const d = await call('GET', `/api/clients/${state.T}`, { token: 't-admin' });
+    const m = d.body.members.find(x => x.user_id === state.ownerT);
+    assert.ok(m && m.accountRole === 'client', 'the client page cannot tell the owner\'s login from the team');
+});
+test('an existing owner login is linked, but its password link is never handed to the inviter', async () => {
+    // Anyone who owns a client could otherwise type another business owner's
+    // address and take over their account with the link that came back.
+    const SOLO = person('solo@shop.test'); TOKENS['t-solo'] = SOLO;
+    const first = await call('GET', '/api/me', { token: 't-solo' });
+    assert.strictEqual(first.body.role, 'client');
+    const own = first.body.business.id;
+    const r = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'solo@shop.test' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.created, false);
+    assert.strictEqual(r.body.emailed, false);
+    assert.strictEqual(r.body.link, null, 'a password link for an existing login came back to the inviter');
+    assert.ok(/already has a login/.test(r.body.note), r.body.note);
+    assert.strictEqual(r.body.absorbed, own, 'the empty self-serve record should be absorbed');
+    const me = await call('GET', '/api/me', { token: 't-solo' });
+    assert.strictEqual(me.body.business.id, state.D, 'the owner\'s portal does not show the business that invited them');
+});
+test('a login that already belongs to another business is not taken, and the other one is not named', async () => {
+    const before = tbl('client_members').length;
+    const r = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'owner@kitesurf.test' } });
+    assert.strictEqual(r.statusCode, 409, JSON.stringify(r.body));
+    assert.ok(!/Kite Surf/.test(r.body.error), 'the refusal names another agency client');
+    assert.strictEqual(tbl('client_members').length, before);
+    assert.ok(!tbl('client_members').some(m => m.client_id === state.D && m.user_id === state.ownerT));
+});
+test('inviting again links the same login and, with Gmail set up, sends the link from the agency', async () => {
+    const set = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'agency@gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency' } } });
+    assert.strictEqual(set.statusCode, 200, JSON.stringify(set.body));
+    MAIL.sent.length = 0;
+    const r = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-admin', body: { email: 'owner@kitesurf.test' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.created, false, 'a second login was made for the same owner');
+    assert.strictEqual(r.body.emailed, true);
+    assert.strictEqual(r.body.link, null, 'a sent link must not also come back to the page');
+    const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
+    assert.ok(m, 'no invite mail to the owner');
+    assert.ok(/Kite Surf School/.test(m.msg.subject) && /type=recovery/.test(m.msg.text), m.msg.subject + ' / ' + m.msg.text);
+    assert.strictEqual(tbl('app_users').filter(u => u.email === 'owner@kitesurf.test').length, 1);
+    await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
+});
+test('a paid portal is an admin\'s to give', async () => {
+    const e = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'shop@bloom.test', paidUntil: '2027-01-31' } });
+    assert.strictEqual(e.statusCode, 403, JSON.stringify(e.body));
+    assert.ok(!TOKENS['t-shop@bloom.test'], 'a refused invite still made a login');
+    const a = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-admin', body: { email: 'paid@bloom.test', paidUntil: '2027-01-31', planLabel: 'Growth' } });
+    assert.strictEqual(a.statusCode, 201, JSON.stringify(a.body));
+    const row = tbl('app_users').find(u => u.email === 'paid@bloom.test');
+    assert.strictEqual(row.plan_label, 'Growth');
+    assert.ok(String(row.paid_until).startsWith('2027-01-31'));
+});
+
+section('\nphase 32: what the owner sees of the board');
+test('a task for the client is always shown to the client; internal work never is', async () => {
+    const c = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-admin', body: { title: 'Send us your logo files', assignee: 'client', visibleToClient: false, dueDate: '2026-10-01' } });
+    assert.strictEqual(c.statusCode, 201, JSON.stringify(c.body));
+    assert.strictEqual(c.body.task.assignee.kind, 'client');
+    assert.strictEqual(c.body.task.visibleToClient, true, 'the client\'s own to-do was hidden from the client');
+    state.clientTask = c.body.task.id;
+    const shown = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body: { title: 'Design the summer poster', assignee: EMP.id, visibleToClient: true } });
+    state.shownTask = shown.body.task.id;
+    const hidden = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body: { title: 'Chase the late invoice', notes: 'internal' } });
+    state.hiddenTask = hidden.body.task.id;
+    const off = await call('PATCH', `/api/tasks/${state.clientTask}`, { token: 't-admin', body: { visibleToClient: false } });
+    assert.strictEqual(off.body.task.visibleToClient, true, 'the client\'s to-do can be hidden from them by a later edit');
+
+    const o = await call('GET', '/api/client/tasks', { token: 't-owner@kitesurf.test' });
+    assert.strictEqual(o.statusCode, 200, JSON.stringify(o.body));
+    assert.strictEqual(o.body.business.id, state.T);
+    const ids = o.body.tasks.map(t => t.id);
+    assert.ok(ids.includes(state.clientTask) && ids.includes(state.shownTask), 'a shared task is missing from the portal');
+    assert.ok(!ids.includes(state.hiddenTask) && !ids.includes(state.task1), 'internal work reached the owner\'s portal');
+    const mine = o.body.tasks.find(t => t.id === state.clientTask);
+    assert.strictEqual(mine.yours, true);
+    const dump = JSON.stringify(o.body);
+    assert.ok(!dump.includes(EMP.email) && !dump.includes(EMP.id) && !dump.includes('assignee') && !dump.includes('createdBy'), 'the portal list carries the team\'s identities: ' + dump);
+});
+test('the owner is refused the staff routes, and cannot touch anything but their own to-do', async () => {
+    const tok = 't-owner@kitesurf.test';
+    const b = await call('GET', `/api/clients/${state.T}/tasks`, { token: tok });
+    assert.strictEqual(b.statusCode, 403); assert.strictEqual(b.body.code, 'client_surface');
+    assert.strictEqual((await call('PATCH', `/api/tasks/${state.clientTask}`, { token: tok, body: { title: 'x' } })).statusCode, 403);
+    assert.strictEqual((await call('POST', `/api/clients/${state.T}/tasks`, { token: tok, body: { title: 'x' } })).statusCode, 403);
+    assert.strictEqual((await call('GET', '/api/my-tasks', { token: tok })).statusCode, 403);
+    assert.strictEqual((await call('PATCH', `/api/client/tasks/${state.shownTask}`, { token: tok, body: { status: 'done' } })).statusCode, 404, 'shown is not theirs to tick');
+    assert.strictEqual((await call('PATCH', `/api/client/tasks/${state.hiddenTask}`, { token: tok, body: { status: 'done' } })).statusCode, 404);
+    assert.strictEqual((await call('PATCH', `/api/client/tasks/${state.clientTask}`, { token: tok, body: { status: 'waiting' } })).statusCode, 400);
+    assert.strictEqual((await call('GET', '/api/client/tasks', { token: 't-emp' })).statusCode, 400, 'staff read the client\'s board, not the portal list');
+});
+test('the owner ticks off their to-do, and the team sees it done', async () => {
+    const r = await call('PATCH', `/api/client/tasks/${state.clientTask}`, { token: 't-owner@kitesurf.test', body: { status: 'done' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.task.status, 'done');
+    const b = await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-emp' });
+    const t = b.body.tasks.find(x => x.id === state.clientTask);
+    assert.strictEqual(t.status, 'done'); assert.ok(t.completedAt);
+});
+test('the team and the owner talk on a shared task; the owner never sees the team\'s addresses', async () => {
+    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: 'Thanks, got the logos.' } })).statusCode, 201);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-owner@kitesurf.test', body: { body: 'Great!' } })).statusCode, 201);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.hiddenTask}/comments`, { token: 't-owner@kitesurf.test', body: { body: 'peek' } })).statusCode, 404);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: '   ' } })).statusCode, 400);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: 'x'.repeat(2001) } })).statusCode, 400);
+    const o = await call('GET', `/api/tasks/${state.clientTask}/comments`, { token: 't-owner@kitesurf.test' });
+    assert.strictEqual(o.statusCode, 200, JSON.stringify(o.body));
+    assert.strictEqual(o.body.comments.length, 2);
+    const [team, own] = o.body.comments;
+    assert.strictEqual(team.author.kind, 'team'); assert.strictEqual(own.author.kind, 'client'); assert.strictEqual(own.mine, true);
+    assert.ok(!JSON.stringify(o.body).includes(EMP.email), 'the owner was shown a team member\'s address');
+    const s = await call('GET', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp' });
+    assert.strictEqual(s.body.comments[0].author.email, EMP.email, 'the team should see who said it');
+    const b = await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-emp2' });
+    assert.strictEqual(b.body.tasks.find(x => x.id === state.clientTask).comments, 2);
+});
+
+section('\nphase 32: tasks from reports, My tasks, and the edges');
+test('a recommendation is added to the board once, and only from work filed under this client', async () => {
+    const rid = crypto.randomUUID();
+    tbl('reports').push({ id: rid, user_id: ADMIN.id, client_id: state.T, report_type: 'meta_monthly', created_at: new Date().toISOString() });
+    const body = { title: 'Post 2 Reels a week', source: { type: 'recommendation', id: rid, key: 'rec-2', label: 'Monthly report · Aug 2026' } };
+    const a = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body });
+    assert.strictEqual(a.statusCode, 201, JSON.stringify(a.body));
+    assert.strictEqual(a.body.task.source.label, 'Monthly report · Aug 2026');
+    const again = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-admin', body });
+    assert.strictEqual(again.statusCode, 200);
+    assert.strictEqual(again.body.existing, true);
+    assert.strictEqual(again.body.task.id, a.body.task.id);
+    const other = tbl('reports').find(r => r.client_id === state.C);
+    const x = await call('POST', `/api/clients/${state.T}/tasks`, { token: 't-emp', body: { title: 'y', source: { type: 'report', id: other.id } } });
+    assert.strictEqual(x.statusCode, 400, 'a task could point at another client\'s report');
+});
+test('My tasks: mine on every client, soonest first; a client I was taken off drops out', async () => {
+    const d = await call('POST', `/api/clients/${state.D}/tasks`, { token: 't-emp', body: { title: 'Order the spring flyers', assignee: EMP.id, dueDate: '2026-09-30' } });
+    assert.strictEqual(d.statusCode, 201, JSON.stringify(d.body));
+    const r = await call('GET', '/api/my-tasks', { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const titles = r.body.tasks.map(t => t.title);
+    assert.ok(titles.includes('Order the spring flyers') && titles.includes('Film 2 Reels at the beach'), titles.join(' | '));
+    assert.strictEqual(r.body.tasks[0].title, 'Order the spring flyers', 'soonest due date should come first');
+    assert.strictEqual(r.body.tasks[0].client.name, 'Bloom Florist');
+    assert.ok(!titles.includes('Design the summer poster') || r.body.tasks.every(t => t.assignee && t.assignee.id === EMP.id));
+    await call('DELETE', `/api/clients/${state.T}/members/${EMP.id}`, { token: 't-admin' });
+    const after = await call('GET', '/api/my-tasks', { token: 't-emp' });
+    assert.ok(!after.body.tasks.some(t => t.client.id === state.T), 'tasks on a client I can no longer open are still listed');
+    await call('POST', `/api/clients/${state.T}/members`, { token: 't-admin', body: { email: EMP.email, role: 'editor' } });
+});
+test('an editor deletes a task; a merged client brings its board along', async () => {
+    const del = await call('DELETE', `/api/tasks/${state.hiddenTask}`, { token: 't-emp' });
+    assert.strictEqual(del.statusCode, 200, JSON.stringify(del.body));
+    const b = await call('GET', `/api/clients/${state.T}/tasks`, { token: 't-emp' });
+    assert.ok(!b.body.tasks.some(t => t.id === state.hiddenTask));
+    const u = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Kite Surf School (dup)' } });
+    const tu = await call('POST', `/api/clients/${u.body.client.id}/tasks`, { token: 't-admin', body: { title: 'Carried across' } });
+    const dry = await call('POST', `/api/clients/${state.T}/merge`, { token: 't-admin', body: { fromId: u.body.client.id }, query: { dry: '1' } });
+    assert.strictEqual(dry.body.counts.client_tasks, 1, JSON.stringify(dry.body.counts));
+    const m = await call('POST', `/api/clients/${state.T}/merge`, { token: 't-admin', body: { fromId: u.body.client.id } });
+    assert.strictEqual(m.statusCode, 200, JSON.stringify(m.body));
+    assert.strictEqual(tbl('client_tasks').find(t => t.id === tu.body.task.id).client_id, state.T);
+});
+test('a monthly report is filed only under a client the caller may edit', async () => {
+    // Before phase 32 any clientId in the body was trusted.
+    const other = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Not on EMP\'s list' } });
+    const before = tbl('jobs').length;
+    const r = await call('POST', '/api/meta/monthly', { token: 't-emp', body: { connectionId: state.moConn.id, month: '2026-08', clientId: other.body.client.id } });
+    assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
+    assert.ok(/edit access/.test(r.body.error), r.body.error);
+    assert.strictEqual(tbl('jobs').length, before, 'a job was queued for a client the caller cannot edit');
 });
 
 (async () => {

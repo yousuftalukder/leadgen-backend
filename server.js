@@ -11596,15 +11596,18 @@ app.get('/api/clients/:id', async (req, res) => {
         if (!c) return res.status(404).json({ error: 'Client not found.' });
         const { data: members } = await supabase.from('client_members').select('user_id, role, created_at').eq('client_id', c.id);
         const ids = [c.owner_user_id, ...(members || []).map(m => m.user_id)];
-        const { data: users } = await supabase.from('app_users').select('id, email').in('id', ids);
-        const email = id => (users || []).find(u => u.id === id)?.email || id;
+        const { data: users } = await supabase.from('app_users').select('id, email, full_name, role').in('id', ids);
+        const user = id => (users || []).find(u => u.id === id) || {};
+        const email = id => user(id).email || id;
         const { data: conns } = await supabase.from('meta_connections')
             .select('id, page_id, page_name, ig_user_id, ig_username, status, last_sync_at, last_error, token_expires_at, scopes')
             .eq('client_id', c.id);
         res.json({
             client: c,
             owner: { id: c.owner_user_id, email: email(c.owner_user_id) },
-            members: (members || []).map(m => ({ ...m, email: email(m.user_id) })),
+            // accountRole 'client' is the business owner's portal login (phase 32);
+            // everyone else is the agency's team.
+            members: (members || []).map(m => ({ ...m, email: email(m.user_id), name: user(m.user_id).full_name || null, accountRole: user(m.user_id).role || null })),
             metaConnections: conns || []
         });
     } catch (err) { sendErr(res, err); }
@@ -11643,31 +11646,38 @@ app.post('/api/clients/:id/members', async (req, res) => {
             .upsert([{ client_id: c.id, user_id: u.id, role, added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
         if (error) throw error;
 
-        // A client-role account already owns a business record of its own,
-        // made at signup. If an agency now files them under the agency's
-        // record and their own is still empty, keeping both means one
-        // business in two places. The empty one is archived — never deleted —
-        // so their runs land where the agency is already working.
-        let absorbed = null;
-        if (role === 'editor' && await userRole(u.id) === 'client') {
-            const { data: own } = await supabase.from('clients').select('id, name')
-                .eq('owner_user_id', u.id).eq('archived', false);
-            for (const o of (own || [])) {
-                const [{ count: r }, { count: j }, { count: m }] = await Promise.all([
-                    supabase.from('reports').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
-                    supabase.from('jobs').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
-                    supabase.from('meta_connections').select('id', { count: 'exact', head: true }).eq('client_id', o.id)
-                ]);
-                if (!(r || 0) && !(j || 0) && !(m || 0)) {
-                    await supabase.from('clients').update({ archived: true }).eq('id', o.id);
-                    absorbed = o.id;
-                    logger.info('client_own_record_absorbed', { userId: u.id, into: c.id, archived: o.id });
-                }
-            }
-        }
+        const absorbed = role === 'editor' ? await absorbEmptyOwnRecord(u.id, c.id) : null;
         res.json({ success: true, member: { user_id: u.id, email: u.email, role }, absorbed });
     } catch (err) { sendErr(res, err); }
 });
+
+/**
+ * A client-role account already owns a business record of its own, made at
+ * signup. If an agency now files them under the agency's record and their own
+ * is still empty, keeping both means one business in two places. The empty
+ * one is archived — never deleted — so their runs land where the agency is
+ * already working. Returns the archived record's id, or null.
+ */
+async function absorbEmptyOwnRecord(userId, intoClientId) {
+    if (await userRole(userId) !== 'client') return null;
+    let absorbed = null;
+    const { data: own } = await supabase.from('clients').select('id, name')
+        .eq('owner_user_id', userId).eq('archived', false);
+    for (const o of (own || [])) {
+        if (o.id === intoClientId) continue;
+        const [{ count: r }, { count: j }, { count: m }] = await Promise.all([
+            supabase.from('reports').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+            supabase.from('jobs').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+            supabase.from('meta_connections').select('id', { count: 'exact', head: true }).eq('client_id', o.id)
+        ]);
+        if (!(r || 0) && !(j || 0) && !(m || 0)) {
+            await supabase.from('clients').update({ archived: true }).eq('id', o.id);
+            absorbed = o.id;
+            logger.info('client_own_record_absorbed', { userId, into: intoClientId, archived: o.id });
+        }
+    }
+    return absorbed;
+}
 
 app.delete('/api/clients/:id/members/:userId', async (req, res) => {
     try {
@@ -11679,6 +11689,591 @@ app.delete('/api/clients/:id/members/:userId', async (req, res) => {
             .eq('client_id', req.params.id).eq('user_id', req.params.userId);
         if (error) throw error;
         res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 32 :: THE CLIENT'S TASK BOARD
+//
+// Reports said what to do; nothing said who was doing it, so the work that is
+// not a report (film the Reels, fix the link in bio, answer the birthday
+// requests) lived in people's heads. Every client now has a board: To do,
+// In progress, Waiting on the client, Done. The rules are the client's rules:
+// anyone who can open the client can read its board, editors change it.
+//
+// A task can be the client's own (assigned_to_client) and any task can be
+// shown to the client (visible_to_client). Those are the only rows the owner's
+// portal selects, through its own endpoints under /api/client (rule 11); the
+// staff routes refuse client accounts rather than filter for them.
+// ===========================================================================
+const TASK_STATUSES = ['todo', 'doing', 'waiting', 'done'];
+const TASK_TITLE_MAX = 300;
+const TASK_NOTES_MAX = 4000;
+const TASK_LABELS_MAX = 6;
+const TASK_CHECKLIST_MAX = 30;
+const TASK_COMMENT_MAX = 2000;
+const TASK_DONE_SHOWN_DAYS = 14;          // "My tasks" keeps a fortnight of finished work in view
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The phase-32 tables are missing: the server was deployed before the SQL.
+ * Deploy order is SQL → server → pages; when that slips, the board says what
+ * to run instead of failing as a 500 nobody can act on.
+ */
+function missingTable(err) {
+    return !!err && (err.code === '42P01' || err.code === 'PGRST205'
+        || /does not exist|could not find the table/i.test(String(err.message || '')));
+}
+function migrationNeeded(res) {
+    return res.status(503).json({
+        error: 'The task board needs the phase-32 database update. Run sql/schema-phase32.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+function taskFail(message, statusCode = 400) {
+    const e = new Error(message); e.statusCode = statusCode; return e;
+}
+
+/** One line of plain text: control characters out, runs of space collapsed. */
+function oneLine(v, max) {
+    return String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * Validate a task body from the page. Only the fields present come back, so
+ * create (everything) and patch (some things) share one set of rules.
+ */
+function cleanTaskBody(b = {}, { create = false } = {}) {
+    const out = {};
+    if (create || b.title !== undefined) {
+        const t = oneLine(b.title, TASK_TITLE_MAX);
+        if (!t) throw taskFail('Give the task a name.');
+        out.title = t;
+    }
+    if (b.notes !== undefined) {
+        const n = String(b.notes ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, TASK_NOTES_MAX);
+        out.notes = n || null;
+    }
+    if (b.status !== undefined) {
+        if (!TASK_STATUSES.includes(b.status)) throw taskFail(`Status must be one of: ${TASK_STATUSES.join(', ')}.`);
+        out.status = b.status;
+    }
+    if (b.dueDate !== undefined) {
+        if (b.dueDate === null || b.dueDate === '') out.due_date = null;
+        else {
+            const d = String(b.dueDate);
+            if (!ISO_DAY_RE.test(d) || Number.isNaN(Date.parse(d + 'T00:00:00Z'))) throw taskFail('A due date looks like 2026-10-01.');
+            out.due_date = d;
+        }
+    }
+    if (b.labels !== undefined) {
+        if (!Array.isArray(b.labels)) throw taskFail('Labels must be a list.');
+        const seen = new Set(); const labels = [];
+        for (const raw of b.labels) {
+            const l = oneLine(raw, 24);
+            if (!l || seen.has(l.toLowerCase())) continue;
+            seen.add(l.toLowerCase()); labels.push(l);
+        }
+        out.labels = labels.slice(0, TASK_LABELS_MAX);
+    }
+    if (b.checklist !== undefined) {
+        if (!Array.isArray(b.checklist)) throw taskFail('The checklist must be a list.');
+        out.checklist = b.checklist.slice(0, TASK_CHECKLIST_MAX)
+            .map(i => ({ text: oneLine(i && i.text, 200), done: !!(i && i.done) }))
+            .filter(i => i.text);
+    }
+    if (b.visibleToClient !== undefined) out.visible_to_client = b.visibleToClient === true;
+    if (b.position !== undefined) {
+        const p = Number(b.position);
+        if (!Number.isFinite(p)) throw taskFail('Position must be a number.');
+        out.position = p;
+    }
+    return out;
+}
+
+/**
+ * Who a task may belong to: nobody, the client, or a person who can open this
+ * client. A client-role login is never a team assignee — "the client" is.
+ */
+async function resolveAssignee(raw, client) {
+    if (raw === undefined) return {};
+    if (raw === null || raw === '') return { assignee_user_id: null, assigned_to_client: false };
+    if (raw === 'client') return { assignee_user_id: null, assigned_to_client: true, visible_to_client: true };
+    if (!UUID_RE.test(String(raw)) || await userRole(raw) === 'client' || !(await clientAccess(raw, client.id, 'viewer'))) {
+        throw taskFail('That person cannot open this client. Add them to the client first.');
+    }
+    return { assignee_user_id: raw, assigned_to_client: false };
+}
+
+/**
+ * Where a task came from. A report or job it points at must be filed under
+ * the same client, or a board could link to another client's work.
+ */
+async function cleanTaskSource(s, client) {
+    if (!s || typeof s !== 'object') return {};
+    const type = ['report', 'recommendation', 'job', 'schedule'].includes(s.type) ? s.type : null;
+    if (!type) return {};
+    const out = { source_type: type, source_id: null, source_label: oneLine(s.label, 120) || null, source_key: oneLine(s.key, 80) || null };
+    if (s.id && type !== 'schedule') {
+        if (!UUID_RE.test(String(s.id))) throw taskFail('That source is not a report or job id.');
+        const { data } = await supabase.from(type === 'job' ? 'jobs' : 'reports').select('id, client_id').eq('id', s.id).maybeSingle();
+        if (!data || data.client_id !== client.id) throw taskFail('That work is not filed under this client.');
+        out.source_id = data.id;
+    }
+    return out;
+}
+
+/** Everyone who can be given a task on this client: owner, members, admins. Never a client login. */
+async function clientPeople(client) {
+    const { data: members } = await supabase.from('client_members').select('user_id, role').eq('client_id', client.id);
+    const { data: admins } = await supabase.from('app_users').select('id').eq('role', 'admin');
+    const ids = [...new Set([client.owner_user_id, ...(members || []).map(m => m.user_id), ...(admins || []).map(a => a.id)].filter(Boolean))];
+    if (!ids.length) return [];
+    const { data: users } = await supabase.from('app_users').select('id, email, full_name, role, is_active').in('id', ids);
+    const memberRole = Object.fromEntries((members || []).map(m => [m.user_id, m.role]));
+    return (users || [])
+        .filter(u => u.role !== 'client' && u.is_active !== false)
+        .map(u => ({
+            id: u.id, email: u.email, name: u.full_name || null, role: u.role,
+            access: u.id === client.owner_user_id ? 'owner' : (memberRole[u.id] || (u.role === 'admin' ? 'admin' : 'viewer'))
+        }))
+        .sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+}
+
+async function peopleById(ids) {
+    const want = [...new Set(ids.filter(Boolean))];
+    if (!want.length) return {};
+    const { data } = await supabase.from('app_users').select('id, email, full_name').in('id', want);
+    return Object.fromEntries((data || []).map(u => [u.id, { id: u.id, email: u.email, name: u.full_name || null }]));
+}
+
+async function taskCommentCounts(taskIds) {
+    if (!taskIds.length) return {};
+    const { data, error } = await supabase.from('client_task_comments').select('task_id').in('task_id', taskIds);
+    if (error) return {};
+    const out = {};
+    for (const r of (data || [])) out[r.task_id] = (out[r.task_id] || 0) + 1;
+    return out;
+}
+
+/** The staff view of a task. */
+function taskView(t, people = {}, comments = {}) {
+    const p = t.assignee_user_id ? people[t.assignee_user_id] : null;
+    return {
+        id: t.id, clientId: t.client_id, title: t.title, notes: t.notes || '',
+        status: t.status, dueDate: t.due_date || null,
+        labels: t.labels || [], checklist: t.checklist || [],
+        assignee: t.assigned_to_client ? { kind: 'client' }
+            : (t.assignee_user_id ? { kind: 'person', id: t.assignee_user_id, email: p?.email || null, name: p?.name || null } : null),
+        visibleToClient: !!t.visible_to_client,
+        source: t.source_type ? { type: t.source_type, id: t.source_id || null, label: t.source_label || null, key: t.source_key || null } : null,
+        position: Number(t.position) || 0,
+        createdBy: t.created_by || null, completedAt: t.completed_at || null,
+        createdAt: t.created_at, updatedAt: t.updated_at || t.created_at,
+        comments: comments[t.id] || 0
+    };
+}
+
+/** The owner's view of a task: what it is and whether it is theirs. No ids of people, no internal notes on who made it. */
+function clientTaskView(t) {
+    return {
+        id: t.id, title: t.title, notes: t.notes || '', status: t.status, dueDate: t.due_date || null,
+        yours: !!t.assigned_to_client, from: t.source_label || null,
+        checklist: t.checklist || [], completedAt: t.completed_at || null, updatedAt: t.updated_at || t.created_at
+    };
+}
+
+/** The staff routes are the agency's; a client account has its own under /api/client. */
+function staffOnly(ctx, res) {
+    if (ctx.profile?.role !== 'client') return true;
+    res.status(403).json({ error: 'Your to-dos are on your portal home.', code: 'client_surface' });
+    return false;
+}
+
+const TASK_MISSING = Symbol('migration_required');
+async function loadTask(id) {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data, error } = await supabase.from('client_tasks').select('*').eq('id', id).maybeSingle();
+    if (error) { if (missingTable(error)) return TASK_MISSING; throw error; }
+    return data || null;
+}
+
+/** The next position at the bottom of a column. */
+async function endOfColumn(clientId, status) {
+    const { data } = await supabase.from('client_tasks').select('position')
+        .eq('client_id', clientId).eq('status', status).order('position', { ascending: false }).limit(1);
+    return ((data && data[0]) ? Number(data[0].position) || 0 : 0) + 1;
+}
+
+/**
+ * May this caller read (and comment on) this task? Staff: anyone who can open
+ * the client. A client account: only a task shown to it, on its own business.
+ */
+async function taskForReader(ctx, taskId) {
+    const t = await loadTask(taskId);
+    if (!t || t === TASK_MISSING) return t;
+    if (ctx.profile?.role === 'client') {
+        const own = await ownClientFor(ctx);
+        return (own && own.id === t.client_id && t.visible_to_client) ? t : null;
+    }
+    return (await clientAccess(ctx.user.id, t.client_id, 'viewer')) ? t : null;
+}
+
+app.get('/api/clients/:id/tasks', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'viewer');
+        if (!c) return res.status(404).json({ error: 'Client not found.' });
+        const { data, error } = await supabase.from('client_tasks').select('*').eq('client_id', c.id)
+            .order('position', { ascending: true }).order('created_at', { ascending: true });
+        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        const tasks = data || [];
+        const people = await clientPeople(c);
+        const byId = Object.fromEntries(people.map(p => [p.id, p]));
+        // Someone taken off the client keeps their name on the tasks they had.
+        Object.assign(byId, await peopleById(tasks.map(t => t.assignee_user_id).filter(id => id && !byId[id])));
+        const counts = await taskCommentCounts(tasks.map(t => t.id));
+        res.json({
+            client: { id: c.id, name: c.name, access: c.access },
+            canEdit: ['owner', 'admin', 'editor'].includes(c.access),
+            statuses: TASK_STATUSES,
+            people,
+            tasks: tasks.map(t => taskView(t, byId, counts))
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/clients/:id/tasks', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const body = cleanTaskBody(req.body || {}, { create: true });
+        const who = await resolveAssignee(req.body?.assignee, c);
+        const src = await cleanTaskSource(req.body?.source, c);
+
+        // A recommendation is added to the board once, however many times the
+        // button is pressed or by whom.
+        if (src.source_id && src.source_key) {
+            const { data: dup, error: de } = await supabase.from('client_tasks').select('*')
+                .eq('client_id', c.id).eq('source_id', src.source_id).eq('source_key', src.source_key).maybeSingle();
+            if (de) { if (missingTable(de)) return migrationNeeded(res); throw de; }
+            if (dup) return res.json({ task: taskView(dup, await peopleById([dup.assignee_user_id])), existing: true });
+        }
+
+        const status = body.status || 'todo';
+        let position = body.position;
+        if (position === undefined) {
+            const { error: pe } = await supabase.from('client_tasks').select('id').eq('client_id', c.id).limit(1);
+            if (pe) { if (missingTable(pe)) return migrationNeeded(res); throw pe; }
+            position = await endOfColumn(c.id, status);
+        }
+        const now = new Date().toISOString();
+        const row = {
+            client_id: c.id, status, notes: null, due_date: null, labels: [], checklist: [],
+            assignee_user_id: null, assigned_to_client: false, visible_to_client: false,
+            ...body, ...who, ...src,
+            position, created_by: ctx.user.id, created_at: now, updated_at: now,
+            completed_at: status === 'done' ? now : null
+        };
+        if (row.assigned_to_client) row.visible_to_client = true;
+        const { data, error } = await supabase.from('client_tasks').insert([row]).select().maybeSingle();
+        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        res.status(201).json({ task: taskView(data, await peopleById([data.assignee_user_id])) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/tasks/:taskId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const t = await loadTask(req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        const c = t ? await clientAccess(ctx.user.id, t.client_id, 'editor') : null;
+        if (!t || !c) return res.status(404).json({ error: 'Task not found, or you cannot edit it.' });
+
+        const now = new Date().toISOString();
+        const patch = { ...cleanTaskBody(req.body || {}), ...(await resolveAssignee(req.body?.assignee, c)), updated_at: now };
+        if (patch.status && patch.status !== t.status) {
+            patch.completed_at = patch.status === 'done' ? now : null;
+            if (patch.position === undefined) patch.position = await endOfColumn(t.client_id, patch.status);
+        }
+        // The client's own to-do is always one the client can see.
+        const forClient = patch.assigned_to_client !== undefined ? patch.assigned_to_client : t.assigned_to_client;
+        if (forClient) patch.visible_to_client = true;
+
+        const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id])) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/tasks/:taskId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const t = await loadTask(req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        const c = t ? await clientAccess(ctx.user.id, t.client_id, 'editor') : null;
+        if (!t || !c) return res.status(404).json({ error: 'Task not found, or you cannot edit it.' });
+        const { error } = await supabase.from('client_tasks').delete().eq('id', t.id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/tasks/:taskId/comments', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const t = await taskForReader(ctx, req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        if (!t) return res.status(404).json({ error: 'Task not found.' });
+        const { data, error } = await supabase.from('client_task_comments').select('id, author_user_id, body, created_at')
+            .eq('task_id', t.id).order('created_at', { ascending: true }).limit(500);
+        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        const rows = data || [];
+        const people = await peopleById(rows.map(r => r.author_user_id));
+        const roles = {};
+        for (const id of Object.keys(people)) roles[id] = await userRole(id);
+        const forClient = ctx.profile?.role === 'client';
+        res.json({
+            comments: rows.map(r => {
+                const p = people[r.author_user_id] || {};
+                const fromClient = roles[r.author_user_id] === 'client';
+                // The owner reads who said it, never the team's addresses.
+                const author = fromClient
+                    ? { kind: 'client', name: p.name || 'Client', ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) }
+                    : { kind: 'team', name: p.name || (forClient ? 'Your agency team' : (p.email || 'Team')), ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) };
+                return { id: r.id, author, mine: r.author_user_id === ctx.user.id, body: r.body, createdAt: r.created_at };
+            })
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/tasks/:taskId/comments', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        const t = await taskForReader(ctx, req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        if (!t) return res.status(404).json({ error: 'Task not found.' });
+        const body = String(req.body?.body ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+        if (!body) return res.status(400).json({ error: 'Write something first.' });
+        if (body.length > TASK_COMMENT_MAX) return res.status(400).json({ error: `Keep a comment under ${TASK_COMMENT_MAX.toLocaleString('en-US')} characters.` });
+        const { data, error } = await supabase.from('client_task_comments')
+            .insert([{ task_id: t.id, client_id: t.client_id, author_user_id: ctx.user.id, body, created_at: new Date().toISOString() }])
+            .select().maybeSingle();
+        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        await supabase.from('client_tasks').update({ updated_at: new Date().toISOString() }).eq('id', t.id);
+        res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at } });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Everything assigned to the caller, on every client they can still open. */
+app.get('/api/my-tasks', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const { data, error } = await supabase.from('client_tasks').select('*').eq('assignee_user_id', ctx.user.id).limit(1000);
+        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        const cutoff = new Date(Date.now() - TASK_DONE_SHOWN_DAYS * 86400000).toISOString();
+        const rows = (data || []).filter(t => t.status !== 'done' || (t.completed_at && t.completed_at >= cutoff));
+        const clients = new Map();
+        for (const id of new Set(rows.map(t => t.client_id))) {
+            const c = await clientAccess(ctx.user.id, id, 'viewer');
+            if (c && !c.archived) clients.set(id, c);
+        }
+        const me = await peopleById([ctx.user.id]);
+        const counts = await taskCommentCounts(rows.map(t => t.id));
+        const tasks = rows.filter(t => clients.has(t.client_id))
+            // Soonest first; no due date last; then oldest.
+            .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || String(a.created_at).localeCompare(String(b.created_at)))
+            .map(t => ({ ...taskView(t, me, counts), client: { id: t.client_id, name: clients.get(t.client_id).name } }));
+        res.json({ tasks });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ---- the owner's side (rule 11: its own endpoints, its own columns) --------
+
+app.get('/api/client/tasks', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(400).json({ error: 'This is the owner portal’s list. Staff use the client’s task board.' });
+        const own = await ownClientFor(ctx);
+        if (!own) return res.json({ business: null, tasks: [] });
+        const { data, error } = await supabase.from('client_tasks')
+            .select('id, title, notes, status, due_date, assigned_to_client, visible_to_client, source_label, checklist, completed_at, updated_at, created_at')
+            .eq('client_id', own.id).eq('visible_to_client', true).limit(500);
+        if (error) { if (missingTable(error)) return res.json({ business: { id: own.id, name: own.name }, tasks: [] }); throw error; }
+        const rows = (data || []).sort((a, b) =>
+            (a.status === 'done') - (b.status === 'done')
+            || (a.due_date || '9999').localeCompare(b.due_date || '9999')
+            || String(a.created_at).localeCompare(String(b.created_at)));
+        res.json({ business: { id: own.id, name: own.name }, tasks: rows.map(clientTaskView) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** The owner ticks off their own to-do, or un-ticks it. Nothing else about a task is theirs to change. */
+app.patch('/api/client/tasks/:taskId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(400).json({ error: 'Staff change tasks on the client’s task board.' });
+        const t = await taskForReader(ctx, req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        if (!t || !t.assigned_to_client) return res.status(404).json({ error: 'Task not found.' });
+        const status = req.body?.status;
+        if (!['todo', 'doing', 'done'].includes(status)) return res.status(400).json({ error: 'Mark it done, or not done.' });
+        const now = new Date().toISOString();
+        const patch = { status, updated_at: now, completed_at: status === 'done' ? (t.completed_at || now) : null };
+        if (status !== t.status) patch.position = await endOfColumn(t.client_id, status);
+        const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ task: clientTaskView(data) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ---- the owner's login, made by the agency ----------------------------------
+//
+// Until now an owner had one way in: sign up themselves, then be absorbed into
+// the agency's record by an owner who knew their email. That is backwards for
+// the agency that already has the client. So the agency invites the owner
+// from the client's page: the login is made, filed under THIS client, and a
+// one-time link lets the owner choose a password. The link is sent from the
+// agency's Gmail when mail is set up; otherwise the person who invited gets
+// it to pass on, because an invite that silently goes nowhere is worse.
+app.post('/api/clients/:id/portal-invite', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter the owner’s email address.' });
+        const name = oneLine(req.body?.name, 80) || null;
+
+        // Every refusal happens before anything is written: a login made and
+        // then refused would sit in Supabase with no account behind it.
+        let paidUntil = null;
+        if (req.body?.paidUntil) {
+            // A portal can be part of what the agency already sells. Plans are
+            // an admin's to give, exactly as on the admin page.
+            if (ctx.profile.role !== 'admin') return res.status(403).json({ error: 'Only an admin can open a paid portal.' });
+            paidUntil = String(req.body.paidUntil);
+            if (!ISO_DAY_RE.test(paidUntil) || Number.isNaN(Date.parse(paidUntil + 'T23:59:59Z'))) return res.status(400).json({ error: 'Paid until looks like 2026-12-31.' });
+        }
+
+        let { data: u } = await supabase.from('app_users').select('id, email, role').eq('email', email).maybeSingle();
+        if (u && u.role !== 'client') return res.status(400).json({ error: 'That email belongs to someone on your team, not a business owner.' });
+        let created = false;
+        if (!u) {
+            // A password nobody knows: the owner sets their own through the link.
+            const { data: cu, error: ce } = await supabase.auth.admin.createUser({
+                email, password: crypto.randomBytes(24).toString('base64url'), email_confirm: true,
+                ...(name ? { user_metadata: { full_name: name } } : {})
+            });
+            if (ce && /already|registered|exists/i.test(ce.message || '')) {
+                return res.status(409).json({ error: 'That email already has a login that has never been used here. Ask them to sign in once, then invite them again.' });
+            }
+            if (ce) throw ce;
+            const days = await trialDaysSetting();
+            const start = new Date();
+            const row = {
+                id: cu.user.id, email, full_name: name, role: 'client', is_active: true, byo_key_only: false,
+                trial_started_at: start.toISOString(), trial_ends_at: new Date(start.getTime() + days * 86400000).toISOString()
+            };
+            if (paidUntil) Object.assign(row, { paid_until: paidUntil + 'T23:59:59Z', plan_label: oneLine(req.body.planLabel, 60) || null, activated_by: ctx.user.id, activated_at: start.toISOString() });
+            const { error: ue } = await supabase.from('app_users').upsert(row);
+            if (ue) throw ue;
+            for (const e of TRIAL_ENGINES) {
+                await supabase.from('user_engine_access')
+                    .upsert({ user_id: row.id, engine: e, granted_by: ctx.user.id }, { onConflict: 'user_id,engine' });
+            }
+            invalidateEngineAccess(row.id);
+            _roleCache.delete(row.id);
+            u = { id: row.id, email, role: 'client' };
+            created = true;
+        }
+
+        // One login is one business: the portal shows the business the login
+        // resolves to, and a second one would make that a coin toss. The other
+        // business is not named — that would tell the inviter who else it is.
+        if (!created) {
+            const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', u.id).eq('role', 'editor');
+            const elsewhere = (mem || []).map(m => m.client_id).filter(id => id !== c.id);
+            const { data: others } = elsewhere.length ? await supabase.from('clients').select('id, archived').in('id', elsewhere) : { data: [] };
+            const { data: owns } = await supabase.from('clients').select('id').eq('owner_user_id', u.id).eq('archived', false);
+            let ownsWork = false;
+            for (const o of (owns || [])) {
+                const [{ count: r }, { count: j }, { count: m }] = await Promise.all([
+                    supabase.from('reports').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+                    supabase.from('jobs').select('id', { count: 'exact', head: true }).eq('client_id', o.id),
+                    supabase.from('meta_connections').select('id', { count: 'exact', head: true }).eq('client_id', o.id)
+                ]);
+                if ((r || 0) + (j || 0) + (m || 0)) ownsWork = true;
+            }
+            if ((others || []).some(x => !x.archived) || ownsWork) {
+                return res.status(409).json({ error: 'That login already belongs to another business. One login is one business; an admin can merge the two records if they are the same business.' });
+            }
+        }
+
+        const { error: me } = await supabase.from('client_members')
+            .upsert([{ client_id: c.id, user_id: u.id, role: 'editor', added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
+        if (me) throw me;
+        const absorbed = await absorbEmptyOwnRecord(u.id, c.id);
+
+        // The way in. 'recovery' works for a login that exists and lands on
+        // the page that asks for a password. For a login made just now the
+        // inviter may carry the link themselves; for a login that already
+        // existed it goes only to that person's inbox — handing someone
+        // else's password link to whoever typed their address would let any
+        // client's owner take over any business owner's account.
+        const base = appUrl();
+        const mailReady = (await mailSettings()).configured;
+        let link = null;
+        if (created || mailReady) {
+            try {
+                const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
+                    type: 'recovery', email, ...(base ? { options: { redirectTo: `${base}/welcome.html` } } : {})
+                });
+                if (ge) throw ge;
+                link = gl?.properties?.action_link || gl?.action_link || null;
+            } catch (e) {
+                logger.warn('portal_invite_link_failed', { clientId: c.id, message: e.message });
+            }
+        }
+
+        let emailed = false, mailError = null;
+        if (link) {
+            const sent = await sendMail({
+                to: email,
+                subject: `Your ${c.name} portal on EdgeLead`,
+                text: [
+                    `${name ? 'Hi ' + name.split(' ')[0] + ',' : 'Hello,'}`,
+                    '',
+                    `Your agency has opened a portal for ${c.name}. It shows your reports, your numbers from Facebook and Instagram, and the to-dos your agency shares with you.`,
+                    '',
+                    `Choose a password to get in: ${link}`,
+                    '',
+                    'The link works once and expires. If it has expired, ask your agency to send a new one.',
+                    '— EdgeLead'
+                ].join('\n')
+            });
+            emailed = !!sent.ok;
+            if (!sent.ok) mailError = sent.error || null;
+        }
+        logger.info('portal_invite', { clientId: c.id, by: ctx.user.id, created, emailed });
+        const handBack = created && !emailed && link;
+        res.status(created ? 201 : 200).json({
+            success: true, created, absorbed, emailed,
+            owner: { id: u.id, email },
+            // Only for a login made just now, and only when it could not be sent.
+            link: handBack ? link : null,
+            note: emailed ? `Invite sent to ${email}.`
+                : handBack ? `Email is not set up${mailError ? ' (' + mailError + ')' : ''}, so send this link to the owner yourself. It works once and expires.`
+                : !created ? `${email} already has a login. Their portal now shows ${c.name}; they sign in with their own password.${mailReady ? ' The email could not be sent' + (mailError ? ' (' + mailError + ')' : '') + '.' : ''}`
+                : 'The login is ready, but a sign-in link could not be made. Try again in a minute.'
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -13172,7 +13767,9 @@ app.post('/api/clients/:id/competitors/discover', spendLimit, async (req, res) =
 const MERGE_TABLES = [
     'reports', 'jobs', 'campaigns', 'meta_connections', 'meta_oauth_states', 'ai_conversations',
     'content_plan_notes', 'competitor_sets', 'fb_group_sets', 'fb_page_sets', 'fb_suggestions',
-    'fb_posts', 'fb_page_posts', 'posts', 'report_shares', 'schedules'
+    'fb_posts', 'fb_page_posts', 'posts', 'report_shares', 'schedules',
+    // phase 32: a merged client keeps its board and the talk on it
+    'client_tasks', 'client_task_comments'
 ];
 
 app.post('/api/clients/:id/merge', async (req, res) => {
@@ -13269,9 +13866,20 @@ app.post('/api/meta/monthly', spendLimit, async (req, res) => {
             return res.status(400).json({ error: 'That month has not finished yet. Pick a completed month.' });
         }
 
+        // The report is filed where the caller says only if they may edit
+        // that client; otherwise under the connection's own client. Before
+        // phase 32 any id in the body was trusted, so a report could be
+        // dropped into the timeline of a client the caller could not open.
+        let clientId = conn.client_id || null;
+        if (req.body.clientId) {
+            const target = await clientAccess(ctx.user.id, req.body.clientId, 'editor');
+            if (!target) return res.status(403).json({ error: 'You do not have edit access to that client.' });
+            clientId = target.id;
+        }
+
         const job = await createJob(ctx.user.id, 'meta_monthly', 'meta_owned', {
             connectionId: conn.id, month,
-            clientId: req.body.clientId || conn.client_id || null,
+            clientId,
             brief: String(req.body.brief || '').slice(0, 600) || null
         }, 0);
         runJob(job.id, JOB_WORKERS['meta_monthly'](ctx.user.id, job.input, job.id));
