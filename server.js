@@ -5687,6 +5687,9 @@ app.get('/api/me', async (req, res) => {
         body.trial_ends_at = ctx.profile.trial_ends_at || null;
         body.paid_until    = ctx.profile.paid_until || null;
         body.plan_label    = ctx.profile.plan_label || null;
+        // An owner only sees the key controls when an admin has made their
+        // runs spend their own Apify credit (phase 34); otherwise it is jargon.
+        body.ownKey        = await isByoOnly(ctx.user.id);
 
         if (state === 'trial' || state === 'paid') {
             const period = quotaPeriod(state);
@@ -13310,7 +13313,15 @@ app.get('/api/meta/report/:id', async (req, res) => {
         const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
         const { data } = await supabase.from('reports').select('*').eq('id', req.params.id).maybeSingle();
         if (!data || !(await canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });
-        res.json({ report: data });
+        // A monthly report comes with its document (phase 34) and, for staff
+        // who can see the client's board, which recommendations are on it.
+        const view = monthlyView(data);
+        if (view) {
+            view.context = await monthlyContext(data);
+            const c = data.client_id && ctx.profile?.role !== 'client' ? await clientAccess(ctx.user.id, data.client_id, 'viewer') : null;
+            view.tasks = c ? { clientId: c.id, canEdit: ['owner', 'admin', 'editor'].includes(c.access), byKey: await monthlyBoard(data) } : null;
+        }
+        res.json({ report: data, view });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -13564,12 +13575,13 @@ Reply with ONLY this JSON:
  "what_worked": ["2-3 lines about the posts and formats that performed, with numbers"],
  "what_did_not": ["1-3 honest lines; say 'nothing stood out' if that is the truth"],
  "audience": "1-2 sentences from demographics, or 'not enough data'",
- "next_month": ["3-4 concrete actions, each doable by one person with a phone"],
+ "recommendations": [{"action": "one concrete step for next month, starting with a verb", "why": "the number or post from this month that makes it worth doing", "expected": "what it should change, worded as an estimate", "who": "agency or client", "priority": "high, medium or low"}],
  "caveats": "one sentence on anything missing from the data, or empty string"
-}`;
+}
+Give 3 to 5 recommendations, highest priority first, each doable by one person with a phone. "who" is "client" only for what the owner must do themselves (reply to messages, supply photos, approve an offer); everything else is "agency".`;
         const r = await geminiCallDetailed(prompt, { temperature: 0.4, maxOutputTokens: 4000, tag: 'Gemini Monthly', userId });
         aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
-        ai = r.ok ? r.data : null;
+        ai = r.ok ? cleanMonthlyAi(r.data) : null;
     }
     if (!aiStatus.ok) warnings.push(`Narrative unavailable: ${aiStatus.message}`);
 
@@ -15327,6 +15339,7 @@ function clientReportView(row) {
     return {
         id: row.id,
         type: row.report_type,
+        title: CLIENT_REPORT_TITLES[row.report_type] || 'Report',
         platform: row.platform,
         handle: row.target_handle,
         date: row.snapshot_date || (row.created_at || '').slice(0, 10),
@@ -15375,8 +15388,369 @@ function clientReportView(row) {
 
         summary: ((isFb || isMeta) && ai.executive_summary) || row.ai_summary || null,
         followers: row.followers_snapshot ?? main.followers ?? null,
-        posts_per_week: row.posts_per_week ?? null
+        posts_per_week: row.posts_per_week ?? null,
+
+        // The monthly report as the agency's document (phase 34). The routes
+        // that open one report add its context; a list never pays for it.
+        month: monthlyView(row)
     };
+}
+
+
+// ===========================================================================
+// PHASE 34 :: THE MONTHLY REPORT, AS AN AGENCY SENDS IT
+//
+// A monthly report was a table of movements and a paragraph. What an agency
+// sends is a document with an order to it: the month in brief, a scorecard,
+// what worked, who was reached, how the client compares, what was done for
+// them and what happens next, each said in words as well as numbers.
+//
+// monthlyView() reads only the saved report, so the staff page, the owner's
+// portal, a share link and the printed copy are one document, worded here
+// once. monthlyContext() adds what the agency knew about the client that
+// month: the work finished and filed for them, the leads found, where they
+// stood against the businesses they were compared with. It reads as of the
+// report's own date, so a report opened a year later still says what it said.
+//
+// Owner Insights and public data sit in separate, labelled sections, and no
+// number in one is computed from the other (rule 3).
+// ===========================================================================
+
+/** How each monthly measure is said. `unit` follows a number; `noun` ends a sentence. */
+const MONTH_WORDS = {
+    reach:                   { short: 'Reach',               unit: 'reached',                noun: 'accounts reached' },
+    views:                   { short: 'Views',               unit: 'views',                  noun: 'views of your posts' },
+    accounts_engaged:        { short: 'Accounts engaged',    unit: 'accounts engaged',       noun: 'accounts that liked, commented, saved or shared' },
+    total_interactions:      { short: 'Interactions',        unit: 'interactions',           noun: 'likes, comments, saves and shares' },
+    profile_views:           { short: 'Profile visits',      unit: 'profile visits',         noun: 'profile visits' },
+    website_clicks:          { short: 'Website taps',        unit: 'website taps',           noun: 'taps on your website link' },
+    follower_count:          { short: 'New followers',       unit: 'new followers',          noun: 'new Instagram followers' },
+    page_impressions_unique: { short: 'Facebook reach',      unit: 'reached on Facebook',    noun: 'people reached on Facebook' },
+    page_post_engagements:   { short: 'Facebook engagement', unit: 'Facebook engagements',   noun: 'engagements with your Facebook posts' },
+    page_views_total:        { short: 'Page views',          unit: 'Page views',             noun: 'views of your Facebook Page' },
+    page_fan_adds_unique:    { short: 'New Page followers',  unit: 'new Page followers',     noun: 'new Facebook Page followers' }
+};
+const MONTH_GAINED = new Set(['follower_count', 'page_fan_adds_unique']);
+
+/** The three cards that open the report. Each area takes the first measure it has. */
+const MONTH_BRIEF = [
+    { area: 'Visibility', keys: ['reach', 'views', 'page_impressions_unique'] },
+    { area: 'Audience',   keys: ['follower_count', 'page_fan_adds_unique'] },
+    { area: 'Action',     keys: ['website_clicks', 'profile_views', 'accounts_engaged', 'page_post_engagements'] }
+];
+// Below this, a percentage says more about the sample than the account:
+// 3 website taps to 6 is "up 100%" and means nothing. Such a card gives the
+// count instead (rule 5).
+const MONTH_THIN = 50;
+
+const MONTH_FORMAT = { reel: ['Reel', 'Reels'], carousel: ['Carousel', 'Carousels'], still: ['Photo', 'Photos'] };
+
+const monthNum = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+const monthFmt = v => (monthNum(v) === null ? '—' : Math.round(Number(v)).toLocaleString('en-US'));
+/** Under 10% keeps a decimal, because 4.2% and 4% are different claims; above, it is noise. */
+const monthPct = p => { const a = Math.abs(Number(p)); return (a < 10 ? a.toFixed(1).replace(/\.0$/, '') : String(Math.round(a))) + '%'; };
+/** 'August 2026' -> 'August', for sentences; the cover carries the year. */
+const monthShort = label => String(label || '').split(' ')[0] || 'this month';
+
+function monthCovers(month) {
+    if (!MONTH_RE.test(String(month || ''))) return null;
+    const [y, m] = month.split('-').map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const name = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
+    return `${name} 1–${last}, ${y}`;
+}
+
+/** The change column, exactly: the difference and the percentage, or why there is none. */
+function monthChange(d) {
+    const now = monthNum(d.now), before = monthNum(d.before);
+    if (d.kind === 'new') return 'new this month';
+    if (d.kind === 'no_baseline') return 'no earlier month';
+    if (now === null || before === null || d.kind === 'unknown') return 'not reported';
+    const diff = Math.round(now - before);
+    const sign = diff > 0 ? '+' : (diff < 0 ? '−' : '±');
+    const pct = monthNum(d.pct) === null ? '' : ` (${d.pct > 0 ? '+' : (d.pct < 0 ? '−' : '±')}${monthPct(d.pct)})`;
+    return `${sign}${Math.abs(diff).toLocaleString('en-US')}${pct}`;
+}
+
+/** Status against last month. There are no targets to be "on track" for, so none is claimed. */
+function monthStatus(d) {
+    if (d.kind === 'new') return { word: 'New', tone: 'gold' };
+    if (d.kind === 'no_baseline') return { word: 'First month', tone: '' };
+    if (d.kind === 'unknown') return { word: 'Not reported', tone: '' };
+    // The same floor as the cards: 3 to 6 is not "Growing", it is small.
+    if (Math.max(monthNum(d.now) || 0, monthNum(d.before) || 0) < MONTH_THIN) return { word: 'Small numbers', tone: '' };
+    const p = monthNum(d.pct) || 0;
+    if (d.kind === 'up' && p >= 10) return { word: 'Growing', tone: 'jade' };
+    if (d.kind === 'down' && p <= -10) return { word: 'Watch', tone: 'warn' };
+    return { word: 'Steady', tone: '' };
+}
+
+function monthCard(area, d, r) {
+    const w = MONTH_WORDS[d.key] || { short: d.label, unit: String(d.label || '').toLowerCase(), noun: String(d.label || '').toLowerCase() };
+    const now = monthNum(d.now), before = monthNum(d.before);
+    const thisM = monthShort(r.monthLabel), prevM = monthShort(r.prevMonthLabel);
+    const thin = Math.max(now || 0, before || 0) < MONTH_THIN;
+    let big;
+    if (MONTH_GAINED.has(d.key)) big = `+${monthFmt(now)} ${d.key === 'follower_count' ? 'followers' : 'Page followers'}`;
+    else if ((d.kind === 'up' || d.kind === 'down') && !thin) big = `${w.short} ${d.kind} ${monthPct(d.pct)}`;
+    else if (d.kind === 'flat' && !thin) big = `${w.short} steady`;
+    else big = `${monthFmt(now)} ${w.unit}`;
+
+    const cmp = { up: 'up from', down: 'down from', flat: 'about the same as' }[d.kind] || 'against';
+    let line = `${monthFmt(now)} ${w.noun} in ${thisM}`;
+    // From zero there is no percentage to give, so none is implied.
+    if (d.kind === 'new') line += `, against none in ${prevM}.`;
+    else line += before === null ? '.' : `, ${cmp} ${monthFmt(before)} in ${prevM}.`;
+    if (d.key === 'follower_count' && monthNum(r.account && r.account.igFollowers) !== null) {
+        line += ` ${monthFmt(r.account.igFollowers)} followers in total.`;
+    }
+    const tone = d.kind === 'up' || d.kind === 'new' ? 'good' : (d.kind === 'down' ? 'watch' : '');
+    return { area, key: d.key, big, line, tone };
+}
+
+function monthGapName(g) {
+    const [level, key, part] = String(g || '').split(':');
+    if (key === 'follower_demographics') return `Follower ${({ age: 'ages', gender: 'gender', city: 'cities', country: 'countries' })[part] || 'details'}`;
+    const m = META_MONTH_METRICS.find(x => x.key === key && x.level === level);
+    return m ? m.label : String(key || g).replace(/_/g, ' ');
+}
+
+const MONTH_GENDER = { F: 'Women', M: 'Men', U: 'Not specified' };
+let _regionNames = null;
+function monthCountry(code) {
+    try { _regionNames = _regionNames || new Intl.DisplayNames(['en'], { type: 'region' }); return _regionNames.of(String(code).toUpperCase()) || code; }
+    catch { return code; }
+}
+
+/**
+ * Follower demographics as shares. Ages and genders are every follower Meta
+ * could classify, so they are shares of themselves; cities and countries are
+ * only the top few, so they are shares of that same classified whole rather
+ * than of each other, which would make the fifth city look like a fifth.
+ */
+function monthAudience(demo) {
+    const G = demo || {};
+    const sum = a => (Array.isArray(a) ? a : []).reduce((s, x) => s + (Number(x.value) || 0), 0);
+    const base = sum(G.gender) || sum(G.age);
+    const out = [];
+    for (const [k, title, cap] of [['age', 'Age', 7], ['gender', 'Gender', 3], ['city', 'Top cities', 5], ['country', 'Top countries', 5]]) {
+        let rows = (Array.isArray(G[k]) ? G[k] : []).filter(x => Number(x.value) > 0);
+        if (!rows.length) continue;
+        const denom = k === 'age' || k === 'gender' ? sum(rows) : (base || sum(rows));
+        if (k === 'age') rows = rows.slice().sort((a, b) => String(a.key).localeCompare(String(b.key)));
+        out.push({
+            key: k, title,
+            rows: rows.slice(0, cap).map(x => ({
+                label: k === 'gender' ? (MONTH_GENDER[x.key] || String(x.key)) : k === 'country' ? monthCountry(x.key) : String(x.key || '—').replace(/(\d)-(\d)/, '$1–$2'),
+                share: denom ? Math.round(Number(x.value) / denom * 1000) / 10 : null
+            }))
+        });
+    }
+    const top = key => { const g = out.find(x => x.key === key); return g ? g.rows.slice().sort((a, b) => b.share - a.share)[0] : null; };
+    const age = top('age'), city = top('city');
+    // "The largest group", never "most": 41% is the biggest share, not a majority.
+    const ageWords = age ? `The largest group of your followers is aged ${age.label} (${age.share}%)` : null;
+    const line = age && city ? `${ageWords}, and more of them live in ${city.label} (${city.share}%) than anywhere else.`
+        : age ? `${ageWords}.`
+        : city ? `More of your followers live in ${city.label} (${city.share}%) than anywhere else.` : null;
+    return { groups: out, line };
+}
+
+/**
+ * Recommendations as rows an agency can act on. Reports built from phase 34
+ * carry {action, why, expected, who, priority}; older ones a list of lines,
+ * which stay lines rather than being given a priority nobody set.
+ */
+function monthRecs(ai) {
+    const P = ['high', 'medium', 'low'];
+    if (Array.isArray(ai.recommendations) && ai.recommendations.length) {
+        return ai.recommendations.slice(0, 6).map((x, i) => ({
+            key: 'rec-' + i,
+            action: oneLine(typeof x === 'string' ? x : x && x.action, 240),
+            why: oneLine(x && x.why, 300) || null,
+            expected: oneLine(x && x.expected, 200) || null,
+            who: x && (x.who === 'client' || x.who === 'agency') ? x.who : null,
+            priority: x && P.includes(x.priority) ? x.priority : null
+        })).filter(x => x.action);
+    }
+    return (Array.isArray(ai.next_month) ? ai.next_month : []).slice(0, 6)
+        .map((s, i) => ({ key: 'next-' + i, action: oneLine(s, 240), why: null, expected: null, who: null, priority: null }))
+        .filter(x => x.action);
+}
+
+/** What the model returned, kept to the shape the report reads. Never trusted as-is. */
+function cleanMonthlyAi(ai) {
+    if (!ai || typeof ai !== 'object') return ai;
+    const recs = monthRecs(ai);
+    if (Array.isArray(ai.recommendations)) {
+        ai.recommendations = recs.map(({ action, why, expected, who, priority }) => ({ action, why, expected, who, priority }));
+        // Older readers (the owner view's "what to change", the assistant)
+        // read next_month; it stays the list of actions.
+        if (!Array.isArray(ai.next_month) || !ai.next_month.length) ai.next_month = recs.map(x => x.action);
+    }
+    return ai;
+}
+
+/** The monthly report as one document. Pure: reads the row, nothing else. */
+function monthlyView(row) {
+    if (!row || row.report_type !== 'meta_monthly') return null;
+    const r = row.report_json || {};
+    const ai = row.ai_json || r.ai || {};
+    const deltas = (Array.isArray(r.deltas) ? r.deltas : []).filter(d => d && d.key);
+    const byKey = Object.fromEntries(deltas.map(d => [d.key, d]));
+
+    const used = new Set();
+    const brief = [];
+    for (const b of MONTH_BRIEF) {
+        const present = b.keys.map(k => byKey[k]).filter(d => d && !used.has(d.key) && ((monthNum(d.now) || 0) > 0 || (monthNum(d.before) || 0) > 0));
+        const pick = present.find(d => Math.max(monthNum(d.now) || 0, monthNum(d.before) || 0) >= MONTH_THIN) || present[0];
+        if (!pick) continue;
+        used.add(pick.key);
+        // "Action" is a tap or a visit; an interaction standing in for one is engagement.
+        brief.push(monthCard(['accounts_engaged', 'page_post_engagements'].includes(pick.key) ? 'Engagement' : b.area, pick, r));
+    }
+
+    const posting = r.posting || {};
+    const formats = Object.entries(posting.formats || {})
+        .map(([k, f]) => ({ kind: k, label: (MONTH_FORMAT[k] || [null, 'Other posts'])[1], n: Number(f && f.n) || 0,
+            medianReach: monthNum(f && f.medianReach), medianSaved: monthNum(f && f.medianSaved), medianShares: monthNum(f && f.medianShares) }))
+        .sort((a, b) => (b.medianReach ?? -1) - (a.medianReach ?? -1));
+    const ranked = formats.filter(f => f.medianReach !== null && f.n >= 2);
+    let formatLine = null;
+    if (ranked.length >= 2) {
+        const best = ranked[0], worst = ranked[ranked.length - 1];
+        formatLine = `${best.label} reached the most people: a median of ${monthFmt(best.medianReach)} accounts each, across ${best.n}. `
+            + `${worst.label} reached the fewest: ${monthFmt(worst.medianReach)} each, across ${worst.n}.`;
+    } else if (formats.length === 1 && formats[0].medianReach !== null && formats[0].n >= 2) {
+        formatLine = `All ${formats[0].n} posts were ${formats[0].label.toLowerCase()}, reaching a median of ${monthFmt(formats[0].medianReach)} accounts each.`;
+    }
+
+    const safeLink = u => (/^https:\/\/(www\.)?(instagram\.com|facebook\.com)\//i.test(String(u || '')) ? String(u) : null);
+    const posts = (Array.isArray(posting.topByReach) ? posting.topByReach : []).slice(0, 5).map(p => ({
+        kind: (MONTH_FORMAT[p.kind] || ['Post'])[0],
+        caption: oneLine(p.caption, 160) || null,
+        date: p.postedAt ? String(p.postedAt).slice(0, 10) : null,
+        reach: monthNum(p.reach), saved: monthNum(p.saved), shares: monthNum(p.shares), views: monthNum(p.views),
+        link: safeLink(p.permalink)
+    }));
+
+    const acc = r.account || {};
+    const audience = monthAudience(r.demographics);
+    const aiOk = !!(ai && (ai.headline || ai.executive_summary));
+    const list = a => (Array.isArray(a) ? a : []).map(s => oneLine(s, 400)).filter(Boolean).slice(0, 5);
+
+    return {
+        cover: {
+            kind: 'Monthly report',
+            month: r.month || String(row.snapshot_date || '').slice(0, 7) || null,
+            monthLabel: r.monthLabel || null,
+            prevMonthLabel: r.comparable ? (r.prevMonthLabel || null) : null,
+            covers: monthCovers(r.month),
+            account: {
+                pageName: acc.pageName || null,
+                igUsername: acc.igUsername || null,
+                igFollowers: monthNum(acc.igFollowers),
+                pageFollowers: monthNum(acc.pageFollowers)
+            },
+            builtAt: r.generatedAt || row.created_at || null
+        },
+        comparable: !!r.comparable,
+        verdict: aiOk ? (oneLine(ai.headline, 300) || null) : null,
+        summary: aiOk ? (String(ai.executive_summary || '').trim().slice(0, 1500) || null) : null,
+        narrative: aiOk ? null : ((row.ai_status && row.ai_status.message) || 'The written summary was not produced for this month.'),
+        brief,
+        scorecard: deltas.map(d => ({
+            key: d.key, label: d.label, platform: d.level === 'ig' ? 'Instagram' : 'Facebook',
+            now: monthNum(d.now), before: monthNum(d.before), pct: monthNum(d.pct), kind: d.kind,
+            change: monthChange(d), status: monthStatus(d)
+        })),
+        moved: list(ai.what_moved),
+        worked: list(ai.what_worked),
+        didNot: list(ai.what_did_not),
+        posting: { count: Number(posting.count) || 0, formats, formatLine },
+        posts,
+        audience: { ...audience, note: aiOk && ai.audience && !/not enough data/i.test(ai.audience) ? oneLine(ai.audience, 400) : null },
+        recommendations: monthRecs(ai || {}),
+        about: {
+            source: 'Every figure in this report is your own Meta Insights, the numbers only the account owner can see. Nothing in it is scraped or estimated.',
+            gaps: [...new Set((r.gaps || []).map(monthGapName))],
+            warnings: (r.warnings || []).map(w => oneLine(w, 300)).filter(w => !/^Narrative unavailable/i.test(w)),
+            caveats: aiOk ? (oneLine(ai.caveats, 400) || null) : null
+        }
+    };
+}
+
+/** 'YYYY-MM' -> ISO bounds of that month. */
+function monthBounds(month) {
+    const w = metaMonthWindow(month);
+    return { from: new Date(w.since * 1000).toISOString(), to: new Date(w.until * 1000).toISOString() };
+}
+
+/**
+ * What the agency knew about the client that month. Everything here is read
+ * as of the report, so it cannot drift after the fact, and everything is
+ * what the owner may read: tasks only when marked for the client, public
+ * standing only as the owner's own view of it.
+ */
+async function monthlyContext(row) {
+    const out = { client: null, work: null, leads: null, standing: null };
+    const month = (row && row.report_json && row.report_json.month) || String((row && row.snapshot_date) || '').slice(0, 7);
+    if (!row || !row.client_id || !MONTH_RE.test(month)) return out;
+    const { from, to } = monthBounds(month);
+    const asOf = row.created_at || new Date().toISOString();
+    const quiet = p => p.then(r => r, () => ({ data: null, error: true }));
+
+    const [client, tasks, reps, leadsIn, leadsAll, bench] = await Promise.all([
+        quiet(supabase.from('clients').select('id, name, brand').eq('id', row.client_id).maybeSingle()),
+        quiet(supabase.from('client_tasks').select('title, completed_at')
+            .eq('client_id', row.client_id).eq('status', 'done').eq('visible_to_client', true)
+            .gte('completed_at', from).lt('completed_at', to).order('completed_at', { ascending: true }).limit(30)),
+        // No ids: the owner's view never carries a source report id (rule 11).
+        quiet(supabase.from('reports').select('report_type, target_handle, created_at')
+            .eq('client_id', row.client_id).neq('report_type', 'meta_monthly')
+            .gte('created_at', from).lt('created_at', to).order('created_at', { ascending: true }).limit(30)),
+        quiet(supabase.from('client_leads').select('lead_id', { count: 'exact', head: true })
+            .eq('client_id', row.client_id).gte('created_at', from).lt('created_at', to)),
+        quiet(supabase.from('client_leads').select('lead_id', { count: 'exact', head: true })
+            .eq('client_id', row.client_id).lt('created_at', to)),
+        quiet(supabase.from('reports').select('report_type, target_handle, created_at, engagement_rate, bench:report_json->benchmark')
+            .eq('client_id', row.client_id).in('report_type', ['ig_report', 'deep_audit'])
+            .lte('created_at', asOf).order('created_at', { ascending: false }).limit(5))
+    ]);
+
+    if (client.data) out.client = { name: client.data.brand || client.data.name };
+
+    // A table that is not there yet (phase 32 unapplied) is "no tasks", not a
+    // failed report; the rest of the section still stands.
+    const done = (tasks.data || []).map(t => ({ title: oneLine(t.title, 300), date: String(t.completed_at || '').slice(0, 10) }));
+    const filed = (reps.data || []).map(x => ({
+        title: `${CLIENT_REPORT_TITLES[x.report_type] || 'Report'}${x.target_handle ? ' · ' + (['ig_report', 'deep_audit'].includes(x.report_type) ? '@' + String(x.target_handle).replace(/^@/, '') : x.target_handle) : ''}`,
+        date: String(x.created_at || '').slice(0, 10)
+    }));
+    if (done.length || filed.length) out.work = { done, filed };
+
+    if (!leadsIn.error && !leadsAll.error && (leadsAll.count || 0) > 0) {
+        out.leads = { thisMonth: leadsIn.count || 0, toDate: leadsAll.count || 0 };
+    }
+
+    for (const b of (bench.data || [])) {
+        const bm = b.bench || (b.report_json && b.report_json.benchmark) || {};
+        if (!Array.isArray(bm.ranked) || bm.ranked.length < 2) continue;
+        const s = clientStanding(b, bm, {});
+        if (!s.verdict) continue;
+        out.standing = { ...s, date: String(b.created_at || '').slice(0, 10), title: CLIENT_REPORT_TITLES[b.report_type] || 'Comparison' };
+        break;
+    }
+    return out;
+}
+
+/** The recommendation tasks already on the client's board for this report, by key. */
+async function monthlyBoard(row) {
+    if (!row || !row.client_id) return {};
+    const { data, error } = await supabase.from('client_tasks').select('id, status, source_key')
+        .eq('client_id', row.client_id).eq('source_id', row.id).not('source_key', 'is', null);
+    if (error) return {};
+    return Object.fromEntries((data || []).map(t => [t.source_key, { id: t.id, status: t.status }]));
 }
 
 
@@ -15594,7 +15968,10 @@ const ASSISTANT_TOOLS = {
             if (data.user_id !== s.userId && !(data.client_id && s.clientIds.includes(data.client_id))) {
                 return { error: 'not found' };
             }
-            return clientReportView(data);
+            // The monthly document is for reading; get_monthly_report already
+            // gives the model the month's numbers, so it is not sent twice.
+            const { month, ...view } = clientReportView(data);
+            return view;
         }
     },
 
@@ -15979,6 +16356,22 @@ async function assistantAnswer({ userId, message, conversationId, clientId = nul
  * the client surface to have an endpoint that never selects them in the first
  * place — rather than a filter somebody has to remember to apply.
  */
+// Keyed by reports.report_type — the value the row actually carries. Two of
+// these were job-type names (fb_page_report, fb_community_audit) that no row
+// has ever carried, so a client's Facebook report showed as "Report". The
+// wiring audit checks this map against every report_type the server writes.
+// Module level since phase 34: the monthly report names the work it lists.
+const CLIENT_REPORT_TITLES = {
+    ig_report:    'Instagram check-up',
+    deep_audit:   'Instagram deep dive',
+    fb_page:      'Facebook page check-up',
+    fb_community: 'Community report',
+    fb_group:     'Community report',
+    content_plan: 'Content plan',
+    meta_owned:   'Owner report',
+    meta_monthly: 'Monthly report'
+};
+
 app.get('/api/client/reports', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -16002,21 +16395,7 @@ app.get('/api/client/reports', async (req, res) => {
             .limit(60);
         if (error) throw error;
 
-        // Keyed by reports.report_type — the value the row actually carries.
-        // Two of these were job-type names (fb_page_report, fb_community_audit)
-        // that no row has ever carried, so a client's Facebook report showed
-        // as "Report". The wiring audit now checks this map against every
-        // report_type the server writes.
-        const TITLES = {
-            ig_report:    'Instagram check-up',
-            deep_audit:   'Instagram deep dive',
-            fb_page:      'Facebook page check-up',
-            fb_community: 'Community report',
-            fb_group:     'Community report',
-            content_plan: 'Content plan',
-            meta_owned:   'Owner report',
-            meta_monthly: 'Monthly report'
-        };
+        const TITLES = CLIENT_REPORT_TITLES;
 
         res.json({
             reports: (data || []).map(r => ({
@@ -16262,7 +16641,9 @@ app.get('/api/client/report/:id', async (req, res) => {
         if (!row || !(await canReadReport(ctx, row))) {
             return res.status(404).json({ error: 'Report not found.' });
         }
-        res.json({ report: clientReportView(row) });
+        const view = clientReportView(row);
+        if (view.month) view.month.context = await monthlyContext(row);
+        res.json({ report: view });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -16354,8 +16735,10 @@ app.get('/api/public/share/:token', publicLimit, async (req, res) => {
         // Types clientReportView cannot translate yet (content plans, community
         // audits) degrade to headline, date and summary rather than falling
         // back to the raw report.
+        const view = clientReportView(rep);
+        if (view.month) view.month.context = await monthlyContext(rep);
         res.json({
-            report: clientReportView(rep),
+            report: view,
             client,
             shared: { expiresAt: s.expires_at, label: s.label, page: 'share.html' }
         });
@@ -16899,5 +17282,7 @@ module.exports = {
     // phase 27
     contactSettings, cleanPaymentOption,
     sendMail, mailSettings, MAIL_KEYS, leadScope, leadFilters, withFinders,
-    metaDailySync, metaDailyTick, growthFrom, growthForConnections, shiftDay, dayStr
+    metaDailySync, metaDailyTick, growthFrom, growthForConnections, shiftDay, dayStr,
+    // phase 34
+    monthlyView, monthlyContext, monthRecs, cleanMonthlyAi, monthChange, monthStatus, CLIENT_REPORT_TITLES
 };

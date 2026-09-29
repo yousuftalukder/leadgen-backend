@@ -1058,3 +1058,136 @@ body.el-drawer-open { overflow: hidden; }
 .ws-toggle[aria-checked="true"]::after { transform: translateX(18px); background: var(--on-accent); }
 .ws-switch { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 @media (prefers-reduced-motion: reduce) { .ws-toggle::after { transition: none; } }
+
+/* =========================================================================
+   PHASE 34 — THE REPORT A CLIENT READS
+   One document in four places: the staff page, the owner's portal, a share
+   link and paper. Numbered sections, words beside every number. report-view.js
+   writes the markup; these are its only styles (rule 17).
+   ========================================================================= */
+.rp { max-width: 1040px; display: flex; flex-direction: column; gap: 30px; }
+.rp-cover { background: linear-gradient(180deg, var(--surface-2), var(--surface-1)); border: 1px solid rgba(240,211,154,0.16);
+    border-radius: var(--r-lg); padding: 26px 28px; display: flex; flex-direction: column; gap: 10px; }
+.rp-cover h1 { font-size: clamp(1.7rem, 3.4vw, 2.4rem); font-weight: 800; letter-spacing: -0.02em; line-height: 1.12; margin: 0;
+    color: var(--text-primary); text-wrap: balance; overflow-wrap: anywhere; }
+.rp-by { color: var(--text-secondary); font-size: 0.92rem; margin: 0; line-height: 1.55; }
+.rp-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
+.rp-toolbar .el-actions { margin: 0; }
+.rp-sec { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.rp-sec h2 { display: flex; align-items: baseline; gap: 10px; font-size: 1.22rem; font-weight: 800; margin: 0; color: var(--text-primary); }
+.rp-n { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; font-weight: 600; color: var(--accent-solid); }
+.rp-lead { margin: -6px 0 0; color: var(--text-secondary); font-size: 0.92rem; line-height: 1.6; max-width: 80ch; }
+.rp-h3 { font-size: 0.95rem; font-weight: 800; color: var(--text-primary); margin: 4px 0 0; }
+.rp-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .rp-cards { grid-template-columns: minmax(0, 1fr); } }
+.rp-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rp-big { font-size: 1.45rem; font-weight: 800; line-height: 1.15; color: var(--text-primary); letter-spacing: -0.01em; }
+.rp-card.is-good .rp-big { color: var(--jade); }
+.rp-card.is-watch .rp-big { color: var(--warn); }
+.rp-card p { margin: 0; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.55; }
+.rp-verdict { font-size: 1.12rem; font-weight: 700; line-height: 1.5; color: var(--text-primary); margin: 0; max-width: 72ch; }
+.rp-prose { color: var(--text-secondary); font-size: 0.95rem; line-height: 1.7; max-width: 80ch; }
+.rp-prose p { margin: 0 0 10px; }
+.rp-prose p:last-child { margin: 0; }
+.rp-note { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.6; margin: 0; max-width: 80ch; }
+.rp-src { color: var(--text-muted); font-size: 0.8rem; line-height: 1.55; margin: 0; }
+.rp-flag { margin: 0; padding: 12px 16px; border-radius: var(--r-md); font-size: 0.9rem; line-height: 1.55;
+    background: rgba(251,191,36,0.09); border: 1px solid rgba(251,191,36,0.26); color: var(--warn); }
+.rp-table td.now { font-weight: 800; color: var(--text-primary); }
+.rp-table td.num, .rp-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rp-table tr.rp-group th { font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-solid);
+    padding: 14px 14px 6px; border-bottom: 1px solid var(--card-border); background: none; }
+.rp-table .s a { color: var(--accent-solid); text-decoration: none; font-weight: 700; }
+.rp-posts .t { font-weight: 600; max-width: 52ch; }
+.rp-recs td { vertical-align: top; line-height: 1.5; }
+.rp-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .rp-two { grid-template-columns: minmax(0, 1fr); } }
+.rp-col { background: var(--card-bg); border: 1px solid var(--card-border); border-top: 3px solid var(--card-border); border-radius: var(--r-md);
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rp-col.is-good { border-top-color: var(--jade); }
+.rp-col.is-watch { border-top-color: var(--warn); }
+.rp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.rp-list li { position: relative; padding-left: 18px; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.55; }
+.rp-list li::before { content: ''; position: absolute; left: 2px; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-solid); }
+.rp-list.is-good li::before { background: var(--jade); }
+.rp-list.is-watch li::before { background: var(--warn); }
+.rp-points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rp-points li { display: flex; flex-direction: column; gap: 3px; padding-left: 12px; border-left: 3px solid var(--card-border); }
+.rp-points li.is-good { border-left-color: var(--jade); }
+.rp-points li.is-watch { border-left-color: var(--warn); }
+.rp-points b { color: var(--text-primary); font-size: 0.9rem; line-height: 1.45; }
+.rp-points span { color: var(--text-muted); font-size: 0.82rem; line-height: 1.5; }
+.rp-demo { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px 24px; }
+.rp-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; font-size: 0.86rem; margin-top: 8px; }
+.rp-bar .lab { color: var(--text-secondary); overflow-wrap: anywhere; }
+.rp-bar .pc { color: var(--text-primary); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rp-bar .track { grid-column: 1 / -1; height: 6px; border-radius: 999px; background: rgba(255,255,255,0.07); overflow: hidden; }
+.rp-bar .track i { display: block; height: 100%; border-radius: 999px; background: var(--jade); }
+.rp-standing { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 8px; }
+.rp-standing p { margin: 0; color: var(--text-secondary); font-size: 0.92rem; line-height: 1.55; }
+.rp-standing .rp-verdict { color: var(--text-primary); }
+.rp-ranks { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.rp-ranks li { flex: 1 1 110px; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; min-width: 0;
+    border: 1px solid var(--card-border); background: var(--bg-color); }
+.rp-ranks li span { font-size: 0.72rem; color: var(--text-muted); font-weight: 700; }
+.rp-ranks li b { font-size: 0.88rem; color: var(--text-primary); overflow-wrap: anywhere; }
+.rp-ranks li.is-you { border-color: var(--jade); background: rgba(63,191,143,0.12); }
+.rp-ic { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; background: rgba(63,191,143,0.12); color: var(--jade); }
+.rp-ic .el-svg { width: 15px; height: 15px; }
+.rp-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+.rp-steps li { color: var(--text-secondary); line-height: 1.55; padding-left: 4px; }
+.rp-steps li .t { color: var(--text-primary); font-weight: 600; margin-right: 10px; }
+.rp-about { display: flex; flex-direction: column; gap: 8px; color: var(--text-muted); font-size: 0.86rem; line-height: 1.6;
+    border-top: 1px solid var(--card-border); padding-top: 12px; }
+.rp-about p { margin: 0; }
+.rp-about b { color: var(--text-secondary); }
+.rp-missing { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.rp-missing li { font-size: 0.84rem; padding: 6px 11px; border-radius: 8px; background: rgba(248,113,113,0.1);
+    border: 1px solid rgba(248,113,113,0.22); color: var(--danger); }
+.rp-ideas { display: flex; flex-direction: column; gap: 12px; }
+.rp-idea { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px 18px; }
+.rp-idea-top { display: flex; gap: 12px; align-items: flex-start; }
+.rp-idea-top b { color: var(--text-primary); font-size: 0.98rem; line-height: 1.35; }
+.rp-idea-n { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-size: 0.78rem; font-weight: 800;
+    background: var(--accent-glow); color: var(--on-accent); }
+.rp-hook { margin: 10px 0; padding: 10px 14px; border-left: 3px solid var(--accent-solid); background: rgba(217,181,108,0.08);
+    border-radius: 0 10px 10px 0; color: var(--text-primary); line-height: 1.55; }
+.rp-script { margin: 8px 0 8px 20px; display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); font-size: 0.88rem; line-height: 1.55; }
+.rp-meta { margin: 6px 0 0; color: var(--text-muted); font-size: 0.85rem; line-height: 1.55; }
+.rp-meta b { color: var(--text-primary); }
+
+/* ---- paper ----
+   Until phase 34 nothing here had print rules, so "Save as PDF" on any page
+   printed pale text on white with the menu down the side. On paper the
+   palette turns light and the app around the content goes; a page that
+   reads on screen reads on paper without its own rules. */
+@page { margin: 14mm 12mm; }
+@media print {
+    :root {
+        --bg-color: #fff; --card-bg: #fff; --surface-1: #fff; --surface-2: #fff; --input-bg: #fff; --terminal-bg: #fff;
+        --card-border: #d8d2c3; --card-edge: #d8d2c3;
+        --text-primary: #10201a; --text-secondary: #2c3b34; --text-muted: #56675f;
+        --accent-solid: #8a6a1f; --accent-dim: #f4ecda; --jade: #0c7856; --success: #0c7856; --warn: #955f00; --danger: #b42318;
+    }
+    html, body { background: #fff !important; }
+    body, body.el-has-sidebar, body.el-has-header, body.el-share.el-has-header, body.el-embed, body.el-has-plan {
+        padding: 0 !important; margin: 0 !important; max-width: none !important; background-image: none !important; }
+    .el-sidebar, .el-topbar, .el-scrim, .el-share-bar, .el-plan, .el-toast, .el-drawer-wrap, .el-workfor,
+    .el-actions, .no-print, #report-actions { display: none !important; }
+    .rp { max-width: none; gap: 22px; }
+    .rp-cover { background: none; border: 0; border-bottom: 2px solid var(--text-primary); border-radius: 0; padding: 0 0 16px; }
+    .rp-card, .rp-col, .rp-standing, .rp-idea, .ws-table-wrap, .card, .ws-card { box-shadow: none; }
+    .ws-table-wrap { overflow: visible; }
+    .rp-sec h2, .rp-h3 { break-after: avoid; page-break-after: avoid; }
+    .rp-card, .rp-col, .rp-standing, .rp-ranks li, .rp-bar, .rp-idea, .ws-row, .ws-table tr { break-inside: avoid; page-break-inside: avoid; }
+    .el-chip { border-color: var(--card-border) !important; }
+    .el-chip.is-gold { color: var(--accent-solid); }
+    .rp-bar .track { background: #ebe6d9; }
+    .rp-bar .track, .rp-bar .track i, .rp-idea-n, .rp-list li::before { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    /* Paper is narrower than the screen breakpoints, and a report reads
+       better with its cards side by side than stacked down the first page. */
+    .rp-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .rp-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

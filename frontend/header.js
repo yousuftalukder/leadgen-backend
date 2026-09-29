@@ -196,10 +196,10 @@
      * not see the tab either.
      */
     const CLIENT_NAV = [
-        { href: 'client.html',           icon: 'doc',    label: 'My Reports',   engine: null },
-        { href: 'client-assistant.html', icon: 'spark',  label: 'Ask',          engine: null },
-        { href: 'client-leads.html',     icon: 'target', label: 'Find Leads',   engine: 'leadgen' },
-        { href: 'client-community.html', icon: 'store',  label: 'Local Demand', engine: 'fb_community' }
+        { href: 'client.html',           icon: 'home',   label: 'Home',           engine: null },
+        { href: 'client-assistant.html', icon: 'spark',  label: 'Ask AI',         engine: null },
+        { href: 'client-leads.html',     icon: 'target', label: 'Find customers', engine: 'leadgen' },
+        { href: 'client-community.html', icon: 'store',  label: 'Local demand',   engine: 'fb_community' }
     ];
 
 
@@ -1055,6 +1055,9 @@
         const isAdmin = me && me.role === 'admin';
         const isClient = me && me.role === 'client';
         const engines = (me && me.engines) || [];
+        // Keys and the Apify status are the team's tools. A business owner
+        // sees them only when their runs spend their own credit.
+        const keys = !isClient || !!(me && me.ownKey);
 
         const visible = (isClient ? CLIENT_NAV : NAV)
             .filter(t => {
@@ -1115,18 +1118,18 @@
             </nav>
 
             <div class="el-side-foot">
-                <div class="el-pill">
+                ${keys ? `<div class="el-pill">
                     <span class="el-node" id="el-node"></span>
                     <span id="el-status">Checking Apify…</span>
-                </div>
+                </div>` : ''}
                 <div class="el-user">
                     <span class="el-avatar" aria-hidden="true">${EL.esc(initials)}</span>
                     <span class="el-user-txt"><b>${EL.esc(who)}</b><small>${EL.esc(roleName)}</small></span>
                 </div>
-                <div class="el-side-actions">
+                ${keys ? `<div class="el-side-actions">
                     <button class="el-btn el-mini" type="button" id="el-key-btn" title="The Apify key your runs spend">Apify key</button>
                     <button class="el-btn el-mini" type="button" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>
-                </div>
+                </div>` : ''}
                 <button class="el-btn el-mini el-signout" type="button" id="el-out">Sign out</button>
             </div>`;
 
@@ -1162,8 +1165,10 @@
         document.addEventListener('keydown', e => { if (e.key === 'Escape') setOpen(false); });
         bar.querySelectorAll('.el-tab').forEach(a => a.addEventListener('click', () => setOpen(false)));
 
-        bar.querySelector('#el-key-btn').addEventListener('click', openKeyModal);
-        bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
+        if (keys) {
+            bar.querySelector('#el-key-btn').addEventListener('click', openKeyModal);
+            bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
+        }
         bar.querySelector('#el-out').addEventListener('click', () => EL.signOut());
 
         if (!isClient && me) {
