@@ -15,7 +15,9 @@ server.js          Express backend, single file, Phase 17. Deployed to Render.
 package.json       start: node server.js · test: offline tests · live-checks: post-deploy script
 frontend/          Static site, deployed to Netlify. header.js is the shared runtime every page
                    loads (menu, New work, drawer, toast); ui.js holds the workspace components
-                   (task board, add client); app.css carries every shared rule including the shell.
+                   (task board, add client); report-view.js lays out the report a client reads
+                   (monthly.html, client.html, share.html, and paper); app.css carries every shared
+                   rule including the shell and the print rules.
                    Staff start at home.html; a client's page is workspace.html?client=<id>.
                    Employee pages and the client surface (signup.html, client.html,
                    client-assistant.html, client-leads.html, client-community.html, share.html)

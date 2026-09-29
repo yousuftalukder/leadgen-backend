@@ -1183,6 +1183,151 @@ test('the analyst reads the month back with the same numbers', async () => {
     assert.strictEqual(reach.changePct, 47.2, 'the assistant must see the same arithmetic the report holds');
 });
 
+section('\nphase 34 — the monthly report, as the agency sends it');
+test('the owner opens the month as a document: three headline cards, said in words and numbers', async () => {
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const m = r.body.report.month;
+    assert.ok(m, 'a monthly report must carry its document');
+    assert.strictEqual(m.cover.monthLabel, 'August 2026');
+    assert.strictEqual(m.cover.prevMonthLabel, 'July 2026');
+    assert.strictEqual(m.cover.covers, 'August 1–31, 2026');
+    const card = a => m.brief.find(b => b.area === a) || {};
+    assert.strictEqual(card('Visibility').big, 'Reach up 47%');
+    assert.strictEqual(card('Visibility').line, '41,820 accounts reached in August, up from 28,410 in July.');
+    assert.strictEqual(card('Audience').big, '+412 followers');
+    assert.strictEqual(card('Audience').line, '412 new Instagram followers in August, against none in July. 9,240 followers in total.',
+        'a count that grew from zero must never be given a percentage');
+    assert.strictEqual(card('Action').big, 'Website taps down 14%');
+    assert.strictEqual(card('Action').tone, 'watch');
+    assert.strictEqual(r.body.report.movements.length, m.scorecard.length, 'the old movements list and the scorecard are the same rows');
+});
+test('the scorecard gives the exact change and a status nobody has to argue about', async () => {
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const row = k => r.body.report.month.scorecard.find(x => x.key === k) || {};
+    assert.strictEqual(row('reach').change, '+13,410 (+47%)');
+    assert.deepStrictEqual(row('reach').status, { word: 'Growing', tone: 'jade' });
+    assert.strictEqual(row('follower_count').change, 'new this month');
+    assert.strictEqual(row('follower_count').status.word, 'New');
+    assert.strictEqual(row('accounts_engaged').change, '+20 (+0.6%)', 'under 10% keeps its decimal');
+    assert.strictEqual(row('accounts_engaged').status.word, 'Steady');
+    assert.strictEqual(row('total_interactions').change, '−520 (−8.1%)');
+    assert.strictEqual(row('total_interactions').status.word, 'Steady', 'a fall under 10% is not an alarm');
+    assert.strictEqual(row('page_post_engagements').status.word, 'Watch');
+    assert.strictEqual(row('page_post_engagements').platform, 'Facebook');
+});
+test('posts, audience and next steps come out readable, and the audience is never overstated', async () => {
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const m = r.body.report.month;
+    assert.strictEqual(m.posts[0].kind, 'Reel');
+    assert.strictEqual(m.posts[0].reach, 11240);
+    assert.strictEqual(m.posts[0].link, 'https://instagram.com/p/abc');
+    const g = k => m.audience.groups.find(x => x.key === k);
+    assert.deepStrictEqual(g('age').rows.map(x => [x.label, x.share]), [['25–34', 60], ['35–44', 40]]);
+    assert.deepStrictEqual(g('gender').rows.map(x => x.label), ['Women', 'Men']);
+    // Boston is 4,100 of the 9,000 followers Meta could classify, not 100%
+    // of the one city it listed.
+    assert.strictEqual(g('city').rows[0].share, 45.6);
+    assert.strictEqual(g('country').rows[0].label, 'United States');
+    assert.strictEqual(m.audience.line, 'The largest group of your followers is aged 25–34 (60%), and more of them live in Boston (45.6%) than anywhere else.');
+    assert.deepStrictEqual(m.recommendations.map(x => [x.key, x.action, x.priority]), [['next-0', 'Post eight Reels', null]],
+        'an older report keeps its lines, with no priority nobody set');
+    assert.ok(/own Meta Insights/.test(m.about.source));
+});
+test('what the agency did that month: only what the client may see, only that month', async () => {
+    const C = state.C;
+    tbl('client_tasks').push(
+        { id: crypto.randomUUID(), client_id: C, title: 'Filmed the seasonal menu Reel', status: 'done', visible_to_client: true, completed_at: '2026-08-12T10:00:00.000Z', created_at: '2026-08-01T10:00:00.000Z' },
+        { id: crypto.randomUUID(), client_id: C, title: 'Chased the unpaid invoice', status: 'done', visible_to_client: false, completed_at: '2026-08-13T10:00:00.000Z', created_at: '2026-08-01T10:00:00.000Z' },
+        { id: crypto.randomUUID(), client_id: C, title: 'Planned October', status: 'done', visible_to_client: true, completed_at: '2026-09-03T10:00:00.000Z', created_at: '2026-09-01T10:00:00.000Z' }
+    );
+    tbl('reports').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: C, report_type: 'fb_page', platform: 'facebook', target_handle: 'harborcafe', created_at: '2026-08-14T09:00:00.000Z' });
+    const lead = () => { const id = crypto.randomUUID(); tbl('leads').push({ id, owner_user_id: EMP.id, username: 'lead' + id.slice(0, 6), platform: 'instagram', created_at: '2026-07-01T00:00:00.000Z' }); return id; };
+    tbl('client_leads').push(
+        { client_id: C, lead_id: lead(), source: 'ig_campaign', created_at: '2026-08-05T00:00:00.000Z' },
+        { client_id: C, lead_id: lead(), source: 'ig_campaign', created_at: '2026-08-21T00:00:00.000Z' },
+        { client_id: C, lead_id: lead(), source: 'ig_campaign', created_at: '2026-07-11T00:00:00.000Z' }
+    );
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const ctx = r.body.report.month.context;
+    assert.deepStrictEqual(ctx.work.done.map(t => t.title), ['Filmed the seasonal menu Reel'],
+        'an internal task, or one from another month, reached the client\'s report');
+    assert.ok(ctx.work.filed.some(f => f.title === 'Facebook page check-up · harborcafe' && f.date === '2026-08-14'), JSON.stringify(ctx.work.filed));
+    assert.ok(!ctx.work.filed.some(f => /Monthly report/.test(f.title)), 'the report must not list itself as work done');
+    const before = tbl('client_leads').filter(x => x.client_id === C && x.created_at < '2026-09-01').length;
+    assert.strictEqual(ctx.leads.thisMonth, 2);
+    assert.strictEqual(ctx.leads.toDate, before);
+});
+test('standing comes from the comparison that existed when the report was built, labelled as such', async () => {
+    const C = state.C;
+    const bench = (ranked, avg) => ({ benchmark: { ranked, cohort: { avgEngagementRate: avg } } });
+    tbl('reports').push(
+        { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, report_type: 'deep_audit', platform: 'instagram', target_handle: 'harborcafe', engagement_rate: 3.1, created_at: '2026-08-20T10:00:00.000Z',
+          report_json: bench([{ rank: 1, handle: 'ginzahibachi' }, { rank: 2, handle: 'harborcafe', isTarget: true }, { rank: 3, handle: 'fujiyama' }], 2.2) },
+        // Built after the monthly report: a report must not change after it is sent.
+        { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, report_type: 'deep_audit', platform: 'instagram', target_handle: 'harborcafe', engagement_rate: 4, created_at: '2099-01-01T00:00:00.000Z',
+          report_json: bench([{ rank: 1, handle: 'harborcafe', isTarget: true }, { rank: 2, handle: 'ginzahibachi' }], 2) }
+    );
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const s = r.body.report.month.context.standing;
+    assert.ok(s, 'no standing in the report');
+    assert.strictEqual(s.verdict, 'You come 2nd out of 3 businesses like yours.');
+    assert.strictEqual(s.date, '2026-08-20');
+    assert.strictEqual(s.title, 'Instagram deep dive');
+    assert.deepStrictEqual(s.peers.map(p => p.name), ['@ginzahibachi', 'You', '@fujiyama']);
+});
+test('a share link carries the same document', async () => {
+    const mk = await call('POST', '/api/share', { token: 't-emp', body: { reportId: state.moReport, label: 'August' } });
+    assert.strictEqual(mk.statusCode, 201, JSON.stringify(mk.body));
+    const r = await call('GET', `/api/public/share/${mk.body.share.token}`);
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const m = r.body.report.month;
+    assert.strictEqual(m.brief[0].big, 'Reach up 47%');
+    assert.strictEqual(m.context.standing.verdict, 'You come 2nd out of 3 businesses like yours.');
+    assert.deepStrictEqual(m.context.work.done.map(t => t.title), ['Filmed the seasonal menu Reel']);
+    assert.ok(!JSON.stringify(r.body).includes('Chased the unpaid invoice'), 'an internal task reached a public link');
+});
+test('staff see which recommendations are already on the board', async () => {
+    const one = await call('GET', `/api/meta/report/${state.moReport}`, { token: 't-emp' });
+    assert.strictEqual(one.statusCode, 200, JSON.stringify(one.body));
+    assert.ok(one.body.view && one.body.view.tasks, 'the staff page gets the document and the board');
+    assert.strictEqual(one.body.view.tasks.canEdit, true);
+    assert.deepStrictEqual(one.body.view.tasks.byKey, {});
+    const add = await call('POST', `/api/clients/${state.C}/tasks`, { token: 't-emp', body: {
+        title: 'Post eight Reels', source: { type: 'recommendation', id: state.moReport, key: 'next-0', label: 'Monthly report · August 2026' } } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    const two = await call('GET', `/api/meta/report/${state.moReport}`, { token: 't-emp' });
+    assert.deepStrictEqual(two.body.view.tasks.byKey['next-0'], { id: add.body.task.id, status: 'todo' });
+    const stranger = await call('GET', `/api/meta/report/${state.moReport}`, { token: 't-emp2' });
+    assert.ok([403, 404].includes(stranger.statusCode), 'a stranger opened the report: ' + stranger.statusCode);
+});
+test('an owner is told whether their runs spend their own key, so the portal can hide the team\'s key controls', async () => {
+    const me = await call('GET', '/api/me', { token: 't-client' });
+    assert.strictEqual(me.statusCode, 200, JSON.stringify(me.body));
+    assert.strictEqual(me.body.ownKey, false);
+    const staff = await call('GET', '/api/me', { token: 't-emp' });
+    assert.strictEqual(staff.body.ownKey, undefined, 'staff always see their key controls; the flag is the owner\'s');
+});
+test('what the model writes is kept to shape before it is saved', () => {
+    const ai = S.cleanMonthlyAi({ recommendations: [
+        { action: '  Fix the link in bio  ', why: 'Taps fell 14%', expected: 'An estimated 20 more taps', who: 'client', priority: 'urgent' },
+        'Post two Reels a week',
+        { why: 'no action given' }
+    ] });
+    assert.deepStrictEqual(ai.recommendations, [
+        { action: 'Fix the link in bio', why: 'Taps fell 14%', expected: 'An estimated 20 more taps', who: 'client', priority: null },
+        { action: 'Post two Reels a week', why: null, expected: null, who: null, priority: null }
+    ]);
+    assert.deepStrictEqual(ai.next_month, ['Fix the link in bio', 'Post two Reels a week'], 'older readers still get their list');
+    assert.deepStrictEqual(S.monthRecs(ai).map(x => x.key), ['rec-0', 'rec-1']);
+    assert.strictEqual(S.monthChange({ now: 5, before: 0, kind: 'new' }), 'new this month');
+    assert.strictEqual(S.monthChange({ now: 90, before: 100, pct: -10, kind: 'down' }), '−10 (−10%)');
+    assert.strictEqual(S.monthStatus({ now: 6, before: 3, pct: 100, kind: 'up' }).word, 'Small numbers', 'a doubling of three is not growth');
+    assert.strictEqual(S.monthStatus({ now: 60, before: 30, pct: 100, kind: 'up' }).word, 'Growing');
+    assert.strictEqual(S.monthlyView({ report_type: 'ig_report' }), null);
+});
+
 section('\nthe content plan, with the model told to overspend');
 /** Stored posts for one Instagram handle, varied enough to produce cells. */
 function seedPosts(handle, spec) {

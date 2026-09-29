@@ -11,9 +11,9 @@
  *     are never cached — a cached /api/me would be a stale account state.
  *   - Offline fallback: the last good copy of the page, else the dashboard.
  */
-const VERSION = 'el-shell-v1';
+const VERSION = 'el-shell-v2';
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
-    'app.css', 'header.js', 'manifest.webmanifest', 'icons/icon-192.png'];
+    'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();

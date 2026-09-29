@@ -288,7 +288,7 @@ console.log('\nreport types: everything written must be labelable and openable')
         // keyed by JOB type for two entries (fb_page_report, fb_community_audit)
         // that no row has ever carried, so a client's Facebook report read as
         // "Report". Same check, other side of the product.
-        const titles = (/\/api\/client\/reports'[\s\S]*?const TITLES\s*=\s*\{([^}]*)\}/.exec(SERVER) || [])[1];
+        const titles = (/const CLIENT_REPORT_TITLES\s*=\s*\{([^}]*)\}/.exec(SERVER) || [])[1];
         if (!titles) {
             bad('the client-surface TITLES map is findable', 'the pattern matched nothing — this check has gone stale');
         } else {
