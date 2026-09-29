@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Review tracker — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+    <div class="card">
+        <h2 class="card-title">Review tracker</h2>
+        <p class="card-subtitle">Finds the businesses of a kind around a place on Google Maps, reads the Instagram posts that
+            tagged each one, and sorts out which were reviews. You get a scoreboard of who is being reviewed, and every creator
+            who reviewed lands on the <a href="leads.html?kind=influencer" class="rv-link">Influencers</a> list, ready for a pipeline.</p>
+
+        <div class="ws-form two rv-form">
+            <div><label for="rv-cat">What kind of business</label><input id="rv-cat" placeholder="e.g. restaurants, cafés, bakeries" maxlength="80"></div>
+            <div><label for="rv-area">Where</label><input id="rv-area" placeholder="e.g. Gulshan, Dhaka" maxlength="120"></div>
+            <div><label for="rv-seed">Include one business (optional)</label><input id="rv-seed" placeholder="@your_client or an Instagram link" maxlength="200">
+                <div class="ws-hint">Usually your client, so the scoreboard shows where they stand.</div></div>
+            <div><label for="rv-handles">Or scan these Instagram accounts</label><input id="rv-handles" placeholder="@burgerhouse, @pizzaplace" maxlength="1200">
+                <div class="ws-hint">Skips Google Maps and reads exactly these. Up to 30.</div></div>
+            <div><label for="rv-max">How many nearby businesses</label><select id="rv-max"><option>5</option><option>10</option><option selected>15</option><option>20</option><option>30</option></select></div>
+            <div><label for="rv-days">Reviews from the last</label><select id="rv-days"><option value="30">30 days</option><option value="60">60 days</option><option value="90" selected>90 days</option><option value="180">6 months</option></select></div>
+            <div><label for="rv-posts">Tagged posts read per business</label><select id="rv-posts"><option>20</option><option selected>40</option><option>60</option><option>100</option></select></div>
+        </div>
+        <div class="ld-actions rv-go">
+            <button class="ws-btn is-gold" type="button" id="rv-run">Find the reviews</button>
+            <span class="ws-note" id="rv-cost"></span>
+        </div>
+        <div id="rv-progress"></div>
+        <p class="ws-note" id="rv-note"></p>
+    </div>
+
+    <div class="card">
+        <div class="card-title" style="font-size:1.05rem">Earlier scans</div>
+        <p class="card-subtitle">Open one to see the scoreboard. From a scan’s page, “Repeat on a schedule” runs it monthly and marks what is new.</p>
+        <div id="rv-list"><p class="el-muted">Loading…</p></div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    const handles = () => $('rv-handles').value.split(/[\s,]+/).map(h => h.trim().replace(/^@/, '')).filter(h => /^[a-z0-9._]{1,30}$/i.test(h)).slice(0, 30);
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'leadgen', page: 'reviews.html' });
+        esc = EL.escape;
+        const cur = EL.currentClient && EL.currentClient();
+        if (cur) {
+            try {
+                const d = await EL.api(`/api/clients/${encodeURIComponent(cur.id)}`);
+                const c = d.client || {};
+                if (c.ig_handle) $('rv-seed').value = '@' + c.ig_handle;
+                if (c.location && !$('rv-area').value) $('rv-area').value = c.location;
+                if (c.niche && !$('rv-cat').value) $('rv-cat').value = c.niche;
+            } catch { /* fill by hand */ }
+        }
+        ['rv-max', 'rv-posts', 'rv-cat', 'rv-area', 'rv-handles'].forEach(id => $(id).addEventListener('change', cost));
+        $('rv-run').addEventListener('click', run);
+        cost(); list();
+    });
+
+    async function cost() {
+        const maps = $('rv-cat').value.trim() && $('rv-area').value.trim();
+        try {
+            const p = new URLSearchParams({ max: $('rv-max').value, posts: $('rv-posts').value, handles: String(handles().length + ($('rv-seed').value.trim() ? 1 : 0)), maps: maps ? '1' : '0' });
+            const e = await EL.api('/api/reviews/estimate?' + p.toString());
+            $('rv-cost').textContent = `At most about $${Number(e.usd).toFixed(2)} of Apify credit.`;
+            $('rv-cost').title = e.note || '';
+        } catch { $('rv-cost').textContent = ''; }
+    }
+
+    async function run() {
+        const body = {
+            category: $('rv-cat').value.trim() || null, area: $('rv-area').value.trim() || null,
+            seed: $('rv-seed').value.trim() || null, handles: handles(),
+            maxBusinesses: +$('rv-max').value, days: +$('rv-days').value, postsPer: +$('rv-posts').value
+        };
+        const note = $('rv-note');
+        if (!(body.category && body.area) && !body.handles.length && !body.seed) {
+            note.className = 'ws-note is-bad'; note.textContent = 'Give a kind of business and an area, or some Instagram accounts to scan.'; return;
+        }
+        const btn = $('rv-run'); btn.disabled = true; note.className = 'ws-note'; note.textContent = 'Starting…';
+        try {
+            const { job } = await EL.runJob('/api/reviews/scan', body, {
+                mount: $('rv-progress'),
+                onProgress: j => { note.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                onFailed: j => { note.className = 'ws-note is-bad'; note.textContent = 'Failed: ' + (j.error || 'unknown'); },
+                onPaused: j => { note.textContent = j.error || 'Paused: it can be resumed from Schedules.'; }
+            });
+            if (job && job.status === 'done') {
+                const r = job.result || {};
+                note.className = 'ws-note is-good';
+                note.textContent = `${r.reviews || 0} review(s) by ${r.creators || 0} creator(s) across ${r.scanned || 0} business(es).`
+                    + (r.savedLeads ? ` ${r.savedLeads} new influencer lead(s) saved.` : '');
+                list();
+                if (r.reportId) location.href = `report.html?report=${encodeURIComponent(r.reportId)}${EL.currentClient && EL.currentClient() ? '&client=' + encodeURIComponent(EL.currentClient().id) : ''}`;
+            }
+        } catch (err) {
+            if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; }
+        } finally { btn.disabled = false; }
+    }
+
+    async function list() {
+        try {
+            const d = await EL.api('/api/reviews/scans');
+            const rows = d.scans || [];
+            $('rv-list').innerHTML = rows.length ? rows.map(s => `<a class="ws-row is-link" href="report.html?report=${encodeURIComponent(s.id)}${s.clientId ? '&client=' + encodeURIComponent(s.clientId) : ''}">
+                <span class="ws-sev is-gold"></span>
+                <div class="ws-grow"><div class="ws-t">${esc(s.title || 'Scan')}</div>
+                    <div class="ws-m">${s.client ? esc(s.client) + ' · ' : ''}${new Date(s.createdAt).toLocaleDateString()} · ${Number(s.counts.reviews || 0)} reviews · ${Number(s.counts.creators || 0)} creators · ${Number(s.counts.scanned || 0)} businesses</div></div></a>`).join('')
+                : '<p class="el-muted">No scans yet.</p>';
+        } catch (err) { if (!err.handled) $('rv-list').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; }
+    }
+})();
+</script>
+
+</body>
+</html>

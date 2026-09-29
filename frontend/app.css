@@ -1425,3 +1425,10 @@ body.el-drawer-open { overflow: hidden; }
 .pl-top .ll-tog.is-on { background: rgba(12,120,86,0.18); border-color: var(--jade); color: var(--text-primary); }
 .pl-note { font-size: 0.84rem; color: var(--warn); margin: 12px 0 0; min-height: 1em; }
 .el-drawer-t p a { color: var(--accent-solid); }
+
+/* ===================================================================
+   PHASE 41 — the review tracker (reviews.html)
+   =================================================================== */
+.rv-form { margin-top: 12px; }
+.rv-go { margin-top: 16px; }
+.rv-link { color: var(--accent-solid); }
