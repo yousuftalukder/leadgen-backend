@@ -51,6 +51,7 @@
     <div class="rvw-panel">
         <div class="rvw-head">
             <b id="rv-title">Report</b>
+            <span class="ws-filters" id="rv-mode" hidden style="margin:0"><button type="button" data-mode="doc">Client report</button><button type="button" data-mode="engine">Full analysis</button></span>
             <span class="rvw-actions">
                 <button class="ws-btn is-sm" id="rv-pdf" type="button">Save as PDF</button>
                 <a class="ws-btn is-sm" id="rv-full" href="#" target="_blank" rel="noopener">Open full page</a>
@@ -333,12 +334,24 @@
         wireOpen(body);
     }
 
+    // Report types the client reads as a document (phase 36): the viewer opens
+    // on that, and the engine's full analysis is one click away.
+    const DOC_TYPES = ['ig_report', 'deep_audit'];
     function openReport(r) {
         const page = UI.TYPE_PAGE[r.report_type] || 'ig-report.html';
-        const href = `${page}?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}`;
+        const tail = `?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}`;
+        const engine = page + tail, doc = 'report.html' + tail;
+        const hasDoc = DOC_TYPES.includes(r.report_type);
+        const show = mode => {
+            const href = mode === 'doc' ? doc : engine;
+            $('rv-full').href = href;
+            $('rv-frame').src = href + '&embed=1';
+            $('rv-mode').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+        };
         $('rv-title').textContent = `${UI.TYPE_LABEL[r.report_type] || r.report_type}${reportLine(r).subject ? ' · ' + reportLine(r).subject : ''}`;
-        $('rv-full').href = href;
-        $('rv-frame').src = href + '&embed=1';
+        $('rv-mode').hidden = !hasDoc;
+        $('rv-mode').querySelectorAll('button').forEach(b => { b.onclick = () => show(b.dataset.mode); });
+        show(hasDoc ? 'doc' : 'engine');
         $('rv').classList.remove('hidden');
         document.body.classList.add('rvw-open');
     }

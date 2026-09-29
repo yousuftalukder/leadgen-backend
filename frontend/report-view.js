@@ -10,6 +10,10 @@
    Load after header.js. Styles are the rp-* rules in app.css (rule 17).
 
    API (window.ELReport):
+     ELReport.document(doc, opts) -> HTML for a server-built document
+                                     (phase 36: Instagram audit, competitor
+                                     intel; any report whose view carries doc)
+     ELReport.hydrate(host)       -> image fallbacks after the HTML is in place
      ELReport.owner(r, opts)      -> HTML for any report in the owner's view:
                                      the monthly document when r.month is set,
                                      otherwise the standard layout
@@ -259,10 +263,98 @@
     }
 
     /** Whatever the owner opened: the monthly document, or the standard layout. */
+    // ---- documents (phase 36) ---------------------------------------------------
+    // The server decides what a report says (reportDoc); this draws the blocks.
+    const SRC = { pub: ['Public data', 'rd-pub'], meta: ['Owner data · Meta', 'rd-meta'], ours: ['Our records', 'rd-ours'], ai: ['Written by AI from these numbers', 'rd-ai'] };
+    const TONE = { good: 'is-good', watch: 'is-watch', bad: 'is-bad', gold: 'is-gold', muted: 'is-muted' };
+    const cell = c => {
+        if (c === null || c === undefined) return '—';
+        if (typeof c !== 'object') return esc(c);
+        if (c.chip) return `<span class="el-chip ${c.tone === 'good' ? 'is-jade' : c.tone === 'watch' ? 'is-warn' : c.tone === 'bad' ? 'is-bad' : c.tone === 'gold' ? 'is-gold' : ''}">${esc(c.chip)}</span>`;
+        return `<span class="${TONE[c.tone] || ''}">${esc(c.text)}</span>`;
+    };
+    const barVal = (v, unit) => unit === 'x' ? `${Number(v).toFixed(1)}×` : unit === '%' ? `${Number(v).toFixed(2)}%` : fmt(v);
+    const HOUR_BANDS = [[6, 9, '6a'], [9, 12, '9a'], [12, 15, '12p'], [15, 18, '3p'], [18, 21, '6p'], [21, 24, '9p']];
+    const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    function block(b) {
+        switch (b.type) {
+            case 'kpis': return `<div class="rd-kpis" style="--cols:${b.cols || Math.min(4, b.items.length)}">${b.items.map(k => `<div class="rd-kpi ${TONE[k.tone] || ''}"><span class="l">${esc(k.label)}</span><span class="v">${esc(k.value)}</span>${k.sub ? `<span class="s">${esc(k.sub)}</span>` : ''}</div>`).join('')}</div>`;
+            case 'verdict': return `<p class="rp-verdict">${esc(b.text)}</p>`;
+            case 'prose': return `<div class="rp-prose">${(b.paras || []).map(p => `<p>${esc(p)}</p>`).join('')}</div>`;
+            case 'note': return `<p class="rp-src">${esc(b.text)}</p>`;
+            case 'table': return `${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<div class="ws-table-wrap"><table class="ws-table rp-table"><thead><tr>${b.cols.map(c => `<th class="${c.num ? 'num' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
+                <tbody>${b.rows.map((r, i) => `<tr class="${i === b.highlight ? 'rd-you' : ''}">${r.map((c, j) => `<td class="${b.cols[j] && b.cols[j].num ? 'num' : ''}">${cell(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${b.note ? `<p class="rp-src">${esc(b.note)}</p>` : ''}`;
+            case 'bars': {
+                const max = b.max || Math.max(...b.rows.map(r => Number(r.value) || 0)) * 1.15 || 1;
+                return `<div class="rd-box">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<div class="rd-bars">${b.rows.map(r => `<div class="rd-bar ${TONE[r.tone] || ''}"><span class="lab">${esc(r.label)}</span><span class="val">${barVal(r.value, b.unit)}</span><span class="track"><i style="width:${Math.max(2, Math.min(100, (Number(r.value) || 0) / max * 100))}%"></i></span></div>`).join('')}</div></div>`;
+            }
+            case 'posts': return `<div class="rd-posts">${b.items.filter(Boolean).map(pc => `<figure class="rd-post ${pc.weak ? 'is-weak' : ''}">
+                <div class="rd-img" data-kind="${esc(pc.kind)}">${pc.image ? `<img src="${esc(pc.image)}" alt="${esc(pc.title)}" loading="lazy">` : ''}<span>${esc(pc.by ? pc.by + ' · ' : '')}${esc(pc.kind)}</span></div>
+                <figcaption><b>${esc(pc.title)}</b><span class="m">${esc([pc.date, pc.meta].filter(Boolean).join(' · '))}</span>
+                ${pc.chip ? `<span class="el-chip ${pc.chip.tone === 'good' ? 'is-jade' : pc.chip.tone === 'bad' ? 'is-bad' : ''}">${esc(pc.chip.text)}</span>` : ''}${pc.link ? ` <a class="rd-link" href="${esc(pc.link)}" target="_blank" rel="noopener noreferrer">Open the post</a>` : ''}</figcaption></figure>`).join('')}</div>`;
+            case 'points': return `<div class="rp-col ${b.tone === 'good' ? 'is-good' : b.tone === 'watch' ? 'is-watch' : ''}">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<ol class="rd-points">${b.items.map(it => `<li><b>${esc(it.title)}</b>${it.text ? `<span>${esc(it.text)}</span>` : ''}</li>`).join('')}</ol></div>`;
+            case 'weeks': return `<div class="rd-weeks">${b.items.map(w => `<div class="rd-week"><span class="w">${esc(w.week)}</span><ul>${w.actions.map(a => `<li>${esc(a)}</li>`).join('')}</ul></div>`).join('')}</div>`;
+            case 'checks': return `<div class="rd-box">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<ul class="rd-checks">${b.items.map(c => `<li class="${c.ok ? 'ok' : 'no'}">${esc(c.label)}</li>`).join('')}</ul></div>`;
+            case 'heat': {
+                const grid = {}; let max = 0;
+                for (const c of b.cells || []) {
+                    const band = HOUR_BANDS.findIndex(([a, z]) => c.hour >= a && c.hour < z); if (band < 0) continue;
+                    const k = c.dow + ':' + band; const g = grid[k] = grid[k] || { sum: 0, n: 0 };
+                    g.sum += (Number(c.value) || 0) * (c.posts || 1); g.n += (c.posts || 1);
+                }
+                for (const g of Object.values(grid)) { g.v = g.sum / g.n; max = Math.max(max, g.v); }
+                const order = [1, 2, 3, 4, 5, 6, 0];
+                return `<div class="rd-box">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<div class="rd-heat"><span></span>${HOUR_BANDS.map(h => `<span class="h">${h[2]}</span>`).join('')}
+                    ${order.map(d => `<span class="d">${DAYS[d]}</span>${HOUR_BANDS.map((_, bi) => { const g = grid[d + ':' + bi]; return `<i style="--a:${g && max ? (0.12 + 0.88 * g.v / max).toFixed(2) : 0.04}" title="${g ? g.n + ' posts' : 'no posts'}"></i>`; }).join('')}`).join('')}</div>${b.note ? `<p class="rp-src">${esc(b.note)}</p>` : ''}</div>`;
+            }
+            case 'line': {
+                const W = 520, H = 170, L = 44, R = 14, T = 12, B = 26;
+                const vals = b.series.flatMap(x => x.values.map(Number));
+                const max = Math.max(1, ...vals) * 1.1;
+                const x = i => L + (b.labels.length < 2 ? 0 : i * (W - L - R) / (b.labels.length - 1)), y = v => T + (H - T - B) * (1 - v / max);
+                const cls = ['rd-s1', 'rd-s2', 'rd-s3'];
+                return `<div class="rd-box">${b.title ? `<h3 class="rp-h3">${esc(b.title)}</h3>` : ''}<svg class="rd-line" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(b.title || 'trend')}">
+                    ${[0, max / 2, max].map(t => `<line class="g" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="t" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${fmt(t)}</text>`).join('')}
+                    ${b.labels.map((l, i) => `<text class="t" x="${x(i)}" y="${H - 8}" text-anchor="middle">${esc(l)}</text>`).join('')}
+                    ${b.series.map((sr, si) => `<polyline class="${cls[si % 3]}" fill="none" points="${sr.values.map((v, i) => `${x(i)},${y(Number(v) || 0)}`).join(' ')}"/><circle class="${cls[si % 3]} dot" cx="${x(sr.values.length - 1)}" cy="${y(Number(sr.values[sr.values.length - 1]) || 0)}" r="4"/>`).join('')}
+                </svg>${b.series.length > 1 ? `<p class="rp-src">${b.series.map((sr, si) => `<span class="rd-key ${cls[si % 3]}"></span>${esc(sr.name)}`).join(' &nbsp; ')}</p>` : ''}</div>`;
+            }
+            case 'row': return `<div class="rd-row" style="--cols:${b.blocks.length}">${b.blocks.map(x => `<div class="rd-cell">${block(x)}</div>`).join('')}</div>`;
+            case 'missing': return `<div class="rd-missing"><b>${esc(b.title)}</b><span>${esc(b.text)}</span></div>`;
+            default: return '';
+        }
+    }
+
+    function documentHtml(doc, o = {}) {
+        if (!doc) return '';
+        const c = doc.cover || {};
+        const sec = sections();
+        return `<article class="rp">
+            <header class="rp-cover">
+                <div class="el-eyebrow">${esc(c.kind || '')}</div>
+                <h1>${esc(c.title || '')}</h1>
+                ${c.sub ? `<p class="rp-by">${esc(c.sub)}</p>` : ''}
+                ${(c.receipt || []).length ? `<div class="rd-receipt">${c.receipt.map(r => `<div><b>${esc(r[0])}</b><small>${esc(r[1])}</small></div>`).join('')}</div>` : ''}
+                <p class="rp-by">Prepared by EdgeLead${c.builtAt ? ' on ' + day(c.builtAt) : ''}</p>
+                ${o.toolbar ? `<div class="rp-toolbar no-print">${o.toolbar}</div>` : ''}
+            </header>
+            ${doc.sections.map(s => sec(s.title, s.lead ? esc(s.lead) : '', `<div class="rd-srcs">${(s.source || []).map(k => SRC[k] ? `<span class="rd-src ${SRC[k][1]}">${SRC[k][0]}</span>` : '').join('')}</div>${s.blocks.map(block).join('')}`)).join('')}
+            ${(doc.about || []).length ? sec('About this report', '', `<div class="rp-about">${doc.about.map(t => `<p>${esc(t)}</p>`).join('')}</div>`, 'rp-last') : ''}
+        </article>`;
+    }
+
+    /** A stored photo that fails to load falls back to its labelled panel. */
+    function hydrate(host) {
+        if (!host) return;
+        host.querySelectorAll('.rd-img img').forEach(img => img.addEventListener('error', () => img.remove(), { once: true }));
+    }
+
     function owner(r, o = {}) {
         if (r && r.month) return monthly(r.month, o);
+        if (r && r.doc) return documentHtml(r.doc, o);
         return standard(r, o);
     }
 
-    window.ELReport = { owner, monthly, standard, wire, day };
+    window.ELReport = { owner, monthly, standard, wire, day, document: documentHtml, hydrate };
 })();

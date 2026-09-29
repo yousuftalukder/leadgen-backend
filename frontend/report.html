@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Client report — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body class="el-has-header">
+
+<main class="el-page" id="rp"><div class="ws-empty"><p>Opening the report…</p></div></main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="report-view.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // The report as the client reads it (phase 36): the same document their
+    // portal and a share link show, with the team's Save as PDF and share.
+    await EL.init({ engine: null, page: 'report.html' });
+    const esc = v => EL.esc(v);
+    const root = document.getElementById('rp');
+    const q = new URLSearchParams(location.search);
+    const id = EL.reportParam();
+    if (!id) { root.innerHTML = '<div class="ws-empty"><h3>No report chosen</h3><p>Open a report from a client’s Reports tab.</p><a class="ws-btn" href="clients.html">Clients</a></div>'; return; }
+
+    let r;
+    try { r = (await EL.api('/api/client/report/' + encodeURIComponent(id))).report; }
+    catch (err) { if (!err.handled) root.innerHTML = `<div class="ws-empty"><h3>That report could not be opened</h3><p>${esc(err.message)}</p></div>`; return; }
+    // The monthly report has its own page, with the task board beside it.
+    if (r.type === 'meta_monthly') { location.replace('monthly.html?' + q.toString()); return; }
+
+    const cid = q.get('client');
+    const toolbar = `<button class="ws-btn is-sm" type="button" id="export-pdf">${EL.icon('doc')}Save as PDF</button><div id="report-actions"></div>`;
+    document.title = `${(r.doc && r.doc.cover && r.doc.cover.title) || r.title || 'Report'} — EdgeLead`;
+    root.innerHTML = `${cid && !EL.isEmbedded() ? `<nav class="ws-crumb no-print" aria-label="Breadcrumb"><a href="clients.html">Clients</a><span>/</span><a href="workspace.html?client=${encodeURIComponent(cid)}&tab=reports">Client</a><span>/</span><span>${esc(r.title || 'Report')}</span></nav>` : ''}
+        ${ELReport.owner(r, { toolbar })}`;
+    ELReport.hydrate(root);
+    document.getElementById('export-pdf').addEventListener('click', () => window.print());
+    EL.reportActions('report-actions', { reportId: r.id });
+})();
+</script>
+
+</body>
+</html>

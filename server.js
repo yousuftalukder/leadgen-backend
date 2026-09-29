@@ -4591,6 +4591,10 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
             };
             const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
 
+            // Instagram's photo links expire; the report keeps its own copies (phase 36).
+            await progress(94, 'Keeping the post photos');
+            await keepAuditImages([main, ...rivalAudits.map(r => ({ ...r, topPosts: (r.topPosts || []).slice(0, 2), bottomPosts: [], exemplars: {} }))], `ig/${jobId || crypto.randomUUID()}`);
+
             await progress(96, 'Saving report');
             const { data: saved } = await supabase.from('reports').insert([{
                 user_id: userId,
@@ -4693,6 +4697,10 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
                 scoreVersion: IG_SCORE_VERSION, generatedAt: new Date().toISOString()
             };
             const postsAnalyzed = main.postsAnalyzed + rivalAudits.reduce((s, r) => s + r.postsAnalyzed, 0);
+
+            // Instagram's photo links expire; the report keeps its own copies (phase 36).
+            await progress(94, 'Keeping the post photos');
+            await keepAuditImages([main, ...rivalAudits.map(r => ({ ...r, topPosts: (r.topPosts || []).slice(0, 2), bottomPosts: [], exemplars: {} }))], `ig/${jobId || crypto.randomUUID()}`);
 
             await progress(96, 'Saving report');
             const { data: saved } = await supabase.from('reports').insert([{
@@ -15392,7 +15400,9 @@ function clientReportView(row) {
 
         // The monthly report as the agency's document (phase 34). The routes
         // that open one report add its context; a list never pays for it.
-        month: monthlyView(row)
+        month: monthlyView(row),
+        // The agency's document for the other report types (phase 36).
+        doc: reportDoc(row)
     };
 }
 
@@ -15755,6 +15765,357 @@ async function monthlyBoard(row) {
 
 
 // ===========================================================================
+// PHASE 36 :: POST PHOTOS KEPT, AND THE REPORT AS A DOCUMENT
+//
+// Instagram's image links expire within days, so a report that showed them
+// broke by the time the client opened it. The photos of the posts a report
+// shows are now copied into our own storage when the report is built, and the
+// report keeps that copy.
+//
+// reportDoc() turns a saved report into the page-by-page document the owner,
+// a share link and a PDF read: numbered sections of typed blocks (kpis, a
+// table, bars, post cards, points, a week plan). report-view.js draws any
+// document; this is the only place a report type decides what it says.
+// Every section names its source (public data, owner data, our records, AI),
+// and a block with no data is left out rather than drawn empty.
+// ===========================================================================
+
+const REPORT_MEDIA_BUCKET = process.env.REPORT_MEDIA_BUCKET || 'report-media';
+// Only the platforms' own image hosts are fetched: the address comes from a
+// scrape, and fetching anything else would let a crafted post reach inside.
+const MEDIA_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*(cdninstagram\.com|fbcdn\.net)\//i;
+const MEDIA_MAX_BYTES = 2 * 1024 * 1024;
+let _mediaBucket = null;
+
+async function ensureMediaBucket() {
+    if (!supabase.storage) return false;
+    if (!_mediaBucket) {
+        _mediaBucket = (async () => {
+            try {
+                const { data } = await supabase.storage.getBucket(REPORT_MEDIA_BUCKET);
+                if (data) return true;
+                const { error } = await supabase.storage.createBucket(REPORT_MEDIA_BUCKET, {
+                    public: true, fileSizeLimit: MEDIA_MAX_BYTES, allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp']
+                });
+                if (error && !/exist/i.test(error.message || '')) throw error;
+                return true;
+            } catch (err) {
+                logger.warn('media_bucket_unavailable', { message: err.message });
+                _mediaBucket = null;
+                return false;
+            }
+        })();
+    }
+    return _mediaBucket;
+}
+
+/** Copy one post photo into storage. Returns its lasting public URL, or null. */
+async function storeMediaImage(srcUrl, path) {
+    if (!MEDIA_HOST_RE.test(String(srcUrl || ''))) return null;
+    if (!(await ensureMediaBucket())) return null;
+    try {
+        const r = await fetch(srcUrl, { signal: AbortSignal.timeout(12000) });
+        if (!r.ok) return null;
+        const type = String(r.headers.get('content-type') || '').split(';')[0].trim();
+        if (!/^image\/(jpeg|png|webp)$/.test(type)) return null;
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (!buf.length || buf.length > MEDIA_MAX_BYTES) return null;
+        const file = `${path}.${type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg'}`;
+        const { error } = await supabase.storage.from(REPORT_MEDIA_BUCKET)
+            .upload(file, buf, { contentType: type, upsert: true, cacheControl: '31536000' });
+        if (error) { logger.warn('media_upload_failed', { message: error.message }); return null; }
+        return supabase.storage.from(REPORT_MEDIA_BUCKET).getPublicUrl(file).data.publicUrl || null;
+    } catch (err) {
+        logger.warn('media_fetch_failed', { message: err.message });
+        return null;
+    }
+}
+
+/**
+ * The photos a report can show: each audit's top and bottom posts and its
+ * exemplars (the same card objects appear in several lists, so one copy
+ * serves all). Adds `image` to each card; the scraped `thumbnail` stays.
+ */
+async function keepAuditImages(audits, prefix, { perAudit = 12 } = {}) {
+    const cards = [];
+    for (const a of audits.filter(Boolean)) {
+        const own = [...(a.topPosts || []), ...(a.bottomPosts || []), ...Object.values(a.exemplars || {})].filter(c => c && c.thumbnail);
+        cards.push(...own.slice(0, perAudit).map(c => ({ c, handle: a.handle })));
+    }
+    const byUrl = new Map();
+    for (const { c, handle } of cards) {
+        if (!byUrl.has(c.thumbnail)) byUrl.set(c.thumbnail, { list: [], key: `${prefix}/${String(handle || 'x').replace(/[^a-z0-9._-]/gi, '')}-${String(c.shortcode || crypto.createHash('sha1').update(c.thumbnail).digest('hex').slice(0, 12)).replace(/[^a-z0-9_-]/gi, '')}` });
+        byUrl.get(c.thumbnail).list.push(c);
+    }
+    const jobs = [...byUrl.entries()];
+    let kept = 0;
+    for (let i = 0; i < jobs.length; i += 4) {
+        await Promise.all(jobs.slice(i, i + 4).map(async ([url, { list, key }]) => {
+            const stored = await storeMediaImage(url, key);
+            if (stored) { kept++; for (const c of list) c.image = stored; }
+        }));
+    }
+    return kept;
+}
+
+// ---- the document ------------------------------------------------------------
+
+const docNum = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+const docFmt = v => (docNum(v) === null ? '—' : Math.round(Number(v)).toLocaleString('en-US'));
+const docPct = (v, d = 1) => (docNum(v) === null ? '—' : `${Number(v).toFixed(d)}%`);
+const docX = v => (docNum(v) === null ? '—' : `${Number(v).toFixed(1)}×`);
+const docMonth = iso => { const d = new Date(iso || Date.now()); return isNaN(d) ? '' : d.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+const docDay = iso => { const d = new Date(iso || ''); return isNaN(d) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }); };
+const docLines = a => (Array.isArray(a) ? a : []).map(s => oneLine(s, 400)).filter(Boolean);
+/** A model line, split at its first colon or dash into a bold lead and the rest. */
+const docPoint = s => { const m = /^(.{3,70}?)(?::|\s[—–-]\s)\s*(.+)$/.exec(s); return m ? { title: m[1], text: m[2] } : { title: s, text: '' }; };
+const FORMAT_NAMES = { Reel: 'Reel', Carousel: 'Carousel', Video: 'Video', Image: 'Photo', Sidecar: 'Carousel' };
+
+function docPostCard(c, extra = {}) {
+    if (!c) return null;
+    const idx = docNum(c.index);
+    return {
+        kind: FORMAT_NAMES[c.type] || c.type || 'Post',
+        title: oneLine(c.caption, 90) || 'No caption',
+        meta: [c.likes != null ? `${docFmt(c.likes)} likes` : null, c.comments != null ? `${docFmt(c.comments)} comments` : null, c.views ? `${docFmt(c.views)} views` : null].filter(Boolean).join(' · '),
+        date: c.postedAt ? docDay(c.postedAt) : null,
+        chip: idx === null ? null : { text: `${docX(idx)} typical`, tone: idx >= 1.2 ? 'good' : idx < 0.8 ? 'bad' : '' },
+        image: c.image || null,
+        link: /^https:\/\/(www\.)?instagram\.com\//.test(String(c.url || '')) ? c.url : null,
+        ...extra
+    };
+}
+
+function docPillarTone(p) { const s = p.max ? p.points / p.max : 0; return s >= 0.7 ? ['Strong', 'good'] : s <= 0.4 ? ['Weak', 'watch'] : ['Fair', 'gold']; }
+
+function docHeat(h) {
+    if (!h || !Array.isArray(h.cells) || !h.cells.length) return null;
+    return { type: 'heat', title: 'Reactions by day and hour, against the account’s typical post',
+        cells: h.cells.filter(c => c.posts > 0).map(c => ({ dow: c.dow, hour: c.hour, value: docNum(c.medIndex) ?? docNum(c.avgIndex) ?? 0, posts: c.posts })),
+        note: h.reliable === false ? 'Fewer than 20 posts: read this as a hint, not a rule.' : 'Darker is stronger. Times are the account’s own time zone.' };
+}
+
+/** The Instagram audit (ig_report): one account, public data. */
+function igDoc(row) {
+    const j = row.report_json || {};
+    const m = j.main || {};
+    if (!m.handle) return null;
+    const ai = row.ai_json || j.ai || {};
+    const bench = j.benchmark || null;
+    const cad = m.cadence || {};
+    const mix = m.contentMix || {};
+    const reel = mix.Reel || null;
+    const pillars = (m.scoreBreakdown && m.scoreBreakdown.breakdown) || [];
+    const summary = String(ai.executive_summary || '').trim();
+    const firstStop = summary.search(/(?<=[.!?])\s/);
+    const sections = [];
+
+    sections.push({ title: 'At a glance', source: ['pub', 'ai'], blocks: [
+        { type: 'kpis', items: [
+            { label: 'Engagement, typical post', value: docPct(m.engagementRateMedian ?? m.engagementRate, 2), sub: bench ? `local average ${docPct(bench.cohort.avgEngagementRate, 2)}` : `average post ${docPct(m.engagementRate, 2)}`, tone: bench && parseFloat(m.engagementRate) >= parseFloat(bench.cohort.avgEngagementRate) ? 'good' : '' },
+            { label: 'Posts a week', value: docNum(cad.postsPerWeek) === null ? '—' : String(cad.postsPerWeek), sub: bench ? `local average ${bench.cohort.avgPostsPerWeek}` : `${docFmt(cad.postsPerMonth)} a month` },
+            reel && reel.avgViews ? { label: 'Views per Reel', value: docFmt(reel.avgViews), sub: `${reel.count} Reels read` } : { label: 'Average likes', value: docFmt(m.avgLikes), sub: `${docFmt(m.avgComments)} comments` },
+            { label: 'Last post', value: cad.lastPostDaysAgo == null ? '—' : `${Math.round(cad.lastPostDaysAgo)} days ago`, sub: cad.longestGapDays != null ? `longest gap ${Math.round(cad.longestGapDays)} days` : '', tone: cad.silent ? 'bad' : '' }
+        ] },
+        summary ? { type: 'verdict', text: firstStop > 0 ? summary.slice(0, firstStop) : summary } : null,
+        summary && firstStop > 0 ? { type: 'prose', paras: [summary.slice(firstStop + 1).trim()] } : null,
+        bench ? { type: 'bars', title: 'Score out of 100', max: 100, rows: [{ label: 'This account', value: m.score, tone: 'good' }, { label: 'Local average', value: bench.cohort.avgScore, tone: 'gold' }] } : null
+    ] });
+
+    if (pillars.length) sections.push({ title: 'How the score is built', lead: `${m.score}/100, grade ${m.grade}. Each part is scored against what works for accounts this size.`, source: ['pub'], blocks: [
+        { type: 'table', cols: [{ label: 'Part' }, { label: 'Points', num: true }, { label: 'What we found' }, { label: '' }],
+          rows: pillars.map(p => { const [w, t] = docPillarTone(p); return [p.pillar, `${docFmt(p.points)} / ${p.max}`, p.detail || '', { chip: w, tone: t }]; }) }
+    ] });
+
+    const mixRows = Object.entries(mix).sort((a, b) => b[1].count - a[1].count);
+    const flags = (m.flags || []).filter(f => f.reliable && f.lift != null).sort((a, b) => b.lift - a.lift).slice(0, 4);
+    if (mixRows.length) sections.push({ title: 'What you post, and what works', source: ['pub'], blocks: [
+        { type: 'table', cols: [{ label: 'Format' }, { label: 'Posts', num: true }, { label: 'Avg likes', num: true }, { label: 'Avg comments', num: true }, { label: 'Avg views', num: true }, { label: 'vs typical', num: true }],
+          rows: mixRows.map(([k, v]) => [FORMAT_NAMES[k] || k, v.count, docFmt(v.avgLikes), docFmt(v.avgComments), v.avgViews ? docFmt(v.avgViews) : '—', { text: docX(v.avgIndex), tone: v.avgIndex >= 1.2 ? 'good' : v.avgIndex < 0.8 ? 'bad' : '' }]),
+          note: '“vs typical” compares each post with the account’s own median post, so one viral post cannot skew it.' },
+        flags.length ? { type: 'bars', title: 'Captions that earned more', max: Math.max(...flags.map(f => 1 + f.lift / 100)) * 1.1, unit: 'x', rows: flags.map(f => ({ label: f.with.label, value: +(1 + f.lift / 100).toFixed(2), tone: f.lift >= 0 ? 'good' : 'watch' })) } : null
+    ] });
+
+    const top = (m.topPosts || []).slice(0, 3), low = (m.bottomPosts || []).slice(0, 1);
+    if (top.length) sections.push({ title: 'Best and weakest posts', source: ['pub'], blocks: [
+        { type: 'posts', items: [...top.map(c => docPostCard(c)), ...low.map(c => docPostCard(c, { weak: true }))] }
+    ] });
+
+    const heat = docHeat(m.heatmap);
+    const bh = m.heatmap && m.heatmap.bestHours && m.heatmap.bestHours[0], bd = m.heatmap && m.heatmap.bestDays && m.heatmap.bestDays[0];
+    const hourName = h => { const x = Number(h); return `${(x % 12) || 12}${x < 12 ? ' am' : ' pm'}`; };
+    if (heat) sections.push({ title: 'When your audience responds', source: ['pub'], blocks: [
+        { type: 'row', blocks: [heat, { type: 'kpis', cols: 1, items: [
+            bd ? { label: 'Best day', value: bd.dowName, sub: bd.medIndex != null ? `${docX(bd.medIndex)} typical` : '', tone: 'good' } : null,
+            bh ? { label: 'Best hour', value: hourName(bh.hour), sub: bh.medIndex != null ? `${docX(bh.medIndex)} typical` : '', tone: 'good' } : null
+        ].filter(Boolean) }] }
+    ] });
+
+    const months = ((m.momentum && m.momentum.months) || []).filter(x => x.posts);
+    if (months.length >= 2) sections.push({ title: 'Consistency and momentum', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            { type: 'line', title: 'Median reactions per post, by month', labels: months.map(x => new Date(x.month + '-01T00:00:00Z').toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })), series: [{ name: m.handle, values: months.map(x => x.medEngagement || 0) }] },
+            { type: 'kpis', cols: 2, items: [
+                { label: 'Posts a month', value: docFmt(cad.postsPerMonth) }, { label: 'Median gap', value: cad.medianGapDays == null ? '—' : `${cad.medianGapDays} days` },
+                { label: 'Longest gap', value: cad.longestGapDays == null ? '—' : `${Math.round(cad.longestGapDays)} days` },
+                { label: 'Momentum', value: m.momentum && m.momentum.changePct != null ? `${m.momentum.changePct > 0 ? '+' : ''}${m.momentum.changePct}%` : '—', tone: m.momentum && m.momentum.changePct > 0 ? 'good' : m.momentum && m.momentum.changePct < 0 ? 'bad' : '' }
+            ] }
+        ] },
+        { type: 'note', text: 'A month still running is left out of the trend; momentum compares complete months.' }
+    ] });
+
+    const tags = (m.topHashtags || []).slice(0, 6);
+    const checks = (m.completeness && m.completeness.checks) || [];
+    if (tags.length || checks.length) sections.push({ title: 'Hashtags and your profile', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            tags.length ? { type: 'table', cols: [{ label: 'Hashtag' }, { label: 'Uses', num: true }, { label: 'vs typical', num: true }], rows: tags.map(t => [t.tag, t.uses, { text: docX(t.avgIndex), tone: t.avgIndex >= 1 ? 'good' : 'bad' }]) } : null,
+            checks.length ? { type: 'checks', title: `Profile checklist · ${checks.filter(c => c.ok).length} of ${checks.length}`, items: checks.map(c => ({ label: c.label, ok: !!c.ok })) } : null
+        ].filter(Boolean) }
+    ] });
+
+    const strengths = docLines(ai.strengths), weaknesses = docLines(ai.weaknesses);
+    if (strengths.length || weaknesses.length) sections.push({ title: 'What is working, what to fix', source: ['ai', 'pub'], blocks: [
+        { type: 'row', blocks: [
+            { type: 'points', title: 'What is working', tone: 'good', items: strengths.slice(0, 4).map(docPoint) },
+            { type: 'points', title: 'What to fix', tone: 'watch', items: weaknesses.slice(0, 4).map(docPoint) }
+        ] }
+    ] });
+
+    const plan = (Array.isArray(ai.action_plan_30_days) ? ai.action_plan_30_days : []).slice(0, 4).map(w => ({ week: oneLine(w.week, 30), actions: docLines(w.actions).slice(0, 4) })).filter(w => w.actions.length);
+    const kt = ai.kpi_targets || {};
+    const reelShare = reel ? parseFloat(reel.share) : null;
+    if (plan.length) sections.push({ title: '30-day plan and targets', source: ['ai'], blocks: [
+        { type: 'weeks', items: plan },
+        (kt.engagement_rate || kt.posts_per_week || kt.reels_share) ? { type: 'table', cols: [{ label: 'Target, 30 days' }, { label: 'Now', num: true }, { label: 'Target', num: true }], rows: [
+            kt.engagement_rate ? ['Engagement rate', docPct(m.engagementRate, 2), oneLine(kt.engagement_rate, 20)] : null,
+            kt.posts_per_week ? ['Posts a week', String(cad.postsPerWeek ?? '—'), oneLine(kt.posts_per_week, 20)] : null,
+            kt.reels_share ? ['Share of Reels', reelShare === null ? '—' : `${reelShare}%`, oneLine(kt.reels_share, 20)] : null
+        ].filter(Boolean) } : null
+    ] });
+
+    return docFinish({
+        type: 'ig_report',
+        cover: { kind: `Instagram audit · ${docMonth(row.created_at)}`, title: m.fullName || `@${m.handle}`,
+            sub: `@${m.handle} · ${m.postsAnalyzed || cad.spanDays ? `the last ${m.postsAnalyzed ? m.postsAnalyzed + ' public posts' : cad.spanDays + ' days of posts'}` : 'recent public posts'}${bench ? `, scored against ${bench.cohort.accounts - 1} local account${bench.cohort.accounts === 2 ? '' : 's'}` : ''}.`,
+            receipt: [[m.grade || '—', 'grade'], [`${docFmt(m.score)}/100`, 'account score'], [docFmt(m.postsAnalyzed), 'posts read'], [docFmt(m.followers), 'followers']],
+            builtAt: j.generatedAt || row.created_at },
+        sections,
+        about: [
+            `Built from the account’s public Instagram posts, collected ${docDay(j.generatedAt || row.created_at)}. Likes, comments and Reel views are what Instagram shows publicly.`,
+            'Reach, saves, shares, profile visits and audience are visible only to the account owner, so they are not estimated here. Connecting Meta adds them to the monthly report.',
+            'Each post is compared with the account’s own typical post, so one viral post cannot redraw the picture. Written sections are by AI from these numbers only.'
+        ]
+    });
+}
+
+/** Competitor intelligence (deep_audit): the client and its rivals, ranked on one scale. */
+function ciDoc(row) {
+    const j = row.report_json || {};
+    const m = j.main || {};
+    const b = j.benchmark;
+    if (!m.handle || !b || !Array.isArray(b.ranked) || b.ranked.length < 2) return null;
+    const ai = row.ai_json || j.ai || {};
+    const all = [m, ...(j.rivals || [])];
+    const byHandle = Object.fromEntries(all.map(a => [a.handle, a]));
+    const n = b.ranked.length;
+    const me = b.ranked.find(r => r.isTarget) || {};
+    const rankOn = k => 1 + all.filter(a => parseFloat(a[k]) > parseFloat(m[k])).length;
+    const reelViews = a => (a.contentMix && a.contentMix.Reel && a.contentMix.Reel.avgViews) || null;
+    const standing = clientStanding({ engagement_rate: m.engagementRate }, b, m);
+    const best = [...b.ranked].filter(r => !r.isTarget)[0];
+    const sections = [];
+
+    sections.push({ title: 'The leaderboard', source: ['pub'], blocks: [
+        { type: 'table', highlight: b.ranked.findIndex(r => r.isTarget),
+          cols: [{ label: 'Rank' }, { label: 'Account' }, { label: 'Score', num: true }, { label: 'Followers', num: true }, { label: 'Engagement', num: true }, { label: 'Posts a week', num: true }, { label: 'Views per Reel', num: true }],
+          rows: b.ranked.map(r => [`#${r.rank}`, `@${r.handle}${r.isTarget ? ' (you)' : ''}`, `${r.score} · ${r.grade}`, docFmt(r.followers), docPct(r.engagementRate, 2), r.postsPerWeek, docFmt(reelViews(byHandle[r.handle] || {}))]) },
+        standing.verdict ? { type: 'verdict', text: `${standing.verdict} ${rankOn('engagementRate') === 1 ? 'You get the most reactions per follower of the group.' : ''}`.trim() } : null
+    ] });
+
+    const cohortEr = parseFloat(b.cohort.avgEngagementRate), cohortPpw = parseFloat(b.cohort.avgPostsPerWeek);
+    sections.push({ title: 'Where the gaps are', lead: 'This account against the group average and the account ranked first.', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            { type: 'bars', title: 'Engagement rate', unit: '%', rows: [{ label: 'You', value: parseFloat(m.engagementRate), tone: 'good' }, { label: 'Group average', value: cohortEr, tone: 'gold' }, best ? { label: `@${best.handle}`, value: parseFloat(best.engagementRate), tone: 'muted' } : null].filter(Boolean) },
+            { type: 'bars', title: 'Posts a week', rows: [{ label: 'You', value: parseFloat(m.postsPerWeek), tone: parseFloat(m.postsPerWeek) >= cohortPpw ? 'good' : 'watch' }, { label: 'Group average', value: cohortPpw, tone: 'gold' }, best ? { label: `@${best.handle}`, value: parseFloat(best.postsPerWeek), tone: 'muted' } : null].filter(Boolean) },
+            { type: 'bars', title: 'Account score', max: 100, rows: [{ label: 'You', value: m.score, tone: 'good' }, { label: 'Group average', value: b.cohort.avgScore, tone: 'gold' }, best ? { label: `@${best.handle}`, value: best.score, tone: 'muted' } : null].filter(Boolean) }
+        ] }
+    ] });
+
+    const share = (a, k) => { const v = a.contentMix && a.contentMix[k]; return v ? v.share : '0%'; };
+    const bestFormat = a => { const e = Object.entries(a.contentMix || {}).filter(([, v]) => v.count >= 2).sort((x, y) => y[1].avgIndex - x[1].avgIndex)[0]; return e ? `${FORMAT_NAMES[e[0]] || e[0]} · ${docX(e[1].avgIndex)}` : '—'; };
+    sections.push({ title: 'The format battle', lead: 'What each account posts, and which format earns it the most against its own typical post.', source: ['pub'], blocks: [
+        { type: 'table', highlight: b.ranked.findIndex(r => r.isTarget),
+          cols: [{ label: 'Account' }, { label: 'Reels', num: true }, { label: 'Carousels', num: true }, { label: 'Photos', num: true }, { label: 'Best format' }],
+          rows: b.ranked.map(r => { const a = byHandle[r.handle] || {}; return [`@${r.handle}`, share(a, 'Reel'), share(a, 'Carousel'), share(a, 'Image'), bestFormat(a)]; }) }
+    ] });
+
+    const rivalPosts = (j.rivals || []).map(a => a.topPosts && a.topPosts[0] ? docPostCard(a.topPosts[0], { by: `@${a.handle}` }) : null).filter(Boolean).slice(0, 4);
+    if (rivalPosts.length) sections.push({ title: 'Rivals’ best posts', lead: 'What is working for them right now.', source: ['pub'], blocks: [{ type: 'posts', items: rivalPosts }] });
+
+    const gaps = (b.hashtagGaps || []).slice(0, 6);
+    const timing = (j.rivals || []).map(a => { const d = a.heatmap && a.heatmap.bestDays && a.heatmap.bestDays[0]; const h = a.heatmap && a.heatmap.bestHours && a.heatmap.bestHours[0]; return d || h ? `@${a.handle}: ${[d && d.dowName, h && `${(h.hour % 12) || 12}${h.hour < 12 ? ' am' : ' pm'}`].filter(Boolean).join(', ')}` : null; }).filter(Boolean);
+    if (gaps.length || timing.length) sections.push({ title: 'Hashtags they use and you do not', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            gaps.length ? { type: 'table', cols: [{ label: 'Hashtag' }, { label: 'Rivals using it', num: true }, { label: 'Their avg engagement', num: true }], rows: gaps.map(g => [g.tag, g.usedBy, docFmt(g.avgEngagement)]) } : null,
+            timing.length ? { type: 'points', title: 'When rivals do best', items: timing.map(t => ({ title: t, text: '' })) } : null
+        ].filter(Boolean) }
+    ] });
+
+    const insights = docLines(ai.competitor_insights), strategy = docLines(ai.content_strategy);
+    if (insights.length || strategy.length) sections.push({ title: `What this means for @${m.handle}`, source: ['ai', 'pub'], blocks: [
+        { type: 'row', blocks: [
+            insights.length ? { type: 'points', title: 'What rivals do that you do not', tone: 'watch', items: insights.slice(0, 4).map(docPoint) } : null,
+            strategy.length ? { type: 'points', title: 'Moves to make', tone: 'good', items: strategy.slice(0, 4).map(docPoint) } : null
+        ].filter(Boolean) }
+    ] });
+
+    const plan = (Array.isArray(ai.action_plan_30_days) ? ai.action_plan_30_days : []).slice(0, 4).map(w => ({ week: oneLine(w.week, 30), actions: docLines(w.actions).slice(0, 4) })).filter(w => w.actions.length);
+    if (plan.length) sections.push({ title: '30-day plan', source: ['ai'], blocks: [{ type: 'weeks', items: plan }] });
+
+    return docFinish({
+        type: 'deep_audit',
+        cover: { kind: `Competitor intelligence · ${docMonth(row.created_at)}`, title: `@${m.handle} against ${n - 1} rival${n === 2 ? '' : 's'}`,
+            sub: `${n} accounts read on the same day and scored on the same scale: ${b.ranked.map(r => '@' + r.handle).join(', ')}.`,
+            receipt: [[me.rank ? ordinal(me.rank) : '—', `of ${n} overall`], [ordinal(rankOn('engagementRate')), 'on engagement'], [ordinal(rankOn('postsPerWeek')), 'on posting volume'], [docFmt(all.reduce((s, a) => s + (a.postsAnalyzed || 0), 0)), 'posts compared']],
+            builtAt: j.generatedAt || row.created_at },
+        sections,
+        about: [
+            `Every account was read on ${docDay(j.generatedAt || row.created_at)} from its public Instagram posts. All figures are public counts, scored by the same rules for every account.`,
+            'The client’s own Meta numbers never appear here: rivals have none to compare with.',
+            'Written sections are by AI from these numbers only.'
+        ]
+    });
+}
+
+/** Drop empty blocks and sections, so a document only draws what it has. */
+function docFinish(doc) {
+    const keep = b => {
+        if (!b) return false;
+        if (b.type === 'row') { b.blocks = (b.blocks || []).filter(keep); return b.blocks.length > 0; }
+        if (b.type === 'kpis') { b.items = (b.items || []).filter(Boolean); return b.items.length > 0; }
+        if (['posts', 'points', 'weeks', 'checks'].includes(b.type)) return Array.isArray(b.items) && b.items.filter(Boolean).length > 0;
+        if (b.type === 'table') return Array.isArray(b.rows) && b.rows.length > 0;
+        if (b.type === 'bars') return Array.isArray(b.rows) && b.rows.length > 0;
+        return true;
+    };
+    doc.sections = (doc.sections || []).map(s => ({ ...s, blocks: (s.blocks || []).filter(keep) })).filter(s => s.blocks.length);
+    return doc;
+}
+
+/** The document for a report, when its type has one. */
+function reportDoc(row) {
+    if (!row) return null;
+    try {
+        if (row.report_type === 'ig_report') return igDoc(row);
+        if (row.report_type === 'deep_audit') return ciDoc(row);
+    } catch (err) {
+        logger.warn('report_doc_failed', { type: row.report_type, message: err.message });
+    }
+    return null;
+}
+
+
+// ===========================================================================
 // OWNER ASSISTANT  (phase 15)
 //
 // A business owner asks a question in their own words and gets an answer
@@ -15977,7 +16338,7 @@ const ASSISTANT_TOOLS = {
             }
             // The monthly document is for reading; get_monthly_report already
             // gives the model the month's numbers, so it is not sent twice.
-            const { month, ...view } = clientReportView(data);
+            const { month, doc, ...view } = clientReportView(data);
             if (s.audience !== 'operator') return view;
             // Staff get the gist (phase 35): the finding, where they stand, the
             // top three each way and the summary. The page has the rest.
@@ -17474,5 +17835,7 @@ module.exports = {
     // phase 34
     monthlyView, monthlyContext, monthRecs, cleanMonthlyAi, monthChange, monthStatus, CLIENT_REPORT_TITLES,
     // phase 35
-    assistantScope, assistantAnswer
+    assistantScope, assistantAnswer,
+    // phase 36
+    reportDoc, igDoc, ciDoc, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
 };
