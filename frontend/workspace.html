@@ -336,7 +336,7 @@
 
     // Report types the client reads as a document (phase 36): the viewer opens
     // on that, and the engine's full analysis is one click away.
-    const DOC_TYPES = ['ig_report', 'deep_audit', 'fb_page', 'public_monthly'];
+    const DOC_TYPES = ['ig_report', 'deep_audit', 'fb_page', 'fb_community', 'fb_group', 'public_monthly'];
     function openReport(r) {
         const page = UI.TYPE_PAGE[r.report_type] || 'ig-report.html';
         const tail = `?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}`;

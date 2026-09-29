@@ -2602,6 +2602,50 @@ test('…while a stranger naming the same client is answered only about their ow
     assert.strictEqual(r.body.clientId, null, 'a stranger reached a client through the assistant');
 });
 
+section('\nphase 39 — the Facebook groups read as a document');
+function fbRoom(name, extra = {}) {
+    return { groupId: name.toLowerCase().replace(/\W/g, ''), name, memberCount: 18400, postsAnalyzed: 42, windowDays: 14, postsPerDay: 3, uniquePosters: 35, uniquePosterRatio: 0.83, medianComments: 7, adminShare: 4,
+        promoAllowed: true, approvalRequired: false, roomValue: 64,
+        roomValueBreakdown: { liveness: 0.2, conversation: 0.7, diversity: 0.83, demand: 0.6, permission: 1, confidence: 1, sampleSize: 42, lowConfidence: false, verdict: 'Worth working' },
+        formats: [{ key: 'photo', posts: 20, avgIndex: 1.4 }, { key: 'link', posts: 6, avgIndex: 0.5 }], intents: [{ key: 'recommendation_request', posts: 9, avgIndex: 2.2 }], openings: [{ key: 'question', posts: 8, avgIndex: 1.6 }],
+        heatmap: { cells: [{ dow: 5, hour: 20, posts: 4, avgIndex: 1.9 }], bestHours: [], bestDays: [] },
+        topPosts: [{ excerpt: 'Anyone know a baker who does eggless birthday cakes near Gulshan?', intent: 'recommendation_request', reactions: 41, comments: 63, index: 3.4, postedAt: '2026-09-20T15:00:00Z', url: 'https://www.facebook.com/groups/x/posts/1' }, { excerpt: 'Selling my oven', reactions: 2, comments: 1, index: 0.3, url: 'https://evil.example/y' }],
+        demandSignals: 12, demandRate: 28.6, demandCategories: [{ category: 'recommendation', count: 9 }, { category: 'price_inquiry', count: 3 }], demandKeywords: [{ term: 'eggless cake', hits: 5 }], ...extra };
+}
+test('a groups read becomes a document: groups ranked with our call, demand, what works, rules', async () => {
+    const a = fbRoom('Gulshan Foodies'), b = fbRoom('Dhaka Home Bakers', { roomValue: 22, promoAllowed: false, approvalRequired: true, postsAnalyzed: 9, roomValueBreakdown: { lowConfidence: true, verdict: 'Not enough data' } });
+    const benchmark = { rooms: 2, avgRoomValue: 43, bestRoom: { groupId: a.groupId, name: a.name }, formats: a.formats, intents: a.intents, openings: a.openings, demandKeywords: a.demandKeywords, demandCategories: [{ category: 'recommendation', count: 18 }, { category: 'price_inquiry', count: 6 }],
+        ranked: [{ rank: 1, name: a.name, roomValue: 64, members: 18400, postsPerDay: 3, medianComments: 7, demandSignals: 12 }, { rank: 2, name: b.name, roomValue: 22, members: 18400, postsPerDay: 3, medianComments: 7, demandSignals: 12, lowConfidence: true }] };
+    const row = { id: 'c', report_type: 'fb_community', created_at: '2026-09-28T10:00:00Z', niche: 'bakery', location_label: 'Dhaka',
+        report_json: { mode: 'combined', groups: [a, b, fbRoom('Empty', { postsAnalyzed: 0 })], benchmark },
+        ai_json: { executive_summary: 'Gulshan Foodies is where your buyers ask. Dhaka Home Bakers bans promotion.', room_verdicts: [{ group: 'Gulshan Foodies', verdict: 'work it', why: 'Asks every day' }, { group: 'Dhaka Home Bakers', verdict: 'skip it', why: 'Promotion banned' }],
+            unmet_demand: ['Eggless cakes: asked 5 times, answered once'], what_works_here: ['Questions: 1.6× typical'], risks: ['Approval queue: posts wait a day'], lead_actions: ['Reply to cake requests within the hour'], posting_playbook: [{ room: 'Gulshan Foodies', format: 'photo', intent: 'question', best_time: 'Fri 8 pm', angle: 'Show the eggless range' }], next_30_days: [{ week: 'Week 1', actions: ['Join and read the rules'] }] } };
+    const d = S.reportDoc(row);
+    assert.strictEqual(d.type, 'fb_community');
+    assert.strictEqual(d.cover.title, 'Bakery groups in Dhaka');
+    assert.deepStrictEqual(d.cover.receipt[3], ['24', 'buying signals'], 'the empty group counts nothing');
+    const titles = d.sections.map(x => x.title);
+    for (const x of ['At a glance', 'Which groups are worth your time', 'What people are asking to buy', 'What gets a response here', 'Posts that did best', 'When and how to post', 'Group rules and risks', 'Turning this into customers']) assert.ok(titles.includes(x), 'missing ' + x + ': ' + titles.join(' | '));
+    const rank = d.sections.find(x => x.title === 'Which groups are worth your time').blocks[0];
+    assert.deepStrictEqual(rank.rows.map(r => r[6].chip), ['Work it', 'Skip it']);
+    assert.deepStrictEqual(rank.rows[1][5], { text: '22*', tone: 'watch' }, 'a thin sample is marked');
+    const cats = d.sections.find(x => x.title === 'What people are asking to buy').blocks[0].blocks[0];
+    assert.deepStrictEqual(cats.rows.map(r => r.value), [75, 25]);
+    const quotes = d.sections.find(x => x.title === 'Posts that did best').blocks[0].items;
+    assert.strictEqual(quotes[0].link, 'https://www.facebook.com/groups/x/posts/1');
+    assert.ok(quotes.every(q => q.link === null || /facebook\.com/.test(q.link)), 'a link off Facebook must not be shown');
+    const rules = d.sections.find(x => x.title === 'Group rules and risks').blocks[0].rows;
+    assert.deepStrictEqual(rules[1].slice(1), [{ chip: 'Banned', tone: 'bad' }, { chip: 'Admin approval', tone: 'watch' }]);
+});
+test('one group gets its own read: the score explained, no ranking table', async () => {
+    const d = S.reportDoc({ id: 's', report_type: 'fb_group', created_at: '2026-09-28T10:00:00Z', report_json: { mode: 'individual', group: fbRoom('Gulshan Foodies') }, ai_json: null });
+    assert.strictEqual(d.cover.title, 'Gulshan Foodies');
+    const titles = d.sections.map(x => x.title);
+    assert.ok(titles.includes('Is this group worth your time') && !titles.includes('Which groups are worth your time'), titles.join(' | '));
+    assert.ok(!titles.includes('Group rules and risks'), 'no risks from the AI and one group: nothing to show');
+    assert.strictEqual(S.reportDoc({ report_type: 'fb_group', report_json: { group: fbRoom('X', { postsAnalyzed: 0 }) } }), null, 'a group with no posts has no document');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

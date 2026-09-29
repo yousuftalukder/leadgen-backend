@@ -16267,6 +16267,151 @@ function fbDoc(row) {
     });
 }
 
+/**
+ * The Facebook groups read (fb_community, several rooms) or one room
+ * (fb_group). Public posts only; the members who wrote them are never named.
+ */
+function fbGroupsDoc(row) {
+    const j = row.report_json || {};
+    const single = row.report_type === 'fb_group' || j.mode === 'individual';
+    const groups = (single ? [j.group] : (j.groups || [])).filter(g => g && g.postsAnalyzed > 0);
+    if (!groups.length) return null;
+    const bm = single ? null : j.benchmark || null;
+    const ai = row.ai_json || j.ai || {};
+    const nice = k => String(k || '').replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+    const tone = x => (x >= 1.2 ? 'good' : x < 0.8 ? 'bad' : '');
+    const g0 = groups[0];
+    const members = groups.reduce((s, g) => s + (g.memberCount || 0), 0);
+    const posts = groups.reduce((s, g) => s + g.postsAnalyzed, 0);
+    const demand = groups.reduce((s, g) => s + (g.demandSignals || 0), 0);
+    const score = single ? g0.roomValue : (bm ? bm.avgRoomValue : Math.round(groups.reduce((s, g) => s + g.roomValue, 0) / groups.length));
+    const verdictOf = name => (Array.isArray(ai.room_verdicts) ? ai.room_verdicts : []).find(v => v && String(v.group || '').toLowerCase() === String(name || '').toLowerCase());
+    const V = { 'work it': ['Work it', 'good'], 'test it': ['Test it', 'gold'], 'skip it': ['Skip it', 'bad'] };
+    const call = g => { const v = verdictOf(g.name); const k = v && String(v.verdict || '').toLowerCase().trim(); return V[k] || (g.roomValue >= 50 ? V['work it'] : g.roomValue >= 30 ? V['test it'] : V['skip it']); };
+    const summary = String(ai.executive_summary || '').trim();
+    const firstStop = summary.search(/(?<=[.!?])\s/);
+    const sections = [];
+
+    const worth = groups.filter(g => g.roomValue >= 50).length;
+    const medComments = pmMedian(groups.map(g => g.medianComments));
+    sections.push({ title: 'At a glance', source: ['pub', 'ai'], blocks: [
+        { type: 'kpis', items: [
+            single ? { label: 'Group score', value: `${docFmt(g0.roomValue)}/100`, sub: g0.roomValueBreakdown && g0.roomValueBreakdown.verdict, tone: g0.roomValue >= 50 ? 'good' : g0.roomValue < 30 ? 'bad' : 'watch' }
+                   : { label: 'Groups worth working', value: `${worth} of ${groups.length}`, sub: bm && bm.bestRoom ? `best: ${bm.bestRoom.name}` : '', tone: worth ? 'good' : 'watch' },
+            { label: 'Buying signals', value: docFmt(demand), sub: `${docPct(posts ? demand / posts * 100 : null)} of posts ask to buy or for a recommendation`, tone: demand ? 'good' : '' },
+            { label: 'Comments per post', value: docFmt(medComments), sub: medComments >= 5 ? 'people talk here' : 'quiet threads', tone: medComments >= 5 ? 'good' : 'watch' },
+            { label: 'Posts a day', value: String(+groups.reduce((s, g) => s + (g.postsPerDay || 0), 0).toFixed(1)), sub: single ? `across ${docFmt(g0.windowDays)} days read` : 'all groups together' }
+        ] },
+        summary ? { type: 'verdict', text: firstStop > 0 ? summary.slice(0, firstStop) : summary } : null,
+        summary && firstStop > 0 ? { type: 'prose', paras: [summary.slice(firstStop + 1).trim()] } : null
+    ] });
+
+    if (single) {
+        const b = g0.roomValueBreakdown || {};
+        const pc = v => (docNum(v) === null ? null : Math.round(v * 100));
+        sections.push({ title: 'Is this group worth your time', lead: b.verdict ? String(b.verdict).replace(/\broom\b/gi, 'group') : null, source: ['pub'], blocks: [
+            { type: 'row', blocks: [
+                { type: 'bars', title: 'What the score is made of', unit: '%', max: 100, rows: [
+                    { label: 'Lively (posts a day)', value: pc(b.liveness), tone: 'gold' },
+                    { label: 'Conversation (comments)', value: pc(b.conversation), tone: 'gold' },
+                    { label: 'Many voices, not a few', value: pc(b.diversity), tone: 'gold' },
+                    { label: 'People asking to buy', value: pc(b.demand), tone: 'good' }
+                ].filter(r => r.value !== null) },
+                { type: 'checks', title: 'Posting here', items: [
+                    { label: g0.promoAllowed === false ? 'Promotion is banned: value posts and answers only' : 'Promotion is allowed', ok: g0.promoAllowed !== false },
+                    { label: g0.approvalRequired ? 'Posts wait for admin approval' : 'Posts go up straight away', ok: !g0.approvalRequired },
+                    { label: `${docFmt(g0.postsAnalyzed)} posts read${b.lowConfidence ? ': too few to be sure' : ''}`, ok: !b.lowConfidence },
+                    { label: `${docFmt(g0.uniquePosters)} different people posted`, ok: (g0.uniquePosterRatio || 0) >= 0.5 }
+                ] }
+            ] },
+            g0.memberCount ? { type: 'note', text: `${docFmt(g0.memberCount)} members${g0.adminShare ? `; admins wrote ${g0.adminShare}% of posts` : ''}.` } : null
+        ] });
+    } else if (bm && (bm.ranked || []).length) {
+        sections.push({ title: 'Which groups are worth your time', lead: 'Ranked by group score: how lively, how talkative, how varied, and how often people ask to buy.', source: ['pub', 'ai'], blocks: [
+            { type: 'table', cols: [{ label: 'Group' }, { label: 'Members', num: true }, { label: 'Posts a day', num: true }, { label: 'Comments', num: true }, { label: 'Buying signals', num: true }, { label: 'Score', num: true }, { label: 'Our call' }],
+                rows: bm.ranked.slice(0, 15).map(r => { const c = call(r); return [oneLine(r.name, 60), docFmt(r.members), String(r.postsPerDay ?? '—'), docFmt(r.medianComments), docFmt(r.demandSignals), r.lowConfidence ? { text: `${r.roomValue}*`, tone: 'watch' } : { text: String(r.roomValue), tone: r.roomValue >= 50 ? 'good' : r.roomValue < 30 ? 'bad' : '' }, { chip: c[0], tone: c[1] }]; }) },
+            bm.ranked.some(r => r.lowConfidence) ? { type: 'note', text: '* Fewer than 15 posts were public: read that score as a first look.' } : null,
+            (Array.isArray(ai.room_verdicts) ? ai.room_verdicts : []).length ? { type: 'points', title: 'Why', items: ai.room_verdicts.filter(v => v && v.group && v.why).slice(0, 6).map(v => ({ title: oneLine(v.group, 60), text: oneLine(v.why, 240) })) } : null
+        ] });
+    }
+
+    const cats = (single ? g0.demandCategories : bm && bm.demandCategories) || [];
+    const kws = ((single ? g0.demandKeywords : bm && bm.demandKeywords) || []).slice(0, 10);
+    const unmet = docLines(ai.unmet_demand);
+    if (demand || unmet.length) sections.push({ title: 'What people are asking to buy', lead: demand ? `${docFmt(demand)} posts asked for a product, a service or a recommendation.` : null, source: ['pub', 'ai'], blocks: [
+        { type: 'row', blocks: [
+            cats.length && demand ? { type: 'bars', title: 'Kinds of request', unit: '%', max: 100, rows: cats.slice(0, 6).map(c => ({ label: nice(c.category), value: +(c.count / demand * 100).toFixed(1), tone: 'good' })) } : null,
+            kws.length ? { type: 'table', title: 'Words in those requests', cols: [{ label: 'Asked about' }, { label: 'Times', num: true }], rows: kws.map(k => [k.term, k.hits]) } : null
+        ] },
+        unmet.length ? { type: 'points', title: 'Asked for, and not well answered', tone: 'good', items: unmet.slice(0, 5).map(docPoint) } : null
+    ] });
+
+    const formats = ((single ? g0.formats : bm && bm.formats) || []).slice(0, 6);
+    const intents = ((single ? g0.intents : bm && bm.intents) || []).slice(0, 6);
+    const openings = ((single ? g0.openings : bm && bm.openings) || []);
+    const works = docLines(ai.what_works_here), fails = docLines(ai.what_fails_here);
+    if (formats.length || intents.length || works.length) sections.push({ title: 'What gets a response here', source: ['pub', 'ai'], blocks: [
+        { type: 'row', blocks: [
+            formats.length ? { type: 'table', title: 'By format', cols: [{ label: 'Format' }, { label: 'Posts', num: true }, { label: 'vs typical', num: true }], rows: formats.map(f => [nice(f.key), f.posts, { text: docX(f.avgIndex), tone: tone(f.avgIndex) }]) } : null,
+            intents.length ? { type: 'bars', title: 'By what the post is for', unit: 'x', rows: intents.map(i => ({ label: nice(i.key), value: i.avgIndex, tone: i.avgIndex >= 1.2 ? 'good' : i.avgIndex < 0.8 ? 'watch' : 'gold' })) } : null
+        ] },
+        openings[0] && openings[0].avgIndex >= 1.2 ? { type: 'note', text: `Posts that open with ${nice(openings[0].key).toLowerCase()} do best, at ${docX(openings[0].avgIndex)} typical.` } : null,
+        works.length || fails.length ? { type: 'row', blocks: [
+            { type: 'points', title: 'Works here', tone: 'good', items: works.slice(0, 4).map(docPoint) },
+            { type: 'points', title: 'Falls flat here', tone: 'watch', items: fails.slice(0, 4).map(docPoint) }
+        ] } : null
+    ] });
+
+    const top = groups.flatMap(g => (g.topPosts || []).slice(0, 3).map(p => ({ ...p, room: g.name })))
+        .filter(p => oneLine(p.excerpt, 240)).sort((a, b) => (b.index || 0) - (a.index || 0))
+        .filter((p, i, all) => all.findIndex(q => oneLine(q.excerpt, 120) === oneLine(p.excerpt, 120)) === i).slice(0, 4);
+    if (top.length) sections.push({ title: 'Posts that did best', lead: 'Written by group members; shown for what they say, not who said it.', source: ['pub'], blocks: [
+        { type: 'quotes', items: top.map(p => ({ tag: [single ? oneLine(nice(p.intent || p.format), 30) : oneLine(p.room, 34), p.postedAt ? docDay(p.postedAt) : null].filter(Boolean).join(' · '), text: oneLine(p.excerpt, 240), meta: [p.reactions != null ? `${docFmt(p.reactions)} reactions` : null, p.comments != null ? `${docFmt(p.comments)} comments` : null].filter(Boolean).join(' · '), chip: docNum(p.index) === null ? null : { text: `${docX(p.index)} typical`, tone: 'good' }, link: /^https:\/\/(www\.|m\.)?facebook\.com\//.test(String(p.url || '')) ? p.url : null })) }
+    ] });
+
+    const best = single ? g0 : (groups.find(g => bm && bm.bestRoom && g.groupId === bm.bestRoom.groupId) || groups.slice().sort((a, b) => b.roomValue - a.roomValue)[0]);
+    const heat = docHeat(best.heatmap);
+    const hours = ((best.heatmap && best.heatmap.bestHours) || []).filter(h => docNum(h.avgIndex) !== null).slice(0, 5);
+    const play = (Array.isArray(ai.posting_playbook) ? ai.posting_playbook : []).filter(p => p && (p.room || p.angle)).slice(0, 8);
+    if (heat || hours.length || play.length) sections.push({ title: 'When and how to post', source: ['pub', 'ai'], blocks: [
+        { type: 'row', blocks: [
+            heat ? { ...heat, title: single ? 'Response by day and hour' : `Response by day and hour in ${best.name}`, note: best.postsAnalyzed < 20 ? 'Fewer than 20 posts: read this as a hint, not a rule.' : `Darker is stronger. Local time.${best.approvalRequired ? ' Posts here wait for approval, so timing is approximate.' : ''}` } : null,
+            hours.length ? { type: 'bars', title: 'Best hours to post', unit: 'x', rows: hours.map(h => ({ label: `${String(h.hour).padStart(2, '0')}:00 · ${docFmt(h.posts)} posts`, value: h.avgIndex, tone: h.avgIndex >= 1.2 ? 'good' : 'gold' })) } : null
+        ] },
+        play.length ? { type: 'table', title: 'Posting playbook', cols: [{ label: 'Group' }, { label: 'Post' }, { label: 'Angle' }, { label: 'When' }], rows: play.map(p => [oneLine(p.room, 50) || '—', [nice(p.format), nice(p.intent)].filter(x => x && x !== '').join(', ') || '—', oneLine(p.angle, 200) || '—', oneLine(p.best_time, 40) || '—']) } : null
+    ] });
+
+    const risks = docLines(ai.risks);
+    if (!single || risks.length) sections.push({ title: 'Group rules and risks', source: ['pub', 'ai'], blocks: [
+        single ? null : { type: 'table', cols: [{ label: 'Group' }, { label: 'Promotion' }, { label: 'Posting' }], rows: groups.slice(0, 15).map(g => [oneLine(g.name, 60), g.promoAllowed === false ? { chip: 'Banned', tone: 'bad' } : { chip: 'Allowed', tone: 'good' }, g.approvalRequired ? { chip: 'Admin approval', tone: 'watch' } : { chip: 'Straight away', tone: '' }]) },
+        risks.length ? { type: 'points', title: 'Watch out for', tone: 'watch', items: risks.slice(0, 4).map(docPoint) } : null
+    ] });
+
+    const leads = docLines(ai.lead_actions);
+    const plan = (Array.isArray(ai.next_30_days) ? ai.next_30_days : []).slice(0, 4).map(w => ({ week: oneLine(w.week, 30), actions: docLines(w.actions).slice(0, 4) })).filter(w => w.actions.length);
+    if (leads.length || plan.length) sections.push({ title: 'Turning this into customers', source: ['ai'], blocks: [
+        leads.length ? { type: 'points', title: 'This week', tone: 'good', items: leads.slice(0, 5).map(docPoint) } : null,
+        plan.length ? { type: 'weeks', items: plan } : null
+    ] });
+
+    const where = [row.niche, row.location_label].filter(Boolean);
+    return docFinish({
+        type: single ? 'fb_group' : 'fb_community',
+        cover: { kind: `${single ? 'Facebook group read' : 'Facebook groups read'} · ${docMonth(row.created_at)}`,
+            title: single ? g0.name : (where.length ? `${row.niche ? nice(row.niche) + ' ' : ''}groups${row.location_label ? ' in ' + row.location_label : ''}` : `${groups.length} local Facebook groups`),
+            sub: single ? `What this group talks about, what it asks to buy, and how to post in it.` : `Where your customers talk across ${groups.length} public groups, what they ask to buy, and how to show up.`,
+            receipt: [[`${docFmt(score)}`, single ? 'group score' : 'average score'], [docFmt(members), 'members'], [docFmt(posts), 'posts read'], [docFmt(demand), 'buying signals']],
+            builtAt: row.created_at },
+        sections,
+        about: [
+            `Built from public posts in ${single ? 'this group' : 'these groups'}, read ${docDay(row.created_at)}. Private groups are never read.`,
+            'Members are not named. A buying signal is a post asking for a product, a service or a recommendation.',
+            'The group score (0 to 100) weighs how lively a group is, how much people comment, how many different people post, how often they ask to buy, and whether promotion is allowed. Thin samples are scored down.',
+            'Written sections are by AI from these numbers only.'
+        ]
+    });
+}
+
 /** Drop empty blocks and sections, so a document only draws what it has. */
 function docFinish(doc) {
     const keep = b => {
@@ -16289,6 +16434,7 @@ function reportDoc(row) {
         if (row.report_type === 'ig_report') return igDoc(row);
         if (row.report_type === 'deep_audit') return ciDoc(row);
         if (row.report_type === 'fb_page') return fbDoc(row);
+        if (row.report_type === 'fb_community' || row.report_type === 'fb_group') return fbGroupsDoc(row);
         if (row.report_type === 'public_monthly') return publicMonthlyDoc(row);
     } catch (err) {
         logger.warn('report_doc_failed', { type: row.report_type, message: err.message });
@@ -18256,5 +18402,5 @@ module.exports = {
     // phase 35
     assistantScope, assistantAnswer,
     // phase 36
-    reportDoc, igDoc, ciDoc, fbDoc, publicMonthlyDoc, publicMonthData, monthPlatforms, monthTrends, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
+    reportDoc, igDoc, ciDoc, fbDoc, fbGroupsDoc, publicMonthlyDoc, publicMonthData, monthPlatforms, monthTrends, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
 };
