@@ -14479,7 +14479,10 @@ Give 3 to 5 recommendations, highest priority first, each doable by one person w
     if (!aiStatus.ok) warnings.push(`Narrative unavailable: ${aiStatus.message}`);
 
     await progress(96, 'Saving');
-    const payload = { ...summary, ai, aiStatus, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
+    // What was planned for the month and how it did (phase 42). Quiet when
+    // there is no calendar yet.
+    const contentPlan = await contentPlanMonth(input.clientId || conn.client_id || null, month).catch(() => null);
+    const payload = { ...summary, ai, aiStatus, contentPlan, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
     const { data: saved } = await supabase.from('reports').insert([{
         user_id: userId,
         client_id: input.clientId || conn.client_id || null,
@@ -15598,6 +15601,312 @@ app.delete('/api/content-plan/notes/:noteId', async (req, res) => {
 });
 
 // ===========================================================================
+// PHASE 42 :: THE PLAN AS A CALENDAR THE OWNER APPROVES
+//
+// A plan used to end at a list of briefs. Now each brief becomes a post on a
+// date (the brief's own best slot where it names one, else spread over four
+// weeks), the owner approves, asks for changes or skips it from their portal,
+// an approved post becomes a task for the team, and a posted one carries its
+// link, so the monthly report can say how the planned posts actually did.
+// ===========================================================================
+
+const CP_POST_STATUS = [['idea', 'Waiting for approval'], ['changes', 'Changes asked'], ['approved', 'Approved'], ['made', 'Made'], ['posted', 'Posted'], ['skipped', 'Skipped']];
+const cpStatusName = s => (CP_POST_STATUS.find(x => x[0] === s) || [s, s])[1];
+const CP_DOW = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+/** A brief's slot ("Tue 7pm", "Friday 20:00") as a weekday and a time. */
+function cpParseSlot(slot) {
+    const s = String(slot || '').toLowerCase();
+    const d = /\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/.exec(s);
+    const t = /\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/.exec(s.replace(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/, ''));
+    let time = null;
+    if (t) {
+        let h = +t[1]; const m = t[2] ? +t[2] : 0;
+        if (t[3] === 'pm' && h < 12) h += 12;
+        if (t[3] === 'am' && h === 12) h = 0;
+        if (h <= 23 && m <= 59) time = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+    return { dow: d ? CP_DOW[d[1]] : null, time };
+}
+
+/**
+ * Dates for a plan's briefs, from `start`, over four weeks. A brief keeps its
+ * own weekday when it names one; no two posts share a day unless a week is
+ * fuller than seven. Pure.
+ */
+function cpScheduleDates(briefs, start) {
+    const s = new Date(String(start).slice(0, 10) + 'T00:00:00Z');
+    const monday = new Date(s); monday.setUTCDate(s.getUTCDate() - ((s.getUTCDay() + 6) % 7));
+    const weeks = 4, n = briefs.length, used = new Set();
+    const order = [2, 4, 6, 1, 3, 5, 0];      // Tue, Thu, Sat, Mon, Wed, Fri, Sun
+    const day = d => d.toISOString().slice(0, 10);
+    return briefs.map((b, i) => {
+        const week = Math.min(weeks - 1, Math.floor(i * weeks / Math.max(1, n)));
+        const slot = cpParseSlot(b.slot);
+        const tryDows = slot.dow !== null ? [slot.dow, ...order.filter(x => x !== slot.dow)] : order;
+        for (let w = week; w < week + 3; w++) {
+            for (const dow of tryDows) {
+                const d = new Date(monday); d.setUTCDate(monday.getUTCDate() + w * 7 + ((dow + 6) % 7));
+                if (d < s || used.has(day(d))) continue;
+                used.add(day(d));
+                return { plannedOn: day(d), time: slot.time };
+            }
+        }
+        const d = new Date(s); d.setUTCDate(s.getUTCDate() + i);
+        return { plannedOn: day(d), time: slot.time };
+    });
+}
+
+async function contentPostsReady() {
+    const { error } = await supabase.from('content_posts').select('id').limit(1);
+    return !error;
+}
+function contentPostsMissing(res) {
+    return res.status(503).json({ error: 'The content calendar needs the phase-42 database update. Run sql/schema-phase42.sql in the Supabase SQL editor.', code: 'migration_required' });
+}
+
+/** The staff view of a planned post. */
+function contentPostView(p) {
+    const b = p.brief || {};
+    return {
+        id: p.id, planId: p.report_id, clientId: p.client_id || null, key: p.brief_key, format: p.format || null,
+        hook: p.hook || null, caption: p.caption || null, plannedOn: p.planned_on, time: p.planned_time || null,
+        status: p.status, statusName: cpStatusName(p.status), ownerNote: p.owner_note || null,
+        decidedBy: p.decided_by || null, decidedAt: p.decided_at || null, taskId: p.task_id || null,
+        postedUrl: p.posted_url || null, postedAt: p.posted_at || null,
+        brief: { concept: b.concept || null, script: b.script || [], shot: b.shot || null, why: b.why || null, evidence: b.evidence || [], band: b.predicted_band || null, boost: b.boost || null, cell: b.cell || null }
+    };
+}
+
+/** The owner's view: what the post is and what is asked of them. No people, no plan ids. */
+function contentPostOwnerView(p) {
+    const b = p.brief || {};
+    return {
+        id: p.id, plannedOn: p.planned_on, time: p.planned_time || null, format: p.format || null,
+        hook: p.hook || null, caption: p.caption || null, shot: b.shot || null, why: b.why || null,
+        status: p.status, statusName: p.status === 'idea' ? 'Waiting for your OK' : cpStatusName(p.status),
+        yourNote: p.owner_note || null, postedUrl: p.posted_url || null
+    };
+}
+
+/** Approving a post puts "make it" on the team's board, once. */
+async function contentPostTask(p, byUserId) {
+    if (!p.client_id || p.task_id) return p.task_id || null;
+    const key = 'post:' + p.id;
+    const { data: dup } = await supabase.from('client_tasks').select('id').eq('client_id', p.client_id).eq('source_id', p.report_id).eq('source_key', key).maybeSingle();
+    if (dup) return dup.id;
+    const b = p.brief || {};
+    const due = new Date(p.planned_on + 'T00:00:00Z'); due.setUTCDate(due.getUTCDate() - 2);
+    const today = new Date().toISOString().slice(0, 10);
+    const notes = [b.concept, b.shot ? 'Shot: ' + b.shot : null, (b.script || []).length ? 'Script:\n' + b.script.map((x, i) => `${i + 1}. ${x}`).join('\n') : null, p.caption ? 'Caption:\n' + p.caption : null]
+        .filter(Boolean).join('\n\n').slice(0, 4000);
+    const { data, error } = await supabase.from('client_tasks').insert([{
+        client_id: p.client_id, title: oneLine(`Make the ${String(p.format || 'post').toLowerCase()}: ${p.hook || 'planned post'}`, 300),
+        notes, status: 'todo', due_date: due.toISOString().slice(0, 10) < today ? today : due.toISOString().slice(0, 10),
+        labels: ['Content'], checklist: [], assignee_user_id: null, assigned_to_client: false, visible_to_client: false,
+        source_type: 'report', source_id: p.report_id, source_key: key, source_label: `Content plan · ${docDay(p.planned_on + 'T00:00:00Z')}`,
+        position: await endOfColumn(p.client_id, 'todo'), created_by: byUserId || null
+    }]).select('id').maybeSingle();
+    if (error) { logger.warn('content_task_failed', { postId: p.id, message: error.message }); return null; }
+    return data ? data.id : null;
+}
+
+/** Move a post; the decision, the task and the link follow from the status. */
+async function contentPostMove(p, status, { by = 'team', userId = null, note, postedUrl } = {}) {
+    const now = new Date().toISOString();
+    const patch = { status, updated_at: now };
+    if (['approved', 'changes', 'skipped'].includes(status)) { patch.decided_by = by; patch.decided_at = now; }
+    if (note !== undefined && by === 'owner') patch.owner_note = note ? String(note).slice(0, 2000) : null;
+    if (status === 'approved' || status === 'made' || status === 'posted') {
+        const taskId = await contentPostTask({ ...p, ...patch }, userId);
+        if (taskId) patch.task_id = taskId;
+    }
+    if (status === 'posted') {
+        patch.posted_at = p.posted_at || now;
+        if (postedUrl !== undefined) {
+            const u = String(postedUrl || '').trim();
+            patch.posted_url = /^https:\/\/(www\.)?(instagram|facebook)\.com\//i.test(u) ? u.slice(0, 500) : null;
+            const m = /instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/.exec(u);
+            patch.shortcode = m ? m[1] : null;
+        }
+        const taskId = patch.task_id || p.task_id;
+        if (taskId) await supabase.from('client_tasks').update({ status: 'done', completed_at: now, updated_at: now }).eq('id', taskId);
+    }
+    const { data } = await supabase.from('content_posts').update(patch).eq('id', p.id).select().maybeSingle();
+    return data || { ...p, ...patch };
+}
+
+/**
+ * The month's planned posts and how the posted ones did: public likes and
+ * comments from the posts collected, and owner reach where Meta is
+ * connected — side by side, never blended (rule 3).
+ */
+async function contentPlanMonth(clientId, month) {
+    if (!clientId || !/^\d{4}-\d{2}$/.test(String(month || ''))) return null;
+    const [y, m] = month.split('-').map(Number);
+    const from = `${month}-01`, to = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+    const { data, error } = await supabase.from('content_posts').select('*').eq('client_id', clientId).gte('planned_on', from).lt('planned_on', to);
+    if (error || !data || !data.length) return null;
+    const codes = data.map(p => p.shortcode).filter(Boolean);
+    const [{ data: pub }, { data: own }] = codes.length ? await Promise.all([
+        supabase.from('posts').select('shortcode, likes, comments, views').in('shortcode', codes),
+        supabase.from('meta_media').select('shortcode, insights').in('shortcode', codes)
+    ]) : [{ data: [] }, { data: [] }];
+    const items = data.sort((a, b) => String(a.planned_on).localeCompare(String(b.planned_on))).map(p => {
+        const s = (pub || []).find(x => x.shortcode === p.shortcode) || null;
+        const o = (own || []).find(x => x.shortcode === p.shortcode) || null;
+        return { plannedOn: p.planned_on, format: p.format || null, hook: p.hook || null, status: p.status,
+            url: p.posted_url || null, likes: s ? s.likes ?? null : null, comments: s ? s.comments ?? null : null,
+            reach: o && o.insights ? docNum(o.insights.reach) : null, band: (p.brief || {}).predicted_band || null };
+    });
+    const n = st => items.filter(i => i.status === st).length;
+    return { planned: items.length, approved: items.filter(i => ['approved', 'made', 'posted'].includes(i.status)).length,
+        posted: n('posted'), skipped: n('skipped'), waiting: n('idea') + n('changes'), items };
+}
+
+/** The month's planned posts as document blocks, shared by both monthly reports. */
+function cpDocBlocks(cp) {
+    if (!cp || !cp.planned) return null;
+    const hasReach = cp.items.some(i => i.reach != null);
+    const tone = st => (st === 'posted' ? 'good' : st === 'skipped' ? '' : st === 'changes' || st === 'idea' ? 'watch' : 'gold');
+    return [
+        { type: 'kpis', items: [
+            { label: 'Posts planned', value: docFmt(cp.planned), sub: 'from the content plan' },
+            { label: 'Approved', value: docFmt(cp.approved), sub: cp.waiting ? `${cp.waiting} still waiting for an OK` : 'all decided', tone: cp.waiting ? 'watch' : 'good' },
+            { label: 'Posted', value: docFmt(cp.posted), sub: cp.planned ? `${Math.round(cp.posted / cp.planned * 100)}% of the plan` : '', tone: cp.posted ? 'good' : '' },
+            cp.skipped ? { label: 'Skipped', value: docFmt(cp.skipped), sub: 'left out on purpose' } : null
+        ].filter(Boolean) },
+        { type: 'table', cols: [{ label: 'Planned for' }, { label: 'Post' }, { label: 'Status' }, { label: 'Likes', num: true }, { label: 'Comments', num: true }].concat(hasReach ? [{ label: 'Reach (your Meta)', num: true }] : []),
+            rows: cp.items.slice(0, 20).map(i => [docDay(i.plannedOn + 'T00:00:00Z'), `${i.format ? i.format + ': ' : ''}${oneLine(i.hook, 90) || '—'}`, { chip: cpStatusName(i.status), tone: tone(i.status) },
+                i.likes == null ? '—' : docFmt(i.likes), i.comments == null ? '—' : docFmt(i.comments)].concat(hasReach ? [i.reach == null ? '—' : docFmt(i.reach)] : [])) },
+        { type: 'note', text: `Likes and comments are the public counts for posts we have the link for${hasReach ? '; reach is from your own Meta numbers, shown beside them and never added together' : ''}.` }
+    ];
+}
+
+async function planForCalendar(ctx, id, need = 'viewer') {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data } = await supabase.from('reports').select('id, user_id, client_id, report_type, report_json, ai_json').eq('id', id).maybeSingle();
+    if (!data || data.report_type !== 'content_plan' || !(await canReadReport(ctx, data))) return null;
+    if (need === 'editor' && data.client_id && !(await clientAccess(ctx.user.id, data.client_id, 'editor'))) return null;
+    if (need === 'editor' && !data.client_id && data.user_id !== ctx.user.id && ctx.profile?.role !== 'admin') return null;
+    return data;
+}
+
+app.get('/api/content-plan/:id/calendar', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const plan = await planForCalendar(ctx, req.params.id);
+        if (!plan) return res.status(404).json({ error: 'Plan not found' });
+        const { data } = await supabase.from('content_posts').select('*').eq('report_id', plan.id).order('planned_on', { ascending: true });
+        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: !!plan.client_id });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Put a plan's briefs on dates. Pressing it again adds only briefs not yet on it. */
+app.post('/api/content-plan/:id/calendar', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const plan = await planForCalendar(ctx, req.params.id, 'editor');
+        if (!plan) return res.status(404).json({ error: 'Plan not found, or you cannot edit it.' });
+        const p = plan.report_json || {};
+        const b = p.briefs || plan.ai_json || {};
+        const spec = Array.isArray(p.formatSpec) && p.formatSpec.length ? p.formatSpec : [{ key: 'Reel', plural: 'reels' }, { key: 'Carousel', plural: 'carousels' }, { key: 'Still', plural: 'stills' }];
+        const briefs = spec.flatMap(f => (Array.isArray(b[f.plural]) ? b[f.plural] : []).map((x, i) => ({ ...x, _key: `${f.plural}:${i}`, _format: f.label || f.key })));
+        if (!briefs.length) return res.status(400).json({ error: 'This plan has no briefs to schedule.' });
+        const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.start || '')) ? req.body.start : new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+        const { data: have } = await supabase.from('content_posts').select('brief_key').eq('report_id', plan.id);
+        const taken = new Set((have || []).map(x => x.brief_key));
+        const todo = briefs.filter(x => !taken.has(x._key));
+        const dates = cpScheduleDates(todo, start);
+        const rows = todo.map((x, i) => ({
+            report_id: plan.id, client_id: plan.client_id || null, brief_key: x._key, format: String(x._format).replace(/s$/, ''),
+            hook: oneLine(x.hook || x.concept, 300) || null, caption: x.caption ? String(x.caption).slice(0, 4000) : null,
+            brief: { concept: x.concept || null, script: Array.isArray(x.script) ? x.script.slice(0, 8) : [], shot: x.shot || null, why: x.why || null,
+                evidence: (x.evidence || []).slice(0, 3), predicted_band: x.predicted_band || null, boost: x.boost || null, cell: x.cell || null, slot: x.slot || null },
+            planned_on: dates[i].plannedOn, planned_time: dates[i].time, status: 'idea', created_by: ctx.user.id
+        }));
+        if (rows.length) {
+            const { error } = await supabase.from('content_posts').insert(rows);
+            if (error) throw error;
+        }
+        const { data } = await supabase.from('content_posts').select('*').eq('report_id', plan.id).order('planned_on', { ascending: true });
+        res.status(rows.length ? 201 : 200).json({ added: rows.length, posts: (data || []).map(contentPostView) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/content-posts/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
+        const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).maybeSingle();
+        if (!p || !(await planForCalendar(ctx, p.report_id, 'editor'))) return res.status(404).json({ error: 'Post not found, or you cannot edit it.' });
+        const b = req.body || {};
+        const patch = {};
+        if (b.plannedOn !== undefined) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.plannedOn))) return res.status(400).json({ error: 'The date is not valid.' });
+            patch.planned_on = b.plannedOn;
+        }
+        if (b.time !== undefined) patch.planned_time = /^\d{2}:\d{2}$/.test(String(b.time || '')) ? b.time : null;
+        if (b.hook !== undefined) patch.hook = oneLine(b.hook, 300) || null;
+        if (b.caption !== undefined) patch.caption = b.caption ? String(b.caption).slice(0, 4000) : null;
+        if (Object.keys(patch).length) {
+            patch.updated_at = new Date().toISOString();
+            await supabase.from('content_posts').update(patch).eq('id', p.id);
+            Object.assign(p, patch);
+        }
+        let row = p;
+        if (b.status !== undefined && b.status !== p.status) {
+            if (!CP_POST_STATUS.some(s => s[0] === b.status)) return res.status(400).json({ error: 'That status does not exist.' });
+            row = await contentPostMove(p, b.status, { by: 'team', userId: ctx.user.id, postedUrl: b.postedUrl });
+        } else if (b.postedUrl !== undefined && p.status === 'posted') {
+            row = await contentPostMove(p, 'posted', { by: 'team', userId: ctx.user.id, postedUrl: b.postedUrl });
+        }
+        res.json({ post: contentPostView(row) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// --- the owner's side -----------------------------------------------------------
+
+app.get('/api/client/content', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
+        if (!(await contentPostsReady())) return res.json({ posts: [] });
+        const own = await ownClientFor(ctx);
+        if (!own) return res.json({ posts: [] });
+        const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+        const { data } = await supabase.from('content_posts').select('*').eq('client_id', own.id).gte('planned_on', since)
+            .neq('status', 'skipped').order('planned_on', { ascending: true }).limit(60);
+        const posts = (data || []).map(contentPostOwnerView);
+        res.json({ posts, waiting: posts.filter(p => p.status === 'idea').length });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/client/content/:id/decision', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const own = await ownClientFor(ctx);
+        if (!own || !UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
+        const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).eq('client_id', own.id).maybeSingle();
+        if (!p) return res.status(404).json({ error: 'Post not found.' });
+        const to = { approve: 'approved', changes: 'changes', skip: 'skipped' }[String(req.body?.decision || '')];
+        if (!to) return res.status(400).json({ error: 'Choose approve, changes or skip.' });
+        if (['made', 'posted'].includes(p.status)) return res.status(409).json({ error: 'This post is already made.' });
+        const note = req.body?.note ? String(req.body.note).trim().slice(0, 2000) : null;
+        if (to === 'changes' && !note) return res.status(400).json({ error: 'Say what you would like changed.' });
+        const row = await contentPostMove(p, to, { by: 'owner', note });
+        res.json({ post: contentPostOwnerView(row) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
 // PHASE 11 :: SCHEDULED RUNS
 //
 // A monthly report a human has to remember to click is a report that gets
@@ -16571,6 +16880,8 @@ function monthlyView(row) {
         audience: { ...audience, note: aiOk && ai.audience && !/not enough data/i.test(ai.audience) ? oneLine(ai.audience, 400) : null },
         recommendations: monthRecs(ai || {}),
         platforms: monthPlatforms(byKey, acc),
+        contentPlan: r.contentPlan || null,
+        contentPlanBlocks: cpDocBlocks(r.contentPlan),
         conclusion: aiOk ? (oneLine(ai.conclusion, 600) || null) : null,
         about: {
             source: 'Every figure in this report is your own Meta Insights, the numbers only the account owner can see. Nothing in it is scraped or estimated.',
@@ -17437,7 +17748,8 @@ registerWorker('public_monthly', (userId, input, jobId) => async (progress) => {
     const { data: plan } = await supabase.from('client_tasks').select('title, assigned_to_client, due_date')
         .eq('client_id', client.id).eq('visible_to_client', true).neq('status', 'done').order('due_date', { ascending: true }).limit(5)
         .then(r => r, () => ({ data: [] }));
-    const payload = { ...data, context: ctx, plan: (plan || []).map(t => ({ title: oneLine(t.title, 200), who: t.assigned_to_client ? 'You' : 'Our team', due: t.due_date || null })), generatedAt: createdAt };
+    const contentPlan = await contentPlanMonth(client.id, input.month).catch(() => null);
+    const payload = { ...data, context: ctx, contentPlan, plan: (plan || []).map(t => ({ title: oneLine(t.title, 200), who: t.assigned_to_client ? 'You' : 'Our team', due: t.due_date || null })), generatedAt: createdAt };
     await progress(92, 'Saving');
     const { data: saved } = await supabase.from('reports').insert([{
         user_id: userId, client_id: client.id,
@@ -17514,6 +17826,9 @@ function publicMonthlyDoc(row) {
     const work = ctx.work || {}, leads = ctx.leads;
     const done = [...(work.done || []).map(t => ({ title: t.title, text: `done ${docDay(t.date)}` })), ...(work.filed || []).map(f => ({ title: f.title, text: `delivered ${docDay(f.date)}` })), ...(leads && leads.thisMonth ? [{ title: `${docFmt(leads.thisMonth)} new leads found`, text: `${docFmt(leads.toDate)} to date` }] : [])];
     if (done.length) sections.push({ title: `What we did in ${m}`, source: ['ours'], blocks: [{ type: 'points', tone: 'good', items: done.slice(0, 8) }] });
+
+    const cpBlocks = cpDocBlocks(j.contentPlan);
+    if (cpBlocks) sections.push({ title: 'What we planned, and how it did', source: ['ours', 'pub'], blocks: cpBlocks });
 
     const plan = [{ first: true, title: 'Connect Facebook and Instagram to EdgeLead, so we can report reach, visits and bookings', who: 'You · 2 minutes' }, ...(j.plan || []).map(t => ({ title: t.title, who: t.who }))];
     sections.push({ title: 'Plan for next month', source: ['ours'], blocks: [
@@ -19555,6 +19870,8 @@ async function schemaProbe() {
           impact: 'Scheduled runs cannot be created or fired.' },
         { table: 'report_shares', column: 'token',     migration: 'schema-phase11.sql',
           impact: 'Report share links cannot be created.' },
+        { table: 'content_posts', column: 'planned_on', migration: 'schema-phase42.sql',
+          impact: 'Content plans cannot be put on the calendar and owners see no posts to approve.' },
         { table: 'leads',         column: 'kind_now',  migration: 'schema-phase40.sql',
           impact: 'Leads are saved but not sorted into influencers and businesses, and the pipeline answers 503.' }
     ];
@@ -19812,6 +20129,7 @@ module.exports = {
     // phase 35
     assistantScope, assistantAnswer,
     // phase 36
+    cpScheduleDates, cpParseSlot, contentPlanMonth,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },
     classifyLead, leadFit, leadPostSignal, leadSignalsAdd, leadSignalsMerge, leadAssessment, PIPE_STAGES,

@@ -2969,6 +2969,65 @@ test('the scan can be repeated monthly, and the owner can open its document', as
     assert.strictEqual(v.body.report.doc.type, 'review_scan');
 });
 
+section('\nphase 42 — the content plan as a calendar the owner approves');
+test('briefs land on their own weekday where they name one, never two on a day, never before the start', () => {
+    const d = S.cpScheduleDates([{ slot: 'Tue 7pm' }, { slot: 'Friday 20:00' }, { slot: '' }, { slot: 'Tue 7pm' }, {}], '2026-10-07');
+    const days = d.map(x => x.plannedOn);
+    assert.strictEqual(new Set(days).size, days.length, 'two posts on one day: ' + days.join(','));
+    assert.ok(days.every(x => x >= '2026-10-07'), days.join(','));
+    assert.strictEqual(new Date(days[1] + 'T00:00:00Z').getUTCDay(), 5, 'the Friday brief was not put on a Friday');
+    assert.strictEqual(d[0].time, '19:00');
+    assert.deepStrictEqual(S.cpParseSlot('Sat 11am'), { dow: 6, time: '11:00' });
+});
+test('staff put a plan on the calendar once; the owner sees what waits for them, and nothing about the team', async () => {
+    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    assert.strictEqual(put.statusCode, 201, JSON.stringify(put.body));
+    assert.ok(put.body.added >= 2, JSON.stringify(put.body));
+    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    assert.strictEqual(again.body.added, 0, 'pressing it twice doubled the calendar');
+    const own = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.strictEqual(own.statusCode, 200, JSON.stringify(own.body));
+    assert.ok(own.body.posts.length >= 2 && own.body.waiting === own.body.posts.length);
+    assert.strictEqual(own.body.posts[0].statusName, 'Waiting for your OK');
+    for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy']) assert.ok(!(k in own.body.posts[0]), `the owner was sent ${k}`);
+    state.cpPosts = put.body.posts;
+});
+test('the owner approves one (it goes on the board), asks for changes on another, and the team sees why', async () => {
+    const [a, b] = state.cpPosts;
+    const ok = await call('POST', `/api/client/content/${a.id}/decision`, { token: 't-client', body: { decision: 'approve' } });
+    assert.strictEqual(ok.statusCode, 200, JSON.stringify(ok.body));
+    const row = tbl('content_posts').find(x => x.id === a.id);
+    assert.deepStrictEqual([row.status, row.decided_by], ['approved', 'owner']);
+    const task = tbl('client_tasks').find(t => t.source_key === 'post:' + a.id);
+    assert.ok(task && task.client_id === state.C && /^Make the /.test(task.title), 'the approved post did not become a task');
+    const empty = await call('POST', `/api/client/content/${b.id}/decision`, { token: 't-client', body: { decision: 'changes' } });
+    assert.strictEqual(empty.statusCode, 400, 'changes were asked for without saying what');
+    await call('POST', `/api/client/content/${b.id}/decision`, { token: 't-client', body: { decision: 'changes', note: 'Use our new logo, not the old one' } });
+    const cal = await call('GET', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp' });
+    const seen = cal.body.posts.find(x => x.id === b.id);
+    assert.deepStrictEqual([seen.status, seen.ownerNote], ['changes', 'Use our new logo, not the old one']);
+    const owner = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-client', body: { status: 'posted' } });
+    assert.strictEqual(owner.statusCode, 403, 'an owner reached the staff route');
+});
+test('posted with its link: the task closes, and the monthly report says how the planned posts did', async () => {
+    const [a] = state.cpPosts;
+    const r = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-emp', body: { status: 'posted', postedUrl: 'https://www.instagram.com/p/PLAN123/' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const row = tbl('content_posts').find(x => x.id === a.id);
+    assert.strictEqual(row.shortcode, 'PLAN123');
+    assert.strictEqual(tbl('client_tasks').find(t => t.id === row.task_id).status, 'done');
+    tbl('posts').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'instagram', handle: 'harborcafe', shortcode: 'PLAN123', likes: 321, comments: 17, views: 0 });
+    const month = String(row.planned_on).slice(0, 7);
+    const cp = await S.contentPlanMonth(state.C, month);
+    const item = cp.items.find(i => i.url === 'https://www.instagram.com/p/PLAN123/');
+    assert.deepStrictEqual([item.likes, item.comments, item.status], [321, 17, 'posted']);
+    assert.ok(cp.planned >= 1 && cp.posted === 1);
+    const doc = S.reportDoc({ id: 'm', report_type: 'public_monthly', created_at: new Date().toISOString(),
+        report_json: { month, monthLabel: 'October 2026', client: { name: 'Harbor Cafe' }, context: {}, contentPlan: cp, plan: [] } });
+    const sec = doc.sections.find(x => x.title === 'What we planned, and how it did');
+    assert.ok(sec, doc.sections.map(x => x.title).join(' | '));
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');
