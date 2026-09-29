@@ -3028,6 +3028,60 @@ test('posted with its link: the task closes, and the monthly report says how the
     assert.ok(sec, doc.sections.map(x => x.title).join(' | '));
 });
 
+section('\nphase 41b — the review tracker set up fresh each time');
+test('step one finds and matches only: several kinds, a rating floor, no name search, nothing read yet', async () => {
+    process.env.APIFY_API_KEY = 'test-apify-key';
+    const before = APIFY.calls.length;
+    APIFY.actors['compass/crawler-google-places'] = (input) => {
+        assert.deepStrictEqual(input.searchStringsArray, ['cafés', 'bakeries']);
+        return [
+            { title: 'Top Cafe', categoryName: 'Cafe', instagrams: ['https://instagram.com/topcafe'], totalScore: 4.6, reviewsCount: 900, placeId: 'A' },
+            { title: 'Meh Cafe', categoryName: 'Cafe', instagrams: ['https://instagram.com/mehcafe'], totalScore: 3.1, reviewsCount: 40, placeId: 'B' },
+            { title: 'No Link Bakery', categoryName: 'Bakery', totalScore: 4.8, reviewsCount: 300, placeId: 'C' }
+        ];
+    };
+    tbl('jobs').filter(j => j.user_id === ADMIN.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reviews/find', { token: 't-admin', body: { clientId: state.C, categories: ['cafés', 'bakeries'], area: 'Banani, Dhaka', maxBusinesses: 5, minRating: 4, searchNames: false, handles: ['@rivalone'] } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    const names = job.result.places.map(p => p.name);
+    assert.ok(names.includes('Top Cafe') && !names.includes('Meh Cafe'), 'the rating floor was not applied: ' + names.join(','));
+    assert.ok(job.result.places.some(p => p.handle === 'rivalone' && p.source === 'given'), 'the own list was dropped');
+    const bakery = job.result.places.find(p => p.name === 'No Link Bakery');
+    assert.deepStrictEqual([bakery.handle, bakery.match], [null, 'none'], 'a name search ran although it was switched off');
+    const calls = APIFY.calls.slice(before).map(c => c.id);
+    assert.ok(!calls.includes('apify/instagram-scraper'), 'step one read tagged posts');
+    assert.ok(!calls.includes('apify/instagram-search-scraper'), 'step one searched names although told not to');
+    assert.ok(!tbl('reports').some(x => x.id === job.result_report_id && job.result_report_id), 'step one saved a report');
+});
+test('step two reads exactly the picked list: Maps is not asked again, and AI can be switched off', async () => {
+    const before = APIFY.calls.length;
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        const h = (/instagram\.com\/([^/]+)\/tagged/.exec(input.directUrls[0]) || [])[1];
+        const n = h === 'topcafe' ? 1 : 2;
+        return [{ ownerUsername: 'nadia.r' + n, shortCode: 'k-' + h, caption: `Tried @${h}: price 300 tk, great taste, 8/10`, likesCount: 50, commentsCount: 5, timestamp: new Date().toISOString() },
+                { ownerUsername: 'sam.k' + n, shortCode: 'v-' + h, caption: `Weekend vibes at @${h}, loved it`, likesCount: 10, commentsCount: 1, timestamp: new Date().toISOString() }];
+    };
+    GEMINI.requests.length = 0;
+    tbl('jobs').filter(j => j.user_id === ADMIN.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reviews/scan', { token: 't-admin', body: { clientId: state.C, useMaps: false, category: 'cafés, bakeries', area: 'Banani, Dhaka',
+        handles: [{ handle: 'topcafe', name: 'Top Cafe' }, { handle: 'nolinkbakery', name: 'No Link Bakery' }], days: 30, postsPer: 20, useAi: false } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    const ids = APIFY.calls.slice(before).map(c => c.id);
+    assert.ok(!ids.includes('compass/crawler-google-places'), 'Maps was asked again for a picked list');
+    assert.deepStrictEqual(APIFY.calls.slice(before).filter(c => c.id === 'apify/instagram-scraper').map(c => c.input.resultsLimit), [20, 20]);
+    assert.strictEqual(GEMINI.requests.length, 0, 'AI was used although it was switched off');
+    const j = tbl('reports').find(x => x.id === job.result_report_id).report_json;
+    assert.deepStrictEqual(j.board.map(b => b.handle).sort(), ['nolinkbakery', 'topcafe']);
+    assert.strictEqual(j.board.find(b => b.handle === 'topcafe').name, 'Top Cafe');
+    assert.strictEqual(j.counts.unclear, 2, 'the unclear posts should stay unclear, not be guessed');
+    assert.strictEqual(j.windowDays, 30);
+    delete process.env.APIFY_API_KEY;
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

@@ -36,3 +36,21 @@ are read defensively, but only a real run proves them.
   but not the client, the most-seen reviews, and businesses that could not be
   matched. Scheduled monthly ("Repeat on a schedule"), it marks reviews and
   creators that are new since the previous scan of the same place.
+
+## Update: set up fresh each run
+
+The page is now two steps, and every run chooses its own sources:
+
+1. **Where the businesses come from:** a Google Maps area (one or several kinds
+   of business, how many, a minimum Google rating and review count, and whether
+   to search Instagram by name for listings with no link), your own list of
+   rival handles (the old manual way), or both, plus the client. "Find the
+   businesses" (`POST /api/reviews/find`, job `review_places`) finds and
+   matches them and reads nothing yet.
+2. **Check the list:** untick any, fix or fill in a handle, add more. Then the
+   window, tagged posts per business (10–100), and whether AI reads the unclear
+   posts. "Read the reviews" scans exactly the ticked list; Maps is not asked
+   again.
+
+With only your own list, step one costs nothing and goes straight to the list.
+The last setup is remembered in the browser.

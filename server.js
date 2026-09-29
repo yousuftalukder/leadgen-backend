@@ -18100,38 +18100,60 @@ function reviewAggregate(businesses, posts, { clientHandle = null, previous = nu
     return { board, reviewers, missedByClient: client ? reviewers.filter(r => !r.reviewedClient).slice(0, 25) : [] };
 }
 
-registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => {
-    const warnings = [];
-    const days = Math.min(365, Math.max(7, parseInt(input.days, 10) || 90));
-    const postsPer = Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(input.postsPer, 10) || 40));
-    const maxBiz = Math.min(REVIEW_MAX_BUSINESSES, Math.max(1, parseInt(input.maxBusinesses, 10) || 15));
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    const category = oneLine(input.category, 80) || null, area = oneLine(input.area, 120) || null;
 
-    // --- 1. the businesses ------------------------------------------------------
+/** The kinds of business to look for: one or several, comma-separated. */
+function reviewCategories(input) {
+    const raw = Array.isArray(input.categories) ? input.categories : String(input.category || '').split(',');
+    return [...new Set(raw.map(c => oneLine(c, 60)).filter(Boolean))].slice(0, 5);
+}
+
+/**
+ * Steps 1 and 2 of a scan, also run on their own (review_places) so staff can
+ * see the list, untick businesses, fix a handle or add rivals before paying
+ * to read anyone's tagged posts. Each run sets its own sources:
+ *   - Google Maps: one or more kinds of business around an area, as many as
+ *     asked, filtered by rating and review count;
+ *   - a list of Instagram handles (the old manual rival style), used as given;
+ *   - one business to include (usually the client).
+ */
+async function reviewGatherPlaces(userId, input, jobId, progress, ck, warnings) {
+    const maxBiz = Math.min(REVIEW_MAX_BUSINESSES, Math.max(1, parseInt(input.maxBusinesses, 10) || 15));
+    const cats = reviewCategories(input);
+    const area = oneLine(input.area, 120) || null;
+    const minRating = docNum(input.minRating), minReviews = docNum(input.minReviews);
+    const skip = new Set((input.exclude || []).map(x => String(x || '').toLowerCase()));
     let places = ck.get('places');
     if (!places) {
         places = [];
         for (const h of (input.handles || []).slice(0, REVIEW_MAX_BUSINESSES)) {
             const handle = String(h.handle || h || '').replace('@', '').trim().toLowerCase();
-            if (/^[a-z0-9._]{1,30}$/.test(handle)) places.push({ key: 'ig:' + handle, name: oneLine(h.name, 120) || '@' + handle, handle, source: 'given', match: 'sure' });
+            if (/^[a-z0-9._]{1,30}$/.test(handle) && !places.some(p => p.handle === handle)) places.push({ key: 'ig:' + handle, name: oneLine(h.name, 120) || '@' + handle, handle, source: 'given', match: 'sure' });
         }
-        if (category && area) {
-            await progress(5, `Finding ${category} around ${area} on Google Maps`);
-            const need = +(maxBiz / 1000 * COST_PER_1K_PLACES).toFixed(4);
+        if (cats.length && area && input.useMaps !== false) {
+            await progress(5, `Finding ${cats.join(', ')} around ${area} on Google Maps`);
+            // Asked for per kind, filtered after: a rating filter can only
+            // remove, so ask for a little more when one is set.
+            const per = Math.min(REVIEW_MAX_BUSINESSES, Math.ceil(maxBiz / cats.length * (minRating || minReviews ? 1.5 : 1)));
+            const need = +(per * cats.length / 1000 * COST_PER_1K_PLACES).toFixed(4);
             const { client } = await getWorkingClient('leadgen', userId, { needUsd: need, jobId });
             try {
                 const { items } = await callActor(client, REVIEW_MAPS_ACTOR, {
-                    searchStringsArray: [category], locationQuery: area, maxCrawledPlacesPerSearch: maxBiz,
+                    searchStringsArray: cats, locationQuery: area, maxCrawledPlacesPerSearch: per,
                     language: 'en', skipClosedPlaces: true, ...(REVIEW_MAPS_CONTACTS ? { scrapeContacts: true } : {})
-                }, { estimateUsd: need, maxItems: maxBiz, jobId });
-                const seen = new Set(places.map(p => p.handle));
+                }, { estimateUsd: need, maxItems: per * cats.length, jobId });
+                const seen = new Set(places.map(p => p.handle).filter(Boolean)), keys = new Set();
+                let dropped = 0, added = 0;
                 for (const it of (items || []).map(reviewPlace)) {
-                    if (!it.name) continue;
-                    if (it.handle && seen.has(it.handle)) continue;
+                    if (!it.name || keys.has(it.key)) continue;
+                    keys.add(it.key);
+                    if (it.handle && (seen.has(it.handle) || skip.has(it.handle))) continue;
+                    if ((minRating !== null && (it.rating === null || it.rating < minRating)) || (minReviews !== null && (it.reviews === null || it.reviews < minReviews))) { dropped++; continue; }
+                    if (added >= maxBiz) break;
                     if (it.handle) seen.add(it.handle);
                     places.push({ ...it, match: it.handle ? 'sure' : null, reviews_maps: it.reviews });
+                    added++;
                 }
+                if (dropped) warnings.push(`${dropped} business(es) on Maps were below the rating or review count asked for and were left out.`);
             } catch (e) {
                 if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
                 warnings.push(`Google Maps search failed: ${e.message}`);
@@ -18141,10 +18163,9 @@ registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => 
             const h = igHandleFromUrl(input.seed) || (/^@?[a-z0-9._]{1,30}$/i.test(String(input.seed).trim()) ? String(input.seed).trim().replace('@', '').toLowerCase() : null);
             if (h && !places.some(p => p.handle === h)) places.unshift({ key: 'ig:' + h, name: '@' + h, handle: h, source: 'given', match: 'sure' });
         }
-        places = places.slice(0, maxBiz + (input.handles || []).length + 1);
         await ck.done('places', places);
     }
-    if (!places.length) throw Object.assign(new Error('No businesses to scan. Give a business type and an area, or Instagram handles.'), { statusCode: 422 });
+    if (!places.length) throw Object.assign(new Error('No businesses to scan. Give a kind of business and an area, or Instagram handles.'), { statusCode: 422 });
 
     // --- 2. their Instagram ---------------------------------------------------
     await progress(15, 'Finding each business’s Instagram');
@@ -18159,7 +18180,9 @@ registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => 
             const h = html ? [...html.matchAll(/instagram\.com\/(?:#!\/)?[A-Za-z0-9._]{1,30}/gi)].map(m => igHandleFromUrl(m[0])).find(Boolean) : null;
             if (h) found = { handle: h, source: 'website', match: 'sure' };
         }
-        if (!found && p.name) {
+        // The name search costs a little each; a run can switch it off and
+        // leave unlinked businesses for a person to fill in.
+        if (!found && p.name && input.searchNames !== false) {
             const need = +(COST_PER_1K_PROFILE / 20).toFixed(4);
             try {
                 const { client } = await getWorkingClient('leadgen', userId, { needUsd: need, jobId });
@@ -18176,6 +18199,31 @@ registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => 
         await ck.done(unit, found || { handle: null, match: 'none' });
         await progress(15 + Math.round(15 * (i + 1) / places.length), `Matched ${i + 1} of ${places.length}`);
     }
+    return places;
+}
+
+/** Step one on its own: the list to choose from, before any tagged posts are read. */
+registerWorker('review_places', (userId, input, jobId) => async (progress, ck) => {
+    const warnings = [];
+    const places = await reviewGatherPlaces(userId, input, jobId, progress, ck, warnings);
+    await progress(100, `${places.length} business(es) found`);
+    return {
+        places: places.map(p => ({ key: p.key, name: p.name || null, category: p.category || null, address: p.address || null, rating: p.rating ?? null,
+            reviews: p.reviews_maps ?? p.reviews ?? null, handle: p.handle || null, match: p.match || 'none', matchScore: p.matchScore ?? null,
+            source: p.source || null, website: p.website || null, mapsUrl: p.mapsUrl || null })),
+        warnings
+    };
+});
+
+registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => {
+    const warnings = [];
+    const days = Math.min(365, Math.max(7, parseInt(input.days, 10) || 90));
+    const postsPer = Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(input.postsPer, 10) || 40));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const category = reviewCategories(input).join(', ') || null, area = oneLine(input.area, 120) || null;
+
+    const places = await reviewGatherPlaces(userId, input, jobId, progress, ck, warnings);
+
     const scan = places.filter(p => p.handle && (p.match === 'sure' || p.match === 'likely'));
     const unmatched = places.filter(p => !p.handle || p.match === 'check' || p.match === 'none');
 
@@ -18207,7 +18255,7 @@ registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => 
     }
 
     // --- 4. the unclear ones ---------------------------------------------------
-    const unclear = posts.map((p, i) => ({ p, i })).filter(x => x.p.label === 'unclear');
+    const unclear = input.useAi === false ? [] : posts.map((p, i) => ({ p, i })).filter(x => x.p.label === 'unclear');
     for (let s = 0; s < unclear.length; s += REVIEW_AI_BATCH) {
         const unit = 'ai:' + s;
         let labels = ck.get(unit);
@@ -18309,32 +18357,72 @@ app.get('/api/reviews/estimate', async (req, res) => {
         const postsPer = Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(req.query.posts, 10) || 40));
         const handles = Math.min(REVIEW_MAX_BUSINESSES, parseInt(req.query.handles, 10) || 0);
         const maps = String(req.query.maps || '1') !== '0';
-        const usd = reviewEstimate({ places: maps ? max : 0, businesses: (maps ? max : 0) + handles, postsPer, searches: maps ? max : 0 });
+        const names = String(req.query.names || '1') !== '0';
+        const step = String(req.query.step || 'scan');
+        const usd = step === 'find'
+            ? reviewEstimate({ places: maps ? max : 0, searches: maps && names ? max : 0 })
+            : reviewEstimate({ places: maps ? max : 0, businesses: (maps ? max : 0) + handles, postsPer, searches: maps && names ? max : 0 });
         res.json({ usd, note: 'The most it can cost: every business needing an Instagram search and every tagged post read. Most runs cost less.' });
     } catch (err) { sendErr(res, err); }
 });
 
+/** The per-run choices both steps take, cleaned once. */
+function reviewInput(b = {}) {
+    const handles = (Array.isArray(b.handles) ? b.handles : String(b.handles || '').split(/[\s,]+/))
+        .map(h => (typeof h === 'string' ? { handle: h } : h))
+        .filter(h => h && /^@?[a-z0-9._]{1,30}$/i.test(String(h.handle || '').trim())).slice(0, REVIEW_MAX_BUSINESSES)
+        .map(h => ({ handle: String(h.handle).replace('@', '').trim().toLowerCase(), name: h.name ? oneLine(h.name, 120) : null }));
+    const num = (v, lo, hi) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : null; };
+    const categories = reviewCategories({ categories: b.categories, category: b.category });
+    return {
+        categories, category: categories.join(', ') || null, area: oneLine(b.area, 120) || null,
+        seed: b.seed ? oneLine(b.seed, 200) : null, handles,
+        exclude: (Array.isArray(b.exclude) ? b.exclude : []).map(x => String(x || '').replace('@', '').toLowerCase()).filter(Boolean).slice(0, 60),
+        maxBusinesses: Math.round(num(b.maxBusinesses, 1, REVIEW_MAX_BUSINESSES) || 15),
+        minRating: num(b.minRating, 0, 5), minReviews: num(b.minReviews, 0, 100000),
+        useMaps: b.useMaps !== false, searchNames: b.searchNames !== false, useAi: b.useAi !== false,
+        postsPer: Math.round(num(b.postsPer, 10, REVIEW_MAX_POSTS) || 40),
+        days: Math.round(num(b.days, 7, 365) || 90)
+    };
+}
+const reviewUsesMaps = i => !!(i.useMaps && i.categories.length && i.area);
+
+/** Step one: find the businesses, match their Instagram, and stop — nothing is read yet. */
+app.post('/api/reviews/find', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const input = reviewInput(req.body || {});
+        if (!reviewUsesMaps(input) && !input.handles.length && !input.seed) return res.status(400).json({ error: 'Give a kind of business and an area, or Instagram handles.' });
+        const clientId = await resolveClientId(req, ctx);
+        await assertJobSlot(ctx.user.id);
+        input.clientId = clientId || null;
+        const maps = reviewUsesMaps(input);
+        const estimate = reviewEstimate({ places: maps ? input.maxBusinesses : 0, businesses: 0, searches: maps && input.searchNames ? input.maxBusinesses : 0 });
+        const job = await createJob(ctx.user.id, 'review_places', 'leadgen', input, estimate);
+        runJob(job.id, JOB_WORKERS['review_places'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id, estimatedUsd: estimate });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * The scan. Either in one go (Maps and/or handles), or — the usual way from
+ * the page — with the exact list picked after step one, passed as handles
+ * with Maps switched off.
+ */
 app.post('/api/reviews/scan', spendLimit, async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
         if (!staffOnly(ctx, res)) return;
-        const b = req.body || {};
-        const category = oneLine(b.category, 80), area = oneLine(b.area, 120);
-        const handles = (Array.isArray(b.handles) ? b.handles : String(b.handles || '').split(/[\s,]+/))
-            .map(h => (typeof h === 'string' ? { handle: h } : h)).filter(h => h && /^@?[a-z0-9._]{1,30}$/i.test(String(h.handle || '').trim())).slice(0, REVIEW_MAX_BUSINESSES);
-        if (!(category && area) && !handles.length && !b.seed) return res.status(400).json({ error: 'Give a business type and an area (e.g. “restaurants”, “Gulshan, Dhaka”), or Instagram handles to scan.' });
+        const input = reviewInput(req.body || {});
+        if (!reviewUsesMaps(input) && !input.handles.length && !input.seed) return res.status(400).json({ error: 'Give a kind of business and an area (e.g. “restaurants”, “Gulshan, Dhaka”), or Instagram handles to scan.' });
         const clientId = await resolveClientId(req, ctx);
         if (clientId && !(await clientAccess(ctx.user.id, clientId, 'editor'))) return res.status(403).json({ error: 'You need edit access to that client.' });
         await assertJobSlot(ctx.user.id);
-        const input = {
-            clientId: clientId || null, category: category || null, area: area || null, seed: b.seed ? oneLine(b.seed, 200) : null,
-            handles: handles.map(h => ({ handle: String(h.handle).replace('@', '').trim().toLowerCase(), name: h.name ? oneLine(h.name, 120) : null })),
-            maxBusinesses: Math.min(REVIEW_MAX_BUSINESSES, Math.max(1, parseInt(b.maxBusinesses, 10) || 15)),
-            postsPer: Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(b.postsPer, 10) || 40)),
-            days: Math.min(365, Math.max(7, parseInt(b.days, 10) || 90))
-        };
-        const maps = !!(category && area);
-        const estimate = reviewEstimate({ places: maps ? input.maxBusinesses : 0, businesses: (maps ? input.maxBusinesses : 0) + input.handles.length + (input.seed ? 1 : 0), postsPer: input.postsPer, searches: maps ? input.maxBusinesses : 0 });
+        input.clientId = clientId || null;
+        const maps = reviewUsesMaps(input);
+        const n = (maps ? input.maxBusinesses : 0) + input.handles.length + (input.seed ? 1 : 0);
+        const estimate = reviewEstimate({ places: maps ? input.maxBusinesses : 0, businesses: n, postsPer: input.postsPer, searches: maps && input.searchNames ? input.maxBusinesses : 0 });
         const job = await createJob(ctx.user.id, 'review_scan', 'leadgen', input, estimate);
         runJob(job.id, JOB_WORKERS['review_scan'](ctx.user.id, job.input, job.id));
         res.status(202).json({ jobId: job.id, estimatedUsd: estimate, budget: await budgetSnapshot('leadgen', ctx.user.id, estimate) });

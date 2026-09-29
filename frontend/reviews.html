@@ -15,23 +15,71 @@
 <div class="el-page">
     <div class="card">
         <h2 class="card-title">Review tracker</h2>
-        <p class="card-subtitle">Finds the businesses of a kind around a place on Google Maps, reads the Instagram posts that
-            tagged each one, and sorts out which were reviews. You get a scoreboard of who is being reviewed, and every creator
-            who reviewed lands on the <a href="leads.html?kind=influencer" class="rv-link">Influencers</a> list, ready for a pipeline.</p>
+        <p class="card-subtitle">Reads the Instagram posts that tagged a set of businesses and sorts out which were reviews. You choose the
+            businesses every time: from a Google Maps area, from your own list of rivals, or both. Every creator who reviewed lands on the
+            <a href="leads.html?kind=influencer" class="rv-link">Influencers</a> list, ready for a pipeline.</p>
+    </div>
 
-        <div class="ws-form two rv-form">
-            <div><label for="rv-cat">What kind of business</label><input id="rv-cat" placeholder="e.g. restaurants, cafés, bakeries" maxlength="80"></div>
-            <div><label for="rv-area">Where</label><input id="rv-area" placeholder="e.g. Gulshan, Dhaka" maxlength="120"></div>
-            <div><label for="rv-seed">Include one business (optional)</label><input id="rv-seed" placeholder="@your_client or an Instagram link" maxlength="200">
-                <div class="ws-hint">Usually your client, so the scoreboard shows where they stand.</div></div>
-            <div><label for="rv-handles">Or scan these Instagram accounts</label><input id="rv-handles" placeholder="@burgerhouse, @pizzaplace" maxlength="1200">
-                <div class="ws-hint">Skips Google Maps and reads exactly these. Up to 30.</div></div>
-            <div><label for="rv-max">How many nearby businesses</label><select id="rv-max"><option>5</option><option>10</option><option selected>15</option><option>20</option><option>30</option></select></div>
-            <div><label for="rv-days">Reviews from the last</label><select id="rv-days"><option value="30">30 days</option><option value="60">60 days</option><option value="90" selected>90 days</option><option value="180">6 months</option></select></div>
-            <div><label for="rv-posts">Tagged posts read per business</label><select id="rv-posts"><option>20</option><option selected>40</option><option>60</option><option>100</option></select></div>
+    <!-- Step 1: where the businesses come from, this time. -->
+    <div class="card">
+        <div class="rv-step"><span class="rv-n">1</span><h3 class="card-title rv-h">Where the businesses come from</h3></div>
+
+        <div class="rv-src">
+            <label class="rv-toggle"><input type="checkbox" id="rv-use-maps" checked> <b>Google Maps area</b> <span class="el-muted">Businesses of a kind around a place</span></label>
+            <div class="ws-form two" id="rv-maps">
+                <div><label for="rv-cat">Kinds of business</label><input id="rv-cat" placeholder="e.g. restaurants, cafés, bakeries" maxlength="200">
+                    <div class="ws-hint">One or several, separated by commas.</div></div>
+                <div><label for="rv-area">Where</label><input id="rv-area" placeholder="e.g. Gulshan 2, Dhaka" maxlength="120">
+                    <div class="ws-hint">As narrow as you like: a road, a neighbourhood or a city.</div></div>
+                <div><label for="rv-max">How many businesses</label><input id="rv-max" type="number" min="1" max="30" value="15"></div>
+                <div class="ws-form two rv-mini">
+                    <div><label for="rv-minr">Google rating at least</label><select id="rv-minr"><option value="">Any</option><option>3.5</option><option>4</option><option>4.3</option><option>4.5</option></select></div>
+                    <div><label for="rv-minc">With at least … reviews</label><input id="rv-minc" type="number" min="0" placeholder="any"></div>
+                </div>
+                <label class="rv-toggle rv-wide"><input type="checkbox" id="rv-names" checked> Search Instagram for businesses whose listing has no link
+                    <span class="el-muted">(costs a little each; off = you fill the handle in)</span></label>
+            </div>
+        </div>
+
+        <div class="rv-src">
+            <label class="rv-toggle"><input type="checkbox" id="rv-use-list" checked> <b>My own list</b> <span class="el-muted">Rivals you already know, as before</span></label>
+            <div id="rv-list-box">
+                <label for="rv-handles">Instagram accounts</label>
+                <textarea id="rv-handles" rows="2" placeholder="@ginzahibachi, @tokyoexpress, @burgerhouse" maxlength="1500"></textarea>
+                <div class="ws-hint">Read exactly as given. Up to 30.</div>
+            </div>
+        </div>
+
+        <div class="ws-form two">
+            <div><label for="rv-seed">Include the client</label><input id="rv-seed" placeholder="@your_client" maxlength="200">
+                <div class="ws-hint">So the scoreboard shows where they stand.</div></div>
+        </div>
+
+        <div class="ld-actions rv-go">
+            <button class="ws-btn is-gold" type="button" id="rv-find">Find the businesses</button>
+            <span class="ws-note" id="rv-find-cost"></span>
+        </div>
+        <div id="rv-find-progress"></div>
+        <p class="ws-note" id="rv-find-note"></p>
+    </div>
+
+    <!-- Step 2: check the list, then read. -->
+    <div class="card" id="rv-step2" hidden>
+        <div class="rv-step"><span class="rv-n">2</span><h3 class="card-title rv-h">Check the list, then read the reviews</h3></div>
+        <p class="card-subtitle">Untick any you do not want, fix a handle that looks wrong, or add more. Only the ticked ones are read.</p>
+        <div class="ll-scroll"><table class="ws-table rv-table">
+            <thead><tr><th><input type="checkbox" id="rv-all" class="ll-sel" aria-label="Tick every business" checked></th><th>Business</th><th>Instagram</th><th>How we found it</th></tr></thead>
+            <tbody id="rv-rows"></tbody>
+        </table></div>
+        <form class="rv-add" id="rv-add"><input id="rv-add-h" placeholder="Add a business: @handle" maxlength="31" aria-label="Add a business by Instagram handle"><button class="ws-btn is-sm" type="submit">Add</button></form>
+
+        <div class="ws-form two rv-opts">
+            <div><label for="rv-days">Reviews from the last</label><select id="rv-days"><option value="30">30 days</option><option value="60">60 days</option><option value="90" selected>90 days</option><option value="180">6 months</option><option value="365">A year</option></select></div>
+            <div><label for="rv-posts">Tagged posts read per business</label><input id="rv-posts" type="number" min="10" max="100" value="40"></div>
+            <label class="rv-toggle rv-wide"><input type="checkbox" id="rv-ai" checked> Let AI read the posts the rules cannot decide <span class="el-muted">(unticked, they are left out)</span></label>
         </div>
         <div class="ld-actions rv-go">
-            <button class="ws-btn is-gold" type="button" id="rv-run">Find the reviews</button>
+            <button class="ws-btn is-gold" type="button" id="rv-run">Read the reviews</button>
             <span class="ws-note" id="rv-cost"></span>
         </div>
         <div id="rv-progress"></div>
@@ -40,8 +88,8 @@
 
     <div class="card">
         <div class="card-title" style="font-size:1.05rem">Earlier scans</div>
-        <p class="card-subtitle">Open one to see the scoreboard. From a scan’s page, “Repeat on a schedule” runs it monthly and marks what is new.</p>
-        <div id="rv-list"><p class="el-muted">Loading…</p></div>
+        <p class="card-subtitle">Open one to see the scoreboard. From a scan’s page, “Repeat on a schedule” runs the same businesses monthly and marks what is new.</p>
+        <div id="rv-scans"><p class="el-muted">Loading…</p></div>
     </div>
 </div>
 
@@ -53,49 +101,158 @@
 
     const $ = id => document.getElementById(id);
     let esc = v => String(v ?? '');
-    const handles = () => $('rv-handles').value.split(/[\s,]+/).map(h => h.trim().replace(/^@/, '')).filter(h => /^[a-z0-9._]{1,30}$/i.test(h)).slice(0, 30);
+    const HANDLE = /^[a-z0-9._]{1,30}$/;
+    const MATCH = { sure: ['Linked on Maps or their website', 'is-jade'], likely: ['Found by name search', 'is-gold'], check: ['Check this handle', 'is-warn'], none: ['No account found', 'is-bad'], given: ['From your list', ''] };
+    const SAVE_KEY = 'el-review-setup';
+    let rows = [];            // step 2: { key, name, category, rating, reviews, handle, match, on, mapsUrl }
+
+    const handlesFrom = v => String(v || '').split(/[\s,]+/).map(h => h.trim().replace(/^@/, '').toLowerCase()).filter(h => HANDLE.test(h)).slice(0, 30);
+    const useMaps = () => $('rv-use-maps').checked && $('rv-cat').value.trim() && $('rv-area').value.trim();
 
     document.addEventListener('DOMContentLoaded', async () => {
         await EL.init({ engine: 'leadgen', page: 'reviews.html' });
         esc = EL.escape;
+        restore();
         const cur = EL.currentClient && EL.currentClient();
         if (cur) {
             try {
-                const d = await EL.api(`/api/clients/${encodeURIComponent(cur.id)}`);
-                const c = d.client || {};
+                const c = (await EL.api(`/api/clients/${encodeURIComponent(cur.id)}`)).client || {};
                 if (c.ig_handle) $('rv-seed').value = '@' + c.ig_handle;
                 if (c.location && !$('rv-area').value) $('rv-area').value = c.location;
                 if (c.niche && !$('rv-cat').value) $('rv-cat').value = c.niche;
+                if (Array.isArray(c.competitors) && c.competitors.length && !$('rv-handles').value) $('rv-handles').value = c.competitors.map(h => '@' + h).join(', ');
             } catch { /* fill by hand */ }
         }
-        ['rv-max', 'rv-posts', 'rv-cat', 'rv-area', 'rv-handles'].forEach(id => $(id).addEventListener('change', cost));
+        const syncSources = () => {
+            $('rv-maps').hidden = !$('rv-use-maps').checked;
+            $('rv-list-box').hidden = !$('rv-use-list').checked;
+            findCost();
+        };
+        ['rv-use-maps', 'rv-use-list', 'rv-names'].forEach(id => $(id).addEventListener('change', syncSources));
+        ['rv-cat', 'rv-area', 'rv-max', 'rv-handles'].forEach(id => $(id).addEventListener('change', findCost));
+        ['rv-posts', 'rv-days'].forEach(id => $(id).addEventListener('change', scanCost));
+        $('rv-find').addEventListener('click', find);
         $('rv-run').addEventListener('click', run);
-        cost(); list();
+        $('rv-all').addEventListener('change', () => { rows.forEach(r => { if (r.handle) r.on = $('rv-all').checked; }); drawRows(); });
+        $('rv-add').addEventListener('submit', e => {
+            e.preventDefault();
+            const h = handlesFrom($('rv-add-h').value)[0];
+            if (!h) { $('rv-add-h').focus(); return; }
+            if (!rows.some(r => r.handle === h)) rows.push({ key: 'ig:' + h, name: '@' + h, handle: h, match: 'given', on: true });
+            $('rv-add-h').value = ''; drawRows();
+        });
+        syncSources(); scans();
     });
 
-    async function cost() {
-        const maps = $('rv-cat').value.trim() && $('rv-area').value.trim();
+    // A per-browser convenience: the last setup comes back next time.
+    function remember() {
+        try { localStorage.setItem(SAVE_KEY, JSON.stringify({ maps: $('rv-use-maps').checked, list: $('rv-use-list').checked, names: $('rv-names').checked,
+            cat: $('rv-cat').value, max: $('rv-max').value, minr: $('rv-minr').value, minc: $('rv-minc').value, days: $('rv-days').value, posts: $('rv-posts').value, ai: $('rv-ai').checked })); } catch { /* optional */ }
+    }
+    function restore() {
+        let v = null;
+        try { v = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch { v = null; }
+        if (!v) return;
+        $('rv-use-maps').checked = v.maps !== false; $('rv-use-list').checked = v.list !== false; $('rv-names').checked = v.names !== false;
+        if (v.cat) $('rv-cat').value = v.cat; if (v.max) $('rv-max').value = v.max; if (v.minr !== undefined) $('rv-minr').value = v.minr;
+        if (v.minc) $('rv-minc').value = v.minc; if (v.days) $('rv-days').value = v.days; if (v.posts) $('rv-posts').value = v.posts; $('rv-ai').checked = v.ai !== false;
+    }
+
+    async function findCost() {
+        const maps = useMaps();
+        $('rv-find').textContent = maps ? 'Find the businesses' : 'Next: check the list';
+        if (!maps) { $('rv-find-cost').textContent = 'Nothing to pay for yet: your list is used as given.'; return; }
         try {
-            const p = new URLSearchParams({ max: $('rv-max').value, posts: $('rv-posts').value, handles: String(handles().length + ($('rv-seed').value.trim() ? 1 : 0)), maps: maps ? '1' : '0' });
+            const p = new URLSearchParams({ step: 'find', max: $('rv-max').value, maps: '1', names: $('rv-names').checked ? '1' : '0' });
             const e = await EL.api('/api/reviews/estimate?' + p.toString());
-            $('rv-cost').textContent = `At most about $${Number(e.usd).toFixed(2)} of Apify credit.`;
-            $('rv-cost').title = e.note || '';
+            $('rv-find-cost').textContent = `At most about $${Number(e.usd).toFixed(2)} to find and match them.`;
+        } catch { $('rv-find-cost').textContent = ''; }
+    }
+    async function scanCost() {
+        const n = rows.filter(r => r.on && r.handle).length;
+        $('rv-run').textContent = `Read the reviews for ${n} business${n === 1 ? '' : 'es'}`;
+        $('rv-run').disabled = !n;
+        try {
+            const p = new URLSearchParams({ step: 'scan', maps: '0', handles: String(n), posts: $('rv-posts').value });
+            const e = await EL.api('/api/reviews/estimate?' + p.toString());
+            $('rv-cost').textContent = n ? `At most about $${Number(e.usd).toFixed(2)} of Apify credit.` : '';
         } catch { $('rv-cost').textContent = ''; }
     }
 
-    async function run() {
-        const body = {
-            category: $('rv-cat').value.trim() || null, area: $('rv-area').value.trim() || null,
-            seed: $('rv-seed').value.trim() || null, handles: handles(),
-            maxBusinesses: +$('rv-max').value, days: +$('rv-days').value, postsPer: +$('rv-posts').value
-        };
-        const note = $('rv-note');
-        if (!(body.category && body.area) && !body.handles.length && !body.seed) {
-            note.className = 'ws-note is-bad'; note.textContent = 'Give a kind of business and an area, or some Instagram accounts to scan.'; return;
+    function listFromOwn() {
+        const out = [];
+        const seed = handlesFrom($('rv-seed').value)[0];
+        if (seed) out.push({ key: 'ig:' + seed, name: '@' + seed + ' (the client)', handle: seed, match: 'given', on: true });
+        if ($('rv-use-list').checked) handlesFrom($('rv-handles').value).forEach(h => { if (!out.some(r => r.handle === h)) out.push({ key: 'ig:' + h, name: '@' + h, handle: h, match: 'given', on: true }); });
+        return out;
+    }
+
+    async function find() {
+        remember();
+        const note = $('rv-find-note'); note.className = 'ws-note'; note.textContent = '';
+        if (!useMaps()) {
+            rows = listFromOwn();
+            if (!rows.length) { note.className = 'ws-note is-bad'; note.textContent = 'Turn on Google Maps with a kind of business and an area, or add some Instagram accounts.'; return; }
+            showStep2(); return;
         }
+        const btn = $('rv-find'); btn.disabled = true; note.textContent = 'Starting…';
+        try {
+            const { job } = await EL.runJob('/api/reviews/find', {
+                categories: $('rv-cat').value.split(',').map(s => s.trim()).filter(Boolean), area: $('rv-area').value.trim(),
+                maxBusinesses: +$('rv-max').value || 15, minRating: $('rv-minr').value || null, minReviews: $('rv-minc').value || null,
+                searchNames: $('rv-names').checked, handles: $('rv-use-list').checked ? handlesFrom($('rv-handles').value) : [], seed: $('rv-seed').value.trim() || null
+            }, {
+                mount: $('rv-find-progress'),
+                onProgress: j => { note.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                onFailed: j => { note.className = 'ws-note is-bad'; note.textContent = 'Failed: ' + (j.error || 'unknown'); }
+            });
+            if (job && job.status === 'done') {
+                const r = job.result || {};
+                rows = (r.places || []).map(p => ({ ...p, match: p.source === 'given' ? 'given' : p.match, on: !!p.handle && ['sure', 'likely', 'given'].includes(p.source === 'given' ? 'given' : p.match) }));
+                note.className = 'ws-note is-good';
+                note.textContent = `${rows.length} business${rows.length === 1 ? '' : 'es'} found.` + ((r.warnings || []).length ? ' ' + r.warnings.join(' ') : '');
+                showStep2();
+            }
+        } catch (err) { if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; } }
+        finally { btn.disabled = false; }
+    }
+
+    function showStep2() { $('rv-step2').hidden = false; drawRows(); $('rv-step2').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+
+    function drawRows() {
+        $('rv-rows').innerHTML = rows.map((r, i) => {
+            const m = MATCH[r.match] || MATCH.none;
+            const meta = [r.category, r.rating != null ? `★ ${r.rating}` : null, r.reviews != null ? `${Number(r.reviews).toLocaleString()} Google reviews` : null].filter(Boolean).join(' · ');
+            return `<tr>
+                <td><input type="checkbox" class="ll-sel" data-on="${i}" ${r.on ? 'checked' : ''} ${r.handle ? '' : 'disabled'} aria-label="Read ${esc(r.name || r.handle || 'this business')}"></td>
+                <td><b>${esc(r.name || '—')}</b>${meta ? `<small class="rv-meta">${esc(meta)}</small>` : ''}${r.mapsUrl ? ` <a class="rv-link" href="${EL.safeUrl(r.mapsUrl)}" target="_blank" rel="noopener noreferrer">map</a>` : ''}</td>
+                <td><input class="rv-handle" data-h="${i}" value="${esc(r.handle ? '@' + r.handle : '')}" placeholder="@handle" maxlength="31" aria-label="Instagram handle for ${esc(r.name || '')}"></td>
+                <td><span class="el-chip ${m[1]}">${esc(m[0])}</span></td>
+            </tr>`;
+        }).join('') || '<tr><td colspan="4" class="el-muted">Nothing yet. Add a business below.</td></tr>';
+        $('rv-rows').querySelectorAll('[data-on]').forEach(c => c.addEventListener('change', () => { rows[+c.dataset.on].on = c.checked; scanCost(); }));
+        $('rv-rows').querySelectorAll('[data-h]').forEach(inp => inp.addEventListener('change', () => {
+            const r = rows[+inp.dataset.h], h = handlesFrom(inp.value)[0] || null;
+            r.handle = h; r.on = !!h; if (h && ['check', 'none'].includes(r.match)) r.match = 'given';
+            drawRows();
+        }));
+        scanCost();
+    }
+
+    async function run() {
+        remember();
+        const pick = rows.filter(r => r.on && r.handle);
+        const note = $('rv-note');
+        if (!pick.length) { note.className = 'ws-note is-bad'; note.textContent = 'Tick at least one business.'; return; }
         const btn = $('rv-run'); btn.disabled = true; note.className = 'ws-note'; note.textContent = 'Starting…';
         try {
-            const { job } = await EL.runJob('/api/reviews/scan', body, {
+            const { job } = await EL.runJob('/api/reviews/scan', {
+                // The picked list is the scan: Maps is not asked again. Kind and
+                // area still name the report and find the previous scan of it.
+                useMaps: false, category: $('rv-use-maps').checked ? $('rv-cat').value.trim() || null : null, area: $('rv-use-maps').checked ? $('rv-area').value.trim() || null : null,
+                handles: pick.map(r => ({ handle: r.handle, name: r.name && !/^@/.test(r.name) ? r.name : null })),
+                days: +$('rv-days').value, postsPer: +$('rv-posts').value || 40, useAi: $('rv-ai').checked
+            }, {
                 mount: $('rv-progress'),
                 onProgress: j => { note.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
                 onFailed: j => { note.className = 'ws-note is-bad'; note.textContent = 'Failed: ' + (j.error || 'unknown'); },
@@ -104,26 +261,24 @@
             if (job && job.status === 'done') {
                 const r = job.result || {};
                 note.className = 'ws-note is-good';
-                note.textContent = `${r.reviews || 0} review(s) by ${r.creators || 0} creator(s) across ${r.scanned || 0} business(es).`
-                    + (r.savedLeads ? ` ${r.savedLeads} new influencer lead(s) saved.` : '');
-                list();
+                note.textContent = `${r.reviews || 0} review(s) by ${r.creators || 0} creator(s) across ${r.scanned || 0} business(es).` + (r.savedLeads ? ` ${r.savedLeads} new influencer lead(s) saved.` : '');
+                scans();
                 if (r.reportId) location.href = `report.html?report=${encodeURIComponent(r.reportId)}${EL.currentClient && EL.currentClient() ? '&client=' + encodeURIComponent(EL.currentClient().id) : ''}`;
             }
-        } catch (err) {
-            if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; }
-        } finally { btn.disabled = false; }
+        } catch (err) { if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; } }
+        finally { btn.disabled = false; }
     }
 
-    async function list() {
+    async function scans() {
         try {
             const d = await EL.api('/api/reviews/scans');
-            const rows = d.scans || [];
-            $('rv-list').innerHTML = rows.length ? rows.map(s => `<a class="ws-row is-link" href="report.html?report=${encodeURIComponent(s.id)}${s.clientId ? '&client=' + encodeURIComponent(s.clientId) : ''}">
+            const list = d.scans || [];
+            $('rv-scans').innerHTML = list.length ? list.map(s => `<a class="ws-row is-link" href="report.html?report=${encodeURIComponent(s.id)}${s.clientId ? '&client=' + encodeURIComponent(s.clientId) : ''}">
                 <span class="ws-sev is-gold"></span>
                 <div class="ws-grow"><div class="ws-t">${esc(s.title || 'Scan')}</div>
                     <div class="ws-m">${s.client ? esc(s.client) + ' · ' : ''}${new Date(s.createdAt).toLocaleDateString()} · ${Number(s.counts.reviews || 0)} reviews · ${Number(s.counts.creators || 0)} creators · ${Number(s.counts.scanned || 0)} businesses</div></div></a>`).join('')
                 : '<p class="el-muted">No scans yet.</p>';
-        } catch (err) { if (!err.handled) $('rv-list').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; }
+        } catch (err) { if (!err.handled) $('rv-scans').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; }
     }
 })();
 </script>
