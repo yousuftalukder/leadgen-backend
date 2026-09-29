@@ -80,6 +80,19 @@
                 ${v.narrative ? `<p class="rp-note">${esc(v.narrative)} Every number in this report is still exact.</p>` : ''}`));
         }
 
+        // Facebook and Instagram side by side (phase 38).
+        const pf = v.platforms;
+        if (pf && (pf.rows || []).length) {
+            out.push(sec('Performance summary', 'Facebook and Instagram side by side. A dash means Meta gives no such figure for that platform.',
+                block({ type: 'row', blocks: [
+                    { type: 'table', cols: [{ label: 'Measure' }, { label: 'Facebook', num: true }, { label: 'Instagram', num: true }, { label: 'Both', num: true }],
+                      rows: pf.rows.map(r => [r.label, fmt(r.fb), fmt(r.ig), r.both === null ? '—' : { text: fmt(r.both), tone: '' }]) },
+                    pf.followers && (pf.followers.fb !== null || pf.followers.ig !== null) ? { type: 'bars', title: 'Followers now', rows: [
+                        pf.followers.fb !== null ? { label: 'Facebook', value: pf.followers.fb, tone: 'muted' } : null,
+                        pf.followers.ig !== null ? { label: 'Instagram', value: pf.followers.ig, tone: 'good' } : null].filter(Boolean) } : null
+                ].filter(Boolean) })));
+        }
+
         // 02 — the scorecard, Instagram and Facebook as two groups.
         const rows = v.scorecard || [];
         if (rows.length) {
@@ -100,6 +113,15 @@
                     <tbody>${group('Instagram')}${group('Facebook')}</tbody></table></div>`));
         }
 
+        // Five months of their own daily numbers (phase 38).
+        const tr = ctx.trends;
+        if (tr && tr.labels) {
+            const two = (a, b) => [a.some(x => x !== null) ? { name: 'Instagram', values: a.map(x => x || 0) } : null, b.some(x => x !== null) ? { name: 'Facebook', values: b.map(x => x || 0) } : null].filter(Boolean);
+            const reach = two(tr.reach.ig, tr.reach.fb), follows = two(tr.follows.ig, tr.follows.fb);
+            if (reach.length || follows.length) out.push(sec('The longer view', 'From the numbers read every day since the account was connected. Months before the connection show as zero.',
+                block({ type: 'row', blocks: [follows.length ? { type: 'line', title: 'New followers a month', labels: tr.labels, series: follows } : null, reach.length ? { type: 'line', title: 'People reached a month', labels: tr.labels, series: reach } : null].filter(Boolean) })));
+        }
+
         // 03 — what worked: the narrative's two lists, the best posts, the formats.
         const posting = v.posting || {};
         const list = (items, cls) => items.length ? `<ul class="rp-list ${cls}">${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="el-muted">Nothing stood out.</p>';
@@ -108,11 +130,9 @@
             out.push(sec(`Your content in ${month}`, '', `${worked.length || didNot.length ? `<div class="rp-two">
                     <div class="rp-col is-good"><h3 class="rp-h3">What worked</h3>${list(worked, 'is-good')}</div>
                     <div class="rp-col is-watch"><h3 class="rp-h3">What did not</h3>${list(didNot, 'is-watch')}</div></div>` : ''}
-                ${posts.length ? `<h3 class="rp-h3">Your best posts in ${esc(month)}</h3>
-                    <div class="ws-table-wrap"><table class="ws-table rp-table rp-posts"><thead><tr><th>Post</th><th>Type</th><th class="num">Reached</th><th class="num">Saves</th><th class="num">Shares</th></tr></thead>
-                    <tbody>${posts.map(p => `<tr><td><div class="t">${p.caption ? esc(p.caption) : '<span class="el-muted">No caption</span>'}</div>
-                        <div class="s">${[day(p.date), p.link ? `<a href="${esc(p.link)}" target="_blank" rel="noopener noreferrer">Open the post</a>` : ''].filter(Boolean).join(' · ')}</div></td>
-                        <td>${esc(p.kind)}</td><td class="num">${fmt(p.reach)}</td><td class="num">${fmt(p.saved)}</td><td class="num">${fmt(p.shares)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+                ${posts.length ? `<h3 class="rp-h3">Your best posts in ${esc(month)}, by people reached</h3>
+                    ${block({ type: 'posts', items: posts.map(p => ({ kind: p.kind, title: p.caption || 'No caption', image: p.image || null, link: p.link, date: day(p.date),
+                        meta: [p.reach != null ? `${fmt(p.reach)} reached` : null, p.saved != null ? `${fmt(p.saved)} saves` : null, p.shares != null ? `${fmt(p.shares)} shares` : null, p.views ? `${fmt(p.views)} views` : null].filter(Boolean).join(' · ') })) })}` : ''}
                 <p class="rp-note">${posting.count ? `${fmt(posting.count)} post${posting.count === 1 ? '' : 's'} published in ${esc(month)}.` : `Nothing was published in ${esc(month)}.`}
                     ${posting.formatLine ? esc(posting.formatLine) : ''} ${posting.formatLine ? 'Medians, so one unusual post does not redraw the picture.' : ''}</p>`));
         }
@@ -170,6 +190,8 @@
                 detailed ? 'In order of priority. Expected results are estimates, not promises.' : 'For next month.',
                 body + (tasks && tasks.canEdit ? '<p class="rp-src no-print">Adding one puts it on the client’s task board. One marked “You” becomes the client’s to-do in their portal.</p>' : '')));
         }
+
+        if (v.conclusion) out.push(sec('Conclusion', '', `<p class="rp-verdict">${esc(v.conclusion)}</p>`));
 
         // 08 — about this report.
         const ab = v.about || {};

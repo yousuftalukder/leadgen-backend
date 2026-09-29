@@ -336,7 +336,7 @@
 
     // Report types the client reads as a document (phase 36): the viewer opens
     // on that, and the engine's full analysis is one click away.
-    const DOC_TYPES = ['ig_report', 'deep_audit', 'fb_page'];
+    const DOC_TYPES = ['ig_report', 'deep_audit', 'fb_page', 'public_monthly'];
     function openReport(r) {
         const page = UI.TYPE_PAGE[r.report_type] || 'ig-report.html';
         const tail = `?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}`;
@@ -349,7 +349,7 @@
             $('rv-mode').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
         };
         $('rv-title').textContent = `${UI.TYPE_LABEL[r.report_type] || r.report_type}${reportLine(r).subject ? ' · ' + reportLine(r).subject : ''}`;
-        $('rv-mode').hidden = !hasDoc;
+        $('rv-mode').hidden = !hasDoc || page === 'report.html';
         $('rv-mode').querySelectorAll('button').forEach(b => { b.onclick = () => show(b.dataset.mode); });
         show(hasDoc ? 'doc' : 'engine');
         $('rv').classList.remove('hidden');
@@ -396,6 +396,9 @@
         const conns = detail.metaConnections || [];
         const live = liveConns();
         const monthly = live.length || conns.length ? await EL.api(`/api/meta/monthly?client_id=${id}`).catch(() => ({ reports: [] })) : { reports: [] };
+        // Monthly reports from public numbers (phase 38), for clients without Meta.
+        const tlp = timeline || await loadTimeline().catch(() => ({ reports: [] }));
+        const publicMonthlies = (tlp.reports || []).filter(r => r.report_type === 'public_monthly');
         if (live.length && !growth) { growth = await EL.api(`/api/meta/growth?client_id=${id}`).catch(() => null); }
         const gr = growth && growth.growth;
         const months = [];
@@ -427,9 +430,10 @@
                 <tbody>${(gr.series || []).slice(-14).reverse().map(r => `<tr><td>${esc(r.day)}</td><td class="ws-num">${num(r.followers)}</td><td class="ws-num">${num(r.reach)}</td><td class="ws-num">${num(r.profile_views)}</td><td class="ws-num">${num(r.interactions)}</td></tr>`).join('')}</tbody></table></div>
                 <p class="el-muted">A day’s reach, visits and interactions are written the day after, once the day is complete; followers are the count on that day.</p></section>` : ''}
             <section class="ws-card"><div class="ws-card-h"><h2>Monthly reports</h2>
-                ${live.length && canEdit() ? `<div class="ws-actions"><select id="m-month" style="width:auto">${months.map(m => `<option value="${m}">${mName(m)}</option>`).join('')}</select><button class="ws-btn is-gold is-sm" type="button" id="m-build">Build the report</button></div>` : ''}</div>
+                ${canEdit() ? `<div class="ws-actions"><select id="m-month" style="width:auto" aria-label="Month">${months.map(m => `<option value="${m}">${mName(m)}</option>`).join('')}</select>${live.length ? '<button class="ws-btn is-gold is-sm" type="button" id="m-build">Build the report</button>' : ''}<button class="ws-btn is-sm ${live.length ? '' : 'is-gold'}" type="button" id="m-pbuild" title="From the posts our audits already read, with the work we did. No Apify credit.">${live.length ? 'From public numbers' : 'Build from public numbers'}</button></div>` : ''}</div>
+                ${publicMonthlies.length ? `<div class="ws-rows">${publicMonthlies.map(r => `<a class="ws-row is-link" href="report.html?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(mName(String(r.snapshot_date || '').slice(0, 7)))} · public numbers</div><div class="ws-m">Built ${esc(UI.day(r.created_at))}</div></div>${UI.srcChip('public')}</a>`).join('')}</div>` : ''}
                 ${(monthly.reports || []).length ? `<div class="ws-rows">${monthly.reports.map(r => `<a class="ws-row is-link" href="monthly.html?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}"><span class="ws-sev is-jade"></span><div class="ws-grow"><div class="ws-t">${esc(mName(r.month))}</div><div class="ws-m">${esc(r.ai_summary ? r.ai_summary.slice(0, 140) : 'Built ' + UI.day(r.created_at))}</div></div>${UI.srcChip('meta')}</a>`).join('')}</div>`
-                : `<p class="el-muted">${live.length ? 'None yet. Build one for any finished month.' : 'Connect Meta to build monthly reports.'}</p>`}
+                : `<p class="el-muted">${live.length ? 'None yet. Build one for any finished month.' : 'Without Meta, a monthly report is built from public numbers: the posts our audits already read, where they stand against rivals, and the work we did. Connecting Meta adds reach, visits and audience.'}</p>`}
                 <div class="ws-note" id="mb-note"></div><div id="mb-progress"></div>
             </section>`;
 
@@ -461,6 +465,19 @@
                     onFailed: j => { note.className = 'ws-note is-bad'; note.textContent = 'Failed: ' + (j.error || 'unknown'); pull.disabled = false; }
                 });
             } catch (err) { if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; } pull.disabled = false; }
+        });
+        const pbuild = $('m-pbuild');
+        if (pbuild) pbuild.addEventListener('click', async () => {
+            const n = $('mb-note'); pbuild.disabled = true;
+            n.className = 'ws-note'; n.textContent = 'Building the report from public numbers…';
+            try {
+                await EL.runJob('/api/reports/public-monthly', { clientId: c.id, month: $('m-month').value }, {
+                    mount: $('mb-progress'),
+                    onProgress: j => { n.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                    onDone: j => { const rid = j.result && (j.result.reportId || j.result.reportRef); timeline = null; if (rid) location.href = `report.html?report=${encodeURIComponent(rid)}&client=${encodeURIComponent(c.id)}`; else tabMeta(body); },
+                    onFailed: j => { n.className = 'ws-note is-bad'; n.textContent = j.error || 'That did not finish.'; pbuild.disabled = false; }
+                });
+            } catch (err) { if (!err.handled) { n.className = 'ws-note is-bad'; n.textContent = err.message; } pbuild.disabled = false; }
         });
         const build = $('m-build');
         if (build) build.addEventListener('click', async () => {

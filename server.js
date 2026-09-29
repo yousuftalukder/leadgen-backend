@@ -13488,7 +13488,7 @@ registerWorker('meta_monthly', (userId, input, jobId) => async (progress, ck) =>
             // Stopping at the first post older than the window works because
             // the edge is returned newest-first.
             const out = await graphGet(`${conn.ig_user_id}/media`, {
-                fields: 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,shortcode',
+                fields: 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,shortcode,thumbnail_url,media_url',
                 limit: META_MEDIA_LIMIT
             }, pageToken);
             const inWindow = (out.data || []).filter(m => {
@@ -13504,6 +13504,8 @@ registerWorker('meta_monthly', (userId, input, jobId) => async (progress, ck) =>
                     ins = Object.fromEntries(Object.entries(r.values).map(([k, v]) => [k, Array.isArray(v) ? seriesLast(v) : v]));
                 } catch (err) { if (err.statusCode === 401) throw err; }
                 posts.push({
+                    // A video's photo is its thumbnail; an image's is the media itself.
+                    thumb: m.thumbnail_url || (m.media_type === 'VIDEO' ? null : m.media_url) || null,
                     id: m.id, kind, permalink: m.permalink || null, postedAt: m.timestamp || null,
                     caption: (m.caption || '').slice(0, 200) || null,
                     likes: m.like_count ?? null, comments: m.comments_count ?? null,
@@ -13538,6 +13540,10 @@ registerWorker('meta_monthly', (userId, input, jobId) => async (progress, ck) =>
     }]));
 
     const top = arr => arr.filter(p => typeof p.reach === 'number').sort((a, b) => b.reach - a.reach).slice(0, 5);
+    // The best posts' photos are kept (phase 38); Meta's addresses expire.
+    const shown = [...new Set([...top(posts), ...posts.filter(p => typeof p.saved === 'number').sort((a, b) => b.saved - a.saved).slice(0, 3)])];
+    await Promise.all(shown.map(async p => { if (p.thumb && !p.image) p.image = await storeMediaImage(p.thumb, `meta/${jobId || conn.id}/${String(p.id).replace(/[^a-z0-9_-]/gi, '')}`); }));
+    for (const p of posts) delete p.thumb;
     const summary = {
         month, monthLabel: metaMonthLabel(month), prevMonth: prev, prevMonthLabel: metaMonthLabel(prev),
         comparable: !before.unavailable,
@@ -13584,6 +13590,7 @@ Reply with ONLY this JSON:
  "what_did_not": ["1-3 honest lines; say 'nothing stood out' if that is the truth"],
  "audience": "1-2 sentences from demographics, or 'not enough data'",
  "recommendations": [{"action": "one concrete step for next month, starting with a verb", "why": "the number or post from this month that makes it worth doing", "expected": "what it should change, worded as an estimate", "who": "agency or client", "priority": "high, medium or low"}],
+ "conclusion": "2-3 sentences that close the month with its key numbers and name next month's focus",
  "caveats": "one sentence on anything missing from the data, or empty string"
 }
 Give 3 to 5 recommendations, highest priority first, each doable by one person with a phone. "who" is "client" only for what the owner must do themselves (reply to messages, supply photos, approve an offer); everything else is "agency".`;
@@ -15046,7 +15053,8 @@ const REPORT_PAGE = {
     deep_audit: 'ig-competitors.html', competitor: 'ig-competitors.html',
     fb_page: 'fb-report.html',
     fb_community: 'fb-audit.html', fb_group: 'fb-audit.html',
-    content_plan: 'content-plan.html', meta_owned: 'content-plan.html'
+    content_plan: 'content-plan.html', meta_owned: 'content-plan.html',
+    public_monthly: 'report.html'
 };
 
 /**
@@ -15637,6 +15645,7 @@ function monthlyView(row) {
 
     const safeLink = u => (/^https:\/\/(www\.)?(instagram\.com|facebook\.com)\//i.test(String(u || '')) ? String(u) : null);
     const posts = (Array.isArray(posting.topByReach) ? posting.topByReach : []).slice(0, 5).map(p => ({
+        image: p.image || null,
         kind: (MONTH_FORMAT[p.kind] || ['Post'])[0],
         caption: oneLine(p.caption, 160) || null,
         date: p.postedAt ? String(p.postedAt).slice(0, 10) : null,
@@ -15681,12 +15690,67 @@ function monthlyView(row) {
         posts,
         audience: { ...audience, note: aiOk && ai.audience && !/not enough data/i.test(ai.audience) ? oneLine(ai.audience, 400) : null },
         recommendations: monthRecs(ai || {}),
+        platforms: monthPlatforms(byKey, acc),
+        conclusion: aiOk ? (oneLine(ai.conclusion, 600) || null) : null,
         about: {
             source: 'Every figure in this report is your own Meta Insights, the numbers only the account owner can see. Nothing in it is scraped or estimated.',
             gaps: [...new Set((r.gaps || []).map(monthGapName))],
             warnings: (r.warnings || []).map(w => oneLine(w, 300)).filter(w => !/^Narrative unavailable/i.test(w)),
             caveats: aiOk ? (oneLine(ai.caveats, 400) || null) : null
         }
+    };
+}
+
+/**
+ * Facebook and Instagram side by side (phase 38), as in the agency's own
+ * monthly deck. Each row pairs the nearest measure on each platform; a dash
+ * means Meta gives no such figure there. "Both" is a plain sum, shown only
+ * when both sides have the number.
+ */
+function monthPlatforms(byKey, acc) {
+    const ROWS = [
+        ['New followers', 'page_fan_adds_unique', 'follower_count'],
+        ['Reach', 'page_impressions_unique', 'reach'],
+        ['Views', null, 'views'],
+        ['Engagement', 'page_post_engagements', 'total_interactions'],
+        ['Profile and Page visits', 'page_views_total', 'profile_views'],
+        ['Website taps', null, 'website_clicks']
+    ];
+    const val = k => (k && byKey[k] ? monthNum(byKey[k].now) : null);
+    const rows = ROWS.map(([label, fb, ig]) => {
+        const a = val(fb), b = val(ig);
+        return { label, fb: a, ig: b, both: a !== null && b !== null ? a + b : null };
+    }).filter(r => r.fb !== null || r.ig !== null);
+    if (!rows.length || !rows.some(r => r.fb !== null) || !rows.some(r => r.ig !== null)) return null;
+    return { rows, followers: { fb: monthNum(acc.pageFollowers), ig: monthNum(acc.igFollowers) } };
+}
+
+/** Five months of the account's own daily numbers, ending with the report's month (phase 38). */
+async function monthTrends(connectionId, month) {
+    if (!connectionId || !MONTH_RE.test(String(month || ''))) return null;
+    const months = [];
+    let m = month;
+    for (let i = 0; i < 5; i++) { months.unshift(m); m = metaPrevMonth(m); }
+    const from = `${months[0]}-01`, to = monthBounds(month).to.slice(0, 10);
+    const { data, error } = await supabase.from('meta_daily').select('day, level, followers, reach, follows')
+        .eq('connection_id', connectionId).gte('day', from).lt('day', to).limit(400);
+    if (error || !data || !data.length) return null;
+    const agg = {};
+    for (const r of data) {
+        const k = `${r.level}:${String(r.day).slice(0, 7)}`;
+        const a = agg[k] = agg[k] || { reach: 0, follows: 0, days: 0, hasReach: false, hasFollows: false };
+        a.days++;
+        if (typeof r.reach === 'number') { a.reach += r.reach; a.hasReach = true; }
+        if (typeof r.follows === 'number') { a.follows += r.follows; a.hasFollows = true; }
+    }
+    const series = (level, f) => months.map(mm => { const a = agg[`${level}:${mm}`]; return a && a[f === 'reach' ? 'hasReach' : 'hasFollows'] ? a[f] : null; });
+    const withData = months.filter(mm => agg[`ig:${mm}`] || agg[`page:${mm}`]);
+    if (withData.length < 2) return null;
+    return {
+        labels: months.map(mm => new Date(mm + '-01T00:00:00Z').toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })),
+        reach: { ig: series('ig', 'reach'), fb: series('page', 'reach') },
+        follows: { ig: series('ig', 'follows'), fb: series('page', 'follows') },
+        firstMonth: withData[0]
     };
 }
 
@@ -15729,6 +15793,10 @@ async function monthlyContext(row) {
     ]);
 
     if (client.data) out.client = { name: client.data.brand || client.data.name };
+    if (row.report_type === 'meta_monthly') {
+        const connId = (row.report_json && row.report_json.connection && row.report_json.connection.id) || row.meta_connection_id || null;
+        out.trends = await monthTrends(connId, month).catch(() => null);
+    }
 
     // A table that is not there yet (phase 32 unapplied) is "no tasks", not a
     // failed report; the rest of the section still stands.
@@ -16221,11 +16289,248 @@ function reportDoc(row) {
         if (row.report_type === 'ig_report') return igDoc(row);
         if (row.report_type === 'deep_audit') return ciDoc(row);
         if (row.report_type === 'fb_page') return fbDoc(row);
+        if (row.report_type === 'public_monthly') return publicMonthlyDoc(row);
     } catch (err) {
         logger.warn('report_doc_failed', { type: row.report_type, message: err.message });
     }
     return null;
 }
+
+// ===========================================================================
+// PHASE 38 :: THE MONTHLY REPORT BEFORE META IS CONNECTED
+//
+// A client whose Meta is not connected still gets a monthly report, built
+// only from what can be seen from outside and what the agency did. Nothing
+// is scraped for it: it reads the posts and reports earlier runs stored for
+// the client, so it costs no Apify. What it cannot know (reach, visits,
+// saves, taps, audience) is said plainly in a box, never shown as zero, and
+// that box is the reason to connect.
+// ===========================================================================
+
+const PUBLIC_MONTH_MAX_POSTS = 600;
+
+function pmMedian(a) { const v = a.filter(x => typeof x === 'number' && Number.isFinite(x)).sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2); }
+/** Newest read of each post wins: the same post is stored once per run that saw it. */
+function pmDedupe(rows, key) { const seen = new Set(); return (rows || []).filter(r => { const k = r[key]; if (!k || seen.has(k)) return false; seen.add(k); return true; }); }
+
+async function pmFollowers(clientId, types, path, before) {
+    const { data } = await supabase.from('reports').select(`created_at, report_json`)
+        .eq('client_id', clientId).in('report_type', types).lt('created_at', before)
+        .order('created_at', { ascending: false }).limit(1);
+    const r = (data || [])[0];
+    const v = r ? path(r.report_json || {}) : null;
+    return typeof v === 'number' ? { value: v, asOf: String(r.created_at).slice(0, 10) } : null;
+}
+
+async function publicMonthData(client, month) {
+    const cur = monthBounds(month), prev = monthBounds(metaPrevMonth(month));
+    const handle = String(client.ig_handle || '').replace(/^@/, '').toLowerCase() || null;
+
+    // The client's Facebook Page is the one its latest Page report was about.
+    const { data: fbRep } = await supabase.from('reports').select('report_json').eq('client_id', client.id)
+        .eq('report_type', 'fb_page').order('created_at', { ascending: false }).limit(1);
+    const pageId = ((fbRep || [])[0] && fbRep[0].report_json && fbRep[0].report_json.target && fbRep[0].report_json.target.pageId) || null;
+
+    const ig = async b => !handle ? [] : pmDedupe((await supabase.from('posts')
+        .select('shortcode, post_url, post_type, caption, likes, comments, views, thumbnail_url, posted_at, performance_index, scraped_at, handle')
+        .eq('client_id', client.id).eq('platform', 'instagram').eq('handle', handle)
+        .gte('posted_at', b.from).lt('posted_at', b.to).order('scraped_at', { ascending: false }).limit(PUBLIC_MONTH_MAX_POSTS)).data, 'shortcode');
+    const fb = async b => !pageId ? [] : pmDedupe((await supabase.from('fb_page_posts')
+        .select('post_id, post_url, media_type, content, reactions_total, comments, shares, views, posted_at, performance_index, scraped_at, page_id')
+        .eq('client_id', client.id).eq('page_id', pageId)
+        .gte('posted_at', b.from).lt('posted_at', b.to).order('scraped_at', { ascending: false }).limit(PUBLIC_MONTH_MAX_POSTS)).data, 'post_id');
+
+    const [igNow, igPrev, fbNow, fbPrev, igEnd, igStart, fbEnd, fbStart] = await Promise.all([
+        ig(cur), ig(prev), fb(cur), fb(prev),
+        pmFollowers(client.id, ['ig_report', 'deep_audit'], j => j.main && j.main.followers, cur.to),
+        pmFollowers(client.id, ['ig_report', 'deep_audit'], j => j.main && j.main.followers, cur.from),
+        pmFollowers(client.id, ['fb_page'], j => j.target && j.target.followers, cur.to),
+        pmFollowers(client.id, ['fb_page'], j => j.target && j.target.followers, cur.from)
+    ]);
+
+    const igEng = p => (p.likes || 0) + (p.comments || 0);
+    const fbEng = p => (p.reactions_total || 0) + (p.comments || 0) + (p.shares || 0);
+    const kinds = (rows, kindOf, eng) => {
+        const g = {};
+        for (const p of rows) { const k = kindOf(p); (g[k] = g[k] || []).push(eng(p)); }
+        const all = pmMedian(rows.map(eng)) || 1;
+        return Object.entries(g).map(([k, v]) => ({ kind: k, posts: v.length, median: pmMedian(v), vsTypical: +((pmMedian(v) || 0) / all).toFixed(2) })).sort((a, b) => b.posts - a.posts);
+    };
+    const igKind = p => ({ Reel: 'Reel', Video: 'Reel', Sidecar: 'Carousel', Image: 'Photo' }[p.post_type] || 'Post');
+    const fbKind = p => String(p.media_type || 'post').replace(/^\w/, c => c.toUpperCase());
+
+    const igTop = [...igNow].sort((a, b) => igEng(b) - igEng(a)).slice(0, 3);
+    await Promise.all(igTop.map(async p => { p.image = await storeMediaImage(p.thumbnail_url, `pm/${client.id}/${month}-${String(p.shortcode).replace(/[^a-z0-9_-]/gi, '')}`); }));
+    const fbTop = [...fbNow].sort((a, b) => fbEng(b) - fbEng(a)).slice(0, 2);
+
+    // Local demand read in the month's Facebook group reports.
+    const { data: rooms } = await supabase.from('reports').select('report_type, report_json').eq('client_id', client.id)
+        .in('report_type', ['fb_community', 'fb_group']).gte('created_at', cur.from).lt('created_at', cur.to).limit(10);
+    let requests = 0, groups = 0;
+    for (const r of rooms || []) {
+        const j = r.report_json || {};
+        if (j.benchmark && typeof j.benchmark.totalDemand === 'number') { requests += j.benchmark.totalDemand; groups += j.benchmark.rooms || (j.groups || []).length; }
+        else if (j.group) { requests += j.group.demandSignals || 0; groups += 1; }
+    }
+
+    const reel = rows => pmMedian(rows.filter(p => igKind(p) === 'Reel').map(p => p.views).filter(v => v > 0));
+    return {
+        month, monthLabel: metaMonthLabel(month), prevMonthLabel: metaMonthLabel(metaPrevMonth(month)),
+        client: { name: client.brand || client.name, igHandle: handle, fbPage: pageId ? (fbRep[0].report_json.target.name || null) : null },
+        ig: handle ? {
+            posts: igNow.length, prevPosts: igPrev.length,
+            engagement: igNow.reduce((s, p) => s + igEng(p), 0), prevEngagement: igPrev.reduce((s, p) => s + igEng(p), 0),
+            reelViews: reel(igNow), prevReelViews: reel(igPrev),
+            followers: igEnd, followersStart: igStart,
+            formats: kinds(igNow, igKind, igEng),
+            top: igTop.map(p => ({ kind: igKind(p), caption: oneLine(p.caption, 120) || null, likes: p.likes, comments: p.comments, views: p.views || null, date: String(p.posted_at).slice(0, 10), link: /^https:\/\/(www\.)?instagram\.com\//.test(String(p.post_url || '')) ? p.post_url : null, image: p.image || null }))
+        } : null,
+        fb: pageId ? {
+            posts: fbNow.length, prevPosts: fbPrev.length,
+            engagement: fbNow.reduce((s, p) => s + fbEng(p), 0), prevEngagement: fbPrev.reduce((s, p) => s + fbEng(p), 0),
+            followers: fbEnd, followersStart: fbStart,
+            formats: kinds(fbNow, fbKind, fbEng),
+            top: fbTop.map(p => ({ kind: fbKind(p), text: oneLine(p.content, 240) || null, reactions: p.reactions_total, comments: p.comments, shares: p.shares, date: String(p.posted_at).slice(0, 10), link: /^https:\/\/(www\.|m\.)?facebook\.com\//.test(String(p.post_url || '')) ? p.post_url : null }))
+        } : null,
+        demand: groups ? { requests, groups } : null
+    };
+}
+
+registerWorker('public_monthly', (userId, input, jobId) => async (progress) => {
+    const { data: client } = await supabase.from('clients').select('id, name, brand, ig_handle').eq('id', input.clientId).maybeSingle();
+    if (!client) throw new Error('That client no longer exists.');
+    await progress(15, `Reading ${metaMonthLabel(input.month)} from the stored posts`);
+    const data = await publicMonthData(client, input.month);
+    if (!(data.ig && data.ig.posts) && !(data.fb && data.fb.posts)) {
+        throw new Error(`No posts from ${data.monthLabel} are stored for ${client.name}. Run an Instagram audit or a Facebook Page report that covers the month first.`);
+    }
+    await progress(70, 'Adding the work we did and where they stand');
+    const createdAt = new Date().toISOString();
+    const ctx = await monthlyContext({ client_id: client.id, report_type: 'public_monthly', report_json: { month: input.month }, created_at: createdAt });
+    const { data: plan } = await supabase.from('client_tasks').select('title, assigned_to_client, due_date')
+        .eq('client_id', client.id).eq('visible_to_client', true).neq('status', 'done').order('due_date', { ascending: true }).limit(5)
+        .then(r => r, () => ({ data: [] }));
+    const payload = { ...data, context: ctx, plan: (plan || []).map(t => ({ title: oneLine(t.title, 200), who: t.assigned_to_client ? 'You' : 'Our team', due: t.due_date || null })), generatedAt: createdAt };
+    await progress(92, 'Saving');
+    const { data: saved } = await supabase.from('reports').insert([{
+        user_id: userId, client_id: client.id,
+        platform: data.ig ? 'instagram' : 'facebook',
+        report_type: 'public_monthly',
+        target_handle: data.client.igHandle || data.client.fbPage || client.name,
+        posts_analyzed: (data.ig ? data.ig.posts : 0) + (data.fb ? data.fb.posts : 0),
+        snapshot_date: `${input.month}-01`,
+        credits_estimate: 0,
+        report_json: payload
+    }]).select('id').maybeSingle();
+    return { reportId: saved?.id || null, reportRef: saved?.id || null, month: input.month };
+});
+
+/** The public-numbers monthly as a document. */
+function publicMonthlyDoc(row) {
+    const j = row.report_json || {};
+    if (!j.month) return null;
+    const ig = j.ig, fb = j.fb, ctx = j.context || {};
+    const m = monthShort(j.monthLabel), pm = monthShort(j.prevMonthLabel);
+    const chg = (now, before) => { const a = docNum(now), b = docNum(before); if (a === null || b === null) return '—'; const d = a - b; const pc = b ? Math.abs(d / b * 100) : 0; const p = b ? ` (${d >= 0 ? '+' : '−'}${pc < 1 ? pc.toFixed(1) : Math.round(pc)}%)` : ''; return `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(Math.round(d)).toLocaleString('en-US')}${p}`; };
+    const gained = f => f && f.followers && f.followersStart ? f.followers.value - f.followersStart.value : null;
+    const posts = (ig ? ig.posts : 0) + (fb ? fb.posts : 0), prevPosts = (ig ? ig.prevPosts : 0) + (fb ? fb.prevPosts : 0);
+    const eng = (ig ? ig.engagement : 0) + (fb ? fb.engagement : 0), prevEng = (ig ? ig.prevEngagement : 0) + (fb ? fb.prevEngagement : 0);
+    const st = ctx.standing;
+    const sections = [];
+
+    const verdict = `${j.client.name} published ${posts} post${posts === 1 ? '' : 's'} in ${m}${prevPosts ? `, ${posts >= prevPosts ? posts - prevPosts + ' more than' : prevPosts - posts + ' fewer than'} ${pm}` : ''}, and ${eng >= prevEng ? 'people reacted more' : 'people reacted less'}: ${docFmt(eng)} likes, comments and shares${prevEng ? `, against ${docFmt(prevEng)}` : ''}.`;
+    sections.push({ title: 'The month in brief', source: ['pub'], blocks: [
+        { type: 'kpis', items: [
+            ig && ig.followers ? { label: 'Instagram followers', value: docFmt(ig.followers.value), sub: gained(ig) !== null ? `${gained(ig) >= 0 ? '+' : ''}${docFmt(gained(ig))} over the month` : `as of ${docDay(ig.followers.asOf)}`, tone: gained(ig) > 0 ? 'good' : '' } : null,
+            fb && fb.followers ? { label: 'Facebook followers', value: docFmt(fb.followers.value), sub: gained(fb) !== null ? `${gained(fb) >= 0 ? '+' : ''}${docFmt(gained(fb))} over the month` : `as of ${docDay(fb.followers.asOf)}`, tone: gained(fb) > 0 ? 'good' : '' } : null,
+            { label: 'Posts published', value: String(posts), sub: prevPosts ? `${prevPosts} in ${pm}` : '' },
+            { label: 'Likes, comments and shares', value: docFmt(eng), sub: prevEng ? chg(eng, prevEng) + ` on ${pm}` : '', tone: eng > prevEng ? 'good' : eng < prevEng ? 'watch' : '' },
+            ig && ig.reelViews ? { label: 'Views per Reel', value: docFmt(ig.reelViews), sub: ig.prevReelViews ? `median, ${docFmt(ig.prevReelViews)} in ${pm}` : 'median' } : null
+        ].filter(Boolean).slice(0, 4) },
+        { type: 'verdict', text: verdict }
+    ] });
+
+    const rows = [
+        ig && ig.followers ? ['Instagram followers (month end)', ig.followersStart ? docFmt(ig.followersStart.value) : '—', docFmt(ig.followers.value), ig.followersStart ? chg(ig.followers.value, ig.followersStart.value) : '—'] : null,
+        fb && fb.followers ? ['Facebook followers (month end)', fb.followersStart ? docFmt(fb.followersStart.value) : '—', docFmt(fb.followers.value), fb.followersStart ? chg(fb.followers.value, fb.followersStart.value) : '—'] : null,
+        ig ? ['Instagram posts', String(ig.prevPosts), String(ig.posts), chg(ig.posts, ig.prevPosts)] : null,
+        fb ? ['Facebook posts', String(fb.prevPosts), String(fb.posts), chg(fb.posts, fb.prevPosts)] : null,
+        ig ? ['Instagram likes and comments', docFmt(ig.prevEngagement), docFmt(ig.engagement), chg(ig.engagement, ig.prevEngagement)] : null,
+        fb ? ['Facebook reactions, comments and shares', docFmt(fb.prevEngagement), docFmt(fb.engagement), chg(fb.engagement, fb.prevEngagement)] : null,
+        ig && (ig.reelViews || ig.prevReelViews) ? ['Median views per Reel', docFmt(ig.prevReelViews), docFmt(ig.reelViews), chg(ig.reelViews, ig.prevReelViews)] : null
+    ].filter(Boolean);
+    sections.push({ title: `${m} against ${pm}`, lead: 'The public numbers, month against month. Post counts are for posts published in each month, as last read.', source: ['pub'], blocks: [
+        { type: 'table', cols: [{ label: 'Measure' }, { label: pm, num: true }, { label: m, num: true }, { label: 'Change', num: true }], rows },
+        { type: 'missing', title: 'Not in this report yet: reach, profile visits, website taps, saves and audience', text: 'These are visible only to the account owner. Connect Facebook and Instagram once, in about two minutes, and next month’s report shows how many people saw each post, visited the profile and tapped through to book.' }
+    ] });
+
+    const cards = [
+        ...(ig ? ig.top : []).map(p => ({ kind: p.kind, title: p.caption || 'No caption', meta: [p.likes != null ? `${docFmt(p.likes)} likes` : null, p.comments != null ? `${docFmt(p.comments)} comments` : null, p.views ? `${docFmt(p.views)} views` : null].filter(Boolean).join(' · '), date: docDay(p.date), image: p.image, link: p.link, by: 'Instagram' }))
+    ];
+    const quotes = (fb ? fb.top : []).map(p => ({ tag: `Facebook · ${p.kind} · ${docDay(p.date)}`, text: p.text || '(no text)', meta: `${docFmt(p.reactions)} reactions · ${docFmt(p.comments)} comments · ${docFmt(p.shares)} shares`, link: p.link }));
+    if (cards.length || quotes.length) sections.push({ title: 'Top-performing content', lead: 'The posts people reacted to most this month.', source: ['pub'], blocks: [
+        cards.length ? { type: 'posts', items: cards } : null,
+        quotes.length ? { type: 'quotes', items: quotes } : null
+    ] });
+
+    const fmtBars = (f, title) => f && f.formats && f.formats.length > 1 ? { type: 'bars', title, unit: 'x', rows: f.formats.map(x => ({ label: `${x.kind} · ${x.posts}`, value: x.vsTypical, tone: x.vsTypical >= 1.2 ? 'good' : x.vsTypical < 0.8 ? 'watch' : 'gold' })) } : null;
+    const fb1 = fmtBars(ig, 'Instagram, by format, against the typical post'), fb2 = fmtBars(fb, 'Facebook, by format, against the typical post');
+    if (fb1 || fb2) sections.push({ title: 'What you post', source: ['pub'], blocks: [{ type: 'row', blocks: [fb1, fb2].filter(Boolean) }] });
+
+    if (st || j.demand) sections.push({ title: 'Against local rivals, and local demand', source: ['pub'], blocks: [
+        { type: 'row', blocks: [
+            st ? { type: 'points', title: `From the ${st.title} on ${docDay(st.date)}`, items: [{ title: st.verdict, text: st.gap || '' }] } : null,
+            j.demand ? { type: 'points', title: 'Local Facebook groups this month', items: [{ title: `${docFmt(j.demand.requests)} people asked for what ${j.client.name} sells`, text: `across ${j.demand.groups} local group${j.demand.groups === 1 ? '' : 's'}.` }] } : null
+        ].filter(Boolean) }
+    ] });
+
+    const work = ctx.work || {}, leads = ctx.leads;
+    const done = [...(work.done || []).map(t => ({ title: t.title, text: `done ${docDay(t.date)}` })), ...(work.filed || []).map(f => ({ title: f.title, text: `delivered ${docDay(f.date)}` })), ...(leads && leads.thisMonth ? [{ title: `${docFmt(leads.thisMonth)} new leads found`, text: `${docFmt(leads.toDate)} to date` }] : [])];
+    if (done.length) sections.push({ title: `What we did in ${m}`, source: ['ours'], blocks: [{ type: 'points', tone: 'good', items: done.slice(0, 8) }] });
+
+    const plan = [{ first: true, title: 'Connect Facebook and Instagram to EdgeLead, so we can report reach, visits and bookings', who: 'You · 2 minutes' }, ...(j.plan || []).map(t => ({ title: t.title, who: t.who }))];
+    sections.push({ title: 'Plan for next month', source: ['ours'], blocks: [
+        { type: 'table', cols: [{ label: 'What' }, { label: 'Who' }], rows: plan.map(p => [p.first ? { text: p.title, tone: 'good' } : p.title, p.who]) }
+    ] });
+
+    return docFinish({
+        type: 'public_monthly',
+        cover: { kind: `Monthly report · ${j.monthLabel}`, title: j.client.name,
+            sub: `${[j.client.igHandle ? `Instagram @${j.client.igHandle}` : null, j.client.fbPage ? `Facebook ${j.client.fbPage}` : null].filter(Boolean).join(' and ')} · covers ${monthCovers(j.month)} · public numbers.`,
+            receipt: [
+                [String(posts), 'posts published'], [docFmt(eng), 'likes, comments, shares'],
+                [ig && gained(ig) !== null ? `${gained(ig) >= 0 ? '+' : ''}${docFmt(gained(ig))}` : (ig && ig.followers ? docFmt(ig.followers.value) : '—'), ig && gained(ig) !== null ? 'Instagram followers' : 'followers'],
+                [st && st.rank ? ordinal(st.rank) : '—', st && st.of ? `of ${st.of} local rivals` : 'against rivals']
+            ],
+            builtAt: j.generatedAt || row.created_at },
+        sections,
+        about: [
+            'Every number here is public: follower counts from the last reads before and after the month, and the likes, comments, shares and views Instagram and Facebook show on each post, as last read by our audits. Nothing new was scraped for this report.',
+            'Reach, visits, saves, taps and audience are the owner’s own numbers and are not guessed. Once Meta is connected, the monthly report switches to the full version.'
+        ]
+    });
+}
+
+/**
+ * Build the public-numbers monthly report for a client (phase 38). Staff
+ * with edit access; a finished month; costs nothing, but runs as a job like
+ * everything else (rule 4).
+ */
+// No spend limiter: it reads stored data and spends no credit; the job slot still caps it.
+app.post('/api/reports/public-monthly', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.body?.clientId, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const month = MONTH_RE.test(String(req.body?.month || '')) ? String(req.body.month) : metaDefaultMonth();
+        if (month >= new Date().toISOString().slice(0, 7)) return res.status(400).json({ error: 'That month has not finished yet. Pick a completed month.' });
+        await assertJobSlot(ctx.user.id);
+        const job = await createJob(ctx.user.id, 'public_monthly', 'report', { clientId: c.id, month }, 0);
+        runJob(job.id, JOB_WORKERS['public_monthly'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ success: true, jobId: job.id, month, estimatedUsd: 0 });
+    } catch (err) { sendErr(res, err); }
+});
 
 
 // ===========================================================================
@@ -17031,7 +17336,8 @@ const CLIENT_REPORT_TITLES = {
     fb_group:     'Community report',
     content_plan: 'Content plan',
     meta_owned:   'Owner report',
-    meta_monthly: 'Monthly report'
+    meta_monthly: 'Monthly report',
+    public_monthly: 'Monthly report'
 };
 
 app.get('/api/client/reports', async (req, res) => {
@@ -17950,5 +18256,5 @@ module.exports = {
     // phase 35
     assistantScope, assistantAnswer,
     // phase 36
-    reportDoc, igDoc, ciDoc, fbDoc, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
+    reportDoc, igDoc, ciDoc, fbDoc, publicMonthlyDoc, publicMonthData, monthPlatforms, monthTrends, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
 };
