@@ -308,6 +308,11 @@ console.log('\npages: shell, styles and auth on every one');
     // so a person can read them without an account. They still must parse
     // and still must be reachable.
     const STATIC = new Set(['privacy.html', 'terms.html', 'data-deletion.html']);
+    // Pages that come before there is a session — a new account, a password
+    // chosen from an invite link — cannot boot through EL.init, which sends
+    // anyone without a session to the login page. signup.html used to pass
+    // this check only because a comment mentioned EL.init.
+    const PRE_SESSION = new Set(['signup.html', 'welcome.html']);
     const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
 
     for (const f of PAGES) {
@@ -315,7 +320,7 @@ console.log('\npages: shell, styles and auth on every one');
         if (!/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
         if (!STATIC.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
         if (!STATIC.has(f) && !/supabase-js/.test(src)) noSupabase.push(f);
-        if (!PUBLIC.has(f) && !STATIC.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
+        if (!PUBLIC.has(f) && !STATIC.has(f) && !PRE_SESSION.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
         for (const m of src.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
             try { new Function(m[1]); } catch (e) { badParse.push(`${f}: ${e.message}`); }
         }

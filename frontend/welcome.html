@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Choose your password — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <meta name="theme-color" content="#06140f">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+    <style>
+    /* welcome.html — page-specific only. Shared rules live in app.css. */
+    body { padding: 60px 20px; max-width: 520px; }
+    .wl-logo { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 26px;
+        background: var(--accent-glow); -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; }
+    .wl-card label { display: block; font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 7px; }
+    .wl-card label:first-of-type { margin-top: 0; }
+    .wl-hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 6px; min-height: 15px; line-height: 1.4; }
+    .wl-hint.is-bad { color: var(--danger); }
+    .wl-hint.is-good { color: var(--success); }
+    .wl-hint.is-busy { color: var(--accent-solid); }
+    .wl-meter { height: 4px; border-radius: 999px; background: rgba(255,255,255,0.09); margin-top: 9px; overflow: hidden; }
+    .wl-meter i { display: block; height: 100%; width: 0; background: var(--danger); transition: width .18s, background .18s; }
+    .wl-meter.s2 i { background: var(--warn); }
+    .wl-meter.s3 i { background: var(--success); }
+    .wl-error { margin-top: 15px; color: var(--danger); font-size: 0.85rem; line-height: 1.5; min-height: 18px; }
+    .wl-foot { margin-top: 20px; font-size: 0.85rem; color: var(--text-muted); text-align: center; }
+    .wl-foot a { color: var(--accent-solid); text-decoration: none; font-weight: 600; }
+    .wl-who { color: var(--text-primary); font-weight: 700; word-break: break-all; }
+    </style>
+</head>
+<body>
+
+<div class="wl-logo">⚡ EDGELEAD</div>
+
+<section class="card wl-card" id="wl-checking">
+    <h2 class="card-title">One moment</h2>
+    <p class="card-subtitle">Checking your link…</p>
+</section>
+
+<section class="card wl-card hidden" id="wl-form">
+    <h2 class="card-title">Choose your password</h2>
+    <p class="card-subtitle">Your agency opened a portal for your business. Pick a password to finish, then sign in with <span class="wl-who" id="wl-email"></span> from now on.</p>
+
+    <label for="wl-pass">Password</label>
+    <input type="password" id="wl-pass" placeholder="••••••••••" autocomplete="new-password">
+    <div class="wl-meter" id="wl-meter"><i></i></div>
+    <div class="wl-hint" id="wl-pass-hint">At least 10 characters.</div>
+
+    <label for="wl-pass2">Confirm password</label>
+    <input type="password" id="wl-pass2" placeholder="••••••••••" autocomplete="new-password">
+    <div class="wl-hint" id="wl-pass2-hint"></div>
+
+    <button class="btn-primary" id="wl-go" style="margin-top:20px;">Save password and open my portal</button>
+    <div class="wl-error" id="wl-error"></div>
+</section>
+
+<section class="card wl-card hidden" id="wl-expired">
+    <h2 class="card-title">This link has expired</h2>
+    <p class="card-subtitle">Links like this work once and for a limited time. Ask your agency to send a new one, or sign in if you already chose a password.</p>
+    <div class="wl-foot"><a href="index.html">Go to sign in</a></div>
+</section>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    // This page comes before there is a password, like signup.html, so it
+    // cannot call EL.init() — that sends anyone without a session to the
+    // login page. The one-time link in the address signs the owner in just
+    // long enough to choose a password; header.js is here for EL.api() and
+    // EL.backendUrl(). (phase 32)
+    const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
+    const MIN_PASSWORD = 10;
+
+    const $ = id => document.getElementById(id);
+    const show = id => ['wl-checking', 'wl-form', 'wl-expired'].forEach(x => $(x).classList.toggle('hidden', x !== id));
+
+    // Read the hash before the client consumes it: an expired link comes back
+    // as #error_code=otp_expired rather than as tokens.
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const linkError = hash.get('error_code') || hash.get('error');
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    async function start() {
+        if (linkError) { show('wl-expired'); return; }
+        const { data } = await sb.auth.getSession();
+        const session = data && data.session;
+        if (!session) { show('wl-expired'); return; }
+        $('wl-email').textContent = (session.user && session.user.email) || 'your email';
+        // Drop the tokens from the address bar so they are not bookmarked or shared.
+        history.replaceState(null, '', window.location.pathname);
+        show('wl-form');
+        $('wl-pass').focus();
+    }
+
+    // ---- password feedback, the same rules as signup.html ------------------
+    let breachTimer = null;
+    let lastChecked = { value: null, ok: null };
+    function strength(pw) {
+        let s = 0;
+        if (pw.length >= MIN_PASSWORD) s++;
+        if (pw.length >= 14) s++;
+        if (/[^A-Za-z0-9]/.test(pw) || (/[A-Za-z]/.test(pw) && /[0-9]/.test(pw))) s++;
+        return Math.min(3, s);
+    }
+    function paintMeter(pw) {
+        const s = pw ? strength(pw) : 0;
+        const bar = $('wl-meter');
+        bar.className = 'wl-meter' + (s >= 3 ? ' s3' : s === 2 ? ' s2' : '');
+        bar.querySelector('i').style.width = (s / 3 * 100) + '%';
+    }
+    function setHint(el, text, cls) {
+        el.textContent = text;
+        el.className = 'wl-hint' + (cls ? ' ' + cls : '');
+    }
+    async function checkBreached(pw) {
+        if (pw === lastChecked.value) return lastChecked.ok;
+        setHint($('wl-pass-hint'), 'Checking this password…', 'is-busy');
+        try {
+            const r = await EL.api('/api/public/signup/password-check', { method: 'POST', body: { password: pw } });
+            lastChecked = { value: pw, ok: !!r.ok };
+            if (r.ok) setHint($('wl-pass-hint'), 'Looks good.', 'is-good');
+            else setHint($('wl-pass-hint'), r.error || 'Pick a different password.', 'is-bad');
+            return !!r.ok;
+        } catch {
+            // Advisory, and fails open, exactly as on signup.
+            lastChecked = { value: pw, ok: true };
+            setHint($('wl-pass-hint'), 'Could not check that password right now.', '');
+            return true;
+        }
+    }
+    $('wl-pass').addEventListener('input', () => {
+        const pw = $('wl-pass').value;
+        paintMeter(pw);
+        clearTimeout(breachTimer);
+        if (pw.length < MIN_PASSWORD) {
+            setHint($('wl-pass-hint'), `At least ${MIN_PASSWORD} characters.`, pw ? 'is-bad' : '');
+            return;
+        }
+        setHint($('wl-pass-hint'), 'Checking this password…', 'is-busy');
+        breachTimer = setTimeout(() => checkBreached(pw), 550);
+    });
+    $('wl-pass2').addEventListener('input', () => {
+        const a = $('wl-pass').value, b = $('wl-pass2').value;
+        if (!b) return setHint($('wl-pass2-hint'), '', '');
+        setHint($('wl-pass2-hint'), a === b ? 'Passwords match.' : 'Passwords do not match.', a === b ? 'is-good' : 'is-bad');
+    });
+
+    // ---- save ---------------------------------------------------------------
+    async function save() {
+        const btn = $('wl-go');
+        const pw = $('wl-pass').value, pw2 = $('wl-pass2').value;
+        $('wl-error').textContent = '';
+        if (pw.length < MIN_PASSWORD) { $('wl-error').textContent = `Your password needs at least ${MIN_PASSWORD} characters.`; return; }
+        if (pw !== pw2) { $('wl-error').textContent = 'The two passwords do not match.'; return; }
+        btn.disabled = true; btn.textContent = 'Checking…';
+        if (!(await checkBreached(pw))) {
+            btn.disabled = false; btn.textContent = 'Save password and open my portal';
+            $('wl-error').textContent = 'That password has appeared in a known data breach. Please pick another.';
+            return;
+        }
+        btn.textContent = 'Saving…';
+        try {
+            const { error } = await sb.auth.updateUser({ password: pw });
+            if (error) throw error;
+            // A business owner goes to their portal; anyone else to the workspace.
+            let dest = 'index.html';
+            try {
+                const { data } = await sb.auth.getSession();
+                const r = await fetch(EL.backendUrl() + '/api/me', { headers: { Authorization: 'Bearer ' + data.session.access_token } });
+                if (r.ok && (await r.json()).role === 'client') dest = 'client.html';
+            } catch { /* the workspace will route them */ }
+            window.location.href = dest;
+        } catch (err) {
+            const expired = /expired|invalid|session/i.test(err && err.message || '');
+            if (expired) { show('wl-expired'); return; }
+            $('wl-error').textContent = (err && err.message) || 'Could not save the password. Try again.';
+            btn.disabled = false; btn.textContent = 'Save password and open my portal';
+        }
+    }
+    $('wl-go').addEventListener('click', save);
+    $('wl-pass2').addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+
+    start();
+})();
+</script>
+</body>
+</html>

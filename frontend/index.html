@@ -224,6 +224,15 @@
 (function () {
     'use strict';
 
+    // A password link from an invite lands here when Supabase falls back to
+    // the site's front page. It belongs on the page that asks for a password,
+    // with its hash intact, and must leave before anything below reads the
+    // hash and signs in with it. (phase 32)
+    if (/(^#|&)(type=(recovery|invite)|error_code=otp_expired)/.test(window.location.hash)) {
+        window.location.replace('welcome.html' + window.location.hash);
+        return;
+    }
+
     const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
 
