@@ -86,7 +86,8 @@
     }
     @media (max-width: 560px) {
         .ll-table .col-where, .ll-table th.col-where,
-        .ll-table .col-found, .ll-table th.col-found { display: none; }
+        .ll-table .col-found, .ll-table th.col-found,
+        .ll-table .col-pipe, .ll-table th.col-pipe { display: none; }
     }
     </style>
 </head>
@@ -133,7 +134,12 @@
             <div><label for="f-location">Location</label><input type="text" id="f-location" list="dl-location" placeholder="any" autocomplete="off"><datalist id="dl-location"></datalist></div>
             <div><label for="f-min">Followers from</label><input type="number" id="f-min" placeholder="any" min="0"></div>
             <div><label for="f-max">Followers to</label><input type="number" id="f-max" placeholder="any" min="0"></div>
+            <div><label for="f-method">Found by</label><select id="f-method">
+                <option value="">Any method</option><option value="m4">A business’s tagged posts</option><option value="m3">Hashtag</option>
+                <option value="m3_1">Phrase search</option><option value="m1">Location page</option><option value="m6">Account search</option><option value="fb">Facebook search</option>
+            </select></div>
             <div><label for="f-sort">Sort</label><select id="f-sort">
+                <option value="fit">Best fit first</option>
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
                 <option value="followers">Most followers</option>
@@ -161,6 +167,9 @@
     </div>
 
     <div class="card">
+        <!-- Which list (phase 40). Every lead is sorted into influencer,
+             business, or needs a look; one run fills all of them. -->
+        <div class="ll-kinds" id="ll-kinds" role="tablist" aria-label="Which leads" hidden></div>
         <div class="ll-bar">
             <span class="ll-count" id="ll-count">Loading…</span>
             <span class="spacer"></span>
@@ -168,14 +177,27 @@
             <button class="btn-secondary" id="btn-export" type="button">Export CSV</button>
         </div>
         <div id="ll-body"><div class="ll-empty">Loading…</div></div>
+        <div class="ll-bulk" id="ll-bulk" hidden>
+            <span><b id="ll-bulk-n">0</b> selected</span>
+            <select id="ll-bulk-for" aria-label="Add them for"></select>
+            <button class="ws-btn is-gold is-sm" type="button" id="ll-bulk-add">Add to pipeline</button>
+            <span class="grow"></span>
+            <span class="ll-count">Mark as</span>
+            <button class="ld-pick" type="button" data-bulk-kind="influencer">Influencer</button>
+            <button class="ld-pick" type="button" data-bulk-kind="business">Business</button>
+            <button class="ld-pick" type="button" data-bulk-kind="personal">Ordinary</button>
+            <button class="ld-pick is-quiet" type="button" id="ll-bulk-clear">Clear</button>
+        </div>
         <div class="ll-pager" id="ll-pager"></div>
         <p class="ll-note" id="ll-foot"></p>
+        <p class="ll-note" id="ll-sortnote"></p>
     </div>
 
 </div>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
+<script src="leads-ui.js"></script>
 <script>
 (function () {
     'use strict';
@@ -186,6 +208,12 @@
     const flags = { reachable: false, has_email: false, enriched: false, business: false, verified: false };
     let scope = 'agency';         // 'agency' | 'mine' | 'client'
     let debounce = null;
+    // Which list (phase 40): '' is everything; the tabs appear once the
+    // server reports counts by kind, i.e. once the phase-40 SQL has run.
+    let kind = new URLSearchParams(location.search).get('kind') || null;
+    let kindCounts = null;
+    const selected = new Map();   // lead id -> row
+    let pageRows = [];
 
     const n = v => (v === null || v === undefined || v === '' ? '—' : Number(v).toLocaleString());
 
@@ -217,12 +245,13 @@
             setScope(b.dataset.scope);
         }));
 
-        loadSummary();
+        // The counts decide which list opens, so they come first.
+        await loadSummary();
         load();
 
         ['f-q', 'f-industry', 'f-location'].forEach(id =>
             $(id).addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => { page = 1; load(); }, 350); }));
-        ['f-platform', 'f-min', 'f-max', 'f-sort'].forEach(id =>
+        ['f-platform', 'f-min', 'f-max', 'f-sort', 'f-method'].forEach(id =>
             $(id).addEventListener('change', () => { page = 1; load(); }));
 
         // Only the filter toggles. The scope switch shares the class for its
@@ -237,7 +266,7 @@
 
         $('btn-reset').addEventListener('click', () => {
             ['f-q', 'f-industry', 'f-location', 'f-min', 'f-max'].forEach(id => { $(id).value = ''; });
-            $('f-platform').value = ''; $('f-sort').value = 'newest';
+            $('f-platform').value = ''; $('f-method').value = ''; $('f-sort').value = kindCounts ? 'fit' : 'newest';
             Object.keys(flags).forEach(k => { flags[k] = false; });
             document.querySelectorAll('.ll-tog').forEach(b => b.classList.remove('is-on'));
             page = 1; load();
@@ -245,7 +274,88 @@
 
         $('btn-export').addEventListener('click', exportCsv);
         $('fb-go').addEventListener('click', findFbPages);
+        wireBulk();
     });
+
+    // ---- the lists (phase 40) ----------------------------------------------
+    const KIND_TABS = [['influencer', 'Influencers'], ['business', 'Businesses'], ['check', 'Needs a look'], ['', 'All']];
+    function drawKinds() {
+        const host = $('ll-kinds');
+        if (!kindCounts) { host.hidden = true; return; }
+        const n = k => k === 'check' ? (kindCounts.unsure || 0) + (kindCounts.personal || 0)
+            : k === '' ? Object.values(kindCounts).reduce((a, b) => a + b, 0) : (kindCounts[k] || 0);
+        if (kind === null) kind = n('influencer') ? 'influencer' : (n('business') ? 'business' : '');
+        host.hidden = false;
+        host.innerHTML = KIND_TABS.map(([k, label]) => `<button class="ll-kind${k === kind ? ' is-on' : ''}" type="button" role="tab" aria-selected="${k === kind}" data-k="${k}">${label} <b>${n(k).toLocaleString()}</b></button>`).join('');
+        host.querySelectorAll('[data-k]').forEach(b => b.addEventListener('click', () => { kind = b.dataset.k; drawKinds(); page = 1; load(); }));
+    }
+
+    function wireBulk() {
+        $('ll-bulk-clear').addEventListener('click', () => { selected.clear(); render(pageRows); });
+        $('ll-bulk-add').addEventListener('click', async () => {
+            const btn = $('ll-bulk-add'); btn.disabled = true;
+            try {
+                const r = await EL.api('/api/leads/pipeline', { method: 'POST', body: { leadIds: [...selected.keys()], clientId: $('ll-bulk-for').value || null } });
+                const a = (r.added || []).length, al = (r.already || []).length, sk = (r.skipped || []).length;
+                EL.toast(`${a} added${al ? `, ${al} already there` : ''}${sk ? `, ${sk} need marking as influencer or business first` : ''}.`, a ? 'ok' : 'bad');
+                selected.clear(); load();
+            } catch (err) { EL.toast(err.message, 'bad'); }
+            btn.disabled = false;
+        });
+        document.querySelectorAll('[data-bulk-kind]').forEach(b => b.addEventListener('click', async () => {
+            const k = b.dataset.bulkKind, ids = [...selected.keys()];
+            b.disabled = true;
+            let done = 0;
+            for (const id of ids) {
+                try { await EL.api(`/api/leads/${encodeURIComponent(id)}/kind`, { method: 'PATCH', body: { kind: k } }); done++; } catch { /* reported below */ }
+            }
+            b.disabled = false;
+            EL.toast(`${done} of ${ids.length} marked as ${LeadUI.KIND_NAME[k].toLowerCase()}.`, done ? 'ok' : 'bad');
+            selected.clear(); loadSummary(); load();
+        }));
+    }
+    async function fillBulkFor() {
+        const sel = $('ll-bulk-for');
+        if (sel.dataset.filled) return;
+        let list = [];
+        try { list = (await EL.clients()).filter(c => !c.archived && c.access !== 'viewer'); } catch { /* none */ }
+        const cur = EL.currentClient && EL.currentClient();
+        sel.innerHTML = `<option value="">Our agency (businesses we pitch)</option>` + list.map(c => `<option value="${esc(c.id)}" ${cur && cur.id === c.id ? 'selected' : ''}>For ${esc(c.brand || c.name)}</option>`).join('');
+        sel.dataset.filled = '1';
+    }
+    function drawBulk() {
+        const n = selected.size;
+        $('ll-bulk').hidden = !n;
+        $('ll-bulk-n').textContent = n;
+        if (n) fillBulkFor();
+    }
+
+    async function sortNote() {
+        const host = $('ll-sortnote');
+        if (!kindCounts) { host.textContent = ''; return; }
+        const bits = [];
+        try {
+            const a = await EL.api('/api/leads/accuracy');
+            if (a.labeled) bits.push(`Your team has checked ${a.labeled.toLocaleString()} lead${a.labeled === 1 ? '' : 's'}; the automatic sorting agreed on ${a.agree} (${a.agreement}%).${a.note ? ' ' + a.note : ''}`);
+            else bits.push('Open a lead and answer “Is this right?” to check the sorting. After about 50 answers this line says how accurate it is.');
+        } catch { /* optional */ }
+        host.innerHTML = esc(bits.join(' '));
+        if (EL.me && EL.me.role === 'admin') {
+            const b = document.createElement('button');
+            b.className = 'ld-pick is-quiet'; b.type = 'button'; b.textContent = 'Sort every lead again';
+            b.title = 'Re-reads every lead with the current rules. Free: no Apify, no AI.';
+            b.addEventListener('click', async () => {
+                b.disabled = true; b.textContent = 'Sorting…';
+                try {
+                    const { job } = await EL.runJob('/api/leads/reclassify', {}, { onProgress: j => { b.textContent = `Sorting… ${j.progress || 0}%`; } });
+                    if (job && job.status === 'done') { EL.toast(`Sorted ${Number((job.result || {}).sorted || 0).toLocaleString()} leads.`); loadSummary(); load(); }
+                } catch (err) { if (!err.handled) EL.toast(err.message, 'bad'); }
+                b.disabled = false; b.textContent = 'Sort every lead again';
+            });
+            host.appendChild(document.createTextNode(' '));
+            host.appendChild(b);
+        }
+    }
 
     /**
      * Start a Facebook Page search and, when it lands, re-read the list so
@@ -303,6 +413,8 @@
         put('min_followers', $('f-min').value);
         put('max_followers', $('f-max').value);
         put('sort', $('f-sort').value);
+        put('method', $('f-method').value);
+        if (kind && kindCounts) p.set('kind', kind);
         for (const [k, on] of Object.entries(flags)) if (on) p.set(k, '1');
         for (const [k, v] of Object.entries(extra)) put(k, v);
         return p;
@@ -319,6 +431,11 @@
         const tile = (k, v, sub) => `<div class="ll-stat"><div class="k">${k}</div>
             <div class="v">${n(v)}</div><div class="s">${sub}</div></div>`;
         const pc = (a, b) => (b ? Math.round(a / b * 100) + '% of all' : '—');
+
+        kindCounts = s.byKind || null;
+        drawKinds();
+        sortNote();
+        if (!kindCounts && $('f-sort').value === 'fit') $('f-sort').value = 'newest';
 
         $('ll-stats').innerHTML =
             tile('Total', s.total, 'leads collected') +
@@ -377,11 +494,13 @@
      */
     function hasFilters() {
         if (Object.values(flags).some(Boolean)) return true;
-        return ['f-q', 'f-industry', 'f-location', 'f-min', 'f-max', 'f-platform']
+        return ['f-q', 'f-industry', 'f-location', 'f-min', 'f-max', 'f-platform', 'f-method']
             .some(id => String($(id).value || '').trim() !== '');
     }
 
     function render(rows) {
+        pageRows = rows;
+        drawBulk();
         const filtered = hasFilters();
         const who = scope === 'client' && $('ll-count').dataset.client ? ` for ${esc($('ll-count').dataset.client)}` : '';
         const tail = filtered ? ' match' : (scope === 'client' ? '' : (scope === 'mine' ? ' of yours' : ' collected by everyone here'));
@@ -402,9 +521,12 @@
             return;
         }
 
-        $('ll-body').innerHTML = `<table class="ll-table">
+        $('ll-body').innerHTML = `<div class="ll-scroll"><table class="ll-table">
             <thead><tr>
+                <th><input type="checkbox" class="ll-sel" id="ll-all" aria-label="Select every lead on this page"></th>
                 <th>Who</th>
+                ${kindCounts ? '<th class="col-where">Why</th>' : ''}
+                ${kindCounts ? '<th class="col-pipe">Pipeline</th>' : ''}
                 <th class="col-where">Filed under</th>
                 <th>Contact</th>
                 <th class="col-found">Found by</th>
@@ -421,23 +543,43 @@
                     r.whatsapp && r.whatsapp !== r.phone ? `<span>wa ${esc(r.whatsapp)}</span>` : '',
                     r.website ? `<span>${esc(r.website)}</span>` : ''
                 ].filter(Boolean).join('');
+                const why = (r.kind_reasons || [])[0];
+                const pipes = (r.pipeline || []).map(p => `<span>${esc(p.client || 'Agency')} · ${esc(p.stageName)}</span>`).join('');
                 return `<tr>
+                    <td><input type="checkbox" class="ll-sel" data-sel="${esc(r.id)}" ${selected.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.username || '')}"></td>
                     <td class="ll-name">
                         <span class="ll-tag ${plat}">${plat === 'fb' ? 'FB' : 'IG'}</span>
-                        <a href="${EL.safeUrl(url)}" target="_blank" rel="noopener noreferrer">${esc(r.username || '—')}</a>
+                        ${kindCounts ? `<button class="ll-open" type="button" data-open="${esc(r.id)}">${esc(r.username || '—')}</button>` : `<a href="${EL.safeUrl(url)}" target="_blank" rel="noopener noreferrer">${esc(r.username || '—')}</a>`}
                         ${r.is_verified ? '<span class="ll-tag">verified</span>' : ''}
                         ${r.full_name ? `<small>${esc(r.full_name)}</small>` : ''}
+                        ${kindCounts ? `<small>${LeadUI.kindChip(r.kind_now || r.kind_label || r.lead_kind || 'unsure')} ${LeadUI.fitChip(r.fit_score)} <a href="${EL.safeUrl(url)}" target="_blank" rel="noopener noreferrer">profile</a></small>` : ''}
                     </td>
+                    ${kindCounts ? `<td class="col-where ll-why">${why ? esc(why.text) : '<span class="ll-none">—</span>'}</td>` : ''}
+                    ${kindCounts ? `<td class="col-pipe"><div class="ll-pipe">${pipes || '<span class="ll-none">—</span>'}</div></td>` : ''}
                     <td class="col-where ll-contact">${[esc(r.industry || r.category || ''), esc(r.location || r.city || '')].filter(Boolean).join('<br>') || '<span class="ll-none">—</span>'}</td>
                     <td class="ll-contact">${contact || '<span class="ll-none">no contact found</span>'}</td>
                     <td class="col-found ll-contact">${finder(r)}</td>
                     <td class="num col-scale">${n(r.followers_count)}</td>
                     <td class="num col-scale">${r.engagement_rate != null ? Number(r.engagement_rate).toFixed(1) + '%' : '—'}</td>
                 </tr>`;
-            }).join('')}</tbody></table>`;
+            }).join('')}</tbody></table></div>`;
 
         renderPager();
-        $('ll-foot').textContent = `Showing ${rows.length} of ${n(total)}. Contact details are the ones these accounts published publicly.`;
+        $('ll-foot').textContent = `Showing ${rows.length} of ${n(total)}. Contact details are the ones these accounts published publicly.`
+            + (kindCounts ? ' Open a lead to see why it was sorted this way, correct it, or add it to a pipeline.' : '');
+        $('ll-body').querySelectorAll('[data-sel]').forEach(c => c.addEventListener('change', () => {
+            const row = rows.find(x => x.id === c.dataset.sel);
+            if (c.checked) selected.set(c.dataset.sel, row); else selected.delete(c.dataset.sel);
+            drawBulk();
+        }));
+        const all = $('ll-all');
+        if (all) all.addEventListener('change', () => {
+            rows.forEach(r => { if (all.checked) selected.set(r.id, r); else selected.delete(r.id); });
+            $('ll-body').querySelectorAll('[data-sel]').forEach(c => { c.checked = all.checked; });
+            drawBulk();
+        });
+        $('ll-body').querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () =>
+            LeadUI.openLead(b.dataset.open, { onChange: () => { loadSummary(); load(); } })));
     }
 
     /** Who found it — their name, else the email's local part; “+1” when others found it too. */

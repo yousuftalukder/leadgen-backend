@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Pipeline — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+    <div class="card">
+        <h2 class="card-title">Pipeline</h2>
+        <p class="card-subtitle">Every lead someone is working, by stage. Influencers are worked for a client brand;
+            businesses are prospects for the agency. Open a card to move it, hand it over, set a follow-up,
+            write a first message or keep notes.</p>
+        <div class="ll-kinds" id="pl-kinds" role="tablist" aria-label="Which pipeline">
+            <button class="ll-kind is-on" type="button" role="tab" aria-selected="true" data-k="influencer">Influencers <b id="pl-n-influencer">·</b></button>
+            <button class="ll-kind" type="button" role="tab" aria-selected="false" data-k="business">Businesses <b id="pl-n-business">·</b></button>
+        </div>
+        <div class="pl-top">
+            <div><label for="pl-for">For</label><select id="pl-for"><option value="">Every brand and the agency</option><option value="agency">The agency’s own prospects</option></select></div>
+            <div><label for="pl-who">Whose</label><select id="pl-who"><option value="">Everyone’s</option><option value="me">Mine</option></select></div>
+            <div class="ll-toggles" style="margin-top:0">
+                <button class="ll-tog" type="button" id="pl-due" aria-pressed="false">Follow-ups due</button>
+                <button class="ll-tog" type="button" id="pl-closed" aria-pressed="false">Show finished</button>
+            </div>
+        </div>
+        <p class="pl-note" id="pl-note"></p>
+    </div>
+
+    <div class="card">
+        <div id="pl-board"><div class="pl-empty">Loading…</div></div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="leads-ui.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    let esc = v => String(v ?? '');
+    const qs = new URLSearchParams(location.search);
+    let kind = qs.get('kind') === 'business' ? 'business' : 'influencer';
+    let due = qs.get('due') === 'now', closed = false;
+    let rows = [], stages = null;
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await EL.init({ engine: 'leadgen', page: 'pipeline.html' });
+        esc = EL.escape;
+        if (EL.me && EL.me.role === 'client') { location.replace('client.html'); return; }
+
+        try {
+            const list = (await EL.clients()).filter(c => !c.archived);
+            $('pl-for').insertAdjacentHTML('beforeend', list.map(c => `<option value="${esc(c.id)}">${esc(c.brand || c.name)}</option>`).join(''));
+        } catch { /* the filter just has fewer choices */ }
+        const cur = EL.currentClient && EL.currentClient();
+        if (qs.get('client')) $('pl-for').value = qs.get('client');
+        else if (cur && qs.get('scope') === 'client') $('pl-for').value = cur.id;
+        if (qs.get('who') === 'me') $('pl-who').value = 'me';
+
+        document.querySelectorAll('#pl-kinds [data-k]').forEach(b => b.addEventListener('click', () => { kind = b.dataset.k; drawTabs(); load(); }));
+        $('pl-for').addEventListener('change', load);
+        $('pl-who').addEventListener('change', load);
+        $('pl-due').addEventListener('click', () => { due = !due; drawToggles(); draw(); });
+        $('pl-closed').addEventListener('click', () => { closed = !closed; drawToggles(); draw(); });
+        drawTabs(); drawToggles();
+        load();
+    });
+
+    function drawTabs() {
+        document.querySelectorAll('#pl-kinds [data-k]').forEach(b => {
+            const on = b.dataset.k === kind;
+            b.classList.toggle('is-on', on); b.setAttribute('aria-selected', String(on));
+        });
+    }
+    function drawToggles() {
+        $('pl-due').classList.toggle('is-on', due); $('pl-due').setAttribute('aria-pressed', String(due));
+        $('pl-closed').classList.toggle('is-on', closed); $('pl-closed').setAttribute('aria-pressed', String(closed));
+    }
+
+    async function load() {
+        const p = new URLSearchParams();
+        const f = $('pl-for').value;
+        if (f) p.set('client_id', f);
+        if ($('pl-who').value) p.set('assigned', $('pl-who').value);
+        try {
+            const [d, other] = await Promise.all([
+                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + kind),
+                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + (kind === 'influencer' ? 'business' : 'influencer') + '&open=1')
+            ]);
+            rows = d.rows || []; stages = d.stages || {};
+            $('pl-n-' + kind).textContent = rows.filter(r => !r.closed).length;
+            $('pl-n-' + (kind === 'influencer' ? 'business' : 'influencer')).textContent = (other.rows || []).length;
+            const mine = d.dueNow || 0;
+            $('pl-note').textContent = mine ? `${mine} follow-up${mine === 1 ? '' : 's'} of yours due today or overdue.` : '';
+            draw();
+        } catch (err) {
+            if (err.handled) return;
+            $('pl-board').innerHTML = `<div class="pl-empty">${esc(err.message)}</div>`;
+        }
+    }
+
+    function draw() {
+        const cols = (stages[kind] || []).filter(([k]) => closed || !['paid', 'dropped', 'won', 'lost'].includes(k));
+        const list = rows.filter(r => (!due || r.due) && (closed || !r.closed));
+        if (!rows.length) {
+            $('pl-board').innerHTML = `<div class="pl-empty">No ${kind === 'influencer' ? 'influencers' : 'businesses'} in the pipeline yet.<br>
+                Open <a href="leads.html?kind=${kind}">Leads</a>, tick the ones worth contacting and press “Add to pipeline”.</div>`;
+            return;
+        }
+        if (!list.length) { $('pl-board').innerHTML = `<div class="pl-empty">Nothing matches. ${due ? 'No follow-ups are due.' : ''}</div>`; return; }
+        $('pl-board').innerHTML = `<div class="pl-board">${cols.map(([k, name]) => {
+            const here = list.filter(r => r.stage === k);
+            return `<section class="pl-col" aria-label="${esc(name)}"><h3>${esc(name)} <b>${here.length}</b></h3>${here.map(card).join('')}</section>`;
+        }).join('')}</div>`;
+        $('pl-board').querySelectorAll('[data-card]').forEach(c => c.addEventListener('click', e => {
+            if (e.target.closest('[data-next]')) return;
+            LeadUI.openPipe(c.dataset.card, { onChange: load });
+        }));
+        $('pl-board').querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', async e => {
+            e.stopPropagation();
+            b.disabled = true;
+            try {
+                const r = await EL.api(`/api/leads/pipeline/${encodeURIComponent(b.dataset.next)}`, { method: 'PATCH', body: { stage: b.dataset.to } });
+                EL.toast(`Moved to ${r.row.stageName}.`);
+                load();
+            } catch (err) { EL.toast(err.message, 'bad'); b.disabled = false; }
+        }));
+    }
+
+    function card(r) {
+        const order = (stages[kind] || []).map(s => s[0]);
+        const i = order.indexOf(r.stage);
+        const next = i >= 0 && i < order.length - 1 && !['paid', 'dropped', 'won', 'lost'].includes(r.stage) ? order[i + 1] : null;
+        const nextName = next ? (stages[kind].find(s => s[0] === next) || [])[1] : null;
+        const l = r.lead || {};
+        return `<div class="pl-card" role="button" tabindex="0" data-card="${esc(r.id)}">
+            <div class="t"><b>${esc(l.fullName || '@' + r.username)}</b>${LeadUI.fitChip(l.fit)}</div>
+            <div class="m">@${esc(r.username)}${l.followers != null ? ' · ' + Number(l.followers).toLocaleString() : ''} · ${esc(r.client || 'Agency')}</div>
+            <div class="m">${r.assignee ? esc(r.assignee) : 'Nobody yet'}${r.followUpOn ? ` · <span class="pl-due ${r.due ? 'is-' + r.due : ''}">${r.due === 'overdue' ? 'overdue ' : 'follow up '}${LeadUI.day(r.followUpOn)}</span>` : ''}${r.rate ? ' · ' + esc(r.rate) : ''}</div>
+            ${r.lastNote ? `<div class="n">${esc(r.lastNote.body)}</div>` : ''}
+            ${next ? `<button class="pl-next" type="button" data-next="${esc(r.id)}" data-to="${esc(next)}">→ ${esc(nextName)}</button>` : ''}
+        </div>`;
+    }
+    document.addEventListener('keydown', e => {
+        const c = e.target.closest && e.target.closest('[data-card]');
+        if (c && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); LeadUI.openPipe(c.dataset.card, { onChange: load }); }
+    });
+})();
+</script>
+
+</body>
+</html>

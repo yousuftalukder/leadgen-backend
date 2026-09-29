@@ -124,7 +124,7 @@ test('no output ever starts with a character a spreadsheet would execute', () =>
 
 console.log('sort whitelist — an ORDER BY must never come from the query string');
 test('every declared sort names a real leads column', () => {
-    const cols = new Set(['created_at', 'followers_count', 'username', 'engagement_rate', 'city']);
+    const cols = new Set(['created_at', 'followers_count', 'username', 'engagement_rate', 'city', 'fit_score']);   // fit_score: sql/schema-phase40.sql
     for (const [k, v] of Object.entries(S.LEAD_SORTS)) {
         assert.ok(cols.has(v.col), `sort "${k}" orders by "${v.col}", which is not a leads column`);
     }

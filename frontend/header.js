@@ -93,6 +93,7 @@
         { href: 'my-tasks.html',  icon: 'check',   label: 'My tasks',  engine: null, count: 'tasks' },
         { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
         { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
+        { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
@@ -1185,6 +1186,14 @@
                 const late = open.filter(t => t.dueDate && t.dueDate < new Date().toISOString().slice(0, 10)).length;
                 setCount('tasks', open.length, late ? `${late} overdue` : '', late > 0);
             }).catch(() => {});
+            // Follow-ups due today or overdue on your leads (phase 40). Quiet
+            // before the phase-40 SQL, and for anyone without the lead tools.
+            const me = EL.me || {};
+            if (me.role === 'admin' || (me.engines || []).includes('leadgen')) {
+                EL.api('/api/leads/pipeline?assigned=me&open=1').then(d => {
+                    setCount('followups', d.dueNow || 0, d.dueNow ? `${d.dueNow} follow-up${d.dueNow === 1 ? '' : 's'} due` : '', (d.dueNow || 0) > 0);
+                }).catch(() => {});
+            }
         }
     }
 
