@@ -1307,7 +1307,7 @@ body.el-drawer-open { overflow: hidden; }
 /* phase 37: a Facebook post quoted word for word */
 .rd-quotes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 .rd-quote { margin: 0; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.rd-quote .el-chip { align-self: flex-start; }
+.rd-quote .el-chip { align-self: flex-start; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .rd-quote blockquote { margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent-solid); background: rgba(217,181,108,0.07); border-radius: 0 8px 8px 0; color: var(--text-primary); font-size: 0.9rem; line-height: 1.5; overflow-wrap: anywhere; }
 .rd-quote figcaption { font-size: 0.8rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 @media print { .rd-quote { break-inside: avoid; page-break-inside: avoid; } }
