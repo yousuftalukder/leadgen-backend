@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Home — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* home.html — page-specific only. Shared rules live in app.css (ws-*). */
+    .hm-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+    .hm-client { text-align: left; text-decoration: none; color: inherit; border: 1px solid var(--card-border); background: var(--card-bg);
+        border-radius: var(--r-md); padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+    .hm-client:hover { border-color: rgba(240,211,154,0.3); }
+    .hm-client .top { display: flex; gap: 10px; align-items: center; min-width: 0; }
+    .hm-client .nm { font-weight: 800; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+    .hm-client .ind { color: var(--text-muted); font-size: 0.8rem; }
+    .hm-client .next { font-size: 0.82rem; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<main class="el-page" id="hm"><div class="ws-empty"><p>Loading…</p></div></main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="ui.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // The first screen of the day: what needs someone, what is running, whose
+    // it is. Everything here is a door into a client or a task.
+    const me = await EL.init({ engine: null, page: 'home.html' });
+    const esc = v => EL.esc(v);
+    const ic = n => EL.icon(n);
+    const root = document.getElementById('hm');
+
+    const [clients, my, jobs] = await Promise.all([
+        EL.clients(true),
+        EL.api('/api/my-tasks').catch(err => ({ tasks: [], error: err })),
+        EL.api('/api/jobs').catch(() => ({ jobs: [] }))
+    ]);
+    const live = clients.filter(c => !c.archived);
+    const tasks = my.tasks || [];
+    const open = tasks.filter(t => t.status !== 'done');
+    const running = (jobs.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status));
+
+    // What needs someone, most urgent first.
+    const attention = [];
+    for (const t of open.filter(UI.isLate)) attention.push({ sev: 'is-bad', t: `Overdue: ${t.title}`, m: `${t.client ? t.client.name + ' · ' : ''}was due ${UI.day(t.dueDate)}`, task: t.id });
+    for (const c of live) {
+        if (c.meta && c.meta.pages && !c.meta.connected) attention.push({ sev: 'is-warn', t: `${c.name}: Meta needs attention`, m: 'Its connection stopped working. Reconnect it from the client’s Meta tab.', href: `workspace.html?client=${c.id}&tab=meta`, label: 'Reconnect' });
+    }
+    for (const j of running.filter(j => j.status === 'paused_no_credit' || j.status === 'interrupted')) attention.push({ sev: 'is-warn', t: `Paused: ${UI.jobName(j.type)}`, m: j.status === 'paused_no_credit' ? 'Out of Apify credit. Top up or add a key, then resume.' : 'Stopped before it finished. It can be resumed.', href: 'schedules.html', label: 'See it' });
+    if (me.role === 'admin' && me.pendingActivations) attention.push({ sev: 'is-gold', t: `${me.pendingActivations} client${me.pendingActivations === 1 ? '' : 's'} asked to continue`, m: 'Their trial is ending or has ended. Activate them from the admin page.', href: 'admin.html', label: 'Open' });
+    const unsetup = live.filter(c => !(c.meta && c.meta.connected) && !(c.reports && c.reports.total));
+    if (unsetup.length) attention.push({ sev: 'is-gold', t: `${unsetup.length} client${unsetup.length === 1 ? ' has' : 's have'} nothing filed yet`, m: unsetup.slice(0, 3).map(c => c.name).join(', ') + (unsetup.length > 3 ? '…' : '') + ' — no report and no Meta.', href: `workspace.html?client=${unsetup[0].id}`, label: 'Start' });
+
+    const hour = new Date().getHours();
+    const hello = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+    const name = (me.full_name || (me.email || '').split('@')[0] || '').split(/[\s._-]/)[0];
+    const recentReports = await EL.api('/api/reports-history?limit=6').then(r => r.reports || []).catch(() => []);
+
+    root.innerHTML = `
+        <div class="ws-head"><div><h1>${hello}${name ? ', ' + esc(name.charAt(0).toUpperCase() + name.slice(1)) : ''}</h1>
+            <p class="ws-sub">${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} · ${live.length} client${live.length === 1 ? '' : 's'} · ${open.length} open task${open.length === 1 ? '' : 's'} for you · ${running.length} running</p></div>
+            <div class="ws-actions"><button class="ws-btn" type="button" id="hm-add">${ic('plus')}Add client</button><button class="ws-btn is-gold" type="button" id="hm-new">${ic('plus')}New work</button></div></div>
+        <div class="ws-grid g2">
+            <section class="ws-card"><div class="ws-card-h"><h2>Needs attention</h2><span class="el-muted ws-num">${attention.length}</span></div>
+                ${attention.length ? `<div class="ws-rows">${attention.map(a => `<div class="ws-row ${a.task ? 'is-link' : ''}" ${a.task ? `data-task="${esc(a.task)}" role="button" tabindex="0"` : ''}><span class="ws-sev ${a.sev}"></span>
+                    <div class="ws-grow"><div class="ws-t">${esc(a.t)}</div><div class="ws-m">${esc(a.m)}</div></div>${a.href ? `<a class="ws-btn is-sm" href="${esc(a.href)}">${esc(a.label)}</a>` : ''}</div>`).join('')}</div>`
+                : '<p class="el-muted">Nothing is waiting on you. Nice.</p>'}
+            </section>
+            <section class="ws-card"><div class="ws-card-h"><h2>Your tasks</h2><a class="ws-link" href="my-tasks.html">All ${ic('arrow')}</a></div>
+                ${my.error ? `<p class="el-muted">${esc(my.error.message)}</p>`
+                : open.length ? `<div class="ws-rows">${open.slice(0, 6).map(t => UI.taskRow(t, { showClient: true })).join('')}</div>`
+                : '<p class="el-muted">Nothing assigned to you. Tasks live on each client’s board.</p>'}
+            </section>
+        </div>
+        ${running.length ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Running now</h2><span class="el-muted">Work you started</span></div>
+            <div class="ws-rows">${running.map(j => `<div class="ws-row"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(UI.jobName(j.type))}</div><div class="ws-m">${esc(UI.jobState(j.status))} · ${j.progress || 0}%${j.current_step ? ' · ' + esc(j.current_step) : ''}</div></div></div>`).join('')}</div></section>` : ''}
+        <section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>${me.role === 'admin' ? 'Clients' : 'Your clients'}</h2><a class="ws-link" href="clients.html">All clients ${ic('arrow')}</a></div>
+            ${live.length ? `<div class="hm-cards">${live.slice(0, 8).map(c => `<a class="hm-client" href="workspace.html?client=${encodeURIComponent(c.id)}">
+                <span class="top"><span class="el-avatar">${esc(UI.initials(c.name))}</span><span style="min-width:0"><span class="nm">${esc(c.name)}</span><span class="ind">${esc(c.niche || c.location || 'No details yet')}</span></span></span>
+                <span class="ws-chips">${c.meta && c.meta.connected ? '<span class="el-chip is-jade">Meta connected</span>' : '<span class="el-chip">No Meta</span>'}<span class="el-chip">${c.reports ? c.reports.total : 0} reports</span></span>
+            </a>`).join('')}</div>`
+            : `<div class="ws-empty"><h3>No clients yet</h3><p>Add the first client: only the name is needed.</p><button class="ws-btn is-gold" type="button" data-add>${ic('plus')}Add client</button></div>`}
+        </section>
+        ${recentReports.length ? `<section class="ws-card"><div class="ws-card-h"><h2>Your latest reports</h2></div>
+            <div class="ws-rows">${recentReports.map(r => {
+                const cl = live.find(c => c.id === r.client_id);
+                const page = UI.TYPE_PAGE[r.report_type] || 'ig-report.html';
+                return `<a class="ws-row is-link" href="${cl ? `workspace.html?client=${encodeURIComponent(cl.id)}&tab=reports` : `${page}?report=${encodeURIComponent(r.id)}`}"><span class="ws-sev"></span>
+                    <div class="ws-grow"><div class="ws-t">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type || 'Report')}${r.target_handle ? ' · ' + esc(r.target_handle) : ''}</div>
+                    <div class="ws-m">${esc([cl ? cl.name : 'No client', UI.day(r.created_at), r.grade ? 'grade ' + r.grade : ''].filter(Boolean).join(' · '))}</div></div>${UI.srcChip(UI.sourceOf(r.report_type))}</a>`;
+            }).join('')}</div></section>` : ''}`;
+
+    document.getElementById('hm-new').addEventListener('click', () => EL.newWork(null));
+    root.querySelectorAll('#hm-add, [data-add]').forEach(b => b.addEventListener('click', () => UI.addClient()));
+    root.querySelectorAll('[data-task]').forEach(el => {
+        const open1 = async () => {
+            const t = tasks.find(x => x.id === el.dataset.task); if (!t) return;
+            // The board's people and edit rights come with the client's board.
+            const b = await EL.api(`/api/clients/${encodeURIComponent(t.client.id)}/tasks`).catch(() => null);
+            UI.openTask(t, { clientId: t.client.id, clientName: t.client.name, people: b ? b.people : [], canEdit: b ? b.canEdit : false, onSaved: () => location.reload() });
+        };
+        el.addEventListener('click', open1);
+        el.addEventListener('keydown', e => { if (e.key === 'Enter') open1(); });
+    });
+})();
+</script>
+</body>
+</html>

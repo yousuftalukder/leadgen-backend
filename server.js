@@ -15818,7 +15818,10 @@ async function assistantScope(userId, clientId = null, role = null) {
     // A client id the caller has no access to is dropped rather than refused:
     // the request still answers, just over their own data. Refusing would let
     // a stale picker selection break an otherwise valid question.
-    const scoped = wanted && clientIds.includes(wanted) ? wanted : null;
+    // Access is clientAccess's, admins included (phase 33): an admin asking
+    // about a client they neither own nor were added to used to get their own
+    // data back under that client's name.
+    const scoped = wanted && (clientIds.includes(wanted) || await clientAccess(userId, wanted, 'viewer')) ? wanted : null;
     let client = (owned || []).find(c => c.id === scoped) || null;
     if (scoped && !client) {
         const { data } = await supabase.from('clients')
