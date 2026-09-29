@@ -81,6 +81,7 @@
                 Prepared with EdgeLead${validUntil ? ` · this link works until ${esc(validUntil)}` : ''}<br>
                 This page is read-only and is not listed anywhere — it only opens for someone with the link.
             </div>`;
+        ELReport.hydrate($('sh-body'));
         $('sh-pdf').addEventListener('click', () => window.print());
     }
 })();

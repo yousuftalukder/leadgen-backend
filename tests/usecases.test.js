@@ -148,7 +148,17 @@ class Query {
 }
 
 const TOKENS = {};   // bearer token -> auth user
+// Storage, for the report photos (phase 36): a bucket that remembers uploads.
+const STORAGE = { buckets: new Set(), files: {} };
 const fakeSupabase = {
+    storage: {
+        getBucket: async name => ({ data: STORAGE.buckets.has(name) ? { name } : null, error: null }),
+        createBucket: async name => { STORAGE.buckets.add(name); return { data: { name }, error: null }; },
+        from: bucket => ({
+            upload: async (path, buf, o) => { STORAGE.files[`${bucket}/${path}`] = { bytes: buf.length, type: o && o.contentType }; return { data: { path }, error: null }; },
+            getPublicUrl: path => ({ data: { publicUrl: `https://stub.supabase.co/storage/v1/object/public/${bucket}/${path}` } })
+        })
+    },
     from: t => new Query(t),
     rpc: () => Promise.resolve({ data: true, error: null }),
     auth: {
@@ -257,6 +267,7 @@ process.env.META_APP_ID = '1234567890'; process.env.META_APP_SECRET = 'test-app-
 // ---------------------------------------------------------------------------
 process.env.GEMINI_API_KEY = 'test-gemini-key';
 const GEMINI = { script: [], requests: [] };
+const FETCHED = [];   // image addresses the server fetched (phase 36)
 global.fetch = async (url, opts = {}) => {
     const u = String(url);
     const reply = (status, body) => ({
@@ -276,6 +287,10 @@ global.fetch = async (url, opts = {}) => {
         // — the content plan's cell keys exist only once the scorecard does.
         if (typeof next === 'function') next = next(body);
         return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
+    }
+    if (/cdninstagram\.com\//.test(u)) {
+        FETCHED.push(u);
+        return { ok: true, status: 200, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new Uint8Array([255, 216, 255, 224, 0, 16]).buffer };
     }
     if (/graph\.facebook\.com\//.test(u)) {
         // A refused token, for the daily read's expiry path.
@@ -327,7 +342,7 @@ const GRAPH = {
         }
         if (seg[0] === GRAPH.IG && seg[1] === 'media') {
             return { data: [
-                { id: 'm1', caption: 'The seasonal menu, start to finish.', media_type: 'VIDEO', media_product_type: 'REELS', timestamp: '2026-08-10T10:00:00+0000', like_count: 300, comments_count: 20, permalink: 'https://instagram.com/p/abc', shortcode: 'abc' },
+                { id: 'm1', caption: 'The seasonal menu, start to finish.', media_type: 'VIDEO', media_product_type: 'REELS', timestamp: '2026-08-10T10:00:00+0000', like_count: 300, comments_count: 20, permalink: 'https://instagram.com/p/abc', shortcode: 'abc', thumbnail_url: 'https://scontent-bos5-1.cdninstagram.com/v/m1-thumb.jpg?oe=x' },
                 { id: 'm2', caption: 'July throwback.', media_type: 'IMAGE', media_product_type: 'FEED', timestamp: '2026-07-30T10:00:00+0000', like_count: 90, comments_count: 4, permalink: 'https://instagram.com/p/def', shortcode: 'def' }
             ] };
         }
@@ -1429,6 +1444,205 @@ test('the ask route offers the client lookups to staff with a client chosen', as
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const names = GEMINI.requests[0].tools[0].functionDeclarations.map(d => d.name);
     assert.ok(names.includes('get_tasks') && names.includes('get_work_log'));
+});
+
+
+section('\nphase 36 — post photos kept, and the report as a document');
+const IGC = (sc, extra = {}) => ({ url: `https://www.instagram.com/p/${sc}/`, shortcode: sc, likes: 400, comments: 30, views: 9000, type: 'Reel', index: 1.8, postedAt: '2026-09-02T19:00:00Z', caption: 'Onion volcano at table 6. Wait for the cheer.', thumbnail: `https://scontent.cdninstagram.com/v/${sc}.jpg?oe=expires`, ...extra });
+function igMain(handle, extra = {}) {
+    const top = [IGC(handle + '1'), IGC(handle + '2', { type: 'Image', index: 1.3 }), IGC(handle + '3')];
+    return {
+        handle, fullName: handle === 'sakurahibachi.ma' ? 'Sakura Hibachi Grill' : null, followers: 4812, postsAnalyzed: 30,
+        engagementRate: '3.10', engagementRateMedian: '2.60', viralityScore: '1.10', postsPerWeek: '3.0', score: 74, grade: 'B+', avgLikes: 180, avgComments: 12,
+        cadence: { postsPerWeek: 3.0, postsPerMonth: 13, medianGapDays: 2.4, longestGapDays: 9, lastPostDaysAgo: 2, silent: false },
+        contentMix: { Reel: { count: 12, share: '40.0%', avgLikes: 212, avgComments: 14, avgViews: 5420, avgIndex: 1.6 }, Image: { count: 14, share: '46.7%', avgLikes: 88, avgComments: 4, avgViews: 0, avgIndex: 0.6 } },
+        scoreBreakdown: { breakdown: [{ pillar: 'Engagement per follower', points: 21, max: 26, detail: '2.60% per post' }, { pillar: 'Conversation', points: 4, max: 16, detail: '6.0 comments per 100 likes' }] },
+        flags: [{ with: { label: 'Asks a question' }, lift: 50, reliable: true }, { with: { label: 'Uses emoji' }, lift: 5, reliable: false }],
+        topPosts: top, bottomPosts: [IGC(handle + '9', { type: 'Image', index: 0.3, likes: 41, views: null })], exemplars: { bestOverall: top[0] },
+        heatmap: { cells: [{ dow: 6, hour: 19, posts: 3, medIndex: 1.7 }, { dow: 1, hour: 10, posts: 2, medIndex: 0.4 }], bestHours: [{ hour: 19, medIndex: 1.7 }], bestDays: [{ dowName: 'Sat', medIndex: 1.5 }], reliable: true },
+        momentum: { months: [{ month: '2026-07', posts: 12, medEngagement: 118 }, { month: '2026-08', posts: 13, medEngagement: 131 }], changePct: 14 },
+        topHashtags: [{ tag: '#hibachi', uses: 18, avgIndex: 1.3 }], completeness: { checks: [{ label: 'Link in bio', ok: false }, { label: 'Category', ok: true }] },
+        ...extra
+    };
+}
+test('a post photo is copied only from Instagram’s own image hosts', async () => {
+    FETCHED.length = 0;
+    assert.strictEqual(await S.storeMediaImage('http://169.254.169.254/latest/meta-data', 'x'), null, 'fetched a non-Instagram address');
+    assert.strictEqual(await S.storeMediaImage('https://evil.example/cdninstagram.com/a.jpg', 'x'), null);
+    assert.strictEqual(FETCHED.length, 0, 'nothing should have been fetched: ' + FETCHED.join(', '));
+    const url = await S.storeMediaImage('https://scontent-bos5-1.cdninstagram.com/v/abc.jpg?oe=1', 'ig/test/abc');
+    assert.ok(url && url.startsWith('https://stub.supabase.co/storage/v1/object/public/report-media/ig/test/abc.jpg'), url);
+    assert.ok(STORAGE.buckets.has('report-media'), 'the bucket was not made');
+});
+test('an audit keeps one copy of each photo it shows, and the card points at it', async () => {
+    FETCHED.length = 0;
+    const main = igMain('sakurahibachi.ma'), rival = igMain('ginzahibachi.ma');
+    const kept = await S.keepAuditImages([main, { ...rival, topPosts: rival.topPosts.slice(0, 2), bottomPosts: [], exemplars: {} }], 'ig/job1');
+    assert.strictEqual(kept, 6, 'four of the client’s photos and two of the rival’s');
+    assert.strictEqual(FETCHED.length, 6, 'the same photo was fetched twice');
+    assert.ok(main.topPosts[0].image.includes('/report-media/ig/job1/sakurahibachi.ma-sakurahibachima1.jpg'), main.topPosts[0].image);
+    assert.strictEqual(main.exemplars.bestOverall.image, main.topPosts[0].image, 'the exemplar is the same post and should share the copy');
+    assert.ok(main.topPosts[0].thumbnail.includes('cdninstagram'), 'the original address stays');
+    assert.ok(rival.topPosts[0].image && !rival.topPosts[2].image);
+});
+test('the Instagram audit becomes a document: glance, score, formats, posts with photos, timing, plan', async () => {
+    const main = igMain('sakurahibachi.ma');
+    main.topPosts[0].image = 'https://stub.supabase.co/storage/v1/object/public/report-media/x.jpg';
+    const row = { id: crypto.randomUUID(), report_type: 'ig_report', created_at: '2026-09-28T10:00:00Z',
+        report_json: { main, rivals: [], generatedAt: '2026-09-28T10:00:00Z' },
+        ai_json: { executive_summary: 'Reels beat every rival. Menu photos pull the average down.', strengths: ['Reels at the grill: 1.6× typical'], weaknesses: ['No booking link'], action_plan_30_days: [{ week: 'Week 1', actions: ['Add the booking link'] }], kpi_targets: { engagement_rate: '3.5%', posts_per_week: '4', reels_share: '60%' } } };
+    const d = S.reportDoc(row);
+    assert.strictEqual(d.cover.title, 'Sakura Hibachi Grill');
+    assert.deepStrictEqual(d.cover.receipt[0], ['B+', 'grade']);
+    const titles = d.sections.map(x => x.title);
+    for (const t of ['At a glance', 'How the score is built', 'What you post, and what works', 'Best and weakest posts', 'When your audience responds', 'Consistency and momentum', 'Hashtags and your profile', 'What is working, what to fix', '30-day plan and targets']) assert.ok(titles.includes(t), 'missing section ' + t + ': ' + titles.join(' | '));
+    const glance = d.sections[0];
+    assert.strictEqual(glance.blocks.find(b => b.type === 'verdict').text, 'Reels beat every rival.');
+    assert.strictEqual(glance.blocks[0].items[0].value, '2.60%', 'the headline rate is the typical post, not the mean');
+    const posts = d.sections.find(x => x.title === 'Best and weakest posts').blocks[0].items;
+    assert.strictEqual(posts[0].image, main.topPosts[0].image, 'a kept photo must be used');
+    assert.strictEqual(posts[1].image, null, 'an expiring Instagram link must never be shown');
+    assert.ok(posts[3].weak && posts[3].chip.tone === 'bad');
+    const flags = d.sections.find(x => x.title === 'What you post, and what works').blocks.find(b => b.type === 'bars');
+    assert.deepStrictEqual(flags.rows.map(r => r.label), ['Asks a question'], 'an unreliable caption lift was shown');
+    assert.ok(d.sections.every(x => x.source && x.source.length || x.title === 'How the score is built'), 'every section names its source');
+});
+test('an audit with no narrative and no heatmap draws only what it has', async () => {
+    const main = igMain('kyotogrillhouse', { heatmap: null, momentum: { months: [] } });
+    const d = S.reportDoc({ id: 'r', report_type: 'ig_report', created_at: '2026-09-28T10:00:00Z', report_json: { main }, ai_json: null });
+    const titles = d.sections.map(x => x.title);
+    assert.ok(!titles.includes('When your audience responds') && !titles.includes('Consistency and momentum') && !titles.includes('30-day plan and targets'), titles.join(' | '));
+    assert.ok(!d.sections[0].blocks.some(b => b.type === 'verdict'));
+});
+test('competitor intel ranks everyone on one scale and marks the client', async () => {
+    const main = igMain('sakurahibachi.ma'), r1 = igMain('ginzahibachi.ma', { score: 79, grade: 'B+', engagementRate: '2.20', postsPerWeek: '5.1' }), r2 = igMain('fujiyama.worcester', { score: 66, grade: 'C+', engagementRate: '1.80', postsPerWeek: '3.6' });
+    const benchmark = S.buildBenchmark(main, [r1, r2]);
+    const d = S.reportDoc({ id: 'c', report_type: 'deep_audit', created_at: '2026-09-28T10:00:00Z', report_json: { main, rivals: [r1, r2], benchmark }, ai_json: { competitor_insights: ['Ginza posts daily: volume wins'], content_strategy: ['Two more Reels a week'] } });
+    assert.strictEqual(d.cover.title, '@sakurahibachi.ma against 2 rivals');
+    assert.deepStrictEqual(d.cover.receipt.slice(0, 3).map(x => x[0]), ['2nd', '1st', '3rd']);
+    const board = d.sections[0].blocks[0];
+    assert.strictEqual(board.rows[board.highlight][1], '@sakurahibachi.ma (you)');
+    assert.strictEqual(d.sections[0].blocks[1].text.startsWith('You come 2nd out of 3'), true, d.sections[0].blocks[1].text);
+    assert.ok(d.sections.some(x => x.title === 'Rivals’ best posts' && x.blocks[0].items[0].by === '@ginzahibachi.ma'));
+});
+test('the owner and a share link get the document; the assistant does not', async () => {
+    const main = igMain('harborcafe');
+    const row = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', platform: 'instagram', target_handle: 'harborcafe', score: 74, created_at: new Date().toISOString(), report_json: { main }, ai_json: { executive_summary: 'Healthy.' } };
+    tbl('reports').push(row);
+    const r = await call('GET', `/api/client/report/${row.id}`, { token: 't-client' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.report.doc.type, 'ig_report');
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    const detail = await S.ASSISTANT_TOOLS.get_report_detail.run(staff, { report_id: row.id });
+    assert.ok(!('doc' in detail));
+});
+
+
+section('\nphase 37 — the Facebook Page report as a document');
+function fbPage(name, extra = {}) {
+    return { name, pageId: name.toLowerCase().replace(/\W/g, ''), followers: 3104, rating: 4.6, reviewsCount: 212, category: 'Japanese restaurant', postsAnalyzed: 38, grade: 'B', score: 71,
+        medians: { engagement: 47 }, conversationRate: 9, amplificationRate: 14, cadence: { postsPerWeek: 3, spanDays: 90, lastPostDaysAgo: 2 },
+        completeness: { checks: [{ label: 'Opening hours', ok: false }, { label: 'Website', ok: true }] }, sentiment: { available: true, positiveShare: 81, negativeShare: 6, highEffortShare: 34 },
+        formats: [{ key: 'video', posts: 9, avgEngagement: 88, avgIndex: 1.9 }, { key: 'link', posts: 10, avgEngagement: 9, avgIndex: 0.2 }], intents: [{ key: 'event_offer', avgIndex: 2.1 }, { key: 'link_out', avgIndex: 0.2 }],
+        video: { posts: 9, share: 24, avgIndex: 1.9, avgViews: 1240 },
+        topPosts: [{ format: 'video', excerpt: 'Kids eat free every Tuesday in September. Tag a parent who needs a night off.', reactions: 312, comments: 88, shares: 41, index: 3.1, postedAt: '2026-08-22T18:00:00Z', url: 'https://www.facebook.com/sakura/posts/1' }, { format: 'photo', excerpt: 'Table 6 set a record', reactions: 254, comments: 36, shares: 12, index: 2.4, url: 'https://evil.example/x' }],
+        heatmap: { cells: [{ dow: 2, hour: 18, posts: 3, avgIndex: 1.8 }], bestHours: [], bestDays: [] }, momentum: { months: [{ month: '2026-07', posts: 12, medEngagement: 38 }, { month: '2026-08', posts: 13, medEngagement: 44 }] }, ...extra };
+}
+test('a Facebook Page report becomes a document, and a rival Page is compared row by row', async () => {
+    const target = fbPage('Sakura Hibachi Grill'), rival = fbPage('Ginza Hibachi', { followers: 5870, cadence: { postsPerWeek: 5.2 } });
+    const benchmark = { verdict: 'Sakura Hibachi Grill leads on 4 of 7 measures.', rows: [{ metric: 'Followers', target: 3104, rival: 5870, winner: 'rival' }, { metric: 'Shares per 100 reactions', target: 14, rival: 6, winner: 'target' }], shareOfVoice: { target: 38, rival: 62 }, formatGaps: [{ format: 'video', rivalIndex: 1.4 }] };
+    const row = { id: 'f', report_type: 'fb_page', created_at: '2026-09-28T10:00:00Z',
+        report_json: { mode: 'versus', windowDays: 90, target, rival, benchmark, recommendations: [{ priority: 'critical', title: 'Add opening hours', action: 'Add opening hours and email to the Page', why: 'Facebook shows “hours not listed” to every visitor.' }], generatedAt: '2026-09-28T10:00:00Z' },
+        ai_json: { executive_summary: 'A well-rated Page whose videos travel. Half its posts are links nobody reacts to.', what_is_working: ['Video: 1.9× typical'], what_is_failing: ['Links: 0.2× typical'], quick_wins: ['Post Tuesday 6 pm'], thirty_day_plan: [{ week: 'Week 1', actions: ['Fill in hours'] }], kpis_to_watch: [{ kpi: 'Median engagement', current: '47', target: '55' }] } };
+    const d = S.reportDoc(row);
+    assert.strictEqual(d.cover.title, 'Sakura Hibachi Grill');
+    assert.deepStrictEqual(d.cover.receipt[1], ['4.6★', '212 reviews']);
+    const titles = d.sections.map(x => x.title);
+    for (const x of ['At a glance', 'Page health', 'What you post, and what works', 'Best posts', 'Timing and momentum', 'Against Ginza Hibachi', 'Recommendations', 'What is working, what is not', '30-day plan and what we will watch']) assert.ok(titles.includes(x), 'missing ' + x + ': ' + titles.join(' | '));
+    const vs = d.sections.find(x => x.title === 'Against Ginza Hibachi');
+    assert.strictEqual(vs.lead, 'Sakura Hibachi Grill leads on 4 of 7 measures.');
+    const table = vs.blocks[0];
+    assert.deepStrictEqual(table.rows.map(r => r[3].chip), ['Ginza Hibachi', 'Sakura Hibachi Grill']);
+    const quotes = d.sections.find(x => x.title === 'Best posts').blocks[0].items;
+    assert.strictEqual(quotes[0].link, 'https://www.facebook.com/sakura/posts/1');
+    assert.strictEqual(quotes[1].link, null, 'a link off Facebook must not be shown');
+    const rec = d.sections.find(x => x.title === 'Recommendations').blocks[0].rows[0];
+    assert.deepStrictEqual(rec[0], { chip: 'Critical', tone: 'bad' });
+    assert.ok(!d.sections.some(x => x.title === 'Against Ginza Hibachi' && false));
+});
+test('a single-Page report has no rival section, and the owner gets the document', async () => {
+    const d = S.fbDoc({ id: 'g', report_type: 'fb_page', created_at: '2026-09-28T10:00:00Z', report_json: { mode: 'single', target: fbPage('Harbor Cafe') }, ai_json: null });
+    assert.ok(!d.sections.some(x => /^Against /.test(x.title)));
+    const r = await call('GET', `/api/client/report/${state.fbRep.id}`, { token: 't-client' });
+    assert.strictEqual(r.body.report.doc && r.body.report.doc.type, 'fb_page');
+    assert.strictEqual(r.body.report.headline, 'Steady, with weekends dark.', 'the older owner fields stay for the list and the assistant');
+});
+
+
+section('\nphase 38 — the monthly report with Meta, upgraded, and without Meta');
+test('the Meta monthly keeps its best posts’ photos, and never the expiring address', async () => {
+    const rep = tbl('reports').find(x => x.id === state.moReport);
+    const p = rep.report_json.posting.topByReach[0];
+    assert.ok(p.image && p.image.includes('/report-media/meta/'), 'no kept photo: ' + JSON.stringify(p));
+    assert.ok(!('thumb' in p), 'the expiring address was saved');
+    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    assert.strictEqual(r.body.report.month.posts[0].image, p.image);
+});
+test('Facebook and Instagram side by side, with a sum only where both have the number', async () => {
+    const d = k => ({ now: { page_fan_adds_unique: 51, follower_count: 8, page_impressions_unique: 30551, reach: 11884, views: 21787, page_post_engagements: 6830, total_interactions: 1011 }[k] });
+    const byKey = Object.fromEntries(['page_fan_adds_unique', 'follower_count', 'page_impressions_unique', 'reach', 'views', 'page_post_engagements', 'total_interactions'].map(k => [k, d(k)]));
+    const pf = S.monthPlatforms(byKey, { pageFollowers: 647, igFollowers: 253 });
+    const row = l => pf.rows.find(r => r.label === l);
+    assert.deepStrictEqual(row('Reach'), { label: 'Reach', fb: 30551, ig: 11884, both: 42435 });
+    assert.deepStrictEqual(row('Views'), { label: 'Views', fb: null, ig: 21787, both: null }, 'no Facebook views: no sum');
+    assert.ok(!row('Website taps'), 'a row neither platform has is left out');
+    assert.strictEqual(S.monthPlatforms({ reach: { now: 5 } }, {}), null, 'one platform only: no side-by-side table');
+});
+test('the longer view adds up each month of the stored daily numbers', async () => {
+    const cid = crypto.randomUUID();
+    for (const [day, level, reach, follows] of [['2026-06-03', 'ig', 100, 1], ['2026-06-04', 'ig', 50, 2], ['2026-07-10', 'ig', 300, 4], ['2026-08-01', 'ig', 400, 6], ['2026-08-02', 'page', 900, 9]]) {
+        tbl('meta_daily').push({ id: crypto.randomUUID(), connection_id: cid, user_id: EMP.id, day, level, reach, follows });
+    }
+    const t = await S.monthTrends(cid, '2026-08');
+    assert.deepStrictEqual(t.labels, ['Apr', 'May', 'Jun', 'Jul', 'Aug']);
+    assert.deepStrictEqual(t.reach.ig, [null, null, 150, 300, 400]);
+    assert.deepStrictEqual(t.follows.fb, [null, null, null, null, 9]);
+    assert.strictEqual(t.firstMonth, '2026-06');
+    assert.strictEqual(await S.monthTrends(crypto.randomUUID(), '2026-08'), null, 'no daily numbers: no trend');
+});
+test('without Meta, a monthly report is built from the stored public posts, and says what it cannot see', async () => {
+    const cl = tbl('clients').find(c => c.id === state.C);
+    const handle = String(cl.ig_handle || 'harborcafe').replace(/^@/, '').toLowerCase();
+    cl.ig_handle = handle;
+    const post = (sc, day, likes, extra = {}) => tbl('posts').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'instagram', handle, shortcode: sc, post_url: `https://www.instagram.com/p/${sc}/`, post_type: 'Reel', caption: 'Grill night ' + sc, likes, comments: 10, views: likes * 20, thumbnail_url: `https://scontent.cdninstagram.com/v/${sc}.jpg`, posted_at: day, scraped_at: new Date().toISOString(), ...extra });
+    post('pm1', '2026-08-05T19:00:00Z', 300); post('pm2', '2026-08-12T19:00:00Z', 120, { post_type: 'Image', views: 0 }); post('pm3', '2026-08-20T19:00:00Z', 200);
+    post('pm0', '2026-07-15T19:00:00Z', 90);
+    post('rv1', '2026-08-06T19:00:00Z', 9999, { handle: 'ginzahibachi.ma' });   // a rival's post filed under the client: not theirs
+    tbl('reports').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', created_at: '2026-07-25T10:00:00Z', report_json: { main: { handle, followers: 4700 } } },
+        { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', created_at: '2026-08-28T10:00:00Z', report_json: { main: { handle, followers: 4812 } } });
+    const bad = await call('POST', '/api/reports/public-monthly', { token: 't-emp', body: { clientId: state.C, month: new Date().toISOString().slice(0, 7) } });
+    assert.strictEqual(bad.statusCode, 400, 'a month still running was accepted');
+    const owner = await call('POST', '/api/reports/public-monthly', { token: 't-client', body: { clientId: state.C, month: '2026-08' } });
+    assert.strictEqual(owner.statusCode, 403, 'an owner started a staff job');
+    tbl('jobs').filter(j => j.user_id === EMP.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reports/public-monthly', { token: 't-emp', body: { clientId: state.C, month: '2026-08' } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `the job ended ${job.status}: ${job.error || ''}`);
+    const rep = tbl('reports').find(x => x.id === job.result_report_id);
+    assert.strictEqual(rep.report_type, 'public_monthly');
+    assert.strictEqual(rep.report_json.ig.posts, 3, 'a rival’s post was counted as the client’s');
+    assert.strictEqual(rep.report_json.ig.prevPosts, 1);
+    assert.deepStrictEqual([rep.report_json.ig.followersStart.value, rep.report_json.ig.followers.value], [4700, 4812]);
+    assert.ok(rep.report_json.ig.top[0].image && rep.report_json.ig.top[0].image.includes('/report-media/pm/'), 'the top post’s photo was not kept');
+    const view = await call('GET', `/api/client/report/${rep.id}`, { token: 't-client' });
+    const d = view.body.report.doc;
+    assert.strictEqual(d.type, 'public_monthly');
+    assert.strictEqual(view.body.report.title, 'Monthly report');
+    assert.ok(d.sections[0].blocks.some(b => b.type === 'verdict' && /published 3 posts in August, 2 more than July/.test(b.text)), JSON.stringify(d.sections[0]));
+    assert.ok(d.sections.some(s => s.blocks.some(b => b.type === 'missing')), 'the report must say what it cannot see');
+    const plan = d.sections.find(s => s.title === 'Plan for next month');
+    assert.ok(/Connect Facebook and Instagram/.test(plan.blocks[0].rows[0][0].text), 'connecting Meta comes first');
 });
 
 section('\nthe content plan, with the model told to overspend');
