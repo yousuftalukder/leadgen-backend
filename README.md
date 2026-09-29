@@ -14,7 +14,9 @@ Since phase 13 it is **two products on one backend**: the employee workbench abo
 server.js          Express backend, single file, Phase 17. Deployed to Render.
 package.json       start: node server.js · test: offline tests · live-checks: post-deploy script
 frontend/          Static site, deployed to Netlify. header.js is the shared runtime every page
-                   loads; app.css carries every shared rule including the header shell.
+                   loads (menu, New work, drawer, toast); ui.js holds the workspace components
+                   (task board, add client); app.css carries every shared rule including the shell.
+                   Staff start at home.html; a client's page is workspace.html?client=<id>.
                    Employee pages and the client surface (signup.html, client.html,
                    client-assistant.html, client-leads.html, client-community.html, share.html)
                    share it;

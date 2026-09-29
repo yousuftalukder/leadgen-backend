@@ -281,8 +281,19 @@
     // ---- boot ---------------------------------------------------------------------
     document.addEventListener('DOMContentLoaded', async () => {
         const me = await EL.init({ engine: null, page: 'client-assistant.html' });
-        if (!me.business) { $('chat-box').innerHTML = '<p class="oa-note">This account has no business record yet. Sign out and back in.</p>'; return; }
-        activeClient = { id: me.business.id, name: me.business.name || 'your business' };
+        if (me.role === 'client') {
+            if (!me.business) { $('chat-box').innerHTML = '<p class="oa-note">This account has no business record yet. Sign out and back in.</p>'; return; }
+            activeClient = { id: me.business.id, name: me.business.name || 'your business' };
+        } else {
+            // Staff arrive from a client's Ask AI tab (phase 33) with ?client= in
+            // the address, which EL.init has made the chosen client. The Owner
+            // Assistant's routes check the caller may read that client.
+            const list = await EL.clients();
+            const cl = list.find(x => x.id === EL.clientId());
+            if (!cl) { $('chat-box').innerHTML = '<p class="oa-note">Open this from a client’s Ask AI tab, so it knows whose numbers to read. <a href="clients.html">Choose a client</a>.</p>'; return; }
+            activeClient = { id: cl.id, name: cl.name };
+            document.title = `Ask AI · ${cl.name} — EdgeLead`;
+        }
         $('oa-for').textContent = ` for ${activeClient.name}`;
 
         $('oa-new').addEventListener('click', newChat);
@@ -322,7 +333,7 @@
 
     // ---- what the warehouse holds: decides the welcome ----------------------------------
     async function loadStatus() {
-        try { xpStatus = await EL.api('/api/xp/status'); } catch (err) { xpStatus = null; }
+        try { xpStatus = await EL.api('/api/xp/status?client_id=' + encodeURIComponent(activeClient.id)); } catch (err) { xpStatus = null; }
         renderState();
         if ($('welcome')) $('chat-box').innerHTML = welcomeHtml();
     }
@@ -369,7 +380,7 @@
     }
     async function syncNow(btn) {
         btn.disabled = true; btn.textContent = 'Starting…';
-        try { await EL.api('/api/xp/sync', { method: 'POST', body: {} }); btn.textContent = 'Reading now — a few minutes'; setTimeout(loadStatus, 30000); }
+        try { await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: activeClient.id } }); btn.textContent = 'Reading now — a few minutes'; setTimeout(loadStatus, 30000); }
         catch (err) { btn.disabled = false; btn.textContent = 'Read my numbers now'; if (!err.handled) alert(err.message); }
     }
 

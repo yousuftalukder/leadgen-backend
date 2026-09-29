@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Client — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* workspace.html — page-specific only. Shared rules live in app.css (ws-*). */
+    .wsc-head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 16px; }
+    .wsc-head > .el-avatar { width: 52px; height: 52px; border-radius: 14px; font-size: 1.05rem; }
+    .wsc-who { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
+    .wsc-who h1 { font-size: 1.8rem; font-weight: 800; color: var(--text-primary); margin: 0; line-height: 1.15; text-wrap: balance; }
+    .wsc-line { color: var(--text-secondary); display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 0.9rem; }
+    .wsc-line span { display: inline-flex; gap: 6px; align-items: center; }
+    .wsc-line .el-svg { width: 15px; height: 15px; color: var(--text-muted); }
+    .wsc-spark { width: 100%; height: auto; display: block; }
+    .wsc-spark text { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
+    .conn { border: 1px solid rgba(63,191,143,0.35); background: rgba(63,191,143,0.06); border-radius: 10px; padding: 12px 14px; font-size: 0.86rem; color: var(--text-secondary); }
+    .conn.is-bad { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.06); }
+    .conn b { color: var(--text-primary); }
+    .gtable td, .gtable th { padding: 8px 12px; }
+    textarea.wsc-area { min-height: 110px; }
+    .wsc-banner { border: 1px solid rgba(63,191,143,0.35); background: rgba(63,191,143,0.08); border-radius: var(--r-md); padding: 14px 16px; margin-bottom: 16px;
+        display: flex; flex-direction: column; gap: 8px; color: var(--text-secondary); font-size: 0.9rem; }
+    .wsc-banner b { color: var(--text-primary); }
+    .wsc-banner code { font-size: 0.74rem; word-break: break-all; color: var(--text-primary); }
+    .wsc-ask { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 800px) { .wsc-ask { grid-template-columns: minmax(0, 1fr); } }
+    .wsc-ask a { text-decoration: none; color: inherit; }
+    /* the report viewer: a report opens on the client's page, rendered by its own engine page */
+    .rvw { position: fixed; inset: 0; z-index: 100000; }
+    .rvw-scrim { position: absolute; inset: 0; background: rgba(2,8,6,0.72); }
+    .rvw-panel { position: absolute; inset: 24px; display: flex; flex-direction: column; border-radius: 14px; overflow: hidden;
+        background: var(--bg-color); border: 1px solid var(--card-border); box-shadow: 0 30px 80px rgba(0,0,0,0.6); }
+    .rvw-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px;
+        border-bottom: 1px solid var(--card-border); font-size: 0.9rem; }
+    .rvw-head b { color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .rvw-actions { display: flex; gap: 6px; flex: none; }
+    #rv-frame { flex: 1; width: 100%; border: 0; background: var(--bg-color); }
+    body.rvw-open { overflow: hidden; }
+    @media (max-width: 720px) { .rvw-panel { inset: 0; border-radius: 0; } }
+</style>
+</head>
+<body>
+<main class="el-page" id="ws"><div class="ws-empty"><p>Loading the client…</p></div></main>
+
+<!-- A report opens here: its engine page embedded without the shell (?embed=1), so it is
+     the same report and the same PDF, without leaving the client. -->
+<div id="rv" class="rvw hidden" role="dialog" aria-modal="true" aria-label="Report">
+    <div class="rvw-scrim" data-rv-close></div>
+    <div class="rvw-panel">
+        <div class="rvw-head">
+            <b id="rv-title">Report</b>
+            <span class="rvw-actions">
+                <button class="ws-btn is-sm" id="rv-pdf" type="button">Save as PDF</button>
+                <a class="ws-btn is-sm" id="rv-full" href="#" target="_blank" rel="noopener">Open full page</a>
+                <button class="ws-btn is-sm" data-rv-close type="button">Close</button>
+            </span>
+        </div>
+        <iframe id="rv-frame" title="Report" src="about:blank"></iframe>
+    </div>
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="ui.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // One client, everything about it, in tabs. The page never files work
+    // itself except through the client in its address: EL.init makes that the
+    // chosen client, so a run started from here lands here.
+    const me = await EL.init({ engine: null, page: 'workspace.html' });
+    const esc = v => EL.esc(v);
+    const ic = n => EL.icon(n);
+    const $ = id => document.getElementById(id);
+    const root = $('ws');
+    const q = new URLSearchParams(location.search);
+    const id = q.get('client');
+    if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { location.replace('clients.html'); return; }
+
+    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['reports', 'Reports'], ['leads', 'Leads'], ['meta', 'Meta'],
+        ['ask', 'Ask AI'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
+    let tab = TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'overview';
+
+    let detail = null, timeline = null, tasks = null, growth = null, metaCfg = null;
+    const canEdit = () => detail && ['owner', 'admin', 'editor'].includes(detail.client.access);
+    const isOwner = () => detail && ['owner', 'admin'].includes(detail.client.access);
+
+    try {
+        detail = await EL.api(`/api/clients/${id}`);
+    } catch (err) {
+        root.innerHTML = `<div class="ws-crumb"><a href="clients.html">Clients</a></div>
+            <div class="ws-empty">${ic('alert')}<h3>This client could not be opened</h3><p>${esc(err.message)} It may have been deleted, or you may not be on it.</p><a class="ws-btn" href="clients.html">All clients</a></div>`;
+        return;
+    }
+    const c = detail.client;
+    EL.rememberClient(c.id);
+    document.title = `${c.name} — EdgeLead`;
+
+    const team = () => [{ user_id: detail.owner.id, email: detail.owner.email, role: 'owner' }, ...(detail.members || []).filter(m => m.accountRole !== 'client')];
+    const portalLogins = () => (detail.members || []).filter(m => m.accountRole === 'client');
+    const liveConns = () => (detail.metaConnections || []).filter(x => x.status === 'active');
+
+    async function refreshDetail() { detail = await EL.api(`/api/clients/${id}`); Object.assign(c, detail.client); }
+    async function loadTimeline() { timeline = await EL.api(`/api/clients/${id}/timeline`); return timeline; }
+    async function loadTasks() { try { tasks = await EL.api(`/api/clients/${id}/tasks`); } catch (err) { tasks = { error: err }; } return tasks; }
+
+    // ---- the page frame: who this is, what is missing, the tabs ---------------
+    function setup() {
+        const reports = timeline ? (timeline.reports || []).length : null;
+        return [
+            { t: 'Business details', done: !!(c.niche && c.location), tab: 'settings', label: 'Add what they do and where' },
+            { t: 'Connect Meta', done: liveConns().length > 0, tab: 'meta', label: 'Connect' },
+            { t: 'First report', done: reports === null ? true : reports > 0, work: true, label: 'Start one' },
+            { t: 'Owner portal', done: portalLogins().length > 0, tab: 'access', label: 'Invite the owner' }
+        ];
+    }
+
+    function frame() {
+        const conns = detail.metaConnections || [];
+        const meta = liveConns().length ? `<span class="el-chip is-jade">Meta connected</span>`
+            : conns.length ? `<span class="el-chip is-warn">Meta needs attention</span>` : `<span class="el-chip">Meta not connected</span>`;
+        const portal = portalLogins().length ? `<span class="el-chip is-jade">Owner has a portal login</span>` : '';
+        const access = { owner: 'You own this client', admin: 'Admin access', editor: 'You can edit', viewer: 'View only' }[c.access] || '';
+        const st = setup();
+        const doneN = st.filter(s => s.done).length;
+        const openTasks = tasks && tasks.tasks ? tasks.tasks.filter(t => t.status !== 'done').length : null;
+        return `
+            <div class="ws-crumb"><a href="clients.html">Clients</a><span>/</span><span>${esc(c.name)}</span></div>
+            <div class="wsc-head">
+                <span class="el-avatar">${esc(UI.initials(c.name))}</span>
+                <div class="wsc-who">
+                    <h1>${esc(c.name)}</h1>
+                    <div class="wsc-line">
+                        ${c.niche ? `<span>${ic('store')}${esc(c.niche)}</span>` : ''}
+                        ${c.location ? `<span>${ic('target')}${esc(c.location)}</span>` : ''}
+                        ${c.ig_handle ? `<span>@${esc(c.ig_handle)}</span>` : ''}
+                        ${c.fb_page ? `<span>${esc(c.fb_page)}</span>` : ''}
+                    </div>
+                    <div class="ws-chips">${meta}${portal}${c.archived ? '<span class="el-chip is-warn">Archived</span>' : ''}<span class="el-chip">${access}</span>
+                        <span class="ws-avatars">${team().map(m => `<span class="el-avatar" title="${esc(m.email)} · ${esc(m.role)}">${esc(UI.initials(m.email))}</span>`).join('')}</span></div>
+                </div>
+                <div class="ws-actions" style="align-self:center">
+                    ${canEdit() ? `<button class="ws-btn is-gold" type="button" id="wsc-new">${ic('plus')}New work</button>` : ''}
+                    <a class="ws-btn" href="?client=${encodeURIComponent(c.id)}&tab=ask" data-tab="ask">${ic('spark')}Ask AI</a>
+                </div>
+            </div>
+            <div id="wsc-banner"></div>
+            ${doneN < 4 && !c.archived ? `<section class="ws-setup"><div class="ws-card-h"><h2>Finish setting up ${esc(c.name)}</h2><span class="el-muted ws-num">${doneN} of 4 done</span></div>
+                <div class="ws-steps">${st.map(s => `<div class="ws-step ${s.done ? 'is-done' : ''}"><span class="tick">${s.done ? ic('check') : ''}</span>
+                    <div style="min-width:0"><div class="ws-t">${s.t}</div>${s.done ? '' : (s.work
+                        ? `<button class="ws-link" type="button" data-newwork>${s.label} ${ic('arrow')}</button>`
+                        : `<a href="?client=${encodeURIComponent(c.id)}&tab=${s.tab}" data-tab="${s.tab}">${s.label} →</a>`)}</div></div>`).join('')}</div></section>` : ''}
+            <nav class="ws-tabs" role="tablist" aria-label="${esc(c.name)}">${TABS.map(([k, l]) => `<a role="tab" href="?client=${encodeURIComponent(c.id)}&tab=${k}" data-tab="${k}" aria-selected="${tab === k}">${l}${k === 'tasks' && openTasks ? ` <span class="n">${openTasks}</span>` : ''}${k === 'reports' && timeline ? ` <span class="n">${(timeline.reports || []).length}</span>` : ''}</a>`).join('')}</nav>
+            <div id="wsc-body"><div class="ws-empty"><p>Loading…</p></div></div>`;
+    }
+
+    function wireFrame() {
+        root.querySelectorAll('[data-tab]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); go(a.dataset.tab); }));
+        const nw = $('wsc-new'); if (nw) nw.addEventListener('click', () => EL.newWork(c.id));
+        root.querySelectorAll('[data-newwork]').forEach(b => b.addEventListener('click', () => EL.newWork(c.id)));
+        banner();
+    }
+
+    function render() { root.innerHTML = frame(); wireFrame(); drawTab(); }
+    function go(k) {
+        tab = k;
+        const u = new URL(location.href); u.searchParams.set('tab', k); u.searchParams.delete('added'); u.searchParams.delete('meta'); u.searchParams.delete('pages'); u.searchParams.delete('message');
+        history.replaceState(null, '', u.toString());
+        root.querySelectorAll('.ws-tabs [data-tab]').forEach(a => a.setAttribute('aria-selected', String(a.dataset.tab === k)));
+        drawTab();
+    }
+
+    /** What arrived with the page: a new client, a Meta connection, an invite link to pass on. */
+    function banner() {
+        const host = $('wsc-banner'); if (!host) return;
+        const parts = [];
+        if (q.get('added') === '1') parts.push(`<div><b>${esc(c.name)} is set up.</b> Everything you do for them is filed here: start with New work, or add tasks to the board.</div>`);
+        let problems = null, invite = null;
+        try { problems = JSON.parse(sessionStorage.getItem('el-added-problems-' + c.id) || 'null'); sessionStorage.removeItem('el-added-problems-' + c.id); } catch { problems = null; }
+        try { invite = JSON.parse(sessionStorage.getItem('el-invite-' + c.id) || 'null'); sessionStorage.removeItem('el-invite-' + c.id); } catch { invite = null; }
+        if (problems && problems.length) parts.push(`<div>Some of it did not go through: ${problems.map(esc).join('; ')}. Fix it under Settings or Access &amp; sharing.</div>`);
+        if (invite) parts.push(inviteHtml(invite));
+        if (q.get('meta') === 'ok') parts.push(`<div><b>Meta connected</b> (${esc(q.get('pages') || '1')} Page${q.get('pages') === '1' ? '' : 's'}). Numbers are read twice a day; the first read starts within the hour.</div>`);
+        if (q.get('meta') === 'error') parts.push(`<div><b>Meta connection failed:</b> ${esc(q.get('message') || 'no reason given')}.</div>`);
+        host.innerHTML = parts.length ? `<div class="wsc-banner">${parts.join('')}</div>` : '';
+        host.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
+    }
+    function inviteHtml(r) {
+        return r.link
+            ? `<div><b>Send this link to the owner.</b> ${esc(r.note || '')}</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><code>${esc(r.link)}</code><button class="ws-btn is-sm" type="button" data-copy="${esc(r.link)}">Copy link</button></div>`
+            : `<div>${esc(r.note || 'Invite sent.')}</div>`;
+    }
+    function copy(text) {
+        const done = () => EL.toast('Copied.');
+        try { navigator.clipboard.writeText(text).then(done, () => EL.toast('Select the link and copy it.', 'bad')); } catch { EL.toast('Select the link and copy it.', 'bad'); }
+    }
+
+    function drawTab() {
+        const body = $('wsc-body');
+        const f = { overview: tabOverview, tasks: tabTasks, reports: tabReports, leads: tabLeads, meta: tabMeta, ask: tabAsk, schedules: tabSchedules, access: tabAccess, settings: tabSettings }[tab];
+        body.innerHTML = '<div class="ws-empty"><p>Loading…</p></div>';
+        Promise.resolve(f(body)).catch(err => { body.innerHTML = `<div class="ws-empty">${ic('alert')}<p>${esc(err.message)}</p></div>`; });
+    }
+
+    // ---- overview ---------------------------------------------------------------
+    function spark(series) {
+        const vals = series.map(r => r.followers).filter(v => typeof v === 'number');
+        if (vals.length < 2) return '';
+        const w = 560, h = 120, pad = { l: 40, r: 10, t: 10, b: 18 };
+        const min = Math.min(...vals), max = Math.max(...vals);
+        const x = i => pad.l + (i / (vals.length - 1)) * (w - pad.l - pad.r);
+        const y = v => pad.t + (1 - (v - min) / ((max - min) || 1)) * (h - pad.t - pad.b);
+        const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+        const line = 'M' + pts.join(' L');
+        const area = `${line} L${x(vals.length - 1).toFixed(1)},${h - pad.b} L${pad.l},${h - pad.b} Z`;
+        const fmt = v => Math.round(v).toLocaleString('en-US');
+        const first = series.find(r => typeof r.followers === 'number'), last = [...series].reverse().find(r => typeof r.followers === 'number');
+        return `<svg class="wsc-spark" viewBox="0 0 ${w} ${h}" role="img" aria-label="Followers from ${fmt(min)} to ${fmt(max)}">
+            <defs><linearGradient id="wsg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--jade)" stop-opacity=".3"/><stop offset="1" stop-color="var(--jade)" stop-opacity="0"/></linearGradient></defs>
+            ${[min, max].map(v => `<line x1="${pad.l}" x2="${w - pad.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--card-border)"/><text x="${pad.l - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${fmt(v)}</text>`).join('')}
+            <path d="${area}" fill="url(#wsg)" stroke="none"/><path d="${line}" fill="none" stroke="var(--jade)" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="${x(vals.length - 1).toFixed(1)}" cy="${y(vals[vals.length - 1]).toFixed(1)}" r="4" fill="var(--jade)" stroke="var(--surface-1)" stroke-width="2"/>
+            <text x="${pad.l}" y="${h - 3}">${esc(UI.day(first.day))}</text><text x="${w - pad.r}" y="${h - 3}" text-anchor="end">${esc(UI.day(last.day))}</text>
+        </svg>`;
+    }
+    const num = v => (v === null || v === undefined) ? '—' : Number(v).toLocaleString('en-US');
+    const signed = v => (v === null || v === undefined) ? '' : (v > 0 ? '+' : '') + Number(v).toLocaleString('en-US');
+    const pct = v => (v === null || v === undefined) ? '' : ` (${v > 0 ? '+' : ''}${Math.round(v)}%)`;
+
+    function reportLine(r) {
+        const subject = r.target_handle ? (r.platform === 'instagram' ? '@' + r.target_handle : r.target_handle) : [].concat(r.fb_group_names || r.fb_page_names || []).join(', ');
+        const result = r.grade ? `grade ${r.grade}${r.score != null ? ' · ' + r.score + '/100' : ''}` : (r.posts_analyzed ? `${r.posts_analyzed} posts read` : '');
+        return { subject, result };
+    }
+    function reportRow(r) {
+        const { subject, result } = reportLine(r);
+        const src = UI.sourceOf(r.report_type);
+        return `<div class="ws-row is-link" data-open="${esc(r.id)}" role="button" tabindex="0"><span class="ws-sev ${src === 'meta' ? 'is-jade' : src === 'reports' ? 'is-gold' : ''}"></span>
+            <div class="ws-grow"><div class="ws-t">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</div><div class="ws-m">${esc([subject, UI.day(r.created_at), result].filter(Boolean).join(' · '))}</div></div>${UI.srcChip(src)}</div>`;
+    }
+    function wireOpen(host) {
+        host.querySelectorAll('[data-open]').forEach(el => {
+            const open = () => { const r = (timeline.reports || []).find(x => x.id === el.dataset.open); if (r) openReport(r); };
+            el.addEventListener('click', open);
+            el.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
+        });
+    }
+
+    async function tabOverview(body) {
+        const conns = liveConns();
+        const [tl] = await Promise.all([
+            timeline ? Promise.resolve(timeline) : loadTimeline(),
+            tasks ? Promise.resolve(tasks) : loadTasks(),
+            conns.length && !growth ? EL.api(`/api/meta/growth?client_id=${id}`).then(g => { growth = g; }).catch(() => { growth = null; }) : Promise.resolve()
+        ]);
+        const reps = tl.reports || [];
+        const jobs = (tl.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status));
+        const ig = reps.find(r => r.report_type === 'ig_report');
+        const gr = growth && growth.growth;
+        let kpis;
+        if (gr && !gr.empty) {
+            const f = gr.followers || {};
+            const tile = (l, w) => { const x = w || {}; const cls = x.kind === 'up' || x.kind === 'new' ? 'up' : x.kind === 'down' ? 'down' : '';
+                return `<div class="ws-kpi"><span class="l">${l}</span><span class="v">${num(x.now)}</span><span class="d ${cls}">${x.before == null ? 'last 7 days' : `vs ${num(x.before)} the week before${pct(x.pct)}`}</span>${UI.srcChip('meta')}</div>`; };
+            kpis = `<div class="ws-grid g4">
+                <div class="ws-kpi"><span class="l">Followers</span><span class="v">${num(f.now)}</span><span class="d ${f.week > 0 ? 'up' : f.week < 0 ? 'down' : ''}">${f.week == null ? 'growth shows after a week of days' : signed(f.week) + ' this week' + pct(f.week_pct)}</span>${UI.srcChip('meta')}</div>
+                ${tile('Reach, last 7 days', gr.reach)}${tile('Profile visits, last 7 days', gr.profile_views)}${tile('Interactions, last 7 days', gr.interactions)}</div>`;
+        } else if (ig) {
+            const bench = reps.find(r => r.report_type === 'deep_audit');
+            kpis = `<div class="ws-grid g4">
+                <div class="ws-kpi"><span class="l">Instagram audit</span><span class="v">${esc(ig.grade || '—')}</span><span class="d">${ig.score != null ? ig.score + '/100 · ' : ''}${UI.day(ig.created_at)}</span>${UI.srcChip('public')}</div>
+                <div class="ws-kpi"><span class="l">Engagement rate</span><span class="v">${ig.engagement_rate != null ? (Number(ig.engagement_rate) * (ig.engagement_rate < 1 ? 100 : 1)).toFixed(1) + '%' : '—'}</span><span class="d">from the same audit</span>${UI.srcChip('public')}</div>
+                <div class="ws-kpi"><span class="l">Competitor benchmark</span><span class="v">${bench ? esc(bench.grade || (bench.score != null ? bench.score + '/100' : 'Done')) : '—'}</span><span class="d">${bench ? UI.day(bench.created_at) : 'not run yet'}</span>${UI.srcChip('public')}</div>
+                <div class="ws-kpi"><span class="l">Owner numbers</span><span class="v" style="font-size:1.05rem;color:var(--text-muted)">${conns.length ? 'First read pending' : 'Not connected'}</span><a class="ws-link" href="?client=${encodeURIComponent(c.id)}&tab=meta" data-tab2="meta">${conns.length ? 'See Meta' : 'Connect Meta'} ${ic('arrow')}</a></div></div>`;
+        } else {
+            kpis = `<div class="ws-empty" style="margin-bottom:16px">${ic('chart')}<h3>No numbers yet</h3><p>Start with an Instagram audit: it reads their recent posts and scores them against local peers, in a few minutes. Connecting Meta adds their own daily numbers.</p>
+                ${canEdit() ? `<div class="ws-actions"><a class="ws-btn is-gold" href="ig-report.html?client=${encodeURIComponent(c.id)}">${ic('play')}Run an Instagram audit</a><a class="ws-btn" href="?client=${encodeURIComponent(c.id)}&tab=meta" data-tab2="meta">Connect Meta</a></div>` : ''}</div>`;
+        }
+        const open = tasks && tasks.tasks ? tasks.tasks.filter(t => t.status !== 'done') : [];
+        const late = open.filter(UI.isLate).length;
+        const waiting = open.filter(t => t.status === 'waiting').length;
+        body.innerHTML = `${kpis}
+            <div class="ws-grid g2">
+                <section class="ws-card"><div class="ws-card-h"><h2>${gr && !gr.empty ? 'Followers, day by day' : 'Latest work'}</h2>${gr && !gr.empty ? UI.srcChip('meta') : `<button class="ws-link" type="button" data-tab2="reports">All reports ${ic('arrow')}</button>`}</div>
+                    ${gr && !gr.empty ? spark(gr.series || []) : (reps.length ? `<div class="ws-rows">${reps.slice(0, 5).map(reportRow).join('')}</div>` : '<p class="el-muted">Nothing filed under this client yet.</p>')}
+                </section>
+                <section class="ws-card"><div class="ws-card-h"><h2>Running and next</h2></div>
+                    <div class="ws-rows">
+                        ${jobs.map(j => `<div class="ws-row"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(UI.jobName(j.type))}</div><div class="ws-m">${esc(UI.jobState(j.status))} · ${j.progress || 0}%${j.error ? ' · ' + esc(j.error.slice(0, 90)) : ''}</div></div></div>`).join('')}
+                        ${tasks && tasks.error ? `<div class="ws-row"><span class="ws-sev"></span><div class="ws-grow"><div class="ws-t">Task board</div><div class="ws-m">${esc(tasks.error.message)}</div></div></div>`
+                            : `<div class="ws-row"><span class="ws-sev ${late ? 'is-bad' : 'is-gold'}"></span><div class="ws-grow"><div class="ws-t">${open.length} open task${open.length === 1 ? '' : 's'}${late ? `, ${late} overdue` : ''}</div><div class="ws-m">${waiting} waiting on the client</div></div><button class="ws-btn is-sm" type="button" data-tab2="tasks">Board</button></div>`}
+                        ${open.filter(UI.isLate).slice(0, 3).map(t => UI.taskRow(t)).join('')}
+                    </div>
+                </section>
+            </div>
+            ${gr && !gr.empty && reps.length ? `<section class="ws-card"><div class="ws-card-h"><h2>Latest work</h2><button class="ws-link" type="button" data-tab2="reports">All reports ${ic('arrow')}</button></div><div class="ws-rows">${reps.slice(0, 5).map(reportRow).join('')}</div></section>` : ''}`;
+        body.querySelectorAll('[data-tab2]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); go(b.dataset.tab2); }));
+        wireOpen(body);
+        body.querySelectorAll('[data-task]').forEach(el => el.addEventListener('click', () => {
+            const t = tasks.tasks.find(x => x.id === el.dataset.task);
+            UI.openTask(t, { clientId: c.id, clientName: c.name, people: tasks.people, canEdit: tasks.canEdit, onSaved: () => { tasks = null; drawTab(); } });
+        }));
+    }
+
+    // ---- tasks ------------------------------------------------------------------
+    function tabTasks(body) {
+        UI.board(body, c.id, { onLoad: d => { tasks = d; } });
+    }
+
+    // ---- reports ----------------------------------------------------------------
+    let reportFilter = 'all';
+    async function tabReports(body) {
+        const tl = timeline || await loadTimeline();
+        const reps = tl.reports || [];
+        const types = [...new Set(reps.map(r => r.report_type))];
+        const running = (tl.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status));
+        const list = reps.filter(r => reportFilter === 'all' || r.report_type === reportFilter);
+        if (!reps.length && !running.length) {
+            body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No reports yet</h3><p>Reports appear here as soon as work for ${esc(c.name)} finishes, whoever on the team ran it.</p>${canEdit() ? `<button class="ws-btn is-gold" type="button" data-newwork>${ic('plus')}New work</button>` : ''}</div>`;
+            body.querySelectorAll('[data-newwork]').forEach(b => b.addEventListener('click', () => EL.newWork(c.id)));
+            return;
+        }
+        body.innerHTML = `
+            ${running.length ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Running now</h2></div><div class="ws-rows">${running.map(j => `<div class="ws-row"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(UI.jobName(j.type))}</div><div class="ws-m">${esc(UI.jobState(j.status))} · ${j.progress || 0}% · started ${esc(UI.ago(j.created_at))}</div></div></div>`).join('')}</div></section>` : ''}
+            <div class="ws-filters"><button type="button" data-f="all" aria-pressed="${reportFilter === 'all'}">All <span class="ws-num">${reps.length}</span></button>${types.map(t => `<button type="button" data-f="${esc(t)}" aria-pressed="${reportFilter === t}">${esc(UI.TYPE_LABEL[t] || t)}</button>`).join('')}</div>
+            <div class="ws-table-wrap"><table class="ws-table"><thead><tr><th>Report</th><th>About</th><th>Date</th><th>Result</th><th>Source</th></tr></thead>
+            <tbody>${list.map(r => { const { subject, result } = reportLine(r); return `<tr class="is-link" data-open="${esc(r.id)}" tabindex="0"><td class="t ws-nowrap">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</td><td>${esc(subject || '—')}${r.ai_summary ? `<div class="s">${esc(r.ai_summary.slice(0, 140))}</div>` : ''}</td><td class="ws-nowrap">${esc(UI.day(r.created_at))}</td><td class="ws-nowrap">${esc(result || '—')}</td><td>${UI.srcChip(UI.sourceOf(r.report_type))}</td></tr>`; }).join('')}</tbody></table></div>`;
+        body.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { reportFilter = b.dataset.f; tabReports(body); }));
+        wireOpen(body);
+    }
+
+    function openReport(r) {
+        const page = UI.TYPE_PAGE[r.report_type] || 'ig-report.html';
+        const href = `${page}?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}`;
+        $('rv-title').textContent = `${UI.TYPE_LABEL[r.report_type] || r.report_type}${reportLine(r).subject ? ' · ' + reportLine(r).subject : ''}`;
+        $('rv-full').href = href;
+        $('rv-frame').src = href + '&embed=1';
+        $('rv').classList.remove('hidden');
+        document.body.classList.add('rvw-open');
+    }
+    function closeReport() { $('rv').classList.add('hidden'); document.body.classList.remove('rvw-open'); $('rv-frame').src = 'about:blank'; }
+    document.querySelectorAll('[data-rv-close]').forEach(b => b.addEventListener('click', closeReport));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('rv').classList.contains('hidden')) closeReport(); });
+    $('rv-pdf').addEventListener('click', () => {
+        // The engine's own exporter when it has one; the browser's print otherwise.
+        const w = $('rv-frame').contentWindow;
+        let doc = null; try { doc = w.document; } catch (_) { doc = null; }
+        const btn = doc && (doc.getElementById('export-pdf') || doc.getElementById('export') || doc.getElementById('vault-export'));
+        if (btn && !btn.closest('.hidden')) btn.click(); else if (w) w.print();
+    });
+
+    // ---- leads ------------------------------------------------------------------
+    async function tabLeads(body) {
+        const [s, l] = await Promise.all([
+            EL.api(`/api/leads/summary?client_only=1&client_id=${id}`),
+            EL.api(`/api/leads?client_only=1&client_id=${id}&limit=12`)
+        ]);
+        const cid = encodeURIComponent(c.id);
+        body.innerHTML = `
+            <div class="ws-head"><div><h2 style="margin:0;font-size:1.1rem;color:var(--text-primary)">Leads for ${esc(c.name)}</h2>
+                <p class="ws-sub">${s.total ? `${s.total} business${s.total === 1 ? '' : 'es'} found · ${s.reachable} reachable · ${s.byPlatform.instagram} on Instagram, ${s.byPlatform.facebook} on Facebook. They are in the agency’s lead list too, filed under this client.` : 'Nothing found for this client yet.'}</p></div>
+                <div class="ws-actions">
+                    ${canEdit() ? `<a class="ws-btn is-gold" href="index.html?client=${cid}">${ic('target')}Find leads on Instagram</a><a class="ws-btn" href="leads.html?client=${cid}&scope=client">Find Facebook Pages</a>` : ''}
+                    <a class="ws-btn is-quiet" href="leads.html?client=${cid}&scope=client">Full list and export</a>
+                </div></div>
+            ${(l.leads || []).length ? `<div class="ws-table-wrap"><table class="ws-table"><thead><tr><th>Business</th><th>Where</th><th>Contact</th></tr></thead><tbody>
+                ${l.leads.map(r => `<tr><td><div class="t">${esc(r.full_name || r.username)}</div><div class="s">${esc(r.username ? '@' + r.username : '')}${r.platform ? ' · ' + esc(r.platform) : ''}</div></td><td>${esc(r.city || '—')}</td><td>${esc(r.email || r.phone || r.whatsapp || 'no contact found')}</td></tr>`).join('')}
+            </tbody></table></div>${(l.total || 0) > 12 ? `<p class="el-muted" style="margin-top:8px">…and ${l.total - 12} more in the full list.</p>` : ''}`
+            : `<div class="ws-empty">${ic('target')}<h3>No leads yet</h3><p>Search Instagram by place, hashtag or a rival’s followers, or find local Facebook Pages with a contact button.</p></div>`}
+            <section class="ws-card" style="margin-top:16px"><div class="ws-card-h"><h2>Local demand</h2><a class="ws-link" href="fb-leads.html?client=${cid}">Open ${ic('arrow')}</a></div>
+                <p class="el-muted">People asking for what ${esc(c.name)} sells, in local Facebook groups. Find the groups, read them, and the requests land here.</p>
+                ${canEdit() ? `<div class="ws-actions"><a class="ws-btn" href="fb-communities.html?client=${cid}">Find Facebook groups</a><a class="ws-btn" href="fb-audit.html?client=${cid}">Read Facebook groups</a></div>` : ''}
+            </section>`;
+    }
+
+    // ---- meta -------------------------------------------------------------------
+    async function tabMeta(body) {
+        if (!metaCfg) { try { metaCfg = await EL.api('/api/meta/status'); } catch { metaCfg = { configured: false }; } }
+        const conns = detail.metaConnections || [];
+        const live = liveConns();
+        const monthly = live.length || conns.length ? await EL.api(`/api/meta/monthly?client_id=${id}`).catch(() => ({ reports: [] })) : { reports: [] };
+        if (live.length && !growth) { growth = await EL.api(`/api/meta/growth?client_id=${id}`).catch(() => null); }
+        const gr = growth && growth.growth;
+        const months = [];
+        for (let i = 1; i <= 6; i++) { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); months.push(d.toISOString().slice(0, 7)); }
+        const mName = m => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+        body.innerHTML = `
+            <div class="ws-grid g2">
+                <section class="ws-card"><div class="ws-card-h"><h2>Facebook Page and Instagram</h2>${live.length ? '<span class="el-chip is-jade">Connected</span>' : ''}</div>
+                    ${conns.length ? conns.map(x => `<div class="conn ${x.status !== 'active' ? 'is-bad' : ''}"><b>${esc(x.page_name || x.page_id)}</b>${x.ig_username ? ` · Instagram <b>@${esc(x.ig_username)}</b>` : ' · no Instagram account linked to this Page'}
+                        <div class="el-muted" style="margin-top:4px">${esc(x.status)}${x.last_sync_at ? ' · last read ' + esc(UI.ago(x.last_sync_at)) : ' · not read yet'}${x.token_expires_at ? ' · access until ' + esc(UI.day(x.token_expires_at)) : ''}${x.last_error ? ' · ' + esc(x.last_error) : ''}</div>
+                        ${canEdit() ? `<div class="ws-actions" style="margin-top:8px"><button class="ws-btn is-sm" type="button" data-read="${esc(x.id)}">${ic('clock')}Read numbers now</button><button class="ws-btn is-sm is-quiet" type="button" data-disc="${esc(x.id)}">Disconnect</button></div>` : ''}</div>`).join('')
+                    : `<p class="el-muted">Connecting Meta gives ${esc(c.name)}’s own numbers: daily followers and reach, a monthly report, and Ask AI answers about their real results. Audits, benchmarks and lead searches work without it.</p>`}
+                    ${canEdit() ? `<div class="ws-actions"><button class="ws-btn ${conns.length ? '' : 'is-gold'}" type="button" id="m-connect" ${metaCfg.configured ? '' : 'disabled'}>${ic('plug')}${conns.length ? 'Connect another Page' : 'Connect Meta'}</button>
+                        ${live.length ? `<button class="ws-btn" type="button" id="m-pull">Pull a 28-day owner report</button>` : ''}</div>` : ''}
+                    <div class="ws-note" id="m-note">${metaCfg.configured ? '' : 'The server has no Meta app keys yet, so connecting is switched off until an admin adds them.'}</div>
+                    <div id="m-progress"></div>
+                </section>
+                <section class="ws-card"><h2>Before you connect</h2>
+                    <ul style="margin:0;padding-left:18px;color:var(--text-secondary);font-size:0.88rem;line-height:1.7">
+                        <li>You sign in with a Facebook account that manages their Page, and choose the Page. Only Pages you choose are filed under ${esc(c.name)}.</li>
+                        <li>Read only: nothing is posted, no messages are read, no ads are changed.</li>
+                        <li>Until Meta approves the app, only people added as Testers on it can connect. Your team can; owners connecting themselves need App Review.</li>
+                        <li>Owner numbers are always labelled as such and never mixed with public data.</li>
+                    </ul>
+                </section>
+            </div>
+            ${gr && !gr.empty ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Numbers, day by day</h2>${UI.srcChip('meta')}</div>
+                <div class="ws-table-wrap"><table class="ws-table gtable"><thead><tr><th>Day</th><th class="ws-num">Followers</th><th class="ws-num">Reach</th><th class="ws-num">Profile visits</th><th class="ws-num">Interactions</th></tr></thead>
+                <tbody>${(gr.series || []).slice(-14).reverse().map(r => `<tr><td>${esc(r.day)}</td><td class="ws-num">${num(r.followers)}</td><td class="ws-num">${num(r.reach)}</td><td class="ws-num">${num(r.profile_views)}</td><td class="ws-num">${num(r.interactions)}</td></tr>`).join('')}</tbody></table></div>
+                <p class="el-muted">A day’s reach, visits and interactions are written the day after, once the day is complete; followers are the count on that day.</p></section>` : ''}
+            <section class="ws-card"><div class="ws-card-h"><h2>Monthly reports</h2>
+                ${live.length && canEdit() ? `<div class="ws-actions"><select id="m-month" style="width:auto">${months.map(m => `<option value="${m}">${mName(m)}</option>`).join('')}</select><button class="ws-btn is-gold is-sm" type="button" id="m-build">Build the report</button></div>` : ''}</div>
+                ${(monthly.reports || []).length ? `<div class="ws-rows">${monthly.reports.map(r => `<a class="ws-row is-link" href="monthly.html?report=${encodeURIComponent(r.id)}&client=${encodeURIComponent(c.id)}"><span class="ws-sev is-jade"></span><div class="ws-grow"><div class="ws-t">${esc(mName(r.month))}</div><div class="ws-m">${esc(r.ai_summary ? r.ai_summary.slice(0, 140) : 'Built ' + UI.day(r.created_at))}</div></div>${UI.srcChip('meta')}</a>`).join('')}</div>`
+                : `<p class="el-muted">${live.length ? 'None yet. Build one for any finished month.' : 'Connect Meta to build monthly reports.'}</p>`}
+                <div class="ws-note" id="mb-note"></div><div id="mb-progress"></div>
+            </section>`;
+
+        const note = $('m-note');
+        const conn = $('m-connect');
+        if (conn) conn.addEventListener('click', async () => {
+            try { const d = await EL.api(`/api/meta/oauth/start?client_id=${id}`); window.location.href = d.url; }
+            catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; }
+        });
+        body.querySelectorAll('[data-read]').forEach(b => b.addEventListener('click', async () => {
+            b.disabled = true; note.className = 'ws-note'; note.textContent = 'Reading today’s numbers…';
+            try { await EL.api('/api/meta/daily-sync', { method: 'POST', body: { connectionId: b.dataset.read } }); growth = null; note.className = 'ws-note is-good'; note.textContent = 'Read. The numbers below are up to date.'; setTimeout(() => tabMeta(body), 600); }
+            catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; b.disabled = false; }
+        }));
+        body.querySelectorAll('[data-disc]').forEach(b => b.addEventListener('click', async () => {
+            if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Disconnect — press again'; return; }
+            try { await EL.api(`/api/meta/connections/${b.dataset.disc}`, { method: 'DELETE' }); await refreshDetail(); growth = null; render(); }
+            catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; }
+        }));
+        const pull = $('m-pull');
+        if (pull) pull.addEventListener('click', async () => {
+            const cx = live[0]; pull.disabled = true;
+            note.className = 'ws-note'; note.textContent = 'Pulling the owner report… this costs no Apify credit.';
+            try {
+                await EL.runJob('/api/meta/sync', { connectionId: cx.id, days: 28, clientId: c.id }, {
+                    mount: $('m-progress'),
+                    onProgress: j => { note.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                    onDone: () => { note.className = 'ws-note is-good'; note.textContent = 'Done. It is in Reports and feeds the content plan.'; timeline = null; },
+                    onFailed: j => { note.className = 'ws-note is-bad'; note.textContent = 'Failed: ' + (j.error || 'unknown'); pull.disabled = false; }
+                });
+            } catch (err) { if (!err.handled) { note.className = 'ws-note is-bad'; note.textContent = err.message; } pull.disabled = false; }
+        });
+        const build = $('m-build');
+        if (build) build.addEventListener('click', async () => {
+            const n = $('mb-note'); build.disabled = true;
+            n.className = 'ws-note'; n.textContent = 'Building the report…';
+            try {
+                await EL.runJob('/api/meta/monthly', { connectionId: live[0].id, month: $('m-month').value, clientId: c.id }, {
+                    mount: $('mb-progress'),
+                    onProgress: j => { n.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                    onDone: () => { n.className = 'ws-note is-good'; n.textContent = 'Built.'; timeline = null; tabMeta(body); },
+                    onFailed: j => { n.className = 'ws-note is-bad'; n.textContent = 'Failed: ' + (j.error || 'unknown'); build.disabled = false; }
+                });
+            } catch (err) { if (!err.handled) { n.className = 'ws-note is-bad'; n.textContent = err.message; } build.disabled = false; }
+        });
+    }
+
+    // ---- ask ai -----------------------------------------------------------------
+    function tabAsk(body) {
+        const cid = encodeURIComponent(c.id);
+        const connected = liveConns().length > 0;
+        const owner = portalLogins()[0];
+        body.innerHTML = `
+            <div class="wsc-ask">
+                <a class="ws-card" href="${connected ? `client-assistant.html?client=${cid}` : `?client=${cid}&tab=meta`}" ${connected ? '' : 'data-tab2="meta"'}>
+                    <div class="ws-card-h"><h2>${ic('plug')} Their Meta numbers</h2>${connected ? '<span class="el-chip is-jade">Ready</span>' : '<span class="el-chip">Needs Meta</span>'}</div>
+                    <p class="el-muted">Followers, reach, views, posts and ads from ${esc(c.name)}’s own accounts, read twice a day. Answers show the figures they are built on.</p>
+                    <span class="ws-link">${connected ? 'Ask about their numbers' : 'Connect Meta first'} ${ic('arrow')}</span>
+                </a>
+                <a class="ws-card" href="assistant.html?client=${cid}">
+                    <div class="ws-card-h"><h2>${ic('doc')} Our reports and research</h2><span class="el-chip is-jade">Ready</span></div>
+                    <p class="el-muted">Audits, competitor benchmarks, Facebook group reads, leads and content plans filed under ${esc(c.name)}. Scraped numbers are labelled as public data.</p>
+                    <span class="ws-link">Ask about the research ${ic('arrow')}</span>
+                </a>
+            </div>
+            <p class="el-muted" style="margin-top:14px">Answers only ever use this client’s data. ${owner ? `The owner (${esc(owner.email)}) can ask about their own numbers from their portal.` : 'Invite the owner under Access &amp; sharing and they can ask about their own numbers from their portal.'}</p>`;
+        body.querySelectorAll('[data-tab2]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); go(b.dataset.tab2); }));
+    }
+
+    // ---- schedules --------------------------------------------------------------
+    async function tabSchedules(body) {
+        const { schedules } = await EL.api(`/api/schedules?client_id=${id}`);
+        const rows = schedules || [];
+        body.innerHTML = rows.length ? `<p class="el-muted" style="margin-bottom:12px">Work that repeats by itself for ${esc(c.name)}. Results are filed here like any other report. A schedule is made from a finished report: “Repeat on a schedule”.</p>
+            <div class="ws-table-wrap"><table class="ws-table"><thead><tr><th>Work</th><th>When</th><th>Next run</th><th>Last result</th><th></th></tr></thead><tbody>
+            ${rows.map(s => `<tr><td class="t">${esc(s.label || s.summary)}</td><td class="ws-nowrap">${esc(EL.scheduleWhen(s))}</td><td class="ws-nowrap">${s.paused ? 'Paused' : esc(UI.day(s.next_run_at))}</td>
+                <td>${esc(s.last_status || '—')}${s.last_error ? `<div class="s">${esc(s.last_error.slice(0, 120))}</div>` : ''}</td>
+                <td class="ws-nowrap">${canEdit() ? `<button class="ws-btn is-sm" type="button" data-pause="${esc(s.id)}" data-val="${s.paused ? 'false' : 'true'}">${s.paused ? 'Resume' : 'Pause'}</button> <button class="ws-btn is-sm is-quiet" type="button" data-del="${esc(s.id)}">Delete</button>` : ''}</td></tr>`).join('')}
+            </tbody></table></div><div class="ws-note" id="s-note"></div>`
+            : `<div class="ws-empty">${ic('clock')}<h3>Nothing repeats yet</h3><p>Open any finished report and choose “Repeat on a schedule”, for example an Instagram audit on the 1st of every month.</p></div>`;
+        body.querySelectorAll('[data-pause]').forEach(b => b.addEventListener('click', async () => {
+            b.disabled = true;
+            try { await EL.api(`/api/schedules/${b.dataset.pause}`, { method: 'PATCH', body: { paused: b.dataset.val === 'true' } }); EL.toast(b.dataset.val === 'true' ? 'Paused.' : 'Resumed.'); tabSchedules(body); }
+            catch (err) { $('s-note').className = 'ws-note is-bad'; $('s-note').textContent = err.message; b.disabled = false; }
+        }));
+        body.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+            if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Delete — press again'; return; }
+            try { await EL.api(`/api/schedules/${b.dataset.del}`, { method: 'DELETE' }); EL.toast('Schedule deleted. Its reports stay.'); tabSchedules(body); }
+            catch (err) { $('s-note').className = 'ws-note is-bad'; $('s-note').textContent = err.message; }
+        }));
+    }
+
+    // ---- access & sharing ---------------------------------------------------------
+    let accessFlash = null;      // the result of an invite, shown again after the tab redraws
+    async function tabAccess(body) {
+        const shares = await EL.api(`/api/shares?client_id=${id}`).then(r => (r.shares || []).filter(x => x.active)).catch(() => []);
+        const owners = portalLogins();
+        const isAdmin = me.role === 'admin';
+        body.innerHTML = `
+            <div class="ws-grid g2e">
+                <section class="ws-card"><div class="ws-card-h"><h2>Team on this client</h2></div>
+                    <div class="ws-rows">${team().map(m => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(m.email))}</span><div class="ws-grow"><div class="ws-t">${esc(m.name || m.email)}</div><div class="ws-m">${esc(m.email)}</div></div>
+                        <span class="el-chip ${m.role === 'owner' ? 'is-gold' : ''}">${m.role === 'owner' ? 'Owner' : m.role === 'editor' ? 'Can edit' : 'Can view'}</span>
+                        ${m.role !== 'owner' && (isOwner() || m.user_id === me.id) ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(m.user_id)}">${m.user_id === me.id ? 'Leave' : 'Remove'}</button>` : ''}</div>`).join('')}</div>
+                    ${isOwner() ? `<div class="ws-form"><div class="ws-form two"><div><label for="t-email">Add a teammate by email</label><input id="t-email" type="email" placeholder="colleague@agency.com"></div>
+                        <div><label for="t-role">They can</label><select id="t-role"><option value="editor">Edit and start work</option><option value="viewer">Only view</option></select></div></div>
+                        <div><button class="ws-btn" type="button" id="t-add">${ic('plus')}Add to this client</button></div></div>` : '<p class="el-muted">Only the client’s owner or an admin adds people.</p>'}
+                    <div class="ws-note" id="t-note"></div>
+                    <p class="el-muted">Admins can open every client. Everyone else sees the clients they are added to.</p>
+                </section>
+                <section class="ws-card"><div class="ws-card-h"><h2>Owner portal</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
+                    <p class="el-muted">The business owner’s own login for ${esc(c.name)} only: their reports in plain words, their numbers every day, Ask AI on their own numbers, and the tasks you share with them. Never your costs, keys or other clients.</p>
+                    ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
+                        ${isOwner() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.email)}">Send a new link</button><button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
+                    ${isOwner() ? `<div class="ws-form">
+                        <div class="ws-form two"><div><label for="o-email">Owner’s email</label><input id="o-email" type="email" placeholder="owner@business.com"></div><div><label for="o-name">Their name</label><input id="o-name" placeholder="Optional"></div></div>
+                        ${isAdmin ? `<div class="ws-form two"><div><label for="o-paid">Paid until</label><input id="o-paid" type="date"><div class="ws-hint">Optional. Empty starts the usual free trial.</div></div><div><label for="o-plan">Plan name</label><input id="o-plan" placeholder="Optional, e.g. Growth"></div></div>` : ''}
+                        <div><button class="ws-btn is-gold" type="button" id="o-invite">${ic('plus')}${owners.length ? 'Invite another login' : 'Invite the owner'}</button></div></div>` : ''}
+                    <div id="o-result"></div>
+                </section>
+            </div>
+            <section class="ws-card"><div class="ws-card-h"><h2>Share links</h2><span class="el-muted">Read-only links to one report, for people without a login</span></div>
+                ${shares.length ? `<div class="ws-rows">${shares.map(x => `<div class="ws-row"><span class="ws-sev is-jade"></span><div class="ws-grow"><div class="ws-t">${esc(UI.TYPE_LABEL[x.reports && x.reports.report_type] || 'Report')}${x.reports && x.reports.target_handle ? ' · ' + esc(x.reports.target_handle) : ''}${x.label ? ' · ' + esc(x.label) : ''}</div>
+                    <div class="ws-m">${x.views || 0} view${x.views === 1 ? '' : 's'} · until ${esc(UI.day(x.expires_at))}</div></div>
+                    <button class="ws-btn is-sm" type="button" data-copy="${esc(x.url)}">Copy</button>${canEdit() ? `<button class="ws-btn is-sm is-quiet" type="button" data-revoke="${esc(x.id)}">Turn off</button>` : ''}</div>`).join('')}</div>`
+                : '<p class="el-muted">No live links. Open a report and choose Share link.</p>'}
+            </section>`;
+
+        const tNote = $('t-note');
+        body.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', async () => {
+            if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Press again to confirm'; return; }
+            try {
+                await EL.api(`/api/clients/${id}/members/${b.dataset.rm}`, { method: 'DELETE' });
+                if (b.dataset.rm === me.id) { location.href = 'clients.html'; return; }
+                await refreshDetail(); render();
+            } catch (err) { tNote.className = 'ws-note is-bad'; tNote.textContent = err.message; }
+        }));
+        const add = $('t-add');
+        if (add) add.addEventListener('click', async () => {
+            const email = $('t-email').value.trim(); if (!email) return;
+            add.disabled = true; tNote.className = 'ws-note'; tNote.textContent = 'Adding…';
+            try { await EL.api(`/api/clients/${id}/members`, { method: 'POST', body: { email, role: $('t-role').value } }); EL.toast(`${email} added to ${c.name}.`); await refreshDetail(); render(); }
+            catch (err) { tNote.className = 'ws-note is-bad'; tNote.textContent = err.message; add.disabled = false; }
+        });
+        const invite = async (email, extra = {}) => {
+            const out = $('o-result');
+            out.innerHTML = '<p class="ws-note">Inviting…</p>';
+            try {
+                const r = await EL.api(`/api/clients/${id}/portal-invite`, { method: 'POST', body: { email, ...extra } });
+                await refreshDetail();
+                accessFlash = `<div class="wsc-banner">${inviteHtml(r)}</div>`;
+                render();                                   // the header's chips and the setup list change too
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
+        };
+        const inv = $('o-invite');
+        if (inv) inv.addEventListener('click', () => {
+            const email = $('o-email').value.trim();
+            if (!email) { $('o-result').innerHTML = '<p class="ws-note is-bad">Enter the owner’s email.</p>'; return; }
+            const extra = { name: $('o-name').value.trim() || null };
+            if ($('o-paid') && $('o-paid').value) { extra.paidUntil = $('o-paid').value; extra.planLabel = $('o-plan').value.trim() || null; }
+            invite(email, extra);
+        });
+        body.querySelectorAll('[data-resend]').forEach(b => b.addEventListener('click', () => invite(b.dataset.resend)));
+        body.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
+        body.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
+            try { await EL.api(`/api/share/${b.dataset.revoke}`, { method: 'DELETE' }); EL.toast('Link turned off. Anyone opening it now sees nothing.'); tabAccess(body); }
+            catch (err) { EL.toast(err.message, 'bad'); }
+        }));
+        if (accessFlash) {
+            $('o-result').innerHTML = accessFlash; accessFlash = null;
+            $('o-result').querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
+        }
+    }
+
+    // ---- settings ---------------------------------------------------------------
+    async function tabSettings(body) {
+        const all = (await EL.clients(true)).filter(x => x.id !== c.id && !x.archived && ['owner', 'admin'].includes(x.access));
+        const dis = canEdit() ? '' : 'disabled';
+        body.innerHTML = `
+            <div class="ws-grid g2">
+                <section class="ws-card"><h2>Business details</h2>
+                    <div class="ws-form">
+                        <div class="ws-form two">
+                            <div><label for="f-name">Business name</label><input id="f-name" value="${esc(c.name)}" ${dis}></div>
+                            <div><label for="f-brand">Brand or product</label><input id="f-brand" value="${esc(c.brand || '')}" placeholder="Optional" ${dis}></div>
+                            <div><label for="f-niche">What they do</label><input id="f-niche" value="${esc(c.niche || '')}" placeholder="e.g. family dentist" ${dis}></div>
+                            <div><label for="f-loc">Where</label><input id="f-loc" value="${esc(c.location || '')}" placeholder="City, State" ${dis}></div>
+                            <div><label for="f-ig">Instagram</label><input id="f-ig" value="${c.ig_handle ? '@' + esc(c.ig_handle) : ''}" placeholder="@handle" ${dis}></div>
+                            <div><label for="f-fb">Facebook Page</label><input id="f-fb" value="${esc(c.fb_page || '')}" placeholder="facebook.com/…" ${dis}></div>
+                        </div>
+                        <div><label for="f-notes">Notes</label><textarea class="wsc-area" id="f-notes" placeholder="Brief, goals, what they care about, what to avoid" ${dis}>${esc(c.notes || '')}</textarea></div>
+                    </div>
+                    ${canEdit() ? `<div class="ws-actions"><button class="ws-btn is-gold" type="button" id="f-save">Save</button></div>` : ''}
+                    <div class="ws-note" id="f-note"></div>
+                </section>
+                <section class="ws-card"><h2>Competitors</h2>
+                    <p class="el-muted">The businesses ${esc(c.name)} is compared against. Keep the set stable: if it changes between reports, so does the comparison.</p>
+                    <textarea class="wsc-area" id="r-list" placeholder="One Instagram handle per line, or comma separated" ${dis}>${esc((c.competitors || []).join('\n'))}</textarea>
+                    ${canEdit() ? `<div class="ws-actions"><button class="ws-btn" type="button" id="r-save">Save the set</button><button class="ws-btn is-quiet" type="button" id="r-find">Suggest similar businesses</button></div>` : ''}
+                    <div class="ws-note" id="r-note">${c.competitors_updated_at ? `${(c.competitors || []).length} account(s) · ${c.competitors_source === 'discovered' ? 'found automatically' : 'entered by hand'} · ${esc(UI.day(c.competitors_updated_at))}` : 'No comparison set yet.'}</div>
+                    <div id="r-progress"></div><div id="r-found"></div>
+                </section>
+            </div>
+            ${isOwner() ? `<section class="ws-card"><h2>Archive, merge or delete</h2>
+                <p class="el-muted">Archiving hides the client and keeps everything. Merging moves everything from another client into this one and archives the other — for duplicates. Deleting removes the client; its reports stay but lose their link to it.</p>
+                <div class="ws-actions">
+                    <button class="ws-btn" type="button" id="x-archive">${c.archived ? 'Unarchive' : 'Archive'}</button>
+                    ${all.length ? `<select id="x-from" style="width:auto;min-width:220px"><option value="">Merge another client into this one…</option>${all.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select><button class="ws-btn" type="button" id="x-merge" disabled>Merge</button>` : ''}
+                    <button class="ws-btn is-danger" type="button" id="x-delete">Delete</button>
+                </div>
+                <div class="ws-note" id="x-note"></div></section>` : ''}`;
+
+        const save = $('f-save');
+        if (save) save.addEventListener('click', async () => {
+            const n = $('f-note');
+            const bodyV = { name: $('f-name').value.trim(), brand: $('f-brand').value.trim() || null, niche: $('f-niche').value.trim() || null,
+                location: $('f-loc').value.trim() || null, ig_handle: $('f-ig').value.trim().replace('@', '') || null, fb_page: $('f-fb').value.trim() || null,
+                notes: $('f-notes').value.trim() || null };
+            if (!bodyV.name) { n.className = 'ws-note is-bad'; n.textContent = 'The client needs a name.'; return; }
+            save.disabled = true;
+            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: bodyV }); EL._clients = null; await refreshDetail(); EL.toast('Saved.'); render(); }
+            catch (err) { n.className = 'ws-note is-bad'; n.textContent = err.message; save.disabled = false; }
+        });
+        const rSave = $('r-save');
+        if (rSave) rSave.addEventListener('click', async () => {
+            const handles = $('r-list').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+            try { const r = await EL.api(`/api/clients/${id}/competitors`, { method: 'PUT', body: { handles } }); $('r-list').value = (r.handles || []).join('\n'); $('r-note').textContent = `Saved ${(r.handles || []).length} account(s).`; await refreshDetail(); }
+            catch (err) { $('r-note').className = 'ws-note is-bad'; $('r-note').textContent = err.message; }
+        });
+        const rFind = $('r-find');
+        if (rFind) rFind.addEventListener('click', async () => {
+            const n = $('r-note');
+            if (!c.niche) { n.className = 'ws-note is-bad'; n.textContent = 'Add what they do first — that is what gets searched for.'; return; }
+            n.className = 'ws-note'; n.textContent = 'Searching… this spends a little Apify credit.'; rFind.disabled = true;
+            try {
+                const { job } = await EL.runJob(`/api/clients/${id}/competitors/discover`, {}, {
+                    mount: $('r-progress'),
+                    onProgress: j => { n.textContent = `${j.progress || 0}% · ${j.current_step || ''}`; },
+                    onFailed: j => { n.className = 'ws-note is-bad'; n.textContent = 'Failed: ' + (j.error || 'unknown'); }
+                });
+                const r = (job && job.result) || {};
+                // A search match is not a competitor: shown for review, written
+                // into the box, and saving is still a decision.
+                if ((r.accounts || []).length) {
+                    $('r-found').innerHTML = `<p class="el-muted">Found these, closest in size first. Edit the list, then save.</p>` +
+                        r.accounts.map(a => `<div class="conn" style="margin-top:6px"><b>@${esc(a.username)}</b> · ${Number(a.followers).toLocaleString('en-US')} followers${a.category ? ' · ' + esc(a.category) : ''}${a.isBusiness ? '' : ' · personal account'}</div>`).join('');
+                    $('r-list').value = (r.handles || []).join('\n');
+                    n.textContent = `${r.handles.length} of ${r.considered} accounts were a comparable size. Review them, then save.`;
+                } else n.textContent = (r.warnings || []).join(' ') || 'Nothing comparable came back.';
+            } catch (err) { if (!err.handled) { n.className = 'ws-note is-bad'; n.textContent = err.message; } }
+            rFind.disabled = false;
+        });
+        const xNote = $('x-note');
+        const arch = $('x-archive');
+        if (arch) arch.addEventListener('click', async () => {
+            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: { archived: !c.archived } }); if (!c.archived && EL.clientId() === c.id) EL.setClientId(null); EL._clients = null; await refreshDetail(); render(); }
+            catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; }
+        });
+        const from = $('x-from'), merge = $('x-merge');
+        if (from) from.addEventListener('change', async () => {
+            merge.disabled = true;
+            if (!from.value) { xNote.textContent = ''; return; }
+            try {
+                const d = await EL.api(`/api/clients/${id}/merge?dry=1`, { method: 'POST', body: { fromId: from.value } });
+                const moving = Object.entries(d.counts).filter(([, n]) => n).map(([t, n]) => `${n} ${t.replace(/_/g, ' ')}`);
+                xNote.className = 'ws-note';
+                xNote.textContent = moving.length ? `Would move ${moving.join(', ')} from “${d.from.name}” into “${d.into.name}” and archive “${d.from.name}”. Nothing is deleted.`
+                    : `“${d.from.name}” has nothing filed under it; merging would just archive it.`;
+                merge.disabled = false;
+            } catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; }
+        });
+        if (merge) merge.addEventListener('click', async () => {
+            if (merge.dataset.sure !== '1') { merge.dataset.sure = '1'; merge.textContent = 'Merge — press again'; return; }
+            merge.disabled = true; xNote.textContent = 'Merging…';
+            try { const d = await EL.api(`/api/clients/${id}/merge`, { method: 'POST', body: { fromId: from.value } }); EL._clients = null; timeline = null; tasks = null; await refreshDetail(); EL.toast(`“${d.from.name}” merged in and archived.`); render(); }
+            catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; merge.disabled = false; }
+        });
+        const del = $('x-delete');
+        if (del) del.addEventListener('click', async () => {
+            if (del.dataset.sure !== '1') { del.dataset.sure = '1'; del.textContent = 'Delete — press again to confirm'; return; }
+            try { await EL.api(`/api/clients/${id}`, { method: 'DELETE' }); if (EL.clientId() === c.id) EL.setClientId(null); location.href = 'clients.html'; }
+            catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; }
+        });
+    }
+
+    // ---- boot ---------------------------------------------------------------------
+    // The timeline and the board feed the setup list and the tab counts, so
+    // they are read once, together, before the first draw.
+    await Promise.all([loadTimeline().catch(() => { timeline = { reports: [], jobs: [], suggestions: [] }; }), loadTasks()]);
+    render();
+})();
+</script>
+</body>
+</html>

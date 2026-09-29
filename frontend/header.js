@@ -78,46 +78,98 @@
     } catch { /* fetch unavailable */ }
 
     /**
-     * Grouped, because twelve flat items is a list you read rather than a menu
-     * you scan. The groups are the three things somebody is actually here to
-     * do — look at Instagram, look at Facebook, or run the business — so the
-     * eye lands on the right third before it reads a single label.
+     * The staff menu is places, not tools (phase 33). The client is the unit
+     * of work, so the menu is where work is found — Home, your tasks, the
+     * clients, every lead, what repeats — and the tools are things you do FOR
+     * a client, started from "New work" on the client or in the rail. Fifteen
+     * tool names in a list read as a workbench nobody could find their way
+     * around; five places read as an agency.
      *
-     * Icon and label are separate fields so the icons can sit in a fixed
-     * column and the labels start on one line. Emoji have wildly different
-     * widths; inlined into the label string they left the text ragged.
+     * `icon` names an entry in ICONS: drawn, so every row lines up and looks
+     * the same on every platform, where emoji did neither.
      */
     const NAV = [
-        { group: 'Instagram' },
-        { href: 'index.html',          icon: '🎯', label: 'Lead Finder',       engine: 'leadgen' },
-        { href: 'leads.html',          icon: '📋', label: 'Lead List',         engine: 'leadgen' },
-        { href: 'ig-report.html',      icon: '📊', label: 'Performance Audit', engine: 'report'  },
-        { href: 'ig-competitors.html', icon: '🥊', label: 'Competitor Intel',  engine: 'report'  },
-
-        { group: 'Facebook' },
-        { href: 'fb-report.html',      icon: '📘', label: 'Page Report',       engine: 'fb_page' },
-        { href: 'fb-communities.html', icon: '🏘', label: 'Communities',       engine: 'fb_community' },
-        { href: 'fb-audit.html',       icon: '🔬', label: 'Community Audit',   engine: 'fb_community' },
-        { href: 'fb-leads.html',       icon: '🎣', label: 'Demand Feed',       engine: 'fb_community' },
-        { href: 'fb-advisor.html',     icon: '✍️', label: 'Post Advisor',      engine: 'fb_community' },
-
-        { group: 'Workspace' },
-        { href: 'assistant.html',      icon: '💬', label: 'Analyst',           engine: null },
-        { href: 'monthly.html',        icon: '📅', label: 'Monthly Report',   engine: 'meta_owned' },
-        { href: 'content-plan.html',   icon: '🧭', label: 'Content Plan',      engine: 'content_plan' },
-        { href: 'clients.html',        icon: '👥', label: 'Clients',           engine: null },
-        { href: 'schedules.html',      icon: '⏱',  label: 'Schedules',         engine: null },
-        { href: 'admin.html',          icon: '🛠', label: 'Admin',             adminOnly: true }
+        { href: 'home.html',      icon: 'home',    label: 'Home',      engine: null },
+        { href: 'my-tasks.html',  icon: 'check',   label: 'My tasks',  engine: null, count: 'tasks' },
+        { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
+        { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
+        { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
+        { group: 'Admin' },
+        { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
     ];
 
+    /** Pages that belong under a menu entry without being one. */
+    const NAV_PARENT = { 'workspace.html': 'clients.html' };
+
     /**
-     * What a client sees. A client is not an employee with fewer grants — the
-     * employee nav is a workbench of eleven tools, and handing that to a
-     * business owner buries the one page they came for.
+     * Everything that can be done for a client, grouped by what the agency is
+     * trying to achieve rather than by platform. Each opens its page with the
+     * client already chosen (?client=), so the question "for whom?" is asked
+     * once, before the tool, and never again on the way.
      *
-     * Engine filtering still applies on top, so a client without a grant does
-     * not see the tab either.
+     * `apify` is true for the engines that spend scraping credit, so the list
+     * can say which do before anyone starts one.
      */
+    const WORK = [
+        { group: 'Check performance', items: [
+            { href: 'ig-report.html',      name: 'Instagram audit',          text: 'Score their recent posts against local peers.',               engine: 'report',       apify: true },
+            { href: 'fb-report.html',      name: 'Facebook Page report',     text: 'Posting rhythm, reactions and reviews on their Page.',        engine: 'fb_page',      apify: true },
+            { href: 'workspace.html',      name: 'Monthly report',           text: 'Last month from their own Meta numbers, in plain words.',     engine: 'meta_owned',   tab: 'meta' }
+        ] },
+        { group: 'Compare with competitors', items: [
+            { href: 'ig-competitors.html', name: 'Competitor benchmark',     text: 'Side by side with their rivals: rank, gaps, what rivals win.', engine: 'report',       apify: true },
+            { href: 'workspace.html',      name: 'Find competitors',         text: 'Suggest similar businesses to compare against.',              engine: 'report',       apify: true, tab: 'settings' }
+        ] },
+        { group: 'Plan content', items: [
+            { href: 'content-plan.html',   name: 'Content plan',             text: 'A month of posts built from what already works for them.',    engine: 'content_plan' },
+            { href: 'fb-advisor.html',     name: 'Group post ideas',         text: 'Draft posts for the Facebook groups their customers use.',    engine: 'fb_community' }
+        ] },
+        { group: 'Find customers', items: [
+            { href: 'index.html',          name: 'Find leads on Instagram',  text: 'Local accounts by place, hashtag or a rival’s followers.',    engine: 'leadgen',      apify: true },
+            { href: 'leads.html',          name: 'Find Facebook Pages',      text: 'Local businesses with a contact button, ready for outreach.', engine: 'leadgen',      apify: true },
+            { href: 'fb-communities.html', name: 'Find Facebook groups',     text: 'Local groups where people ask for recommendations.',          engine: 'fb_community', apify: true },
+            { href: 'fb-audit.html',       name: 'Read Facebook groups',     text: 'Pull real customer requests out of recent group posts.',      engine: 'fb_community', apify: true },
+            { href: 'fb-leads.html',       name: 'Local demand',             text: 'The requests found so far, ready to answer.',                 engine: 'fb_community' }
+        ] },
+        { group: 'Ask', items: [
+            { href: 'client-assistant.html', name: 'Ask AI · their Meta numbers',   text: 'Followers, reach and posts from their own accounts.',   engine: null },
+            { href: 'assistant.html',        name: 'Ask AI · reports and research', text: 'Audits, benchmarks, group reads, leads and plans.',    engine: null }
+        ] }
+    ];
+
+    /** Line icons, 24-unit grid, drawn in currentColor. */
+    const ICONS = {
+        home: '<path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/>',
+        clients: '<path d="M4 21V5l8-2v18"/><path d="M12 21h8V9l-8-2"/><path d="M8 8h.01M8 12h.01M8 16h.01M16 12h.01M16 16h.01"/>',
+        leads: '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
+        clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+        shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
+        check: '<path d="M5 12l5 5 9-10"/>',
+        plus: '<path d="M12 5v14M5 12h14"/>',
+        search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+        x: '<path d="M6 6l12 12M18 6 6 18"/>',
+        arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+        doc: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
+        spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+        target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+        store: '<path d="M4 9l1.5-5h13L20 9"/><path d="M4 9h16v2a3 3 0 0 1-5.3 1.9A3 3 0 0 1 12 14a3 3 0 0 1-2.7-1.1A3 3 0 0 1 4 11z"/><path d="M5 13v8h14v-8"/>',
+        plug: '<path d="M9 3v5M15 3v5"/><path d="M7 8h10v4a5 5 0 0 1-10 0z"/><path d="M12 17v4"/>',
+        key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 5l3 3M14 7l2 2"/>',
+        chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+        users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.7.7 2.8 2.4 3 5.2"/>',
+        link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+        sliders: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+        chart: '<path d="M4 20V4M4 20h16M8 16v-5M12 16V8M16 16v-3"/>',
+        play: '<path d="M7 5v14l11-7z"/>',
+        pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+        alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
+        info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+        out: '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4M6 12h10"/>'
+    };
+    const icon = (name, cls = '') => ICONS[name]
+        ? `<svg class="el-svg ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`
+        : '';
+
     /**
      * Pages where somebody presses Run. These carry the "filing under" bar
      * at the top, because the sidebar picker on its own was not enough: with
@@ -135,11 +187,19 @@
         'leads.html'        // Facebook Page discovery starts from the Lead List
     ];
 
+    /**
+     * What a client sees. A client is not an employee with fewer grants — the
+     * employee menu is the agency's, and handing it to a business owner
+     * buries the one page they came for.
+     *
+     * Engine filtering still applies on top, so a client without a grant does
+     * not see the tab either.
+     */
     const CLIENT_NAV = [
-        { href: 'client.html',           icon: '📊', label: 'My Reports',   engine: null },
-        { href: 'client-assistant.html', icon: '💬', label: 'Ask',          engine: null },
-        { href: 'client-leads.html',     icon: '🎯', label: 'Find Leads',   engine: 'leadgen' },
-        { href: 'client-community.html', icon: '🏘', label: 'Local Demand', engine: 'fb_community' }
+        { href: 'client.html',           icon: 'doc',    label: 'My Reports',   engine: null },
+        { href: 'client-assistant.html', icon: 'spark',  label: 'Ask',          engine: null },
+        { href: 'client-leads.html',     icon: 'target', label: 'Find Leads',   engine: 'leadgen' },
+        { href: 'client-community.html', icon: 'store',  label: 'Local Demand', engine: 'fb_community' }
     ];
 
 
@@ -537,6 +597,13 @@
             }
             EL.me = me;
 
+            // A page opened from a client (New work, a workspace tab, a link)
+            // carries ?client=. It becomes the chosen client before any page
+            // code reads it, so the work is filed where it was started from.
+            // The picker drops it again if this account cannot open it.
+            const wanted = new URLSearchParams(location.search).get('client');
+            if (me.role !== 'client' && wanted && /^[0-9a-f-]{36}$/i.test(wanted)) EL.setClientId(wanted);
+
             // A client who lands on an employee page goes home rather than
             // being shown a console built for somebody else. Engine grants
             // alone would not catch this: a trial holds the report grant, so
@@ -654,6 +721,25 @@
         openKeyModal, openGeminiModal, refreshStatus,
 
         // ---------------------------------------------------------------
+        // WORKSPACE PRIMITIVES (phase 33) — one drawer, one toast, one icon
+        // set, one "new work" flow, shared by the shell and every page.
+        // ---------------------------------------------------------------
+        icon,
+        drawer: openDrawer,
+        closeDrawer,
+        toast,
+        newWork,
+        /** The client a workspace page is about; New work starts there. */
+        _pageClientId: null,
+        /** Put a client at the top of "Recent clients" in this browser. */
+        rememberClient(id) {
+            if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return;
+            EL._pageClientId = id;
+            try { localStorage.setItem(RECENT_KEY, JSON.stringify([id, ...recentIds().filter(x => x !== id)].slice(0, 8))); } catch { /* private mode */ }
+            if (EL._clients) renderRecent(EL._clients);
+        },
+
+        // ---------------------------------------------------------------
         // CLIENT WORKSPACE (phase 9/10)
         // A run started with a client selected is filed under that client
         // and visible to its members. The choice is remembered per browser
@@ -733,7 +819,7 @@
 
         /** Draw attention to the picker after a refusal, then let it go. */
         _nudgeClient() {
-            const targets = [document.getElementById('el-workfor'), document.querySelector('.el-side-foot .el-client')].filter(Boolean);
+            const targets = [document.getElementById('el-workfor')].filter(Boolean);
             targets.forEach(t => { t.classList.remove('is-nudge'); void t.offsetWidth; t.classList.add('is-nudge'); });
             const bar = document.getElementById('el-workfor');
             if (bar) { bar.scrollIntoView({ behavior: 'smooth', block: 'center' }); const s = bar.querySelector('select'); if (s) s.focus(); }
@@ -760,45 +846,32 @@
         _renderWorkFor(list, cur) {
             const bar = document.getElementById('el-workfor');
             if (!bar) return;
+            if (EL._clientsErr) {
+                bar.classList.add('is-empty');
+                bar.innerHTML = `<span class="el-wf-tag">Client</span><span><b>Your clients could not be loaded</b> (${EL.esc(EL._clientsErr)}). Reload the page to try again.</span>`;
+                return;
+            }
             const c = cur ? list.find(x => x.id === cur) : null;
             bar.classList.toggle('is-empty', !c);
             bar.innerHTML = c
                 ? `<span class="el-wf-tag">Client</span>
-                   <span>Filing under <b>${EL.esc(c.name)}</b>${c.ig_handle ? ' · @' + EL.esc(c.ig_handle) : ''}${c.meta && c.meta.connected ? ' · Meta connected' : ''}</span>
+                   <span>Filing under <a href="workspace.html?client=${encodeURIComponent(c.id)}"><b>${EL.esc(c.name)}</b></a>${c.ig_handle ? ' · @' + EL.esc(c.ig_handle) : ''}${c.meta && c.meta.connected ? ' · Meta connected' : ''}</span>
                    <select class="el-client-select" aria-label="Which client this work is for">${EL._clientOptions(list, cur)}</select>`
                 : `<span class="el-wf-tag">Client</span>
-                   <span><b>Choose the client this work is for.</b> Nothing runs until you do${list.length ? '' : ' — <a href="clients.html">create one</a> first'}.</span>
+                   <span><b>Choose the client this work is for.</b> Nothing runs until you do${list.length ? '' : ' — <a href="clients.html?add=1">add one</a> first'}.</span>
                    <select class="el-client-select" aria-label="Which client this work is for">${EL._clientOptions(list, cur)}</select>`;
             bar.querySelector('select').addEventListener('change', EL._onClientChange);
         },
 
         async _mountClientPicker() {
-            const host = document.getElementById('el-client-host');
-            if (!host) return;
             // A client account is the business; asking it to pick one is noise.
-            if (EL.me && EL.me.role === 'client') { host.remove(); return; }
+            if (EL.me && EL.me.role === 'client') return;
             const list = await EL.clients();
             const current = EL.clientId();
-            if (current && !list.some(c => c.id === current)) EL.setClientId(null);
+            if (current && !EL._clientsErr && !list.some(c => c.id === current)) EL.setClientId(null);
             const cur = EL.clientId();
-            // Three states, not two. A failed call used to look exactly like an
-            // empty account, which sends you hunting for a missing client that
-            // was there all along.
-            if (EL._clientsErr) {
-                host.innerHTML = `
-                    <span>Client</span>
-                    <select class="el-client-select" disabled><option>couldn’t load</option></select>
-                    <button type="button" class="el-client-retry" title="${EL.esc(EL._clientsErr)}">Retry</button>`;
-                host.querySelector('.el-client-retry').addEventListener('click', () => {
-                    EL._clients = null; EL._mountClientPicker().catch(() => {});
-                });
-                return;
-            }
-            host.innerHTML = `
-                <span title="Every run is filed under the selected client and every vault is scoped to it.">Client</span>
-                <select class="el-client-select" aria-label="Client workspace">${EL._clientOptions(list, cur)}</select>
-                <a class="el-client-manage" href="clients.html" title="${list.length ? list.length + ' client' + (list.length === 1 ? '' : 's') : 'No clients yet'}">Manage</a>`;
-            host.querySelector('select').addEventListener('change', EL._onClientChange);
+            setCount('clients', list.filter(c => !c.archived).length);
+            renderRecent(list);
             EL._renderWorkFor(list, cur);
         },
 
@@ -978,10 +1051,12 @@
 
     function renderShell(page, me) {
         const here = currentPage(page);
+        const active = NAV_PARENT[here] || here;
         const isAdmin = me && me.role === 'admin';
+        const isClient = me && me.role === 'client';
         const engines = (me && me.engines) || [];
 
-        const visible = (me && me.role === 'client' ? CLIENT_NAV : NAV)
+        const visible = (isClient ? CLIENT_NAV : NAV)
             .filter(t => {
                 if (t.group) return true;                    // resolved below
                 if (t.adminOnly) return isAdmin;
@@ -991,9 +1066,9 @@
             });
 
         // Drop a group heading whose whole section was filtered away by engine
-        // grants — an empty "Facebook" label sitting over nothing reads as
-        // something broken. A heading survives only if a link follows it before
-        // the next heading does.
+        // grants — an empty heading sitting over nothing reads as something
+        // broken. A heading survives only if a link follows it before the next
+        // heading does.
         const kept = visible.filter((t, i) => {
             if (!t.group) return true;
             for (let j = i + 1; j < visible.length; j++) {
@@ -1005,38 +1080,54 @@
 
         const tabs = kept.map(t => t.group
             ? `<div class="el-group">${t.group}</div>`
-            : `<a class="el-tab ${t.href === here ? 'is-active' : ''}" href="${t.href}">
-                   <span class="el-ico" aria-hidden="true">${t.icon || ''}</span>
+            : `<a class="el-tab ${t.href === active ? 'is-active' : ''}" href="${t.href}">
+                   <span class="el-ico" aria-hidden="true">${icon(t.icon)}</span>
                    <span class="el-lab">${t.label}${t.adminOnly && me && me.pendingActivations
                        ? `<span class="el-badge" title="${me.pendingActivations} client(s) asked to continue">${me.pendingActivations}</span>` : ''}</span>
+                   ${t.count ? `<span class="el-count" data-count="${t.count}"></span>` : ''}
                </a>`).join('');
 
-        // A rail rather than a top bar. Twelve destinations in a horizontal
-        // strip either wrap or scroll sideways, and both hide the tail of the
-        // list — which is where Admin and Schedules live. Stacked, the whole
-        // set is visible at once and the labels get room to be words rather
-        // than abbreviations.
+        const email = (me && me.email) || (EL.user && EL.user.email) || '';
+        const who = (me && me.full_name) || email.split('@')[0] || 'You';
+        const initials = String(who).split(/[\s._-]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '•';
+        const roleName = !me ? '' : (me.role === 'admin' ? 'Admin' : me.role === 'client' ? 'Owner' : 'Team');
+
+        // A rail rather than a top bar: every destination visible at once, and
+        // the two things done from anywhere — start work, find a client — at
+        // the top of it, where the eye starts.
         const bar = document.createElement('aside');
         bar.className = 'el-sidebar';
         bar.id = 'el-sidebar';
         bar.innerHTML = `
             <div class="el-side-top">
-                <div class="el-logo">⚡ EDGELEAD</div>
+                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}">⚡ EDGELEAD</a>
+                ${isClient || !me ? '' : `
+                <button class="el-newwork" type="button" id="el-newwork">${icon('plus')}<span>New work</span></button>
+                <div class="el-find" role="search">
+                    ${icon('search')}
+                    <input id="el-find" type="search" placeholder="Find a client" autocomplete="off" aria-label="Find a client" aria-controls="el-find-list">
+                    <div class="el-find-list" id="el-find-list" role="listbox" hidden></div>
+                </div>`}
             </div>
 
-            <nav class="el-nav" aria-label="Sections">${tabs}</nav>
+            <nav class="el-nav" aria-label="Sections">${tabs}
+                ${isClient ? '' : '<div class="el-group" id="el-recent-h" hidden>Recent clients</div><div id="el-recent"></div>'}
+            </nav>
 
             <div class="el-side-foot">
-                <div class="el-client" id="el-client-host"><span>Client</span><select class="el-client-select" disabled><option>…</option></select></div>
                 <div class="el-pill">
                     <span class="el-node" id="el-node"></span>
                     <span id="el-status">Checking Apify…</span>
                 </div>
+                <div class="el-user">
+                    <span class="el-avatar" aria-hidden="true">${EL.esc(initials)}</span>
+                    <span class="el-user-txt"><b>${EL.esc(who)}</b><small>${EL.esc(roleName)}</small></span>
+                </div>
                 <div class="el-side-actions">
-                    <button class="el-btn el-mini" type="button" id="el-key-btn">Update key</button>
+                    <button class="el-btn el-mini" type="button" id="el-key-btn" title="The Apify key your runs spend">Apify key</button>
                     <button class="el-btn el-mini" type="button" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>
                 </div>
-                <button class="el-btn el-signout" type="button" id="el-out">Sign out</button>
+                <button class="el-btn el-mini el-signout" type="button" id="el-out">Sign out</button>
             </div>`;
 
         // The rail is off-canvas on a phone, so the bar that opens it has to
@@ -1047,7 +1138,8 @@
             <button class="el-burger" type="button" id="el-burger" aria-label="Open navigation" aria-expanded="false" aria-controls="el-sidebar">
                 <span></span><span></span><span></span>
             </button>
-            <div class="el-logo">⚡ EDGELEAD</div>`;
+            <div class="el-logo">⚡ EDGELEAD</div>
+            ${isClient || !me ? '' : `<button class="el-newwork el-newwork-top" type="button" id="el-newwork-top" aria-label="New work">${icon('plus')}</button>`}`;
 
         const scrim = document.createElement('div');
         scrim.className = 'el-scrim';
@@ -1073,6 +1165,198 @@
         bar.querySelector('#el-key-btn').addEventListener('click', openKeyModal);
         bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
         bar.querySelector('#el-out').addEventListener('click', () => EL.signOut());
+
+        if (!isClient && me) {
+            const go = () => {
+                setOpen(false);
+                EL.newWork(EL._pageClientId || (WORK_PAGES.includes(here) ? EL.clientId() : null));
+            };
+            bar.querySelector('#el-newwork').addEventListener('click', go);
+            top.querySelector('#el-newwork-top').addEventListener('click', go);
+            wireFind(bar.querySelector('#el-find'), bar.querySelector('#el-find-list'));
+            // "My tasks" is a count of what is still open. Quiet on failure:
+            // before the phase-32 SQL has run it is simply not there yet.
+            EL.api('/api/my-tasks').then(d => {
+                const open = (d.tasks || []).filter(t => t.status !== 'done');
+                const late = open.filter(t => t.dueDate && t.dueDate < new Date().toISOString().slice(0, 10)).length;
+                setCount('tasks', open.length, late ? `${late} overdue` : '', late > 0);
+            }).catch(() => {});
+        }
+    }
+
+    /** A number beside a menu entry; `hot` marks it as needing attention. */
+    function setCount(key, n, title = '', hot = false) {
+        document.querySelectorAll(`.el-count[data-count="${key}"]`).forEach(el => {
+            el.textContent = n ? String(n) : '';
+            el.title = title;
+            el.classList.toggle('is-hot', !!hot);
+        });
+    }
+
+    /**
+     * Recent clients: the last few opened in this browser, filled from the
+     * rest of the list so a new account still has something to click.
+     */
+    const RECENT_KEY = 'el-recent-clients';
+    function recentIds() {
+        try { const v = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+    }
+    function renderRecent(list) {
+        const host = document.getElementById('el-recent');
+        const head = document.getElementById('el-recent-h');
+        if (!host || !head) return;
+        const live = (list || []).filter(c => !c.archived);
+        const byId = new Map(live.map(c => [c.id, c]));
+        const picked = recentIds().map(id => byId.get(id)).filter(Boolean);
+        for (const c of live) { if (picked.length >= 5) break; if (!picked.includes(c)) picked.push(c); }
+        head.hidden = !picked.length;
+        const here = EL._pageClientId || (currentPage() === 'workspace.html' ? new URLSearchParams(location.search).get('client') : null);
+        host.innerHTML = picked.slice(0, 5).map(c => `
+            <a class="el-tab el-recent ${c.id === here ? 'is-active' : ''}" href="workspace.html?client=${encodeURIComponent(c.id)}" title="${EL.esc(c.name)}">
+                <span class="el-ico" aria-hidden="true"><span class="el-dot ${c.meta && c.meta.connected ? 'is-on' : ''}"></span></span>
+                <span class="el-lab">${EL.esc(c.name)}</span>
+            </a>`).join('');
+    }
+
+    /** Type to find a client; Enter opens the first match. */
+    function wireFind(input, listEl) {
+        if (!input || !listEl) return;
+        let matches = [];
+        const close = () => { listEl.hidden = true; listEl.innerHTML = ''; };
+        const draw = async () => {
+            const q = input.value.trim().toLowerCase();
+            if (!q) { close(); return; }
+            const list = (await EL.clients()).filter(c => !c.archived);
+            matches = list.filter(c => [c.name, c.ig_handle, c.niche, c.location].filter(Boolean).join(' ').toLowerCase().includes(q)).slice(0, 8);
+            listEl.hidden = false;
+            listEl.innerHTML = matches.length
+                ? matches.map((c, i) => `<a role="option" class="el-find-row${i === 0 ? ' is-first' : ''}" href="workspace.html?client=${encodeURIComponent(c.id)}">
+                      <b>${EL.esc(c.name)}</b><small>${EL.esc([c.niche, c.location].filter(Boolean).join(' · ') || (c.ig_handle ? '@' + c.ig_handle : ''))}</small></a>`).join('')
+                : `<div class="el-find-none">No client matches “${EL.esc(input.value.trim())}”. <a href="clients.html?add=1">Add a client</a></div>`;
+        };
+        input.addEventListener('input', draw);
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && matches[0]) { e.preventDefault(); location.href = `workspace.html?client=${encodeURIComponent(matches[0].id)}`; }
+            if (e.key === 'Escape') { input.value = ''; close(); }
+        });
+        input.addEventListener('blur', () => setTimeout(close, 150));
+    }
+
+    // ---- drawers and toasts: the two overlays every workspace page uses ------
+
+    /**
+     * A panel from the right: header, scrolling body, optional footer. Returns
+     * { el, body, foot, close }. Escape and the scrim close it; focus goes in
+     * on open and back to where it came from on close.
+     */
+    function openDrawer({ title = '', sub = '', body = '', foot = '', wide = false, onClose = null } = {}) {
+        closeDrawer();
+        const back = document.activeElement;
+        const wrap = document.createElement('div');
+        wrap.className = 'el-drawer-wrap';
+        wrap.id = 'el-drawer';
+        wrap.innerHTML = `
+            <div class="el-drawer-scrim" data-dw-close></div>
+            <aside class="el-drawer${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="el-dw-title">
+                <header class="el-drawer-h">
+                    <div class="el-drawer-t"><h2 id="el-dw-title">${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div>
+                    <button class="el-iconbtn" type="button" data-dw-close aria-label="Close">${icon('x')}</button>
+                </header>
+                <div class="el-drawer-b">${body}</div>
+                ${foot ? `<footer class="el-drawer-f">${foot}</footer>` : ''}
+            </aside>`;
+        document.body.appendChild(wrap);
+        document.body.classList.add('el-drawer-open');
+        const api = {
+            el: wrap,
+            body: wrap.querySelector('.el-drawer-b'),
+            foot: wrap.querySelector('.el-drawer-f'),
+            setTitle(t, s) { wrap.querySelector('#el-dw-title').innerHTML = t; const p = wrap.querySelector('.el-drawer-t p'); if (p && s !== undefined) p.innerHTML = s; },
+            close() { closeDrawer(); }
+        };
+        wrap._onClose = () => { if (onClose) onClose(); if (back && back.focus) back.focus(); };
+        wrap.querySelectorAll('[data-dw-close]').forEach(b => b.addEventListener('click', () => closeDrawer()));
+        const first = wrap.querySelector('.el-drawer-b input, .el-drawer-b select, .el-drawer-b textarea, .el-drawer-b button, .el-drawer-b a');
+        setTimeout(() => (first || wrap.querySelector('[data-dw-close]')).focus(), 30);
+        return api;
+    }
+    function closeDrawer() {
+        const w = document.getElementById('el-drawer');
+        if (!w) return;
+        w.remove();
+        document.body.classList.remove('el-drawer-open');
+        if (w._onClose) w._onClose();
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('el-drawer')) closeDrawer(); });
+
+    let _toastTimer = null;
+    function toast(message, kind = 'ok') {
+        let t = document.getElementById('el-toast');
+        if (!t) { t = document.createElement('div'); t.id = 'el-toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+        t.className = 'el-toast is-' + kind;
+        t.innerHTML = `${icon(kind === 'bad' ? 'alert' : 'check')}<span>${EL.esc(message)}</span>`;
+        t.hidden = false;
+        clearTimeout(_toastTimer);
+        _toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+    }
+
+    /**
+     * New work: for whom first, then what. Every entry opens its page with
+     * the client already chosen, so work is filed before it is started.
+     */
+    async function newWork(clientId) {
+        const me = EL.me || {};
+        const isAdmin = me.role === 'admin';
+        const can = item => item.engine === null || isAdmin || (me.engines || []).includes(item.engine);
+        const list = (await EL.clients()).filter(c => !c.archived);
+        const client = clientId ? list.find(c => c.id === clientId) : null;
+
+        if (!client) {
+            const d = openDrawer({
+                title: 'New work',
+                sub: 'Who is it for? Everything is filed under a client.',
+                body: `
+                    <div class="el-field"><input type="search" id="el-nw-q" placeholder="Find a client" autocomplete="off" aria-label="Find a client"></div>
+                    <div class="el-pick" id="el-nw-list"></div>
+                    <a class="el-btn el-add" href="clients.html?add=1">${icon('plus')}Add a new client first</a>`
+            });
+            const draw = () => {
+                const q = (d.body.querySelector('#el-nw-q').value || '').trim().toLowerCase();
+                const rows = list.filter(c => !q || [c.name, c.niche, c.location, c.ig_handle].filter(Boolean).join(' ').toLowerCase().includes(q));
+                d.body.querySelector('#el-nw-list').innerHTML = rows.length ? rows.map(c => `
+                    <button type="button" class="el-pick-row" data-pick="${EL.esc(c.id)}">
+                        <span class="el-avatar">${EL.esc(String(c.name || '?').split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase())}</span>
+                        <span class="el-pick-t"><b>${EL.esc(c.name)}</b><small>${EL.esc([c.niche, c.location].filter(Boolean).join(' · ') || 'No details yet')}</small></span>
+                        <span class="el-chip ${c.meta && c.meta.connected ? 'is-jade' : ''}">${c.meta && c.meta.connected ? 'Meta connected' : 'No Meta'}</span>
+                    </button>`).join('') : `<p class="el-muted">${list.length ? 'No client matches that.' : 'No clients yet.'}</p>`;
+                d.body.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => newWork(b.dataset.pick)));
+            };
+            d.body.querySelector('#el-nw-q').addEventListener('input', draw);
+            draw();
+            return d;
+        }
+
+        const connected = !!(client.meta && client.meta.connected);
+        const href = item => `${item.href}?client=${encodeURIComponent(client.id)}${item.tab ? '&tab=' + item.tab : ''}`;
+        const groups = WORK.map(g => {
+            const items = g.items.filter(can);
+            if (!items.length) return '';
+            return `<div class="el-work-g"><div class="el-eyebrow">${g.group}</div>${items.map(item => {
+                const blocked = item.engine === 'meta_owned' && !connected;
+                const tag = item.apify ? '<span class="el-chip">Uses Apify credit</span>' : '<span class="el-chip is-jade">No Apify cost</span>';
+                return `<a class="el-work" href="${href(item)}">
+                    <span class="el-work-t"><b>${item.name}</b><small>${blocked ? 'Needs Meta connected first — opens the Meta tab.' : item.text}</small></span>
+                    ${tag}
+                </a>`;
+            }).join('')}</div>`;
+        }).join('');
+        const d = openDrawer({
+            title: `New work for ${EL.esc(client.name)}`,
+            sub: 'Pages open with this client chosen, so everything you run is filed here.',
+            body: `${groups}<button type="button" class="el-btn el-add" id="el-nw-other">Someone else</button>`
+        });
+        d.body.querySelector('#el-nw-other').addEventListener('click', () => newWork(null));
+        return d;
     }
 
     // ---- installable client surface (phase 30) ----------------------------

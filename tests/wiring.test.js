@@ -32,6 +32,9 @@ const SERVER = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8') + '\n' + fs
 const FRONT_DIR = path.join(ROOT, 'frontend');
 const PAGES = fs.readdirSync(FRONT_DIR).filter(f => f.endsWith('.html'));
 const HEADER = fs.readFileSync(path.join(FRONT_DIR, 'header.js'), 'utf8');
+// Shared scripts the pages load besides header.js (phase 33: ui.js holds the
+// workspace components). Their API calls are checked like any page's.
+const SCRIPTS = fs.readdirSync(FRONT_DIR).filter(f => f.endsWith('.js') && f !== 'header.js' && f !== 'sw.js');
 
 let pass = 0, fail = 0, skip = 0;
 const problems = [];
@@ -210,7 +213,8 @@ function pageCalls(src) {
 console.log('\npage → server: every endpoint a page calls must exist');
 {
     const missing = [], unresolved = [];
-    const sources = [...PAGES.map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')]), ['header.js', HEADER]];
+    const sources = [...PAGES.map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')]), ['header.js', HEADER],
+        ...SCRIPTS.map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')])];
 
     let checked = 0;
     for (const [file, src] of sources) {
@@ -262,12 +266,14 @@ console.log('\nreport types: everything written must be labelable and openable')
         [...SERVER.matchAll(/report_type:\s*(['"`])([\w]+)\1/g)].map(m => m[2])
     )].sort();
 
-    const clientsSrc = fs.readFileSync(path.join(FRONT_DIR, 'clients.html'), 'utf8');
-    const labelBlock = (clientsSrc.match(/TYPE_LABEL\s*=\s*\{[^}]*\}/) || [''])[0];
-    const pageBlock  = (clientsSrc.match(/TYPE_PAGE\s*=\s*\{[^}]*\}/) || [''])[0];
+    // Phase 33: one pair of maps in ui.js, shared by every page that lists
+    // reports (the client's Reports tab, Home), instead of a copy per page.
+    const uiSrc = fs.readFileSync(path.join(FRONT_DIR, 'ui.js'), 'utf8');
+    const labelBlock = (uiSrc.match(/TYPE_LABEL\s*=\s*\{[^}]*\}/) || [''])[0];
+    const pageBlock  = (uiSrc.match(/TYPE_PAGE\s*=\s*\{[^}]*\}/) || [''])[0];
 
     if (!labelBlock || !pageBlock) {
-        bad('clients.html still declares TYPE_LABEL and TYPE_PAGE', 'one of the maps could not be found');
+        bad('ui.js still declares TYPE_LABEL and TYPE_PAGE', 'one of the maps could not be found');
     } else {
         // A timeline row with no label renders as "undefined"; with no page it
         // links to '#'. Both are silent.

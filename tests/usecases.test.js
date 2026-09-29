@@ -2121,6 +2121,25 @@ test('a monthly report is filed only under a client the caller may edit', async 
     assert.strictEqual(tbl('jobs').length, before, 'a job was queued for a client the caller cannot edit');
 });
 
+section('\nphase 33: Ask AI answers an admin about any client');
+test('an admin asking about a client they were never added to is answered about that client', async () => {
+    // Before phase 33 the assistant's scope counted only owned and member
+    // clients, so an admin got their own data back under this client's name.
+    assert.ok(!tbl('client_members').some(m => m.client_id === state.D && m.user_id === ADMIN.id), 'the admin should not be a member here');
+    GEMINI.script = [{ parts: [{ text: 'Bloom Florist has nothing on file yet.' }] }];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-admin', body: { message: 'How is this client doing?', clientId: state.D } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.clientId, state.D, 'the admin was answered about something else');
+    assert.ok(/Bloom Florist/.test(GEMINI.requests[0].systemInstruction.parts[0].text), 'the client is not named to the model');
+});
+test('…while a stranger naming the same client is answered only about their own data', async () => {
+    GEMINI.script = [{ parts: [{ text: 'Nothing on file.' }] }];
+    const r = await call('POST', '/api/assistant/ask', { token: 't-stranger', body: { message: 'Tell me about it', clientId: state.D } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.clientId, null, 'a stranger reached a client through the assistant');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

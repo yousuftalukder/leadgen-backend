@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>My tasks — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main class="el-page" id="mt"><div class="ws-empty"><p>Loading your tasks…</p></div></main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="ui.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Everything assigned to you, on every client you can open. Each task
+    // still lives on its client's board; this is the same card, gathered.
+    await EL.init({ engine: null, page: 'my-tasks.html' });
+    const esc = v => EL.esc(v);
+    const root = document.getElementById('mt');
+    const boards = new Map();       // clientId -> the board payload, for people and edit rights
+
+    async function load() {
+        let d;
+        try { d = await EL.api('/api/my-tasks'); }
+        catch (err) {
+            root.innerHTML = `<div class="ws-head"><div><h1>My tasks</h1></div></div><div class="ws-empty">${EL.icon('alert')}<h3>${err.code === 'migration_required' ? 'Tasks are not switched on yet' : 'Your tasks could not be loaded'}</h3><p>${esc(err.message)}</p></div>`;
+            return;
+        }
+        const tasks = d.tasks || [];
+        const week = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+        const groups = [
+            ['Overdue', tasks.filter(UI.isLate)],
+            ['This week', tasks.filter(t => t.status !== 'done' && !UI.isLate(t) && t.dueDate && t.dueDate <= week)],
+            ['Later', tasks.filter(t => t.status !== 'done' && t.dueDate && t.dueDate > week)],
+            ['No due date', tasks.filter(t => t.status !== 'done' && !t.dueDate)],
+            ['Done in the last two weeks', tasks.filter(t => t.status === 'done')]
+        ].filter(([, l]) => l.length);
+        const open = tasks.filter(t => t.status !== 'done');
+        root.innerHTML = `
+            <div class="ws-head"><div><h1>My tasks</h1>
+                <p class="ws-sub">${open.length} open across ${new Set(open.map(t => t.client.id)).size} client${new Set(open.map(t => t.client.id)).size === 1 ? '' : 's'}. Each task lives on its client’s board, where the whole team on that client sees it.</p></div></div>
+            ${groups.length ? groups.map(([g, l]) => `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>${g}</h2><span class="el-muted ws-num">${l.length}</span></div>
+                <div class="ws-rows">${l.map(t => UI.taskRow(t, { showClient: true })).join('')}</div></section>`).join('')
+            : `<div class="ws-empty">${EL.icon('check')}<h3>Nothing assigned to you</h3><p>Tasks are made on each client’s board, from a report’s recommendations, or by hand. Anything given to you shows up here.</p><a class="ws-btn" href="clients.html">Go to clients</a></div>`}`;
+        root.querySelectorAll('[data-task]').forEach(el => {
+            const open1 = async () => {
+                const t = tasks.find(x => x.id === el.dataset.task); if (!t) return;
+                if (!boards.has(t.client.id)) boards.set(t.client.id, await EL.api(`/api/clients/${encodeURIComponent(t.client.id)}/tasks`).catch(() => null));
+                const b = boards.get(t.client.id);
+                UI.openTask(t, { clientId: t.client.id, clientName: t.client.name, people: b ? b.people : [], canEdit: b ? b.canEdit : false, onSaved: load });
+            };
+            el.addEventListener('click', open1);
+            el.addEventListener('keydown', e => { if (e.key === 'Enter') open1(); });
+        });
+    }
+    load();
+})();
+</script>
+</body>
+</html>

@@ -6,7 +6,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
-    <title>Analyst — EdgeLead</title>
+    <title>Ask AI — EdgeLead</title>
     <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
     <style>
@@ -144,10 +144,11 @@
     </div>
 
     <div class="as-intro" id="as-intro">
-        <h2>Your analyst</h2>
-        <p>Ask anything about the account you have selected — what moved, what worked, what to
-           do next, or write it up for the client. It reads the reports and, where Meta is
-           connected, the owner numbers behind them.</p>
+        <h2>Ask AI · reports and research</h2>
+        <p>Ask anything about this client — what moved, what worked, what to do next, or write it
+           up for them. It reads the reports filed under the client and, where Meta is connected,
+           the owner numbers behind them. For questions about their daily numbers, use
+           <a href="client-assistant.html" id="as-owner-link">Ask AI · their Meta numbers</a>.</p>
     </div>
 
     <div class="as-recent" id="as-recent"></div>
@@ -193,6 +194,8 @@
         esc = EL.escape;
 
         clientId = EL.clientId();
+        const ownerLink = document.getElementById('as-owner-link');
+        if (ownerLink && clientId) ownerLink.href = 'client-assistant.html?client=' + encodeURIComponent(clientId);
         // EL.currentClient() is only accurate once the list has loaded, and
         // EL.init fires the picker without awaiting it. Without this the
         // banner reads "Answering about Selected client", which is exactly
