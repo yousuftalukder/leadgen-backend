@@ -1191,3 +1191,30 @@ body.el-drawer-open { overflow: hidden; }
     .rp-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .rp-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* =========================================================================
+   PHASE 35 — ASK AI ABOUT ONE CLIENT
+   The Overview's launcher (.is-compact) and the Ask AI tab's thread.
+   ========================================================================= */
+.ws-ask h2 { display: flex; align-items: center; gap: 8px; }
+.ws-ask h2 .el-svg { width: 17px; height: 17px; color: var(--accent-solid); }
+.ws-ask-lead { margin: -4px 0 0; line-height: 1.55; }
+.ws-ask-form { display: flex; gap: 8px; align-items: flex-end; }
+.ws-ask-form input, .ws-ask-form textarea { flex: 1; min-width: 0; resize: vertical; font: inherit; }
+.ws-ask-sugg { display: flex; flex-wrap: wrap; gap: 8px; }
+.ws-ask-sugg:empty { display: none; }
+.ws-chipbtn { border: 1px solid rgba(240,211,154,0.2); background: rgba(255,255,255,0.03); color: var(--text-secondary); cursor: pointer;
+    border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 0.83rem; text-align: left; }
+.ws-chipbtn:hover { border-color: var(--accent-solid); color: var(--text-primary); }
+.ws-ask-thread { display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow-y: auto; }
+.ws-ask-thread:empty { display: none; }
+.ws-ask-q { align-self: flex-end; max-width: 80%; background: var(--accent-dim); color: var(--text-primary); border-radius: 12px 12px 4px 12px;
+    padding: 9px 13px; font-size: 0.92rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ws-ask-a { align-self: flex-start; max-width: 92%; background: var(--bg-color); border: 1px solid var(--card-border); border-radius: 12px 12px 12px 4px;
+    padding: 11px 14px; font-size: 0.92rem; line-height: 1.6; color: var(--text-secondary); overflow-wrap: anywhere; }
+.ws-ask-a p { margin: 0 0 8px; } .ws-ask-a p:last-child { margin: 0; }
+.ws-ask-a ul, .ws-ask-a ol { margin: 0 0 8px 20px; display: flex; flex-direction: column; gap: 4px; }
+.ws-ask-a b { color: var(--text-primary); }
+.ws-ask-status { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.86rem; }
+.ws-ask.is-compact { gap: 12px; }
+@media (max-width: 560px) { .ws-ask-form { flex-direction: column; align-items: stretch; } .ws-ask-q, .ws-ask-a { max-width: 100%; } }

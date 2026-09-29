@@ -6,7 +6,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
-    <title>Owner Assistant — EdgeLead</title>
+    <title>Edge Meta AI — EdgeLead</title>
     <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
     <link rel="manifest" href="manifest.webmanifest">
@@ -193,7 +193,7 @@
         <main class="oa-main">
             <div class="oa-head">
                 <button class="icon-btn oa-side-toggle" id="oa-side-toggle" type="button" aria-label="Recent chats">☰ Chats</button>
-                <div class="oa-brand"><span>Owner</span> <span class="oa-a">Assistant</span><span class="oa-by" id="oa-for"></span></div>
+                <div class="oa-brand"><span>Edge Meta</span> <span class="oa-a">AI</span><span class="oa-by" id="oa-for"></span></div>
                 <span class="oa-state" id="oa-state"></span>
             </div>
             <div id="chat-scroll" class="oa-scroll"><div id="chat-box" class="oa-box"></div></div>
@@ -290,9 +290,9 @@
             // Assistant's routes check the caller may read that client.
             const list = await EL.clients();
             const cl = list.find(x => x.id === EL.clientId());
-            if (!cl) { $('chat-box').innerHTML = '<p class="oa-note">Open this from a client’s Ask AI tab, so it knows whose numbers to read. <a href="clients.html">Choose a client</a>.</p>'; return; }
+            if (!cl) { $('chat-box').innerHTML = '<p class="oa-note">Open this from a client’s Assistant tab, so it knows whose numbers to read. <a href="clients.html">Choose a client</a>.</p>'; return; }
             activeClient = { id: cl.id, name: cl.name };
-            document.title = `Ask AI · ${cl.name} — EdgeLead`;
+            document.title = `Edge Meta AI · ${cl.name} — EdgeLead`;
         }
         $('oa-for').textContent = ` for ${activeClient.name}`;
 
@@ -357,7 +357,7 @@
         const s = xpStatus;
         if (s && (!s.provisioned || !(s.assets || []).length)) {
             return `<div id="welcome" class="rise"><div class="oa-connect">
-                <p><b>Connect your Facebook Page and Instagram account first.</b> The Owner Assistant reads your own numbers —
+                <p><b>Connect your Facebook Page and Instagram account first.</b> Edge Meta AI reads your own numbers —
                    every day, every post, every follower — and answers only from them. Until an account is connected there is
                    nothing to read.</p>
                 <a class="btn-primary" href="client.html" style="display:inline-block;text-decoration:none">Connect Meta on your Home page</a>

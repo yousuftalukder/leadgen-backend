@@ -132,8 +132,7 @@
             { href: 'fb-leads.html',       name: 'Local demand',             text: 'The requests found so far, ready to answer.',                 engine: 'fb_community' }
         ] },
         { group: 'Ask', items: [
-            { href: 'client-assistant.html', name: 'Ask AI · their Meta numbers',   text: 'Followers, reach and posts from their own accounts.',   engine: null },
-            { href: 'assistant.html',        name: 'Ask AI · reports and research', text: 'Audits, benchmarks, group reads, leads and plans.',    engine: null }
+            { href: 'workspace.html', name: 'Account assistant', text: 'What we did, what is planned, and their numbers, in one chat.', engine: null, tab: 'ask' }
         ] }
     ];
 
@@ -197,7 +196,7 @@
      */
     const CLIENT_NAV = [
         { href: 'client.html',           icon: 'home',   label: 'Home',           engine: null },
-        { href: 'client-assistant.html', icon: 'spark',  label: 'Ask AI',         engine: null },
+        { href: 'client-assistant.html', icon: 'spark',  label: 'Edge Meta AI',   engine: null },
         { href: 'client-leads.html',     icon: 'target', label: 'Find customers', engine: 'leadgen' },
         { href: 'client-community.html', icon: 'store',  label: 'Local demand',   engine: 'fb_community' }
     ];

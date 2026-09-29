@@ -1328,6 +1328,109 @@ test('what the model writes is kept to shape before it is saved', () => {
     assert.strictEqual(S.monthlyView({ report_type: 'ig_report' }), null);
 });
 
+section('\nphase 35 — Ask AI, a light helper about one client');
+test('a question about one client starts from a one-line card, and gets the three new lookups', async () => {
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    assert.ok(staff.clientId === state.C, 'the staff scope did not narrow to the client');
+    assert.ok(/Meta (not )?connected/.test(staff.card) && /\d+ reports?/.test(staff.card) && /\d+ open tasks?/.test(staff.card) && /\d+ leads? found/.test(staff.card), 'card: ' + staff.card);
+    assert.ok(S.assistantSystemPrompt(staff).includes('Client card: ' + staff.card));
+    const prompt = S.assistantSystemPrompt(staff);
+    assert.ok(/what we did for them/.test(prompt) && /what is planned/.test(prompt), 'the staff prompt must aim at what we did, what is planned and the numbers');
+    const names = S.assistantDeclarations(staff).map(d => d.name);
+    for (const n of ['get_tasks', 'get_leads_summary', 'get_work_log']) assert.ok(names.includes(n), n + ' missing for staff');
+    const owner = await S.assistantScope(CLIENT.id, state.C, 'client');
+    const ownNames = S.assistantDeclarations(owner).map(d => d.name);
+    assert.ok(ownNames.includes('get_tasks') && ownNames.includes('get_leads_summary'));
+    assert.ok(!ownNames.includes('get_work_log'), 'the owner was offered the team\'s work log');
+    const loose = await S.assistantScope(EMP.id, null, 'user');
+    assert.ok(!S.assistantDeclarations(loose).some(d => ['get_tasks', 'get_leads_summary', 'get_work_log'].includes(d.name)), 'client lookups offered with no client chosen');
+});
+test('tasks come back as counts and a short list, overdue first; the owner sees only what is shown to them', async () => {
+    tbl('client_tasks').push(
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Chase the unpaid invoice (internal)', notes: 'SECRET-NOTE', status: 'todo', due_date: '2020-01-02', visible_to_client: false, assigned_to_client: false, assignee_user_id: null, created_at: new Date().toISOString() },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Send the menu photos', status: 'waiting', due_date: null, visible_to_client: true, assigned_to_client: true, created_at: new Date().toISOString() }
+    );
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    const t = await S.ASSISTANT_TOOLS.get_tasks.run(staff, {});
+    assert.strictEqual(t.openShown[0].title, 'Chase the unpaid invoice (internal)', 'overdue should come first');
+    assert.strictEqual(t.openShown[0].overdue, true);
+    assert.ok(t.openShown.length <= 10);
+    assert.ok(t.openShown.some(x => x.title === 'Send the menu photos' && x.for === 'the client'));
+    assert.ok(!JSON.stringify(t).includes('SECRET-NOTE'), 'task notes reached the model');
+    const owner = await S.assistantScope(CLIENT.id, state.C, 'client');
+    const o = await S.ASSISTANT_TOOLS.get_tasks.run(owner, {});
+    assert.ok(!JSON.stringify(o).includes('unpaid invoice'), 'an internal task reached the owner\'s assistant');
+    assert.ok(o.openShown.some(x => x.title === 'Send the menu photos'));
+});
+test('leads come back as totals and names, never contact details', async () => {
+    const id1 = crypto.randomUUID(), id2 = crypto.randomUUID();
+    tbl('leads').push(
+        { id: id1, owner_user_id: EMP.id, username: 'bostonbrides', full_name: 'Boston Brides', platform: 'instagram', email: 'hello@bostonbrides.test', created_at: new Date().toISOString() },
+        { id: id2, owner_user_id: EMP.id, username: 'backbaygym', full_name: 'Back Bay Gym', platform: 'facebook', phone: '617-555-0101', created_at: new Date().toISOString() }
+    );
+    tbl('client_leads').push({ client_id: state.C, lead_id: id1, source: 'ig_campaign', created_at: new Date().toISOString() }, { client_id: state.C, lead_id: id2, source: 'fb_discovery', created_at: new Date().toISOString() });
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    const l = await S.ASSISTANT_TOOLS.get_leads_summary.run(staff, {});
+    assert.ok(l.total >= 2 && l.withEmail >= 1 && l.withPhone >= 1 && l.foundThisMonth >= 2, JSON.stringify(l));
+    assert.ok(l.byPlatform.facebook >= 1 && l.bySource.fb_discovery >= 1);
+    assert.ok(l.newest.length <= 5 && l.newest.some(x => x.name === 'Back Bay Gym'));
+    const raw = JSON.stringify(l);
+    assert.ok(!raw.includes('hello@bostonbrides.test') && !raw.includes('617-555-0101'), 'contact details reached the model');
+});
+test('the work log is the team\'s: delivered reports, runs and schedules; the owner cannot call it', async () => {
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    const w = await S.ASSISTANT_TOOLS.get_work_log.run(staff, {});
+    for (const k of ['delivered', 'runningNow', 'stuck', 'scheduled']) assert.ok(Array.isArray(w[k]), k + ' missing');
+    const owner = await S.assistantScope(CLIENT.id, state.C, 'client');
+    assert.deepStrictEqual(await S.ASSISTANT_TOOLS.get_work_log.run(owner, {}), { error: 'not available' });
+});
+test('staff get the gist of a report, not all of it', async () => {
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    const r = await S.ASSISTANT_TOOLS.get_report_detail.run(staff, { report_id: state.fbRep.id });
+    assert.strictEqual(r.headline, 'Steady, with weekends dark.');
+    assert.ok(r.working.every(x => typeof x === 'string') && r.working.length <= 3 && r.fix.length <= 3, JSON.stringify(r));
+    assert.ok(!('month' in r) && !('band' in r));
+    const owner = await S.assistantScope(CLIENT.id, state.C, 'client');
+    const o = await S.ASSISTANT_TOOLS.get_report_detail.run(owner, { report_id: state.fbRep.id });
+    assert.ok(Array.isArray(o.working) && typeof o.working[0] === 'object', 'the owner keeps the full worded view');
+});
+test('a staff question stops after three rounds, and the last round must answer with what it has', async () => {
+    GEMINI.script = [
+        { parts: [{ functionCall: { name: 'get_tasks', args: {} } }] },
+        { parts: [{ functionCall: { name: 'get_leads_summary', args: {} } }] },
+        { parts: [{ text: 'One task is overdue and 2 leads have a way to reach them.' }] }
+    ];
+    GEMINI.requests.length = 0;
+    const out = await S.assistantAnswer({ userId: EMP.id, message: 'Prep me for a call', clientId: state.C, role: 'user' });
+    assert.strictEqual(GEMINI.requests.length, 3, 'expected exactly three model turns');
+    assert.strictEqual(GEMINI.requests[0].toolConfig, undefined);
+    assert.strictEqual(GEMINI.requests[2].toolConfig.functionCallingConfig.mode, 'NONE', 'the last round could still call a tool');
+    assert.strictEqual(out.answer, 'One task is overdue and 2 leads have a way to reach them.');
+    assert.deepStrictEqual(out.used, ['get_tasks', 'get_leads_summary']);
+    state.askConv = out.conversationId;
+});
+test('a long thread keeps its latest turns, not its first ones', async () => {
+    const base = Date.now() - 3600000;
+    for (let i = 0; i < 12; i++) {
+        tbl('ai_messages').push({ id: crypto.randomUUID(), conversation_id: state.askConv, role: i % 2 ? 'assistant' : 'user', content: `turn-${i}`, created_at: new Date(base + (i + 10) * 1000).toISOString() });
+    }
+    GEMINI.script = [{ parts: [{ text: 'Noted.' }] }];
+    GEMINI.requests.length = 0;
+    await S.assistantAnswer({ userId: EMP.id, message: 'And now?', conversationId: state.askConv, clientId: state.C, role: 'user' });
+    const texts = GEMINI.requests[0].contents.flatMap(c => c.parts || []).map(p => p.text).filter(Boolean);
+    assert.ok(texts.includes('turn-11'), 'the latest turn was dropped');
+    assert.ok(!texts.includes('turn-0'), 'the oldest turn was kept over newer ones');
+    assert.ok(texts.length <= 9, 'staff history is eight turns plus the question: ' + texts.length);
+});
+test('the ask route offers the client lookups to staff with a client chosen', async () => {
+    GEMINI.script = [{ parts: [{ text: 'Nothing is waiting on the client.' }] }];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', '/api/assistant/ask', { token: 't-emp', body: { message: 'What is waiting on the client?', clientId: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const names = GEMINI.requests[0].tools[0].functionDeclarations.map(d => d.name);
+    assert.ok(names.includes('get_tasks') && names.includes('get_work_log'));
+});
+
 section('\nthe content plan, with the model told to overspend');
 /** Stored posts for one Instagram handle, varied enough to produce cells. */
 function seedPosts(handle, spec) {
