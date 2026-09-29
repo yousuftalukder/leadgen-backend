@@ -13,6 +13,7 @@
  *   UI.openTask(task, ctx)            the task drawer: create, edit, checklist, comments
  *   UI.taskRow(task, opts)            one task in a list
  *   UI.addClient(opts)                the add-client drawer
+ *   UI.askBox(host, opts)             the account assistant for one client: suggestions, a thread, streamed status
  * ---------------------------------------------------------------------------
  */
 (function () {
@@ -335,7 +336,7 @@
                 <div><label for="ac-fb">Facebook Page</label><input id="ac-fb" value="${esc(draft.fb)}" placeholder="facebook.com/…"></div>
                 <div><label for="ac-comp">Competitors</label><input id="ac-comp" value="${esc(draft.competitors)}" placeholder="@rival1, @rival2"><div class="ws-hint">The accounts this client is compared against, up to 10. Audits and benchmarks use them.</div></div>
             </div>`;
-            if (step === 3) body += `<p class="el-muted">Can you connect their Facebook Page and Instagram now? Audits and lead searches work without it; daily numbers, monthly reports and Ask AI on their own numbers need it.</p>
+            if (step === 3) body += `<p class="el-muted">Can you connect their Facebook Page and Instagram now? Audits and lead searches work without it; daily numbers, monthly reports and Edge Meta AI need it.</p>
                 <div class="ws-form">${[['now', 'Connect now', 'You sign in with a Facebook account that manages their Page. You pick which Page goes under this client.'],
                     ['owner', 'The owner will connect', 'They do it from their own portal after you invite them in the next step.'],
                     ['later', 'Later', 'It stays on this client’s setup list.']].map(([k, t, s]) =>
@@ -418,9 +419,151 @@
         return d;
     }
 
+    // ---- ask ai (phase 35) ----------------------------------------------------
+    // One chat per client for the team. It reads the client's reports, Meta
+    // numbers, task board, leads and work log through the server's lookups,
+    // which are locked to this client; nothing here decides what it can see.
+    const ASK_SUGGEST = name => [
+        `What have we done for ${name} this month?`,
+        'What is planned next, and what is waiting on the client?',
+        'Their key numbers in two lines',
+        `Prep me for a call with ${name}`,
+        'Draft a three-line update I can send the owner'
+    ];
+
+    /** A model answer as safe HTML: paragraphs, "- " lists and **bold**, nothing else. */
+    function answerHtml(text) {
+        const inline = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+        return String(text || '').trim().split(/\n{2,}/).map(block => {
+            const lines = block.split('\n');
+            if (lines.every(l => /^\s*([-*•]|\d+[.)])\s+/.test(l))) {
+                const ordered = /^\s*\d/.test(lines[0]);
+                return `<${ordered ? 'ol' : 'ul'}>${lines.map(l => `<li>${inline(l.replace(/^\s*([-*•]|\d+[.)])\s+/, ''))}</li>`).join('')}</${ordered ? 'ol' : 'ul'}>`;
+            }
+            return `<p>${lines.map(inline).join('<br>')}</p>`;
+        }).join('');
+    }
+
+    /** POST with server-sent status events; resolves with the answer payload. */
+    async function askStream(body, onStatus) {
+        const res = await fetch(EL.backendUrl() + '/api/assistant/ask?stream=1', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + await EL.token() },
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            let d = null; try { d = await res.json(); } catch { d = null; }
+            if (res.status === 401) { EL.signOut(); throw new Error('Signed out.'); }
+            throw new Error((d && d.error) || (res.status === 429 ? 'That was a lot of questions in a minute. Wait a moment and ask again.' : `Request failed (${res.status})`));
+        }
+        const reader = res.body.getReader(), dec = new TextDecoder();
+        let buf = '', out = null;
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const frames = buf.split('\n\n'); buf = frames.pop();
+            for (const f of frames) {
+                if (!f.trim() || f.startsWith(':')) continue;
+                let ev = 'message', data = '';
+                for (const line of f.split('\n')) {
+                    if (line.startsWith('event:')) ev = line.slice(6).trim();
+                    else if (line.startsWith('data:')) data += line.slice(5).trim();
+                }
+                let d; try { d = JSON.parse(data); } catch { continue; }
+                if (ev === 'status' && d.label) onStatus(d.label);
+                else if (ev === 'done') out = d;
+                else if (ev === 'error') throw new Error(d.error || 'That did not work.');
+            }
+        }
+        if (!out) throw new Error('The answer did not arrive. Ask again.');
+        return out;
+    }
+
+    /**
+     * opts: { clientId, clientName, compact, initial, onAsk }
+     * compact: the Overview's launcher, a box and suggestions; asking calls
+     * onAsk(question) so the page can open the full thread. Otherwise the
+     * thread itself, resuming the latest conversation about this client.
+     */
+    function askBox(host, opts = {}) {
+        const name = opts.clientName || 'this client';
+        const suggest = ASK_SUGGEST(name);
+        if (opts.compact) {
+            host.innerHTML = `<section class="ws-card ws-ask is-compact"><div class="ws-card-h"><h2>${EL.icon('spark')}Account assistant</h2>
+                    <span class="el-muted">What we did, what is planned, and ${esc(name)}’s numbers, in seconds</span></div>
+                <form class="ws-ask-form"><input type="text" maxlength="2000" placeholder="e.g. What have we done for them this month?" aria-label="Ask the account assistant about ${esc(name)}"><button class="ws-btn is-gold" type="submit">Ask</button></form>
+                <div class="ws-ask-sugg">${suggest.slice(0, 3).map(t => `<button type="button" class="ws-chipbtn">${esc(t)}</button>`).join('')}</div></section>`;
+            const input = host.querySelector('input');
+            const send = t => { t = String(t || '').trim(); if (t && opts.onAsk) opts.onAsk(t); };
+            host.querySelector('form').addEventListener('submit', e => { e.preventDefault(); send(input.value); });
+            host.querySelectorAll('.ws-chipbtn').forEach(b => b.addEventListener('click', () => send(b.textContent)));
+            return;
+        }
+
+        let conversationId = null, busy = false;
+        const turns = [];
+        host.innerHTML = `<section class="ws-card ws-ask">
+            <div class="ws-card-h"><h2>${EL.icon('spark')}Account assistant · ${esc(name)}</h2><button class="ws-link" type="button" data-new>Start a new conversation</button></div>
+            <p class="el-muted ws-ask-lead">What we did for ${esc(name)}, what is planned, and their numbers, ready to tell the client. It reads their reports, their own Meta numbers when connected, the task board, the leads found and what the team has run, and nothing from any other client.</p>
+            <div class="ws-ask-thread" aria-live="polite"></div>
+            <div class="ws-ask-sugg"></div>
+            <form class="ws-ask-form"><textarea rows="2" maxlength="2000" placeholder="Ask about ${esc(name)}…" aria-label="Your question"></textarea><button class="ws-btn is-gold" type="submit">Ask</button></form>
+        </section>`;
+        const thread = host.querySelector('.ws-ask-thread');
+        const sugg = host.querySelector('.ws-ask-sugg');
+        const input = host.querySelector('textarea');
+        const form = host.querySelector('form');
+
+        function draw(status) {
+            thread.innerHTML = turns.map(t => t.role === 'user'
+                ? `<div class="ws-ask-q">${esc(t.text)}</div>`
+                : `<div class="ws-ask-a">${answerHtml(t.text)}</div>`).join('')
+                + (status ? `<div class="ws-ask-status"><span class="el-dot"></span>${esc(status)}…</div>` : '');
+            sugg.innerHTML = turns.length ? '' : suggest.map(t => `<button type="button" class="ws-chipbtn">${esc(t)}</button>`).join('');
+            sugg.querySelectorAll('.ws-chipbtn').forEach(b => b.addEventListener('click', () => ask(b.textContent)));
+            thread.scrollTop = thread.scrollHeight;
+        }
+
+        async function ask(text) {
+            text = String(text || '').trim();
+            if (!text || busy) return;
+            busy = true; form.querySelector('button').disabled = true; input.value = '';
+            turns.push({ role: 'user', text });
+            draw('Thinking');
+            try {
+                const out = await askStream({ message: text, conversationId, clientId: opts.clientId }, label => draw(label));
+                conversationId = out.conversationId || conversationId;
+                turns.push({ role: 'assistant', text: out.answer || '' });
+            } catch (err) {
+                turns.push({ role: 'assistant', text: err.message || 'That did not work. Ask again in a moment.' });
+            } finally {
+                busy = false; form.querySelector('button').disabled = false; draw(); input.focus();
+            }
+        }
+
+        form.addEventListener('submit', e => { e.preventDefault(); ask(input.value); });
+        input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(input.value); } });
+        host.querySelector('[data-new]').addEventListener('click', () => { conversationId = null; turns.length = 0; draw(); input.focus(); });
+
+        // Resume the latest conversation about this client, unless the page
+        // arrived with a question to ask (from the Overview box).
+        draw();
+        if (opts.initial) { ask(opts.initial); return; }
+        EL.api(`/api/assistant/conversations?client_id=${encodeURIComponent(opts.clientId)}`).then(async r => {
+            const last = (r.conversations || [])[0];
+            if (!last || turns.length) return;
+            const d = await EL.api('/api/assistant/conversation/' + encodeURIComponent(last.id));
+            if (turns.length) return;
+            conversationId = last.id;
+            for (const m of (d.messages || []).slice(-12)) turns.push({ role: m.role === 'assistant' ? 'assistant' : 'user', text: m.content });
+            draw();
+        }).catch(() => {});
+    }
+
     window.UI = {
         TYPE_LABEL, TYPE_PAGE, JOB_LABEL, jobName, jobState, sourceOf, srcChip, STATUS, STATUS_NAME, LABELS,
         initials, day, ago, today, isLate, labelChip,
-        board, openTask, taskRow, addClient
+        board, openTask, taskRow, addClient, askBox, answerHtml
     };
 })();

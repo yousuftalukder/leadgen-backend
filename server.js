@@ -15774,6 +15774,11 @@ async function monthlyBoard(row) {
 
 const ASSISTANT_MAX_ROUNDS = parseInt(process.env.ASSISTANT_MAX_ROUNDS || '6', 10);
 const ASSISTANT_HISTORY    = parseInt(process.env.ASSISTANT_HISTORY || '20', 10);
+// Staff ask quick questions about one client between other work (phase 35).
+// Three rounds covers "tasks + leads + the latest report"; a question that
+// needs more is too broad, and the last round answers with what it has.
+const ASSISTANT_STAFF_ROUNDS  = parseInt(process.env.ASSISTANT_STAFF_ROUNDS || '3', 10);
+const ASSISTANT_STAFF_HISTORY = parseInt(process.env.ASSISTANT_STAFF_HISTORY || '8', 10);
 
 /**
  * One model turn with function calling.
@@ -15784,7 +15789,7 @@ const ASSISTANT_HISTORY    = parseInt(process.env.ASSISTANT_HISTORY || '20', 10)
  * that matters — the key pool, the cooldowns, the model chain, the dead-model
  * map — and only the loop body differs.
  */
-async function geminiToolTurn(contents, functionDeclarations, { systemInstruction, userId, tag = 'assistant' } = {}) {
+async function geminiToolTurn(contents, functionDeclarations, { systemInstruction, userId, tag = 'assistant', noCalls = false } = {}) {
     const candidates = await geminiCandidates(userId);
     if (!candidates.length) return { ok: false, reason: 'no_key' };
 
@@ -15814,7 +15819,9 @@ async function geminiToolTurn(contents, functionDeclarations, { systemInstructio
             contents,
             generationConfig,
             ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-            ...(functionDeclarations?.length ? { tools: [{ functionDeclarations }] } : {})
+            ...(functionDeclarations?.length ? { tools: [{ functionDeclarations }] } : {}),
+            // Tools stay declared (earlier turns called them) but none may be called now.
+            ...(noCalls && functionDeclarations?.length ? { toolConfig: { functionCallingConfig: { mode: 'NONE' } } } : {})
         };
 
         try {
@@ -15971,7 +15978,20 @@ const ASSISTANT_TOOLS = {
             // The monthly document is for reading; get_monthly_report already
             // gives the model the month's numbers, so it is not sent twice.
             const { month, ...view } = clientReportView(data);
-            return view;
+            if (s.audience !== 'operator') return view;
+            // Staff get the gist (phase 35): the finding, where they stand, the
+            // top three each way and the summary. The page has the rest.
+            const titles = a => (a || []).slice(0, 3).map(x => x.title);
+            return {
+                type: view.title, date: view.date, handle: view.handle, headline: view.headline,
+                standing: view.standing && view.standing.verdict ? { verdict: view.standing.verdict, gap: view.standing.gap } : null,
+                working: titles(view.working), fix: titles(view.fix),
+                ideas: (view.ideas || []).slice(0, 3).map(i => ({ idea: i.concept || i.hook, format: i.format })),
+                rooms: (view.rooms || []).slice(0, 3).map(r => r.name),
+                profileMissing: (view.profile && view.profile.missing) || [],
+                summary: view.summary ? String(view.summary).slice(0, 600) : null,
+                provisional: !!view.provisional
+            };
         }
     },
 
@@ -16098,11 +16118,117 @@ const ASSISTANT_TOOLS = {
                 how_to_read: 'followers.now is the count today; followers.day/week/month are the change since yesterday, 7 and 30 days ago (null = not enough days yet); reach, views, profile_views and interactions compare the last 7 ended days with the 7 before.'
             };
         }
+    },
+
+    // ---- phase 35: the rest of the client, in counts and short lists ----------
+    // These three only exist when the conversation is about one client, and
+    // each returns a summary of a kilobyte or two, never raw rows: the model
+    // needs the shape of the account, and the pages have the detail.
+
+    get_tasks: {
+        when: s => !!s.clientId,
+        decl: {
+            name: 'get_tasks',
+            description: 'The client\'s task board: how many tasks are in each column, the open ones (title, status, due date, who it is for, overdue or not; overdue first, at most 10) and what was finished this month. Use for "what is overdue", "what is waiting on the client", "what did we do this month", or to prepare a call.',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            if (!s.clientId) return { error: 'no client chosen' };
+            let q = supabase.from('client_tasks').select('title, status, due_date, assignee_user_id, assigned_to_client, visible_to_client, completed_at')
+                .eq('client_id', s.clientId);
+            // The owner reads only what is shown to them, exactly as on their portal.
+            if (s.audience !== 'operator') q = q.eq('visible_to_client', true);
+            const { data, error } = await q.limit(500);
+            if (error) return missingTable(error) ? { available: false, note: 'The task board is not switched on yet.' } : { error: 'could not read tasks' };
+            const rows = data || [];
+            const today = new Date().toISOString().slice(0, 10);
+            const monthStart = today.slice(0, 7) + '-01';
+            const people = s.audience === 'operator' ? await peopleById(rows.map(t => t.assignee_user_id)) : {};
+            const who = t => t.assigned_to_client ? 'the client'
+                : (t.assignee_user_id ? ((people[t.assignee_user_id] || {}).name || String((people[t.assignee_user_id] || {}).email || 'a team member').split('@')[0]) : 'unassigned');
+            const open = rows.filter(t => t.status !== 'done')
+                .map(t => ({ title: t.title, status: t.status, due: t.due_date || null, for: who(t), overdue: !!(t.due_date && t.due_date < today) }))
+                .sort((a, b) => (b.overdue - a.overdue) || String(a.due || '9999').localeCompare(String(b.due || '9999')));
+            const counts = {};
+            for (const t of rows) counts[t.status] = (counts[t.status] || 0) + 1;
+            return {
+                counts, overdue: open.filter(t => t.overdue).length, openShown: open.slice(0, 10), openTotal: open.length,
+                doneThisMonth: rows.filter(t => t.status === 'done' && t.completed_at && t.completed_at.slice(0, 10) >= monthStart).map(t => t.title).slice(0, 10),
+                statuses: 'todo = to do, doing = in progress, waiting = waiting on the client, done'
+            };
+        }
+    },
+
+    get_leads_summary: {
+        when: s => !!s.clientId,
+        decl: {
+            name: 'get_leads_summary',
+            description: 'The leads found for this client, as totals: how many, how many have an email or a phone, how many were found this month, by platform and by how they were found, and the five newest names. No contact details. Use for "how many leads do we have", "how many can we reach", "what did the last search find".',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            if (!s.clientId) return { error: 'no client chosen' };
+            const { data: links } = await supabase.from('client_leads').select('lead_id, source, created_at')
+                .eq('client_id', s.clientId).order('created_at', { ascending: false }).limit(1000);
+            const L = links || [];
+            if (!L.length) return { total: 0, note: 'No leads have been found for this client yet.' };
+            const ids = [...new Set(L.map(l => l.lead_id))];
+            const leads = [];
+            for (let i = 0; i < ids.length; i += 200) {
+                const { data } = await supabase.from('leads').select('id, username, full_name, platform, email, phone, whatsapp').in('id', ids.slice(i, i + 200));
+                leads.push(...(data || []));
+            }
+            const monthStart = new Date().toISOString().slice(0, 7) + '-01';
+            const tally = f => L.reduce((o, l) => { const k = f(l) || 'other'; o[k] = (o[k] || 0) + 1; return o; }, {});
+            const byId = Object.fromEntries(leads.map(l => [l.id, l]));
+            return {
+                total: ids.length, capped: L.length >= 1000,
+                withEmail: leads.filter(l => l.email).length,
+                withPhone: leads.filter(l => l.phone || l.whatsapp).length,
+                foundThisMonth: new Set(L.filter(l => String(l.created_at) >= monthStart).map(l => l.lead_id)).size,
+                byPlatform: leads.reduce((o, l) => { const k = l.platform || 'instagram'; o[k] = (o[k] || 0) + 1; return o; }, {}),
+                bySource: tally(l => l.source),
+                newest: L.slice(0, 5).map(l => byId[l.lead_id]).filter(Boolean).map(l => ({ name: l.full_name || l.username, platform: l.platform || 'instagram' })),
+                note: 'Contact details are on the Leads page, not here.'
+            };
+        }
+    },
+
+    get_work_log: {
+        // What the agency ran and has scheduled is the team's view, not the owner's.
+        when: s => !!s.clientId && s.audience === 'operator',
+        decl: {
+            name: 'get_work_log',
+            description: 'What the team has done and has lined up for this client: reports delivered in the last 30 days, work running now, runs that failed or paused in the last 30 days, and the next scheduled runs. Use for "what did we do this month", "is anything running", "what is scheduled next".',
+            parameters: { type: 'OBJECT', properties: {} }
+        },
+        run: async (s) => {
+            if (!s.clientId || s.audience !== 'operator') return { error: 'not available' };
+            const since = new Date(Date.now() - 30 * 86400000).toISOString();
+            const [{ data: reps }, { data: jobs }, { data: scheds }] = await Promise.all([
+                supabase.from('reports').select('report_type, target_handle, created_at').eq('client_id', s.clientId)
+                    .gte('created_at', since).order('created_at', { ascending: false }).limit(10),
+                supabase.from('jobs').select('type, status, progress, created_at').eq('client_id', s.clientId)
+                    .gte('created_at', since).order('created_at', { ascending: false }).limit(40),
+                supabase.from('schedules').select('label, job_type, cadence, next_run_at, paused').eq('client_id', s.clientId)
+                    .order('next_run_at', { ascending: true }).limit(10)
+            ]);
+            const J = jobs || [];
+            return {
+                delivered: (reps || []).map(r => ({ report: CLIENT_REPORT_TITLES[r.report_type] || r.report_type, about: r.target_handle || null, date: String(r.created_at).slice(0, 10) })),
+                runningNow: J.filter(j => ['queued', 'running'].includes(j.status)).map(j => ({ work: j.type, status: j.status, progress: j.progress || 0 })),
+                stuck: J.filter(j => ['failed', 'paused_no_credit', 'interrupted'].includes(j.status)).map(j => ({ work: j.type, status: j.status, date: String(j.created_at).slice(0, 10) })).slice(0, 5),
+                finishedRuns: J.filter(j => j.status === 'done').length,
+                scheduled: (scheds || []).filter(x => !x.paused).slice(0, 3).map(x => ({ what: x.label || x.job_type, cadence: x.cadence, next: String(x.next_run_at).slice(0, 10) })),
+                pausedSchedules: (scheds || []).filter(x => x.paused).length
+            };
+        }
     }
 };
 
-function assistantDeclarations() {
-    return Object.values(ASSISTANT_TOOLS).map(t => t.decl);
+/** The tools this conversation may use. With no scope, every declaration (for the contract tests). */
+function assistantDeclarations(scope = null) {
+    return Object.values(ASSISTANT_TOOLS).filter(t => !scope || !t.when || t.when(scope)).map(t => t.decl);
 }
 
 /**
@@ -16157,6 +16283,13 @@ function assistantSystemPrompt(scope) {
         operator && scope.clientId
             ? '- You are scoped to this one client. You cannot see the operator\'s other clients from here, so do not compare against them or refer to them.'
             : '',
+        operator && scope.clientId
+            ? '- Your job here is the account at a glance, for someone about to talk to the client: what we did for them (get_work_log, finished tasks), what is planned (open tasks, scheduled runs, the latest content plan or monthly recommendations), and their numbers in a sentence. Keep answers short enough to read out on a call.'
+            : '',
+        operator && scope.clientId
+            ? '- Fetch only what the question needs: the client card below already has the headline numbers and counts, and one or two lookups is usually enough. Tasks: get_tasks. Leads: get_leads_summary. Work done and scheduled: get_work_log.'
+            : '',
+        scope.card ? `- Client card: ${scope.card}` : '',
         `- Today is ${new Date().toISOString().slice(0, 10)}.`,
         '',
         'If you have no data at all for what they asked, say so in one sentence and suggest the one thing that would fix it.'
@@ -16218,9 +16351,51 @@ async function assistantScope(userId, clientId = null, role = null) {
         ? [`client_id.eq.${scoped}`]
         : [`user_id.eq.${userId}`, ...(clientIds.length ? [`client_id.in.(${clientIds.join(',')})`] : [])];
 
+    // One line that answers the simple questions without a lookup (phase 35):
+    // counts only, read in parallel, and a missing table is just left out.
+    let card = null;
+    if (scoped && client) {
+        const head = q => q.then(r => (r.error ? null : r.count), () => null);
+        let tq = supabase.from('client_tasks').select('id', { count: 'exact', head: true }).eq('client_id', scoped).neq('status', 'done');
+        if (role === 'client') tq = tq.eq('visible_to_client', true);
+        const quiet = p => p.then(r => r, () => null);
+        const [reps, openTasks, leadsN, audit, grow] = await Promise.all([
+            head(supabase.from('reports').select('id', { count: 'exact', head: true }).eq('client_id', scoped)),
+            head(tq),
+            head(supabase.from('client_leads').select('lead_id', { count: 'exact', head: true }).eq('client_id', scoped)),
+            quiet(supabase.from('reports').select('grade, engagement_rate, created_at').eq('client_id', scoped)
+                .eq('report_type', 'ig_report').order('created_at', { ascending: false }).limit(1)),
+            connectionIds.length ? quiet(growthForConnections(connectionIds)) : Promise.resolve(null)
+        ]);
+        // The numbers a client asks about on the phone, so the answer needs no
+        // lookup: their followers and last week from Meta, the last audit's
+        // grade and engagement from public data, each labelled with its source.
+        const nums = [];
+        const g = grow && grow.growth && !grow.growth.empty ? grow.growth : null;
+        const sg = v => (v > 0 ? '+' : '') + Number(v).toLocaleString('en-US');
+        if (g && g.followers && g.followers.now != null) nums.push(`${Number(g.followers.now).toLocaleString('en-US')} followers${g.followers.week != null ? ` (${sg(g.followers.week)} this week)` : ''}`);
+        if (g && g.reach && g.reach.now != null) nums.push(`reach ${Number(g.reach.now).toLocaleString('en-US')} last 7 days${g.reach.pct != null ? ` (${sg(g.reach.pct)}% on the week before)` : ''}`);
+        if (nums.length) nums[nums.length - 1] += ' [owner Meta numbers]';
+        const a = audit && audit.data && audit.data[0];
+        if (a && (a.grade || a.engagement_rate != null)) {
+            const er = a.engagement_rate == null ? null : Number(a.engagement_rate) * (Number(a.engagement_rate) < 1 ? 100 : 1);
+            nums.push(`last Instagram audit ${String(a.created_at).slice(0, 10)}: ${[a.grade ? 'grade ' + a.grade : null, er != null ? er.toFixed(1) + '% engagement' : null].filter(Boolean).join(', ')} [public data]`);
+        }
+        card = [
+            client.name,
+            [client.niche, client.location].filter(Boolean).join(', ') || null,
+            connectionIds.length ? 'Meta connected' : 'Meta not connected',
+            reps === null ? null : `${reps} report${reps === 1 ? '' : 's'}`,
+            openTasks === null ? null : `${openTasks} open task${openTasks === 1 ? '' : 's'}`,
+            leadsN === null ? null : `${leadsN} lead${leadsN === 1 ? '' : 's'} found`,
+            nums.length ? 'numbers: ' + nums.join('; ') : null
+        ].filter(Boolean).join(' · ');
+    }
+
     return {
         userId,
         role,
+        card,
         audience: role === 'client' ? 'owner' : 'operator',
         clientIds,
         clientId: scoped,
@@ -16267,9 +16442,13 @@ async function assistantAnswer({ userId, message, conversationId, clientId = nul
         conv = data;
     }
 
-    const { data: history } = await supabase.from('ai_messages')
-        .select('role, content').eq('conversation_id', conv.id)
-        .order('created_at', { ascending: true }).limit(ASSISTANT_HISTORY);
+    const staff = scope.audience === 'operator';
+    // The most recent turns, oldest first. .limit() on an ascending read kept
+    // the OLDEST ones, so a long thread lost its latest context first.
+    const { data: recent } = await supabase.from('ai_messages')
+        .select('role, content, created_at').eq('conversation_id', conv.id)
+        .order('created_at', { ascending: false }).limit(staff ? ASSISTANT_STAFF_HISTORY : ASSISTANT_HISTORY);
+    const history = (recent || []).slice().reverse();
 
     await supabase.from('ai_messages').insert([{ conversation_id: conv.id, role: 'user', content: message }]);
 
@@ -16287,15 +16466,23 @@ async function assistantAnswer({ userId, message, conversationId, clientId = nul
         get_best_times:        'Working out your best times',
         get_community_demand:  'Checking what people are asking for',
         get_owner_insights:    'Reading your Meta numbers',
-        get_daily_growth:      'Checking your growth day by day'
+        get_daily_growth:      'Checking your growth day by day',
+        get_tasks:             'Checking the task board',
+        get_leads_summary:     'Counting the leads',
+        get_work_log:          'Looking at the work done'
     };
+    const declarations = assistantDeclarations(scope);
+    const maxRounds = staff ? ASSISTANT_STAFF_ROUNDS : ASSISTANT_MAX_ROUNDS;
 
     const used = [];
     let answer = '';
 
-    for (let round = 0; round < ASSISTANT_MAX_ROUNDS; round++) {
-        const turn = await geminiToolTurn(contents, assistantDeclarations(), {
-            systemInstruction: assistantSystemPrompt(scope), userId, tag: 'assistant'
+    for (let round = 0; round < maxRounds; round++) {
+        // The last round offers no tools, so it answers from what it has read
+        // instead of spending the turn on one more lookup it cannot use.
+        const last = round === maxRounds - 1 && round > 0;
+        const turn = await geminiToolTurn(contents, declarations, {
+            systemInstruction: assistantSystemPrompt(scope), userId, tag: 'assistant', noCalls: last
         });
 
         if (!turn.ok) {
@@ -16316,6 +16503,7 @@ async function assistantAnswer({ userId, message, conversationId, clientId = nul
         // Independent reads, so they go together rather than one after another.
         const settled = await Promise.all(turn.calls.map(async fc => {
             const tool = ASSISTANT_TOOLS[fc.name];
+            if (tool && tool.when && !tool.when(scope)) return { fc, result: { error: 'not available here' } };
             let result;
             try { result = tool ? await tool.run(scope, fc.args || {}) : { error: 'unknown tool' }; }
             catch (e) { logger.warn('assistant_tool_failed', { tool: fc.name, message: e.message }); result = { error: e.message }; }
@@ -17284,5 +17472,7 @@ module.exports = {
     sendMail, mailSettings, MAIL_KEYS, leadScope, leadFilters, withFinders,
     metaDailySync, metaDailyTick, growthFrom, growthForConnections, shiftDay, dayStr,
     // phase 34
-    monthlyView, monthlyContext, monthRecs, cleanMonthlyAi, monthChange, monthStatus, CLIENT_REPORT_TITLES
+    monthlyView, monthlyContext, monthRecs, cleanMonthlyAi, monthChange, monthStatus, CLIENT_REPORT_TITLES,
+    // phase 35
+    assistantScope, assistantAnswer
 };

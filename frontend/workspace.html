@@ -27,9 +27,6 @@
         display: flex; flex-direction: column; gap: 8px; color: var(--text-secondary); font-size: 0.9rem; }
     .wsc-banner b { color: var(--text-primary); }
     .wsc-banner code { font-size: 0.74rem; word-break: break-all; color: var(--text-primary); }
-    .wsc-ask { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    @media (max-width: 800px) { .wsc-ask { grid-template-columns: minmax(0, 1fr); } }
-    .wsc-ask a { text-decoration: none; color: inherit; }
     /* the report viewer: a report opens on the client's page, rendered by its own engine page */
     .rvw { position: fixed; inset: 0; z-index: 100000; }
     .rvw-scrim { position: absolute; inset: 0; background: rgba(2,8,6,0.72); }
@@ -83,10 +80,11 @@
     if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { location.replace('clients.html'); return; }
 
     const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['reports', 'Reports'], ['leads', 'Leads'], ['meta', 'Meta'],
-        ['ask', 'Ask AI'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
+        ['ask', 'Assistant'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
     let tab = TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'overview';
 
     let detail = null, timeline = null, tasks = null, growth = null, metaCfg = null;
+    let pendingAsk = null;       // a question typed on the Overview, asked when the Assistant tab opens
     const canEdit = () => detail && ['owner', 'admin', 'editor'].includes(detail.client.access);
     const isOwner = () => detail && ['owner', 'admin'].includes(detail.client.access);
 
@@ -146,7 +144,6 @@
                 </div>
                 <div class="ws-actions" style="align-self:center">
                     ${canEdit() ? `<button class="ws-btn is-gold" type="button" id="wsc-new">${ic('plus')}New work</button>` : ''}
-                    <a class="ws-btn" href="?client=${encodeURIComponent(c.id)}&tab=ask" data-tab="ask">${ic('spark')}Ask AI</a>
                 </div>
             </div>
             <div id="wsc-banner"></div>
@@ -285,6 +282,7 @@
         const late = open.filter(UI.isLate).length;
         const waiting = open.filter(t => t.status === 'waiting').length;
         body.innerHTML = `${kpis}
+            <div id="wsc-askbox" style="margin-bottom:16px"></div>
             <div class="ws-grid g2">
                 <section class="ws-card"><div class="ws-card-h"><h2>${gr && !gr.empty ? 'Followers, day by day' : 'Latest work'}</h2>${gr && !gr.empty ? UI.srcChip('meta') : `<button class="ws-link" type="button" data-tab2="reports">All reports ${ic('arrow')}</button>`}</div>
                     ${gr && !gr.empty ? spark(gr.series || []) : (reps.length ? `<div class="ws-rows">${reps.slice(0, 5).map(reportRow).join('')}</div>` : '<p class="el-muted">Nothing filed under this client yet.</p>')}
@@ -301,6 +299,7 @@
             ${gr && !gr.empty && reps.length ? `<section class="ws-card"><div class="ws-card-h"><h2>Latest work</h2><button class="ws-link" type="button" data-tab2="reports">All reports ${ic('arrow')}</button></div><div class="ws-rows">${reps.slice(0, 5).map(reportRow).join('')}</div></section>` : ''}`;
         body.querySelectorAll('[data-tab2]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); go(b.dataset.tab2); }));
         wireOpen(body);
+        UI.askBox($('wsc-askbox'), { compact: true, clientId: c.id, clientName: c.name, onAsk: question => { pendingAsk = question; go('ask'); } });
         body.querySelectorAll('[data-task]').forEach(el => el.addEventListener('click', () => {
             const t = tasks.tasks.find(x => x.id === el.dataset.task);
             UI.openTask(t, { clientId: c.id, clientName: c.name, people: tasks.people, canEdit: tasks.canEdit, onSaved: () => { tasks = null; drawTab(); } });
@@ -395,7 +394,7 @@
                     ${conns.length ? conns.map(x => `<div class="conn ${x.status !== 'active' ? 'is-bad' : ''}"><b>${esc(x.page_name || x.page_id)}</b>${x.ig_username ? ` · Instagram <b>@${esc(x.ig_username)}</b>` : ' · no Instagram account linked to this Page'}
                         <div class="el-muted" style="margin-top:4px">${esc(x.status)}${x.last_sync_at ? ' · last read ' + esc(UI.ago(x.last_sync_at)) : ' · not read yet'}${x.token_expires_at ? ' · access until ' + esc(UI.day(x.token_expires_at)) : ''}${x.last_error ? ' · ' + esc(x.last_error) : ''}</div>
                         ${canEdit() ? `<div class="ws-actions" style="margin-top:8px"><button class="ws-btn is-sm" type="button" data-read="${esc(x.id)}">${ic('clock')}Read numbers now</button><button class="ws-btn is-sm is-quiet" type="button" data-disc="${esc(x.id)}">Disconnect</button></div>` : ''}</div>`).join('')
-                    : `<p class="el-muted">Connecting Meta gives ${esc(c.name)}’s own numbers: daily followers and reach, a monthly report, and Ask AI answers about their real results. Audits, benchmarks and lead searches work without it.</p>`}
+                    : `<p class="el-muted">Connecting Meta gives ${esc(c.name)}’s own numbers: daily followers and reach, a monthly report, and the account assistant can answer with their real results. Audits, benchmarks and lead searches work without it.</p>`}
                     ${canEdit() ? `<div class="ws-actions"><button class="ws-btn ${conns.length ? '' : 'is-gold'}" type="button" id="m-connect" ${metaCfg.configured ? '' : 'disabled'}>${ic('plug')}${conns.length ? 'Connect another Page' : 'Connect Meta'}</button>
                         ${live.length ? `<button class="ws-btn" type="button" id="m-pull">Pull a 28-day owner report</button>` : ''}</div>` : ''}
                     <div class="ws-note" id="m-note">${metaCfg.configured ? '' : 'The server has no Meta app keys yet, so connecting is switched off until an admin adds them.'}</div>
@@ -466,25 +465,14 @@
     }
 
     // ---- ask ai -----------------------------------------------------------------
+    // The account assistant (phase 35): the chat itself, about this client
+    // only. A question typed on the Overview arrives here and is asked at once.
     function tabAsk(body) {
-        const cid = encodeURIComponent(c.id);
-        const connected = liveConns().length > 0;
         const owner = portalLogins()[0];
-        body.innerHTML = `
-            <div class="wsc-ask">
-                <a class="ws-card" href="${connected ? `client-assistant.html?client=${cid}` : `?client=${cid}&tab=meta`}" ${connected ? '' : 'data-tab2="meta"'}>
-                    <div class="ws-card-h"><h2>${ic('plug')} Their Meta numbers</h2>${connected ? '<span class="el-chip is-jade">Ready</span>' : '<span class="el-chip">Needs Meta</span>'}</div>
-                    <p class="el-muted">Followers, reach, views, posts and ads from ${esc(c.name)}’s own accounts, read twice a day. Answers show the figures they are built on.</p>
-                    <span class="ws-link">${connected ? 'Ask about their numbers' : 'Connect Meta first'} ${ic('arrow')}</span>
-                </a>
-                <a class="ws-card" href="assistant.html?client=${cid}">
-                    <div class="ws-card-h"><h2>${ic('doc')} Our reports and research</h2><span class="el-chip is-jade">Ready</span></div>
-                    <p class="el-muted">Audits, competitor benchmarks, Facebook group reads, leads and content plans filed under ${esc(c.name)}. Scraped numbers are labelled as public data.</p>
-                    <span class="ws-link">Ask about the research ${ic('arrow')}</span>
-                </a>
-            </div>
-            <p class="el-muted" style="margin-top:14px">Answers only ever use this client’s data. ${owner ? `The owner (${esc(owner.email)}) can ask about their own numbers from their portal.` : 'Invite the owner under Access &amp; sharing and they can ask about their own numbers from their portal.'}</p>`;
-        body.querySelectorAll('[data-tab2]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); go(b.dataset.tab2); }));
+        body.innerHTML = `<div id="wsc-askfull"></div>
+            <p class="el-muted" style="margin-top:12px">${liveConns().length ? `For a deep read of ${esc(c.name)}’s own Meta data (every post, day and ad), open <a class="ws-link" href="client-assistant.html?client=${encodeURIComponent(c.id)}">Edge Meta AI</a>, the chat their owner has in the portal. ` : ''}${owner ? `The owner (${esc(owner.email)}) has Edge Meta AI in their portal.` : 'Invite the owner under Access &amp; sharing and they get Edge Meta AI in their portal.'}</p>`;
+        UI.askBox($('wsc-askfull'), { clientId: c.id, clientName: c.name, initial: pendingAsk });
+        pendingAsk = null;
     }
 
     // ---- schedules --------------------------------------------------------------
@@ -529,7 +517,7 @@
                     <p class="el-muted">Admins can open every client. Everyone else sees the clients they are added to.</p>
                 </section>
                 <section class="ws-card"><div class="ws-card-h"><h2>Owner portal</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
-                    <p class="el-muted">The business owner’s own login for ${esc(c.name)} only: their reports in plain words, their numbers every day, Ask AI on their own numbers, and the tasks you share with them. Never your costs, keys or other clients.</p>
+                    <p class="el-muted">The business owner’s own login for ${esc(c.name)} only: their reports in plain words, their numbers every day, Edge Meta AI on their own numbers, and the tasks you share with them. Never your costs, keys or other clients.</p>
                     ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
                         ${isOwner() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.email)}">Send a new link</button><button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
                     ${isOwner() ? `<div class="ws-form">
