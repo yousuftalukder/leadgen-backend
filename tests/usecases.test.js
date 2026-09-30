@@ -3528,6 +3528,16 @@ test('a staff member saves one Apify key for all their work; the admin page says
     assert.ok(Object.values(me.apify.next).every(x => x === 'own key'), 'an all-work key did not cover every engine: ' + JSON.stringify(me.apify.next));
 });
 
+section('\nstaff are reminded to add their own keys');
+test('/api/me tells a staff member which of their own keys are missing; owners and admins are not asked', async () => {
+    const emp2 = await call('GET', '/api/me', { token: 't-emp2' });
+    assert.deepStrictEqual(emp2.body.ownKeys, { apify: false, ai: false }, JSON.stringify(emp2.body));
+    const emp = await call('GET', '/api/me', { token: 't-emp' });
+    assert.strictEqual(emp.body.ownKeys.apify, true, 'a saved personal Apify key was not seen');
+    assert.strictEqual((await call('GET', '/api/me', { token: 't-client' })).body.ownKeys, undefined, 'an owner was asked for keys');
+    assert.strictEqual((await call('GET', '/api/me', { token: 't-admin' })).body.ownKeys, undefined, 'an admin was asked for personal keys');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

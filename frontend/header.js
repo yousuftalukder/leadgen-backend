@@ -626,6 +626,7 @@
             } else {
                 renderShell(page, me);
                 renderPlanBanner(me);
+                renderKeyNudge(me);
                 // A client's pages are installable: the service worker for the
                 // shell, and one nudge to put it on the home screen. (phase 30)
                 if (me.role === 'client') { registerServiceWorker(); mountInstallNudge(); }
@@ -1483,6 +1484,48 @@
      * just noise. The usd metric is deliberately not shown: it is our Apify
      * cost, not a number a client has any use for.
      */
+    /**
+     * Staff who have not added their own Apify and AI keys are reminded on every page until they do,
+     * with a gold dot on the sidebar buttons. "Later" hides the strip for a day; the dots stay.
+     */
+    const NUDGE_KEY = 'el.keynudge.later';
+    function renderKeyNudge(me) {
+        const old = document.getElementById('el-keynudge');
+        if (old) old.remove();
+        const k = me && me.ownKeys;
+        document.getElementById('el-key-btn')?.classList.toggle('el-needs', !!k && !k.apify);
+        document.getElementById('el-ai-btn')?.classList.toggle('el-needs', !!k && !k.ai);
+        if (!k || (k.apify && k.ai)) return;
+        let later = 0;
+        try { later = Number(localStorage.getItem(NUDGE_KEY) || 0); } catch (_) { /* no storage */ }
+        if (Date.now() - later < 86400000) return;
+        const missing = [!k.apify ? 'Apify key' : null, !k.ai ? 'AI key' : null].filter(Boolean);
+        const bar = document.createElement('div');
+        bar.id = 'el-keynudge';
+        bar.className = 'el-keynudge';
+        bar.setAttribute('role', 'status');
+        bar.innerHTML = `<span class="el-keynudge-dot" aria-hidden="true"></span>
+            <span class="el-keynudge-txt"><b>Add your ${missing.join(' and ')}.</b> Your runs then use your own credit first, and the agency’s shared keys stay free for owners and scheduled work. Two minutes each; the window shows how.</span>
+            <span class="el-keynudge-actions">
+                ${!k.apify ? '<button class="el-btn el-btn-go el-mini" type="button" data-nudge="apify">Add Apify key</button>' : ''}
+                ${!k.ai ? '<button class="el-btn el-btn-go el-mini" type="button" data-nudge="ai">Add AI key</button>' : ''}
+                <button class="el-btn el-mini" type="button" data-nudge="later">Later</button>
+            </span>`;
+        // Beside the page's content, not inside it: pages redraw their own content after loading.
+        const page = document.querySelector('.el-page, main');
+        if (page && page.parentNode) page.parentNode.insertBefore(bar, page); else document.body.prepend(bar);
+        bar.querySelector('[data-nudge="apify"]')?.addEventListener('click', () => openKeyModal());
+        bar.querySelector('[data-nudge="ai"]')?.addEventListener('click', () => openGeminiModal());
+        bar.querySelector('[data-nudge="later"]').addEventListener('click', () => {
+            try { localStorage.setItem(NUDGE_KEY, String(Date.now())); } catch (_) { /* no storage */ }
+            bar.remove();
+        });
+    }
+    /** After a key is saved: mark it, and redraw the reminder. */
+    function keySaved(kind) {
+        if (EL.me && EL.me.ownKeys) { EL.me.ownKeys[kind] = true; renderKeyNudge(EL.me); }
+    }
+
     function renderPlanBanner(me) {
         const old = document.querySelector('.el-plan');
         if (old) old.remove();
@@ -1632,6 +1675,7 @@
                 const data = await EL.api('/api/update-apify-key', { method: 'POST', body: { newApiKey, engine } });
                 note.style.color = '#10b981';
                 note.textContent = `Saved for ${data.username} (${data.scope === 'engine_primary' ? 'shared primary' : 'personal'}).`;
+                if (data.scope === 'personal') keySaved('apify');
                 refreshStatus();
                 setTimeout(close, 1100);
             } catch (err) {
@@ -1707,6 +1751,7 @@
             try {
                 await EL.api('/api/gemini-keys', { method: 'POST', body: { key, label } });
                 note.style.color = '#10b981'; note.textContent = 'Saved. Your runs will use this key first.';
+                keySaved('ai');
                 scrim.querySelector('#el-ai-value').value = '';
                 await load();
             } catch (err) { note.style.color = '#ef4444'; note.textContent = err.message; }
