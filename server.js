@@ -15674,7 +15674,9 @@ function contentPostView(p) {
         status: p.status, statusName: cpStatusName(p.status), ownerNote: p.owner_note || null,
         decidedBy: p.decided_by || null, decidedAt: p.decided_at || null, taskId: p.task_id || null,
         postedUrl: p.posted_url || null, postedAt: p.posted_at || null,
-        brief: { concept: b.concept || null, script: b.script || [], shot: b.shot || null, why: b.why || null, evidence: b.evidence || [], band: b.predicted_band || null, boost: b.boost || null, cell: b.cell || null }
+        brief: { concept: b.concept || null, script: b.script || [], shot: b.shot || null, why: b.why || null, evidence: b.evidence || [], band: b.predicted_band || null, boost: b.boost || null, cell: b.cell || null,
+                 topic: b.topic || null, category: b.category || null, tools: b.tools || [], from: b.from || null },
+        pickId: p.pick_id || null
     };
 }
 
@@ -15693,18 +15695,19 @@ function contentPostOwnerView(p) {
 async function contentPostTask(p, byUserId) {
     if (!p.client_id || p.task_id) return p.task_id || null;
     const key = 'post:' + p.id;
-    const { data: dup } = await supabase.from('client_tasks').select('id').eq('client_id', p.client_id).eq('source_id', p.report_id).eq('source_key', key).maybeSingle();
+    // The post id is unique, so the key alone finds it; a post from a pick (phase 43) has no plan report.
+    const { data: dup } = await supabase.from('client_tasks').select('id').eq('client_id', p.client_id).eq('source_key', key).maybeSingle();
     if (dup) return dup.id;
     const b = p.brief || {};
     const due = new Date(p.planned_on + 'T00:00:00Z'); due.setUTCDate(due.getUTCDate() - 2);
     const today = new Date().toISOString().slice(0, 10);
-    const notes = [b.concept, b.shot ? 'Shot: ' + b.shot : null, (b.script || []).length ? 'Script:\n' + b.script.map((x, i) => `${i + 1}. ${x}`).join('\n') : null, p.caption ? 'Caption:\n' + p.caption : null]
+    const notes = [b.topic ? `Topic: ${b.topic}` : null, b.concept, b.shot ? 'Shot: ' + b.shot : null, (b.tools || []).length ? 'Tools: ' + b.tools.join(', ') : null, (b.script || []).length ? 'Script:\n' + b.script.map((x, i) => `${i + 1}. ${x}`).join('\n') : null, p.caption ? 'Caption:\n' + p.caption : null]
         .filter(Boolean).join('\n\n').slice(0, 4000);
     const { data, error } = await supabase.from('client_tasks').insert([{
         client_id: p.client_id, title: oneLine(`Make the ${String(p.format || 'post').toLowerCase()}: ${p.hook || 'planned post'}`, 300),
         notes, status: 'todo', due_date: due.toISOString().slice(0, 10) < today ? today : due.toISOString().slice(0, 10),
         labels: ['Content'], checklist: [], assignee_user_id: null, assigned_to_client: false, visible_to_client: false,
-        source_type: 'report', source_id: p.report_id, source_key: key, source_label: `Content plan · ${docDay(p.planned_on + 'T00:00:00Z')}`,
+        source_type: p.report_id ? 'report' : null, source_id: p.report_id || null, source_key: key, source_label: `Content plan · ${docDay(p.planned_on + 'T00:00:00Z')}`,
         position: await endOfColumn(p.client_id, 'todo'), created_by: byUserId || null
     }]).select('id').maybeSingle();
     if (error) { logger.warn('content_task_failed', { postId: p.id, message: error.message }); return null; }
@@ -15844,7 +15847,8 @@ app.patch('/api/content-posts/:id', async (req, res) => {
         if (!(await contentPostsReady())) return contentPostsMissing(res);
         if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
         const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).maybeSingle();
-        if (!p || !(await planForCalendar(ctx, p.report_id, 'editor'))) return res.status(404).json({ error: 'Post not found, or you cannot edit it.' });
+        const may = p && (p.report_id ? await planForCalendar(ctx, p.report_id, 'editor') : await clientAccess(ctx.user.id, p.client_id, 'editor'));
+        if (!may) return res.status(404).json({ error: 'Post not found, or you cannot edit it.' });
         const b = req.body || {};
         const patch = {};
         if (b.plannedOn !== undefined) {
@@ -15903,6 +15907,914 @@ app.post('/api/client/content/:id/decision', async (req, res) => {
         if (to === 'changes' && !note) return res.status(400).json({ error: 'Say what you would like changed.' });
         const row = await contentPostMove(p, to, { by: 'owner', note });
         res.json({ post: contentPostOwnerView(row) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 43 :: THE CONTENT PLAN THE WAY THE AGENCY WORKS
+//
+// The scorecard says what works in a market. This is the part before it:
+// what the business is and sells (from an audit of its website and posts,
+// corrected by the team), the topics by category that follow from that, and
+// one idea per topic picked from the team's shared idea library — content
+// seen anywhere, from any brand or industry, with its hook, why it worked,
+// the post type and the tools it needs. The team adds its own idea, script
+// and style notes before a pick is final; a final pick goes onto the
+// calendar, where the owner approves the post (phase 42).
+//
+// The system chooses topics and suggests ideas. It never makes the content.
+// ===========================================================================
+
+const CS_CATEGORIES = [['service', 'Services'], ['educational', 'Educational'], ['reviews', 'Reviews and growth'], ['generic', 'Generic'], ['collab', 'Influencer collab']];
+const CS_TYPES = [['static', 'Static'], ['carousel', 'Carousel'], ['video', 'Video'], ['story', 'Story']];
+const CS_TYPE_NAME = Object.fromEntries(CS_TYPES);
+const CS_CAT_NAME = Object.fromEntries(CS_CATEGORIES);
+/** The post types a category tends to need, best first. */
+const CS_TYPE_PREF = {
+    service: ['video', 'carousel', 'static'], educational: ['carousel', 'video', 'static'],
+    reviews: ['story', 'video', 'static'], generic: ['static', 'story', 'carousel'], collab: ['video', 'story']
+};
+/** The short tool suggestion when an idea names none. */
+const CS_DEFAULT_TOOLS = {
+    static: ['Canva'], carousel: ['Canva'], video: ['Phone camera', 'CapCut'], story: ['Instagram stickers', 'Phone camera']
+};
+/** Scorecard formats as library post types. */
+const CS_FORMAT_TYPE = { Reel: 'video', Carousel: 'carousel', Still: 'static', Video: 'video', Photo: 'static', Album: 'carousel' };
+const CS_STOP = new Set('the and for with this that your you our are was were from have has had not but all any can will just into out about more most what when where which who how why its it’s them they their then than there here also very much some such only over under after before again a an of to in on at by is be as or if so no do we us my me'.split(' '));
+const CS_MAX_LIBRARY = 3000;
+
+/** A post type from whatever a person or a spreadsheet calls it; the link decides when nothing does. */
+function csType(v, url) {
+    const s = String(v || '').toLowerCase().trim();
+    if (/stor/.test(s)) return 'story';
+    if (/carou|slide|album|swipe/.test(s)) return 'carousel';
+    if (/reel|video|tiktok|short|clip/.test(s)) return 'video';
+    if (/static|still|photo|image|post|single|graphic/.test(s)) return 'static';
+    const u = String(url || '');
+    if (/instagram\.com\/stories\//i.test(u)) return 'story';
+    if (/instagram\.com\/(reel|tv)\/|tiktok\.com|youtube\.com\/shorts|facebook\.com\/(reel|watch)/i.test(u)) return 'video';
+    return s ? null : 'static';
+}
+/** Short labels from an array or "a, b; c". */
+function csList(v, { max = 8, len = 40, lower = false } = {}) {
+    const raw = Array.isArray(v) ? v : String(v || '').split(/[,;|\n]+/);
+    const out = [];
+    for (const x of raw) {
+        let t = oneLine(String(x || '').replace(/^#/, ''), len);
+        if (!t) continue;
+        if (lower) t = t.toLowerCase();
+        if (!out.some(o => o.toLowerCase() === t.toLowerCase())) out.push(t);
+        if (out.length >= max) break;
+    }
+    return out;
+}
+function csUrl(v) {
+    const u = String(v || '').trim();
+    return /^https?:\/\/[^\s]+$/i.test(u) ? u.slice(0, 500) : null;
+}
+const csMonth = v => (/^\d{4}-(0[1-9]|1[0-2])$/.test(String(v || '')) ? String(v) : new Date().toISOString().slice(0, 7));
+const csWords = text => [...new Set(String(text || '').toLowerCase().normalize('NFKD').split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 2 && !CS_STOP.has(w)))];
+
+/** One library idea from a request body or a spreadsheet row. Null when it holds nothing to go on. */
+function csIdeaRow(b) {
+    const url = csUrl(b.url);
+    const hook = oneLine(b.hook, 300) || null;
+    if (!url && !hook) return null;
+    return {
+        url, hook,
+        source_name: oneLine(String(b.source_name ?? b.sourceName ?? '').replace(/^@/, ''), 120) || igHandleFromUrl(url) || null,
+        industry: oneLine(b.industry, 80) || null,
+        post_type: csType(b.post_type ?? b.postType ?? b.type, url) || 'static',
+        why_worked: b.why_worked ?? b.whyWorked ? String(b.why_worked ?? b.whyWorked).trim().slice(0, 600) || null : null,
+        style: b.style ? String(b.style).trim().slice(0, 600) || null : null,
+        tools: csList(b.tools, { max: 6 }),
+        tags: csList(b.tags, { max: 12, lower: true })
+    };
+}
+function csIdeaView(r, { names = {}, uses = {}, me = null } = {}) {
+    return {
+        id: r.id, url: r.url || null, sourceName: r.source_name || null, industry: r.industry || null,
+        postType: r.post_type, postTypeName: CS_TYPE_NAME[r.post_type] || r.post_type,
+        hook: r.hook || null, whyWorked: r.why_worked || null, style: r.style || null,
+        tools: r.tools || [], tags: r.tags || [], savedBy: names[r.saved_by] || null, mine: !!me && r.saved_by === me,
+        uses: uses[r.id] || 0, createdAt: r.created_at
+    };
+}
+
+/** A small CSV reader: quotes, doubled quotes, commas and newlines inside quotes. */
+function csParseCsv(text) {
+    const s = String(text || '').replace(/^﻿/, '');
+    const rows = []; let row = [], cell = '', q = false;
+    const tab = !s.split('\n')[0].includes(',') && s.split('\n')[0].includes('\t');
+    const sep = tab ? '\t' : ',';
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (q) {
+            if (ch === '"' && s[i + 1] === '"') { cell += '"'; i++; }
+            else if (ch === '"') q = false;
+            else cell += ch;
+        } else if (ch === '"') q = true;
+        else if (ch === sep) { row.push(cell); cell = ''; }
+        else if (ch === '\n' || ch === '\r') {
+            if (ch === '\r' && s[i + 1] === '\n') i++;
+            row.push(cell); cell = '';
+            if (row.some(c => c.trim())) rows.push(row);
+            row = [];
+        } else cell += ch;
+    }
+    row.push(cell);
+    if (row.some(c => c.trim())) rows.push(row);
+    return rows;
+}
+/** Which library field a spreadsheet header means. The first header to claim a field keeps it. */
+const CS_HEADERS = [
+    ['url', /^(url|link|links|post|post ?link|post ?url|reference|ref|source ?link)$/],
+    ['post_type', /(post ?type|content ?type|format|^type$|^kind$)/],
+    ['source_name', /(brand|account|handle|creator|^page$|seen ?at|^source$|^from$|^who$)/],
+    ['industry', /(industry|niche|sector|business ?type)/],
+    ['hook', /(hook|headline|^idea$|^title$|concept|opening)/],
+    ['why_worked', /(why|learning|insight|takeaway|^notes?$|^comments?$|observation|what worked)/],
+    ['style', /(style|structure|script|how|treatment|format notes)/],
+    ['tools', /(tool|app|software|editor)/],
+    ['tags', /(tag|topic|categor|theme|pillar|keyword)/]
+];
+function csImportRows(text, max = 2000) {
+    const rows = csParseCsv(text);
+    if (rows.length < 2) return { rows: [], mapped: {}, skipped: 0 };
+    const head = rows[0].map(h => String(h || '').trim().toLowerCase());
+    const col = {};
+    head.forEach((h, i) => {
+        const hit = CS_HEADERS.find(([f, re]) => !(f in col) && re.test(h));
+        if (hit) col[hit[0]] = i;
+    });
+    // A link column the header did not name: the first column full of links.
+    if (!('url' in col)) {
+        const i = head.findIndex((_, k) => !Object.values(col).includes(k) && rows.slice(1, 6).some(r => /^https?:\/\//i.test(String(r[k] || '').trim())));
+        if (i >= 0) col.url = i;
+    }
+    const out = []; let skipped = 0;
+    for (const r of rows.slice(1, max + 1)) {
+        const get = f => (f in col ? String(r[col[f]] ?? '').trim() : '');
+        const idea = csIdeaRow({ url: get('url'), hook: get('hook'), source_name: get('source_name'), industry: get('industry'),
+            post_type: get('post_type'), why_worked: get('why_worked'), style: get('style'), tools: get('tools'), tags: get('tags') });
+        if (idea) out.push(idea); else skipped++;
+    }
+    return { rows: out, mapped: Object.fromEntries(Object.entries(col).map(([f, i]) => [f, rows[0][i]])), skipped };
+}
+
+/**
+ * How well a library idea serves a topic. Pure, so the ranking can be read
+ * and tested: the post type the category needs, the format rivals win with,
+ * words the idea and the topic share, and a penalty for an idea this client
+ * already used.
+ */
+function csRank(topic, ideas, { market = null, used = {}, month = {} } = {}) {
+    const pref = CS_TYPE_PREF[topic.category] || [];
+    const words = new Set(csWords(`${topic.title} ${topic.detail || ''} ${CS_CAT_NAME[topic.category] || ''}`));
+    const best = market && market.bestType;
+    return ideas.map(i => {
+        let score = 0; const reasons = [];
+        const at = pref.indexOf(i.post_type);
+        if (at === 0) { score += 3; reasons.push(`${CS_TYPE_NAME[i.post_type]} suits ${CS_CAT_NAME[topic.category].toLowerCase()} posts`); }
+        else if (at > 0) score += 2 - Math.min(1.5, at * 0.5);
+        if (best && i.post_type === best) { score += 1.5; reasons.push(`${CS_TYPE_NAME[best]} is what wins for rivals here`); }
+        const tags = (i.tags || []).map(t => t.toLowerCase());
+        if (tags.includes(topic.category) || tags.some(t => csWords(CS_CAT_NAME[topic.category]).includes(t))) { score += 3; reasons.push(`Tagged for ${CS_CAT_NAME[topic.category].toLowerCase()}`); }
+        const tagHits = tags.filter(t => csWords(t).some(w => words.has(w)));
+        if (tagHits.length) { score += Math.min(4, tagHits.length * 2); reasons.push(`Tagged ${tagHits.slice(0, 3).join(', ')}`); }
+        const textHits = csWords(`${i.hook || ''} ${i.why_worked || ''} ${i.style || ''}`).filter(w => words.has(w));
+        if (textHits.length) { score += Math.min(3, textHits.length); if (!tagHits.length) reasons.push(`Mentions ${textHits.slice(0, 3).join(', ')}`); }
+        if (month[i.id]) { score -= 3; reasons.push('Already picked this month'); }
+        else if (used[i.id]) { score -= 1; reasons.push('Used for this client before'); }
+        const fit = score >= 5 ? 'good' : score >= 3 ? 'ok' : 'weak';
+        return { idea: i, score: +score.toFixed(2), fit, reasons };
+    }).sort((a, b) => b.score - a.score || String(b.idea.created_at || '').localeCompare(String(a.idea.created_at || '')));
+}
+/** The short tool suggestion: the idea's own tools first, then the usual ones for its type. At most three. */
+function csToolsFor(type, idea) {
+    return [...new Set([...(idea && idea.tools || []), ...(CS_DEFAULT_TOOLS[type] || [])])].slice(0, 3);
+}
+
+/**
+ * What works in this market, from the client's newest scorecard plan: the
+ * format rivals win with, their best topics and hours, and the gaps. Null
+ * when no plan exists yet.
+ */
+async function csMarket(clientId) {
+    const { data } = await supabase.from('reports').select('id, created_at, report_json').eq('client_id', clientId)
+        .eq('report_type', 'content_plan').order('created_at', { ascending: false }).limit(1);
+    const rep = data && data[0];
+    const p = rep && rep.report_json;
+    if (!p) return null;
+    const spec = Array.isArray(p.formatSpec) && p.formatSpec.length ? p.formatSpec : [{ key: 'Reel', plural: 'reels', label: 'Reels' }, { key: 'Carousel', plural: 'carousels', label: 'Carousels' }, { key: 'Still', plural: 'stills', label: 'Stills' }];
+    const formats = spec.map(f => {
+        const x = (p.formats || {})[f.plural] || {};
+        return { key: f.key, label: f.label, type: CS_FORMAT_TYPE[f.key] || null,
+            share: { target: x.share?.target ?? null, rivals: x.share?.rivals ?? null },
+            index: { target: x.score?.target?.dampedIndex ?? null, rivals: x.score?.rivals?.dampedIndex ?? null },
+            bestHour: (x.byHour || [])[0]?.hour || null };
+    });
+    const ranked = formats.filter(f => f.index.rivals != null && f.type).sort((a, b) => b.index.rivals - a.index.rivals);
+    const topics = ((p.captions || {}).topics || {}).rivals || [];
+    return {
+        planId: rep.id, builtAt: rep.created_at, rivals: p.rivalNames || (p.rivals || []).map(r => '@' + r), formats,
+        bestType: ranked[0] && ranked[0].index.rivals >= 1.05 ? ranked[0].type : null,
+        topics: topics.filter(t => t.topic && t.topic !== 'general').slice(0, 6).map(t => ({ topic: t.topic, index: t.dampedIndex ?? null, n: t.n })),
+        gaps: ((p.lists || {}).gaps || []).slice(0, 5).map(c => ({ format: c.format, topic: c.topic, opening: c.opening, index: c.rivals?.dampedIndex ?? null })),
+        stale: !!(p.freshness && [p.freshness.target, ...(p.freshness.rivals || [])].some(x => x && x.stale))
+    };
+}
+
+async function csReady() {
+    const [a, b] = await Promise.all([supabase.from('content_picks').select('id').limit(1), supabase.from('content_posts').select('pick_id').limit(1)]);
+    return !a.error && !b.error;
+}
+function csMissing(res) {
+    return res.status(503).json({ error: 'The content workflow needs the phase-43 database update. Run sql/schema-phase43.sql in the Supabase SQL editor.', code: 'migration_required' });
+}
+/** The client, when this person may read (or, with 'editor', change) its plan. */
+async function csClient(ctx, id, need = 'viewer') {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    return clientAccess(ctx.user.id, id, need);
+}
+async function csNames(ids) {
+    const want = [...new Set(ids.filter(Boolean))];
+    if (!want.length) return {};
+    const { data } = await supabase.from('app_users').select('id, email, full_name').in('id', want);
+    return Object.fromEntries((data || []).map(u => [u.id, u.full_name || String(u.email || '').split('@')[0]]));
+}
+async function csLibrary(limit = CS_MAX_LIBRARY) {
+    const { data } = await supabase.from('content_ideas').select('*').order('created_at', { ascending: false }).limit(limit);
+    return data || [];
+}
+const csEmptyBusiness = b => !b || (!b.summary && !(b.offers || []).length);
+function csBusiness(v) {
+    const b = v && typeof v === 'object' ? v : {};
+    return {
+        summary: b.summary ? String(b.summary).trim().slice(0, 800) : null,
+        model: b.model ? String(b.model).trim().slice(0, 300) : null,
+        audience: b.audience ? String(b.audience).trim().slice(0, 300) : null,
+        voice: b.voice ? String(b.voice).trim().slice(0, 200) : null,
+        offers: (Array.isArray(b.offers) ? b.offers : []).map(o => ({ name: oneLine(o && o.name, 120), price: oneLine(o && o.price, 60) || null, note: oneLine(o && o.note, 200) || null }))
+            .filter(o => o.name).slice(0, 20),
+        differentiators: csList(b.differentiators, { max: 8, len: 200 }),
+        proof: csList(b.proof, { max: 8, len: 200 })
+    };
+}
+function csTopicView(t, suggestions) {
+    return {
+        id: t.id, category: t.category, categoryName: CS_CAT_NAME[t.category], title: t.title, detail: t.detail || null, why: t.why || null,
+        priority: t.priority, active: !!t.active, source: t.source, suggestedAt: t.suggested_at || null, ideas: suggestions || []
+    };
+}
+function csPickView(p, { ideas = {}, topics = {}, post = null } = {}) {
+    const i = ideas[p.idea_id], t = topics[p.topic_id];
+    return {
+        id: p.id, month: String(p.month).slice(0, 7), topicId: p.topic_id || null, ideaId: p.idea_id || null,
+        topic: t ? t.title : null, category: t ? t.category : null, categoryName: t ? CS_CAT_NAME[t.category] : null,
+        idea: i ? { hook: i.hook || null, url: i.url || null, sourceName: i.source_name || null } : null,
+        postType: p.post_type, postTypeName: CS_TYPE_NAME[p.post_type], title: p.title || null, adaptation: p.adaptation || null,
+        ideaNote: p.idea_note || null, scriptNote: p.script_note || null, styleNote: p.style_note || null, tools: p.tools || [],
+        status: p.status, postId: p.post_id || null,
+        post: post ? { plannedOn: post.planned_on, status: post.status, statusName: cpStatusName(post.status) } : null
+    };
+}
+
+/** Readable text from a web page: title, description, headings and body copy. */
+function csPageText(html) {
+    const h = String(html || '');
+    const title = oneLine((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(h) || [])[1] || '', 200);
+    const desc = oneLine((/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i.exec(h) || /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']/i.exec(h) || [])[1] || '', 400);
+    const body = h.replace(/<(script|style|noscript|svg|nav|footer)[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<(h[1-4]|li|p|div|br|tr)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#?\w+;/g, ' ')
+        .split('\n').map(s => s.replace(/\s+/g, ' ').trim()).filter(s => s.length > 2);
+    return { title, description: desc, text: [...new Set(body)].join('\n').slice(0, 6000) };
+}
+/** The site's own pages most likely to say what it sells. */
+function csSiteLinks(html, base) {
+    const out = [];
+    const re = /<a[^>]+href=["']([^"'#]+)["']/gi; let m;
+    while ((m = re.exec(String(html || '')))) {
+        let u; try { u = new URL(m[1], base); } catch { continue; }
+        if (u.host !== new URL(base).host || !/^https?:$/.test(u.protocol)) continue;
+        if (!/(menu|service|product|price|pricing|package|about|shop|course|treatment|offer|collection)/i.test(u.pathname)) continue;
+        const s = u.origin + u.pathname;
+        if (!out.includes(s) && s !== base) out.push(s);
+    }
+    return out.slice(0, 3);
+}
+
+/** Topics that follow from the business without a model: one per offer, and the standing ones. */
+function csBaseTopics(business, { market = null, reviews = null, client = {} } = {}) {
+    const out = (business.offers || []).slice(0, 8).map((o, i) => ({
+        category: 'service', title: o.name, detail: [o.price, o.note].filter(Boolean).join(' · ') || null,
+        why: 'One of the things they sell — each offer is a primary topic.', priority: i < 3 ? 'high' : 'normal', source: 'audit'
+    }));
+    if (reviews && reviews.count) out.push({ category: 'reviews', title: 'Happy customers', detail: `${reviews.count} review post(s) found by the review tracker${reviews.handles ? ' from ' + reviews.handles : ''}.`, why: 'Real customers already post about them.', priority: 'high', source: 'reviews' });
+    for (const t of (market && market.topics) || []) {
+        if ((t.index || 0) < 1.1) continue;
+        out.push({ category: 'educational', title: `${t.topic[0].toUpperCase()}${t.topic.slice(1)} (works for rivals)`, detail: null,
+            why: `Rival posts about ${t.topic} score ${Number(t.index).toFixed(2)}× their normal (${t.n} posts).`, priority: 'normal', source: 'rivals' });
+    }
+    if (!out.some(t => t.category === 'reviews')) out.push({ category: 'reviews', title: 'Happy customers', detail: 'Customer photos, messages and ratings.', why: 'Proof from customers, not from the brand.', priority: 'normal', source: 'audit' });
+    out.push({ category: 'generic', title: 'Behind the scenes', detail: client.niche ? `How the ${client.niche} work gets done.` : null, why: 'Shows the people and the work.', priority: 'normal', source: 'audit' });
+    out.push({ category: 'collab', title: 'Creator visit', detail: client.location ? `A local creator in ${client.location} tries it.` : 'A local creator tries it.', why: 'Borrowed audience and a second voice.', priority: 'low', source: 'audit' });
+    return out;
+}
+async function csAddTopics(clientId, list, userId) {
+    const { data: have } = await supabase.from('content_topics').select('title').eq('client_id', clientId);
+    const seen = new Set((have || []).map(t => String(t.title).toLowerCase()));
+    const rows = [];
+    for (const t of list) {
+        const title = oneLine(t.title, 160);
+        if (!title || seen.has(title.toLowerCase()) || !CS_CAT_NAME[t.category]) continue;
+        seen.add(title.toLowerCase());
+        rows.push({ client_id: clientId, category: t.category, title, detail: t.detail ? String(t.detail).slice(0, 600) : null,
+            why: t.why ? String(t.why).slice(0, 400) : null, priority: ['high', 'normal', 'low'].includes(t.priority) ? t.priority : 'normal',
+            active: t.active !== undefined ? !!t.active : (t.category === 'service' || t.priority === 'high'), source: ['audit', 'rivals', 'reviews', 'manual'].includes(t.source) ? t.source : 'audit',
+            created_by: userId || null });
+    }
+    if (rows.length) { const { error } = await supabase.from('content_topics').insert(rows); if (error) throw error; }
+    return rows.length;
+}
+/** Review posts the review tracker found for this client's own account. */
+async function csReviews(client) {
+    const { data } = await supabase.from('reports').select('report_json').eq('client_id', client.id).eq('report_type', 'review_scan').order('created_at', { ascending: false }).limit(1);
+    const j = data && data[0] && data[0].report_json;
+    if (!j) return null;
+    const own = String(client.ig_handle || '').replace('@', '').toLowerCase();
+    const row = (j.board || []).find(b => b.handle === own) || null;
+    const count = row ? (row.reviews || 0) + (row.paidReviews || 0) : 0;
+    return count ? { count, handles: null } : null;
+}
+
+registerWorker('content_audit', (userId, input) => async (progress) => {
+    const { data: client } = await supabase.from('clients').select('*').eq('id', input.clientId).maybeSingle();
+    if (!client) { const e = new Error('Client not found.'); e.statusCode = 404; throw e; }
+    const read = { website: null, instagram: null };
+    let site = null;
+    if (input.website) {
+        await progress(10, 'Reading the website');
+        const home = await safePublicFetch(input.website);
+        if (home) {
+            const pages = [{ url: input.website, ...csPageText(home) }];
+            for (const u of csSiteLinks(home, input.website)) {
+                const h = await safePublicFetch(u);
+                if (h) pages.push({ url: u, ...csPageText(h) });
+            }
+            site = pages;
+            read.website = { url: input.website, ok: true, pages: pages.map(p => ({ url: p.url, title: p.title || null, chars: p.text.length })) };
+        } else read.website = { url: input.website, ok: false };
+    }
+    let captions = [];
+    if (input.instagram) {
+        await progress(30, `Reading @${input.instagram}'s stored posts`);
+        const l = await cpLoadRows('instagram', userId, client.id, input.instagram);
+        captions = l.rows.slice(0, 30).map(r => ({ type: cpFormat(r), hook: cpHook(r.caption), caption: String(r.caption || '').slice(0, 280), likes: r.likes, comments: r.comments }));
+        read.instagram = { handle: input.instagram, posts: captions.length, ageDays: l.source.ageDays };
+    }
+    const market = await csMarket(client.id);
+    const reviews = await csReviews(client);
+
+    await progress(50, 'Working out the business and its topics');
+    let ai = null, aiStatus = { ok: false, reason: 'no_key', message: aiReasonText('no_key') };
+    if ((site || captions.length) && geminiAvailable()) {
+        const evidence = {
+            business: { name: client.name, niche: client.niche || null, location: client.location || null },
+            website: site ? site.map(p => ({ url: p.url, title: p.title, description: p.description, text: p.text.slice(0, 3500) })) : null,
+            instagramPosts: captions,
+            market: market ? { rivals: market.rivals, formats: market.formats, topics: market.topics, gaps: market.gaps } : null,
+            reviews
+        };
+        const { json } = budgetedJson(evidence, { maxChars: 26000, keep: ['business', 'website'] });
+        const prompt =
+`You are a social media strategist at an agency, auditing a client before planning their content. Below is what was read: their website pages, their recent Instagram posts, what works for their rivals, and review posts customers made about them.
+
+RULES:
+- Offers are only things the website or the posts actually say they sell. Keep a price only if it is written; never guess one.
+- Never invent awards, numbers, customers or claims. "proof" lists only things the evidence shows (e.g. "4.7 on Google, 900 reviews" only if written).
+- Topics, by category:
+  service: one per main offer (these are the primary topics).
+  educational: trends and know-how in their field a customer would save or share.
+  reviews: happy customers and growth numbers, only from what the evidence shows exists.
+  generic: behind the scenes, team, place, moments, seasons.
+  collab: what a local creator could do with them.
+- Each topic gets a one-line "why" that names where it came from (website, their posts, rivals, reviews).
+- Write in the language the evidence is mostly in.
+
+Evidence (JSON):
+${json}
+
+Reply with ONLY this JSON:
+{
+ "business": { "summary": "2 sentences: what they are and how they make money", "model": "one line: how the business model works", "audience": "who buys", "voice": "how they talk", "offers": [ { "name": "...", "price": "as written or null", "note": "one line" } ], "differentiators": ["..."], "proof": ["..."] },
+ "topics": [ { "category": "service|educational|reviews|generic|collab", "title": "short", "detail": "one line", "why": "one line naming the source", "priority": "high|normal|low" } ]
+}
+12 to 20 topics, every category at least once.`;
+        const r = await geminiCallDetailed(prompt, { temperature: 0.4, maxOutputTokens: 6000, tag: 'Gemini Content Audit', userId });
+        aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
+        ai = r.ok ? r.data : null;
+    }
+    const pageDesc = site && (site[0].description || site[0].title);
+    const suggestion = ai ? csBusiness(ai.business) : csBusiness({ summary: pageDesc || null });
+    await progress(85, 'Saving');
+    const { data: prof } = await supabase.from('content_profiles').select('*').eq('client_id', client.id).maybeSingle();
+    const replace = !prof || csEmptyBusiness(prof.business) || input.replace === true;
+    const business = replace ? suggestion : csBusiness(prof.business);
+    const now = new Date().toISOString();
+    const row = { client_id: client.id, sources: { website: input.website || null, instagram: input.instagram || null },
+        business, audit: { read, suggestion, aiStatus, at: now, applied: replace }, audited_at: now, updated_by: userId, updated_at: now };
+    const { error } = prof ? await supabase.from('content_profiles').update(row).eq('client_id', client.id) : await supabase.from('content_profiles').insert([row]);
+    if (error) throw error;
+    const aiTopics = ai && Array.isArray(ai.topics) ? ai.topics.map(t => ({ ...t, source: /rival/i.test(t.why || '') ? 'rivals' : /review/i.test(t.why || '') ? 'reviews' : 'audit' })) : [];
+    const added = await csAddTopics(client.id, [...aiTopics, ...csBaseTopics(business, { market, reviews, client })], userId);
+    await progress(100, `${added} topic(s) added`);
+    return { topicsAdded: added, applied: replace, aiStatus, read };
+});
+
+/** Ask the model to pick and adapt library ideas for each ticked topic, from the ranked shortlist only. */
+registerWorker('content_suggest', (userId, input) => async (progress) => {
+    const clientId = input.clientId;
+    const [{ data: topics }, lib, market, { data: prof }, { data: picks }] = await Promise.all([
+        supabase.from('content_topics').select('*').eq('client_id', clientId).eq('active', true),
+        csLibrary(), csMarket(clientId),
+        supabase.from('content_profiles').select('business').eq('client_id', clientId).maybeSingle(),
+        supabase.from('content_picks').select('idea_id, month').eq('client_id', clientId)
+    ]);
+    if (!(topics || []).length) { const e = new Error('Tick at least one topic first.'); e.statusCode = 400; throw e; }
+    if (!lib.length) { const e = new Error('The idea library is empty. Add ideas to it first.'); e.statusCode = 400; throw e; }
+    const monthDate = `${csMonth(input.month)}-01`;
+    const used = {}, month = {};
+    for (const p of picks || []) { if (!p.idea_id) continue; used[p.idea_id] = 1; if (String(p.month).slice(0, 10) === monthDate) month[p.idea_id] = 1; }
+    const shortlist = Object.fromEntries(topics.map(t => [t.id, csRank(t, lib, { market, used, month }).slice(0, 5)]));
+    await progress(30, `Matching ${topics.length} topic(s) against ${lib.length} idea(s)`);
+    let ai = null, aiStatus = { ok: false, reason: 'no_key', message: aiReasonText('no_key') };
+    if (geminiAvailable()) {
+        const evidence = {
+            business: (prof && prof.business) || {},
+            market: market ? { bestType: market.bestType, topics: market.topics, gaps: market.gaps } : null,
+            topics: topics.map(t => ({ topicId: t.id, category: t.category, title: t.title, detail: t.detail, why: t.why,
+                candidates: shortlist[t.id].map(c => ({ ideaId: c.idea.id, type: c.idea.post_type, hook: c.idea.hook, whyItWorked: c.idea.why_worked, style: c.idea.style, seenAt: c.idea.source_name, industry: c.idea.industry, tools: c.idea.tools })) }))
+        };
+        const { json } = budgetedJson(evidence, { maxChars: 30000, keep: ['topics'] });
+        const prompt =
+`You help an agency's content team choose ideas. Each topic below has a shortlist of ideas from the team's library — content they saw elsewhere, often from other industries. For each topic, pick up to 3 ideas from ITS OWN shortlist that could carry that topic for this business.
+
+RULES:
+- Use only ideaIds from that topic's candidates. Never invent an idea.
+- "fit" is "good" when the idea's mechanism carries the topic naturally, "weak" when it is a stretch. Say "weak" honestly rather than leaving it out if it is the best there is.
+- "adaptation" is ONE line: how this idea becomes about this topic for this business. Do not write the post, the script or the caption — the team does that.
+- "tools" is at most 3 short tool names needed to make it (keep the idea's own tools when it names them).
+- Prefer the post type rivals win with (market.bestType) when two ideas are otherwise equal.
+
+Topics and shortlists (JSON):
+${json}
+
+Reply with ONLY this JSON:
+{ "topics": [ { "topicId": "...", "ideas": [ { "ideaId": "...", "fit": "good|weak", "adaptation": "one line", "tools": ["..."] } ] } ] }`;
+        const r = await geminiCallDetailed(prompt, { temperature: 0.4, maxOutputTokens: 6000, tag: 'Gemini Content Ideas', userId });
+        aiStatus = { ok: r.ok, reason: r.reason, message: r.ok ? 'Generated.' : aiReasonText(r.reason), model: r.model || null };
+        ai = r.ok ? r.data : null;
+    }
+    await progress(80, 'Saving the suggestions');
+    const byTopic = {};
+    for (const x of (ai && Array.isArray(ai.topics) ? ai.topics : [])) byTopic[String(x.topicId)] = Array.isArray(x.ideas) ? x.ideas : [];
+    let dropped = 0;
+    const now = new Date().toISOString();
+    for (const t of topics) {
+        const allowed = Object.fromEntries(shortlist[t.id].map(c => [c.idea.id, c]));
+        let list = (byTopic[t.id] || []).flatMap(s => {
+            const c = allowed[String(s.ideaId)];
+            if (!c) { dropped++; return []; }
+            return [{ ideaId: c.idea.id, fit: s.fit === 'good' ? 'good' : 'weak', adaptation: oneLine(s.adaptation, 300) || null,
+                tools: csList(s.tools, { max: 3 }).length ? csList(s.tools, { max: 3 }) : csToolsFor(c.idea.post_type, c.idea), by: 'ai' }];
+        }).filter((s, i, a) => a.findIndex(x => x.ideaId === s.ideaId) === i).slice(0, 3);
+        if (!list.length) list = shortlist[t.id].slice(0, 3).map(c => ({ ideaId: c.idea.id, fit: c.fit === 'good' ? 'good' : 'weak', adaptation: null, tools: csToolsFor(c.idea.post_type, c.idea), by: 'rules' }));
+        await supabase.from('content_topics').update({ suggestions: list, suggested_at: now, updated_at: now }).eq('id', t.id);
+    }
+    if (dropped) logger.warn('content_suggest_dropped', { clientId, dropped });
+    await progress(100, `Ideas suggested for ${topics.length} topic(s)`);
+    return { topics: topics.length, dropped, aiStatus };
+});
+
+/** Everything the plan page shows for one client and month. */
+async function csState(client, monthKey, me) {
+    const monthDate = `${monthKey}-01`;
+    const [{ data: prof }, { data: topics }, lib, market, { data: allPicks }] = await Promise.all([
+        supabase.from('content_profiles').select('*').eq('client_id', client.id).maybeSingle(),
+        supabase.from('content_topics').select('*').eq('client_id', client.id).order('created_at', { ascending: true }),
+        csLibrary(), csMarket(client.id),
+        supabase.from('content_picks').select('*').eq('client_id', client.id)
+    ]);
+    const ideas = Object.fromEntries(lib.map(i => [i.id, i]));
+    const tmap = Object.fromEntries((topics || []).map(t => [t.id, t]));
+    const used = {}, month = {};
+    for (const p of allPicks || []) { if (!p.idea_id) continue; used[p.idea_id] = 1; if (String(p.month).slice(0, 10) === monthDate) month[p.idea_id] = 1; }
+    const picks = (allPicks || []).filter(p => String(p.month).slice(0, 10) === monthDate).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const postIds = picks.map(p => p.post_id).filter(Boolean);
+    const { data: posts } = postIds.length ? await supabase.from('content_posts').select('id, planned_on, status').in('id', postIds) : { data: [] };
+    const postOf = Object.fromEntries((posts || []).map(p => [p.id, p]));
+    const names = await csNames(lib.map(i => i.saved_by));
+    const view = i => csIdeaView(i, { names, me });
+    const topicViews = (topics || []).map(t => {
+        let s;
+        if (Array.isArray(t.suggestions) && t.suggestions.length) {
+            s = t.suggestions.filter(x => ideas[x.ideaId]).map(x => ({ ...x, idea: view(ideas[x.ideaId]), reasons: [] }));
+        }
+        if (!s || !s.length) {
+            s = t.active ? csRank(t, lib, { market, used, month }).slice(0, 3).filter(c => c.score > 0)
+                .map(c => ({ ideaId: c.idea.id, fit: c.fit === 'good' ? 'good' : 'weak', adaptation: null, tools: csToolsFor(c.idea.post_type, c.idea), by: 'rules', reasons: c.reasons, idea: view(c.idea) })) : [];
+        }
+        return csTopicView(t, s);
+    });
+    const picked = picks.map(p => csPickView(p, { ideas, topics: tmap, post: postOf[p.post_id] }));
+    return {
+        client: { id: client.id, name: client.name, igHandle: client.ig_handle || null, niche: client.niche || null, location: client.location || null },
+        month: monthKey,
+        profile: prof ? { sources: prof.sources || {}, business: csBusiness(prof.business), audit: prof.audit || null, auditedAt: prof.audited_at || null, updatedAt: prof.updated_at } : null,
+        topics: topicViews, picks: picked,
+        counts: Object.fromEntries(CS_TYPES.map(([k]) => [k, picked.filter(p => p.postType === k).length])),
+        market, libraryCount: lib.length, categories: CS_CATEGORIES, postTypes: CS_TYPES, defaultTools: CS_DEFAULT_TOOLS
+    };
+}
+
+// --- the idea library (the whole team's) -----------------------------------------
+
+app.get('/api/content-ideas', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        let rows = await csLibrary();
+        const type = CS_TYPE_NAME[req.query.type] ? req.query.type : null;
+        const all = rows.length;
+        if (type) rows = rows.filter(r => r.post_type === type);
+        const tag = String(req.query.tag || '').toLowerCase().trim();
+        if (tag) rows = rows.filter(r => (r.tags || []).includes(tag));
+        const q = csWords(req.query.q);
+        if (q.length) rows = rows.filter(r => { const w = csWords(`${r.hook} ${r.why_worked} ${r.style} ${r.source_name} ${r.industry} ${(r.tags || []).join(' ')} ${(r.tools || []).join(' ')}`); return q.every(x => w.some(y => y.startsWith(x))); });
+        if (req.query.mine === '1') rows = rows.filter(r => r.saved_by === ctx.user.id);
+        const { data: picks } = await supabase.from('content_picks').select('idea_id');
+        const uses = {};
+        for (const p of picks || []) if (p.idea_id) uses[p.idea_id] = (uses[p.idea_id] || 0) + 1;
+        const names = await csNames(rows.map(r => r.saved_by));
+        const tags = {};
+        for (const r of rows) for (const t of r.tags || []) tags[t] = (tags[t] || 0) + 1;
+        res.json({ ideas: rows.slice(0, 500).map(r => csIdeaView(r, { names, uses, me: ctx.user.id })), total: all, shown: Math.min(500, rows.length), matched: rows.length,
+            types: CS_TYPES, tags: Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([t, n]) => ({ tag: t, n })) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/content-ideas', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const row = csIdeaRow(req.body || {});
+        if (!row) return res.status(400).json({ error: 'Give the link, or at least the hook.' });
+        if (row.url) {
+            const { data: dup } = await supabase.from('content_ideas').select('*').ilike('url', row.url).limit(1);
+            if (dup && dup[0] && String(dup[0].url).toLowerCase() === row.url.toLowerCase()) return res.status(409).json({ error: 'That link is already in the library.', idea: csIdeaView(dup[0]) });
+        }
+        const { data, error } = await supabase.from('content_ideas').insert([{ ...row, saved_by: ctx.user.id }]).select().maybeSingle();
+        if (error) throw error;
+        res.status(201).json({ idea: csIdeaView(data, { names: await csNames([ctx.user.id]), me: ctx.user.id }) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** A spreadsheet journal, pasted or uploaded as CSV: the headers say which column is which. */
+app.post('/api/content-ideas/import', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const text = String(req.body?.csv || '');
+        if (!text.trim()) return res.status(400).json({ error: 'Paste the sheet, or choose a CSV file.' });
+        if (text.length > 1500000) return res.status(413).json({ error: 'That sheet is too big. Split it into parts under 1.5 MB.' });
+        const { rows, mapped, skipped } = csImportRows(text);
+        if (!rows.length) return res.status(400).json({ error: 'No rows with a link or a hook were found. The first row must be the column names.', mapped });
+        const have = new Set((await csLibrary()).map(r => String(r.url || '').toLowerCase()).filter(Boolean));
+        const fresh = [];
+        let dupes = 0;
+        for (const r of rows) {
+            const k = String(r.url || '').toLowerCase();
+            if (k && have.has(k)) { dupes++; continue; }
+            if (k) have.add(k);
+            fresh.push({ ...r, saved_by: ctx.user.id });
+        }
+        if (req.body?.dryRun) return res.json({ dryRun: true, would: fresh.length, dupes, skipped, mapped, sample: fresh.slice(0, 5).map(r => csIdeaView(r)) });
+        for (let i = 0; i < fresh.length; i += 200) {
+            const { error } = await supabase.from('content_ideas').insert(fresh.slice(i, i + 200));
+            if (error) throw error;
+        }
+        res.status(201).json({ added: fresh.length, dupes, skipped, mapped });
+    } catch (err) { sendErr(res, err); }
+});
+
+async function csIdeaFor(ctx, id) {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data } = await supabase.from('content_ideas').select('*').eq('id', id).maybeSingle();
+    return data || null;
+}
+app.patch('/api/content-ideas/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const idea = await csIdeaFor(ctx, req.params.id);
+        if (!idea) return res.status(404).json({ error: 'Idea not found.' });
+        const merged = csIdeaRow({ ...idea, ...Object.fromEntries(Object.entries(req.body || {}).filter(([, v]) => v !== undefined)),
+            source_name: req.body?.sourceName ?? idea.source_name, why_worked: req.body?.whyWorked ?? idea.why_worked, post_type: req.body?.postType ?? idea.post_type });
+        if (!merged) return res.status(400).json({ error: 'An idea needs a link or a hook.' });
+        const { data, error } = await supabase.from('content_ideas').update({ ...merged, updated_at: new Date().toISOString() }).eq('id', idea.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ idea: csIdeaView(data, { names: await csNames([data.saved_by]), me: ctx.user.id }) });
+    } catch (err) { sendErr(res, err); }
+});
+app.delete('/api/content-ideas/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const idea = await csIdeaFor(ctx, req.params.id);
+        if (!idea) return res.status(404).json({ error: 'Idea not found.' });
+        if (idea.saved_by !== ctx.user.id && ctx.profile?.role !== 'admin') return res.status(403).json({ error: 'Only the person who saved it, or an admin, can remove it.' });
+        await supabase.from('content_ideas').delete().eq('id', idea.id);
+        res.json({ deleted: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+// --- one client's plan -------------------------------------------------------------
+
+app.get('/api/content-strategy/:clientId', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId);
+        if (!client) return res.status(404).json({ error: 'Client not found.' });
+        res.json(await csState(client, csMonth(req.query.month), ctx.user.id));
+    } catch (err) { sendErr(res, err); }
+});
+
+app.put('/api/content-strategy/:clientId/profile', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const { data: prof } = await supabase.from('content_profiles').select('*').eq('client_id', client.id).maybeSingle();
+        const now = new Date().toISOString();
+        const row = { client_id: client.id, business: csBusiness(req.body?.business || (prof && prof.business)), updated_by: ctx.user.id, updated_at: now };
+        if (req.body?.sources) row.sources = { website: csUrl(req.body.sources.website), instagram: String(req.body.sources.instagram || '').replace(/^@/, '').trim().toLowerCase() || null };
+        const { error } = prof ? await supabase.from('content_profiles').update(row).eq('client_id', client.id) : await supabase.from('content_profiles').insert([row]);
+        if (error) throw error;
+        res.json({ business: row.business });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/content-strategy/:clientId/audit', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const website = req.body?.website ? csUrl(/^https?:\/\//i.test(req.body.website) ? req.body.website : 'https://' + String(req.body.website).trim()) : null;
+        const instagram = (String(req.body?.instagram || client.ig_handle || '').replace(/^@/, '').trim().toLowerCase()) || null;
+        if (!website && !instagram) return res.status(400).json({ error: 'Give the website or the Instagram handle to audit.' });
+        await assertJobSlot(ctx.user.id);
+        const job = await createJob(ctx.user.id, 'content_audit', 'content_plan', { clientId: client.id, website, instagram, replace: req.body?.replace === true }, 0);
+        runJob(job.id, JOB_WORKERS['content_audit'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id, estimatedUsd: 0 });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/content-strategy/:clientId/suggest', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        await assertJobSlot(ctx.user.id);
+        const job = await createJob(ctx.user.id, 'content_suggest', 'content_plan', { clientId: client.id, month: csMonth(req.body?.month) }, 0);
+        runJob(job.id, JOB_WORKERS['content_suggest'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id, estimatedUsd: 0 });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/content-strategy/:clientId/topics', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const b = req.body || {};
+        if (!CS_CAT_NAME[b.category]) return res.status(400).json({ error: 'Choose a category.' });
+        if (!oneLine(b.title, 160)) return res.status(400).json({ error: 'Give the topic a name.' });
+        const n = await csAddTopics(client.id, [{ category: b.category, title: b.title, detail: b.detail, why: b.why, priority: b.priority || 'normal', source: 'manual', active: true }], ctx.user.id);
+        if (!n) return res.status(409).json({ error: 'This client already has a topic with that name.' });
+        res.status(201).json({ added: n });
+    } catch (err) { sendErr(res, err); }
+});
+
+async function csTopicFor(ctx, id) {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data } = await supabase.from('content_topics').select('*').eq('id', id).maybeSingle();
+    if (!data || !(await csClient(ctx, data.client_id, 'editor'))) return null;
+    return data;
+}
+app.patch('/api/content-topics/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const t = await csTopicFor(ctx, req.params.id);
+        if (!t) return res.status(404).json({ error: 'Topic not found, or you cannot edit it.' });
+        const b = req.body || {}, patch = {};
+        if (b.active !== undefined) patch.active = !!b.active;
+        if (b.priority !== undefined) { if (!['high', 'normal', 'low'].includes(b.priority)) return res.status(400).json({ error: 'Priority is high, normal or low.' }); patch.priority = b.priority; }
+        if (b.category !== undefined) { if (!CS_CAT_NAME[b.category]) return res.status(400).json({ error: 'Unknown category.' }); patch.category = b.category; }
+        if (b.title !== undefined) { const v = oneLine(b.title, 160); if (!v) return res.status(400).json({ error: 'A topic needs a name.' }); patch.title = v; }
+        if (b.detail !== undefined) patch.detail = b.detail ? String(b.detail).slice(0, 600) : null;
+        if (b.why !== undefined) patch.why = b.why ? String(b.why).slice(0, 400) : null;
+        patch.updated_at = new Date().toISOString();
+        const { data, error } = await supabase.from('content_topics').update(patch).eq('id', t.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ topic: csTopicView(data || { ...t, ...patch }) });
+    } catch (err) { sendErr(res, err); }
+});
+app.delete('/api/content-topics/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const t = await csTopicFor(ctx, req.params.id);
+        if (!t) return res.status(404).json({ error: 'Topic not found, or you cannot edit it.' });
+        await supabase.from('content_topics').delete().eq('id', t.id);
+        res.json({ deleted: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Pick an idea for a topic this month. Picking the same idea for the same topic again returns the first pick. */
+app.post('/api/content-strategy/:clientId/picks', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const b = req.body || {};
+        const month = `${csMonth(b.month)}-01`;
+        const topic = b.topicId ? await csTopicFor(ctx, b.topicId) : null;
+        if (b.topicId && (!topic || topic.client_id !== client.id)) return res.status(404).json({ error: 'Topic not found.' });
+        const idea = b.ideaId ? await csIdeaFor(ctx, b.ideaId) : null;
+        if (b.ideaId && !idea) return res.status(404).json({ error: 'Idea not found.' });
+        if (!topic && !idea) return res.status(400).json({ error: 'Pick a topic, an idea, or both.' });
+        const { data: same } = await supabase.from('content_picks').select('*').eq('client_id', client.id).eq('month', month);
+        const dup = (same || []).find(p => p.topic_id === (topic ? topic.id : null) && p.idea_id === (idea ? idea.id : null));
+        if (dup) return res.json({ pick: csPickView(dup, { ideas: idea ? { [idea.id]: idea } : {}, topics: topic ? { [topic.id]: topic } : {} }), existed: true });
+        const type = CS_TYPE_NAME[b.postType] ? b.postType : (idea ? idea.post_type : (CS_TYPE_PREF[topic.category] || ['static'])[0]);
+        const sug = topic && Array.isArray(topic.suggestions) ? topic.suggestions.find(s => idea && s.ideaId === idea.id) : null;
+        const { data, error } = await supabase.from('content_picks').insert([{
+            client_id: client.id, month, topic_id: topic ? topic.id : null, idea_id: idea ? idea.id : null, post_type: type,
+            title: oneLine(b.title || (topic && topic.title) || (idea && idea.hook), 300) || null,
+            adaptation: (sug && sug.adaptation) || null, tools: (sug && sug.tools && sug.tools.length) ? sug.tools : csToolsFor(type, idea),
+            status: 'draft', created_by: ctx.user.id
+        }]).select().maybeSingle();
+        if (error) throw error;
+        res.status(201).json({ pick: csPickView(data, { ideas: idea ? { [idea.id]: idea } : {}, topics: topic ? { [topic.id]: topic } : {} }) });
+    } catch (err) { sendErr(res, err); }
+});
+
+async function csPickFor(ctx, id) {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data } = await supabase.from('content_picks').select('*').eq('id', id).maybeSingle();
+    if (!data || !(await csClient(ctx, data.client_id, 'editor'))) return null;
+    return data;
+}
+app.patch('/api/content-picks/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const p = await csPickFor(ctx, req.params.id);
+        if (!p) return res.status(404).json({ error: 'Pick not found, or you cannot edit it.' });
+        const b = req.body || {}, patch = {};
+        const text = (k, col, max) => { if (b[k] !== undefined) patch[col] = b[k] ? String(b[k]).trim().slice(0, max) || null : null; };
+        text('title', 'title', 300); text('adaptation', 'adaptation', 600); text('ideaNote', 'idea_note', 1000); text('scriptNote', 'script_note', 2000); text('styleNote', 'style_note', 1000);
+        if (b.tools !== undefined) patch.tools = csList(b.tools, { max: 6 });
+        if (b.postType !== undefined) { if (!CS_TYPE_NAME[b.postType]) return res.status(400).json({ error: 'Post type is static, carousel, video or story.' }); patch.post_type = b.postType; }
+        if (b.status !== undefined) {
+            if (!['draft', 'final'].includes(b.status)) return res.status(400).json({ error: 'Status is draft or final.' });
+            const after = { ...p, ...patch };
+            // The manual touch: a pick is final only once a person has said what the idea, script or style is.
+            if (b.status === 'final' && !after.idea_note && !after.script_note && !after.style_note) {
+                return res.status(400).json({ error: 'Add your note on the idea, the script or the style before marking it final.' });
+            }
+            patch.status = b.status;
+        }
+        patch.updated_at = new Date().toISOString();
+        const { data, error } = await supabase.from('content_picks').update(patch).eq('id', p.id).select().maybeSingle();
+        if (error) throw error;
+        const row = data || { ...p, ...patch };
+        // Once on the calendar, the post carries the same words.
+        if (row.post_id) {
+            const post = { hook: oneLine(row.title, 300) || null, format: CS_TYPE_NAME[row.post_type] };
+            const { data: cur } = await supabase.from('content_posts').select('brief, status').eq('id', row.post_id).maybeSingle();
+            if (cur && !['made', 'posted'].includes(cur.status)) {
+                post.brief = { ...(cur.brief || {}), concept: row.adaptation || row.idea_note || null, script: String(row.script_note || '').split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 8), shot: row.style_note || null, tools: row.tools || [] };
+                await supabase.from('content_posts').update({ ...post, updated_at: patch.updated_at }).eq('id', row.post_id);
+            }
+        }
+        const [{ data: idea }, { data: topic }] = await Promise.all([
+            row.idea_id ? supabase.from('content_ideas').select('*').eq('id', row.idea_id).maybeSingle() : { data: null },
+            row.topic_id ? supabase.from('content_topics').select('*').eq('id', row.topic_id).maybeSingle() : { data: null }
+        ]);
+        res.json({ pick: csPickView(row, { ideas: idea ? { [idea.id]: idea } : {}, topics: topic ? { [topic.id]: topic } : {} }) });
+    } catch (err) { sendErr(res, err); }
+});
+app.delete('/api/content-picks/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const p = await csPickFor(ctx, req.params.id);
+        if (!p) return res.status(404).json({ error: 'Pick not found, or you cannot edit it.' });
+        if (p.post_id) {
+            const { data: post } = await supabase.from('content_posts').select('id, status').eq('id', p.post_id).maybeSingle();
+            if (post && post.status !== 'idea') return res.status(409).json({ error: 'The owner has already answered this post. Skip it on the calendar instead.' });
+            if (post) await supabase.from('content_posts').delete().eq('id', post.id);
+        }
+        await supabase.from('content_picks').delete().eq('id', p.id);
+        res.json({ deleted: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Put the month's final picks on the calendar for the owner to approve. Pressing it again adds only new ones. */
+app.post('/api/content-strategy/:clientId/schedule', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await csReady())) return csMissing(res);
+        const client = await csClient(ctx, req.params.clientId, 'editor');
+        if (!client) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const monthKey = csMonth(req.body?.month);
+        const { data: picks } = await supabase.from('content_picks').select('*').eq('client_id', client.id).eq('month', `${monthKey}-01`);
+        const all = (picks || []).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+        const todo = all.filter(p => p.status === 'final' && !p.post_id);
+        const drafts = all.filter(p => p.status === 'draft').length;
+        if (!todo.length) {
+            const on = all.filter(p => p.post_id).length;
+            return res.status(400).json({ error: drafts ? `Nothing new is final: ${drafts} pick(s) still in draft. Add your notes and mark them final.`
+                : on ? 'Everything final is already on the calendar.' : 'No picks for this month yet.' });
+        }
+        const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+        let start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.start || '')) ? req.body.start : `${monthKey}-01`;
+        if (start < tomorrow) start = tomorrow;
+        const ids = [...new Set(todo.flatMap(p => [p.idea_id, p.topic_id]).filter(Boolean))];
+        const [{ data: ideas }, { data: topics }] = await Promise.all([
+            supabase.from('content_ideas').select('*').in('id', ids), supabase.from('content_topics').select('*').in('id', ids)
+        ]);
+        const I = Object.fromEntries((ideas || []).map(x => [x.id, x])), T = Object.fromEntries((topics || []).map(x => [x.id, x]));
+        const dates = cpScheduleDates(todo.map(() => ({})), start);
+        const rows = todo.map((p, i) => {
+            const idea = I[p.idea_id], topic = T[p.topic_id];
+            return {
+                id: crypto.randomUUID(), report_id: null, pick_id: p.id, client_id: client.id, brief_key: 'pick:' + p.id, format: CS_TYPE_NAME[p.post_type],
+                hook: oneLine(p.title || (idea && idea.hook), 300) || null, caption: null,
+                brief: { concept: p.adaptation || p.idea_note || null, idea: p.idea_note || null,
+                    script: String(p.script_note || '').split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 8), shot: p.style_note || null,
+                    why: topic ? (topic.why || `${CS_CAT_NAME[topic.category]}: ${topic.title}`) : null, evidence: idea && idea.url ? [idea.url] : [],
+                    topic: topic ? topic.title : null, category: topic ? topic.category : null, tools: p.tools || [],
+                    from: idea ? { hook: idea.hook || null, sourceName: idea.source_name || null } : null },
+                planned_on: dates[i].plannedOn, planned_time: null, status: 'idea', created_by: ctx.user.id
+            };
+        });
+        const { error } = await supabase.from('content_posts').insert(rows);
+        if (error) throw error;
+        for (const r of rows) await supabase.from('content_picks').update({ post_id: r.id, updated_at: new Date().toISOString() }).eq('id', r.pick_id);
+        res.status(201).json({ added: rows.length, drafts });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Every planned post for the client in a month, whichever plan it came from. */
+app.get('/api/content-strategy/:clientId/calendar', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const client = await csClient(ctx, req.params.clientId);
+        if (!client) return res.status(404).json({ error: 'Client not found.' });
+        const m = csMonth(req.query.month);
+        const [y, mo] = m.split('-').map(Number);
+        const { data } = await supabase.from('content_posts').select('*').eq('client_id', client.id)
+            .gte('planned_on', `${m}-01`).lt('planned_on', new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 10)).order('planned_on', { ascending: true });
+        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: true });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -19960,6 +20872,8 @@ async function schemaProbe() {
           impact: 'Report share links cannot be created.' },
         { table: 'content_posts', column: 'planned_on', migration: 'schema-phase42.sql',
           impact: 'Content plans cannot be put on the calendar and owners see no posts to approve.' },
+        { table: 'content_picks', column: 'month',     migration: 'schema-phase43.sql',
+          impact: 'The business audit, topics, the idea library and the month plan answer 503.' },
         { table: 'leads',         column: 'kind_now',  migration: 'schema-phase40.sql',
           impact: 'Leads are saved but not sorted into influencers and businesses, and the pipeline answers 503.' }
     ];
@@ -20218,6 +21132,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
+    csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },
     classifyLead, leadFit, leadPostSignal, leadSignalsAdd, leadSignalsMerge, leadAssessment, PIPE_STAGES,

@@ -3082,6 +3082,181 @@ test('step two reads exactly the picked list: Maps is not asked again, and AI ca
     delete process.env.APIFY_API_KEY;
 });
 
+section('\nphase 43 — the content plan the way the agency works');
+const nextMonth = (() => { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() + 1); return d.toISOString().slice(0, 7); })();
+test('a spreadsheet journal comes in whatever its columns are called, and post types are read from words or links', () => {
+    assert.strictEqual(S.csType('Reels'), 'video');
+    assert.strictEqual(S.csType('IG stories'), 'story');
+    assert.strictEqual(S.csType('', 'https://www.instagram.com/reel/abc/'), 'video');
+    assert.strictEqual(S.csType('Swipe post'), 'carousel');
+    const csv = 'Link,Brand,Format,Hook / Idea,Why it worked,Apps,Topic\n' +
+        'https://www.instagram.com/reel/AAA/,@gymbro,Reel,"3 mistakes, and the fix",Myth-busting in 3 beats,"CapCut, Phone",educational; mistakes\n' +
+        'https://www.instagram.com/p/BBB/,Sneaker Shop,carousel,Before and after,Swipe payoff,Canva,reviews\n' +
+        ',,,,,,\n' +
+        ',Tea house,Story,Poll: which one?,Two taps to answer,,generic\n';
+    const r = S.csImportRows(csv);
+    assert.strictEqual(r.rows.length, 3, JSON.stringify(r));
+    assert.deepStrictEqual(Object.keys(r.mapped).sort(), ['hook', 'post_type', 'source_name', 'tags', 'tools', 'url', 'why_worked'].sort());
+    assert.strictEqual(r.rows[0].hook, '3 mistakes, and the fix');
+    assert.deepStrictEqual(r.rows[0].tools, ['CapCut', 'Phone']);
+    assert.deepStrictEqual(r.rows[0].tags, ['educational', 'mistakes']);
+    assert.strictEqual(r.rows[0].source_name, 'gymbro');
+    assert.strictEqual(r.rows[2].post_type, 'story');
+});
+test('an idea tagged for the topic, in the type the category needs, ranks first; one already used this month drops', () => {
+    const topic = { id: 't', category: 'reviews', title: 'Happy customers', detail: 'customer photos and ratings' };
+    const ideas = [
+        { id: 'a', post_type: 'static', hook: 'Menu flat lay', tags: ['food'], created_at: '2026-01-01' },
+        { id: 'b', post_type: 'story', hook: 'Customer photo wall', tags: ['reviews', 'customers'], created_at: '2026-01-01' },
+        { id: 'c', post_type: 'story', hook: 'Customer rating sticker', tags: ['reviews'], created_at: '2026-01-02' }
+    ];
+    const r = S.csRank(topic, ideas);
+    assert.strictEqual(r[0].idea.id, 'b', r.map(x => x.idea.id + ':' + x.score).join(' '));
+    assert.strictEqual(r[0].fit, 'good');
+    assert.ok(r[r.length - 1].idea.id === 'a');
+    const again = S.csRank(topic, ideas, { month: { b: 1 } });
+    assert.notStrictEqual(again[0].idea.id, 'b', 'an idea already picked this month still came first');
+    assert.deepStrictEqual(S.csToolsFor('video', { tools: ['CapCut'] }), ['CapCut', 'Phone camera']);
+});
+test('the library is the whole team\'s: add, refuse a second copy of a link, import a sheet, filter; an owner cannot see it', async () => {
+    const a = await call('POST', '/api/content-ideas', { token: 't-emp', body: { url: 'https://www.instagram.com/reel/LIB1/', hook: 'Guess the price', whyWorked: 'Comments explode', tags: 'service, price', tools: ['CapCut'] } });
+    assert.strictEqual(a.statusCode, 201, JSON.stringify(a.body));
+    assert.deepStrictEqual([a.body.idea.postType, a.body.idea.mine], ['video', true]);
+    const dup = await call('POST', '/api/content-ideas', { token: 't-admin', body: { url: 'https://www.instagram.com/reel/LIB1/', hook: 'again' } });
+    assert.strictEqual(dup.statusCode, 409);
+    const csv = 'url,account,type,hook,notes,tags\n' +
+        'https://www.instagram.com/p/LIB2/,@skincare,carousel,5 myths about X,Saves come from the last slide,educational\n' +
+        'https://www.instagram.com/stories/cafe/1/,@cafe,story,Rate our new drink,Slider sticker gets taps,reviews\n' +
+        'https://www.instagram.com/p/LIB3/,@bakery,photo,The one we sell out of,Scarcity,service\n' +
+        'https://www.instagram.com/reel/LIB1/,@x,reel,dup,dup,\n';
+    const dry = await call('POST', '/api/content-ideas/import', { token: 't-admin', body: { csv, dryRun: true } });
+    assert.deepStrictEqual([dry.body.would, dry.body.dupes], [3, 1], JSON.stringify(dry.body));
+    assert.ok(!tbl('content_ideas').some(r => r.url === 'https://www.instagram.com/p/LIB2/'), 'a dry run saved rows');
+    const imp = await call('POST', '/api/content-ideas/import', { token: 't-admin', body: { csv } });
+    assert.strictEqual(imp.statusCode, 201, JSON.stringify(imp.body));
+    assert.deepStrictEqual([imp.body.added, imp.body.dupes], [3, 1]);
+    const list = await call('GET', '/api/content-ideas', { token: 't-emp', query: { type: 'story' } });
+    assert.ok(list.body.ideas.length >= 1 && list.body.ideas.every(i => i.postType === 'story'));
+    const q = await call('GET', '/api/content-ideas', { token: 't-emp', query: { q: 'myths' } });
+    assert.deepStrictEqual(q.body.ideas.map(i => i.hook), ['5 myths about X']);
+    assert.ok(q.body.ideas[0].savedBy, 'the library did not say who saved it');
+    const adminsIdea = tbl('content_ideas').find(r => r.url === 'https://www.instagram.com/p/LIB2/');
+    const other = await call('DELETE', `/api/content-ideas/${adminsIdea.id}`, { token: 't-emp' });
+    assert.strictEqual(other.statusCode, 403, 'a teammate removed someone else\'s idea');
+    const owner = await call('GET', '/api/content-ideas', { token: 't-client' });
+    assert.strictEqual(owner.statusCode, 403, 'a business owner read the library');
+});
+test('the audit reads the site and posts, fills the business once, and files topics by category', async () => {
+    S.__setReviewLookup(async host => [{ address: host === 'evil.test' ? '169.254.169.254' : '93.184.216.34' }]);
+    WEB['https://harbor.test/'] = { html: '<title>Harbor Cafe</title><meta name="description" content="All-day cafe in Gulshan 2."><h1>Harbor</h1><a href="/menu">Menu</a><a href="https://other.test/menu">x</a>' };
+    WEB['https://harbor.test/menu'] = { html: '<h2>Breakfast platter</h2><p>650 tk</p><h2>Cold brew</h2><p>320 tk</p>' };
+    GEMINI.script = [body => {
+        const text = body.contents[0].parts[0].text;
+        assert.ok(/Breakfast platter/.test(text) && /Gulshan/.test(text), 'the model was not given the website');
+        return { parts: [{ text: JSON.stringify({
+            business: { summary: 'An all-day cafe in Gulshan 2.', model: 'Dine-in and takeaway', audience: 'Office crowd', voice: 'Warm',
+                offers: [{ name: 'Breakfast platter', price: '650 tk', note: 'Weekend favourite' }, { name: 'Cold brew', price: '320 tk' }], proof: [], differentiators: ['Open at 7am'] },
+            topics: [{ category: 'service', title: 'Breakfast platter', why: 'On the website menu', priority: 'high' },
+                     { category: 'educational', title: 'How cold brew is made', why: 'Rivals post brewing reels', priority: 'normal' },
+                     { category: 'reviews', title: 'Happy customers', why: 'Customers tag them', priority: 'high' },
+                     { category: 'generic', title: 'Opening at 7am', why: 'From the website', priority: 'normal' },
+                     { category: 'collab', title: 'Office lunch creator', why: 'Local creators', priority: 'low' },
+                     { category: 'bogus', title: 'Nope' }]
+        }) }] };
+    }];
+    tbl('jobs').filter(j => j.user_id === ADMIN.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', `/api/content-strategy/${state.C}/audit`, { token: 't-admin', body: { website: 'harbor.test' } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    const st = await call('GET', `/api/content-strategy/${state.C}`, { token: 't-emp', query: { month: nextMonth } });
+    assert.strictEqual(st.statusCode, 200, JSON.stringify(st.body));
+    assert.deepStrictEqual(st.body.profile.business.offers.map(o => o.price), ['650 tk', '320 tk']);
+    assert.strictEqual(st.body.profile.audit.read.website.pages.length, 2, 'the menu page was not read, or another site was');
+    const cats = new Set(st.body.topics.map(t => t.category));
+    for (const c of ['service', 'educational', 'reviews', 'generic', 'collab']) assert.ok(cats.has(c), 'no ' + c + ' topic');
+    assert.ok(!st.body.topics.some(t => t.title === 'Nope'), 'a topic in no category was kept');
+    assert.strictEqual(st.body.topics.filter(t => t.title.toLowerCase() === 'breakfast platter').length, 1, 'the same topic was filed twice');
+    assert.ok(st.body.topics.find(t => t.title === 'Cold brew').active, 'an offer was not ticked as a primary topic');
+    // A second audit suggests, but does not overwrite what the team corrected.
+    await call('PUT', `/api/content-strategy/${state.C}/profile`, { token: 't-emp', body: { business: { ...st.body.profile.business, summary: 'Corrected by the team.' } } });
+    GEMINI.script = [{ parts: [{ text: JSON.stringify({ business: { summary: 'Model says something else.', offers: [] }, topics: [] }) }] }];
+    const r2 = await call('POST', `/api/content-strategy/${state.C}/audit`, { token: 't-admin', body: { website: 'https://harbor.test/' } });
+    await untilDone(r2.body.jobId);
+    const prof = tbl('content_profiles').find(p => p.client_id === state.C);
+    assert.strictEqual(prof.business.summary, 'Corrected by the team.');
+    assert.strictEqual(prof.audit.suggestion.summary, 'Model says something else.');
+    const owner = await call('GET', `/api/content-strategy/${state.C}`, { token: 't-client' });
+    assert.strictEqual(owner.statusCode, 403, 'an owner read the working plan');
+});
+test('suggestions come only from each topic\'s own shortlist; an idea the model made up is dropped', async () => {
+    let seen = null;
+    GEMINI.script = [body => {
+        const text = body.contents[0].parts[0].text;
+        const json = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1).replace(/\n\nReply[\s\S]*$/, ''));
+        seen = json;
+        return { parts: [{ text: JSON.stringify({ topics: json.topics.map(t => ({ topicId: t.topicId, ideas: [
+            { ideaId: t.candidates[0].ideaId, fit: 'good', adaptation: `Make it about ${t.title}`, tools: ['Canva'] },
+            { ideaId: '00000000-0000-4000-8000-000000000000', fit: 'good', adaptation: 'invented' }] })) }) }] };
+    }];
+    const r = await call('POST', `/api/content-strategy/${state.C}/suggest`, { token: 't-admin', body: { month: nextMonth } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    assert.ok(seen && seen.topics.every(t => t.candidates.length <= 5));
+    assert.ok(job.result.dropped >= 1, 'the invented idea was not counted as dropped');
+    const st = await call('GET', `/api/content-strategy/${state.C}`, { token: 't-emp', query: { month: nextMonth } });
+    const t = st.body.topics.find(x => x.active && x.ideas.length);
+    assert.ok(t, 'no ticked topic had ideas');
+    assert.ok(t.ideas.every(i => i.idea && i.idea.id), 'a suggestion pointed at no idea');
+    assert.ok(/^Make it about /.test(t.ideas[0].adaptation));
+    state.csTopic = t;
+});
+test('a pick needs the team\'s own note before it is final; final picks go on the calendar for the owner, once', async () => {
+    const t = state.csTopic;
+    const p = await call('POST', `/api/content-strategy/${state.C}/picks`, { token: 't-emp', body: { month: nextMonth, topicId: t.id, ideaId: t.ideas[0].ideaId } });
+    assert.strictEqual(p.statusCode, 201, JSON.stringify(p.body));
+    assert.strictEqual(p.body.pick.status, 'draft');
+    assert.ok(p.body.pick.tools.length >= 1 && p.body.pick.tools.length <= 3);
+    const same = await call('POST', `/api/content-strategy/${state.C}/picks`, { token: 't-emp', body: { month: nextMonth, topicId: t.id, ideaId: t.ideas[0].ideaId } });
+    assert.ok(same.body.existed, 'picking twice made two');
+    const early = await call('PATCH', `/api/content-picks/${p.body.pick.id}`, { token: 't-emp', body: { status: 'final' } });
+    assert.strictEqual(early.statusCode, 400, 'a pick went final with no human note');
+    const story = await call('POST', `/api/content-strategy/${state.C}/picks`, { token: 't-emp', body: { month: nextMonth, topicId: t.id, postType: 'story', title: 'Poll: platter or brew?' } });
+    assert.strictEqual(story.body.pick.postType, 'story');
+    const none = await call('POST', `/api/content-strategy/${state.C}/schedule`, { token: 't-emp', body: { month: nextMonth } });
+    assert.strictEqual(none.statusCode, 400);
+    assert.ok(/still in draft/.test(none.body.error), none.body.error);
+    const fin = await call('PATCH', `/api/content-picks/${p.body.pick.id}`, { token: 't-emp', body: { scriptNote: 'Open on the price tag\nReveal the plate', styleNote: 'Handheld, warm light', status: 'final' } });
+    assert.strictEqual(fin.statusCode, 200, JSON.stringify(fin.body));
+    const put = await call('POST', `/api/content-strategy/${state.C}/schedule`, { token: 't-emp', body: { month: nextMonth } });
+    assert.strictEqual(put.statusCode, 201, JSON.stringify(put.body));
+    assert.deepStrictEqual([put.body.added, put.body.drafts], [1, 1]);
+    const post = tbl('content_posts').find(x => x.pick_id === p.body.pick.id);
+    assert.ok(post && post.report_id === null && post.status === 'idea');
+    assert.deepStrictEqual(post.brief.script, ['Open on the price tag', 'Reveal the plate']);
+    assert.strictEqual(post.planned_on.slice(0, 7), nextMonth);
+    const again = await call('POST', `/api/content-strategy/${state.C}/schedule`, { token: 't-emp', body: { month: nextMonth } });
+    assert.strictEqual(tbl('content_posts').filter(x => x.pick_id === p.body.pick.id).length, 1, 'scheduling twice doubled it');
+    assert.strictEqual(again.statusCode, 400);
+    const cal = await call('GET', `/api/content-strategy/${state.C}/calendar`, { token: 't-emp', query: { month: nextMonth } });
+    assert.ok(cal.body.posts.some(x => x.pickId === p.body.pick.id && x.brief.topic === t.title));
+    const own = await call('GET', '/api/client/content', { token: 't-client' });
+    const mine = own.body.posts.find(x => x.id === post.id);
+    assert.ok(mine && mine.statusName === 'Waiting for your OK', 'the owner does not see the post to approve');
+    for (const k of ['pickId', 'brief', 'clientId']) assert.ok(!(k in mine), 'the owner was sent ' + k);
+    const ok = await call('POST', `/api/client/content/${post.id}/decision`, { token: 't-client', body: { decision: 'approve' } });
+    assert.strictEqual(ok.statusCode, 200, JSON.stringify(ok.body));
+    const task = tbl('client_tasks').find(x => x.source_key === 'post:' + post.id);
+    assert.ok(task && /Tools: /.test(task.notes) && task.source_id === null, 'the approved pick did not become a task with its tools');
+    const staff = await call('PATCH', `/api/content-posts/${post.id}`, { token: 't-emp', body: { status: 'made' } });
+    assert.strictEqual(staff.statusCode, 200, 'staff could not move a post that came from a pick: ' + JSON.stringify(staff.body));
+    const del = await call('DELETE', `/api/content-picks/${p.body.pick.id}`, { token: 't-emp' });
+    assert.strictEqual(del.statusCode, 409, 'a pick the owner already approved was deleted');
+    const delDraft = await call('DELETE', `/api/content-picks/${story.body.pick.id}`, { token: 't-emp' });
+    assert.strictEqual(delDraft.statusCode, 200);
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');
