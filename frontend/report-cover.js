@@ -91,7 +91,7 @@
                : `The whole run — scraping, scoring, ranking and the written strategy — completes in minutes. The same work by hand takes a strategist most of a day.`
         ];
         return `<section class="el-cover">
-  <div class="ec-brand"><strong><img class="ec-logo" src="icons/logo-mark.png" alt="">EdgeLead</strong><span>Social intelligence, measured</span></div>
+  <div class="ec-brand"><strong><img class="ec-logo" src="icons/logo-mark.png?v=2" alt="">EdgeLead</strong><span>Social intelligence, measured</span></div>
   <div class="ec-kind">${esc(o.kind || 'Report')}</div>
   <h1 class="ec-target">${esc(o.target || 'Report')}</h1>
   ${o.sub ? `<p class="ec-sub">${esc(o.sub)}</p>` : ''}
