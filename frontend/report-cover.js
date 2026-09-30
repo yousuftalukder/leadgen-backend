@@ -26,7 +26,7 @@
     background:linear-gradient(180deg,#3b82f6 0%,#8b5cf6 100%); border-radius:2px; }
 .el-cover .ec-brand { display:flex; justify-content:space-between; align-items:baseline; gap:16px; }
 .el-cover .ec-brand strong { font-size:0.95rem; font-weight:800; letter-spacing:-0.01em; display:inline-flex; align-items:center; gap:8px; }
-.el-cover .ec-logo { width:22px; height:26px; background:#fff; border-radius:6px; padding:2px; box-sizing:content-box; }
+.el-cover .ec-logo { width:auto; height:26px; }
 .el-cover .ec-brand span { font-size:0.82rem; color:#94a3b8; }
 .el-cover .ec-kind { margin-top:56px; font-size:0.95rem; font-weight:600; color:#60a5fa; }
 .el-cover .ec-target { margin-top:8px; font-size:clamp(2.2rem, 6vw, 4.1rem); font-weight:800;

@@ -1113,7 +1113,7 @@
         bar.id = 'el-sidebar';
         bar.innerHTML = `
             <div class="el-side-top">
-                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EDGELEAD</span></a>
+                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EdgeLead</span></a>
                 ${isClient || !me ? '' : `
                 <button class="el-newwork" type="button" id="el-newwork">${icon('plus')}<span>New work</span></button>
                 <div class="el-find" role="search">
@@ -1151,7 +1151,7 @@
             <button class="el-burger" type="button" id="el-burger" aria-label="Open navigation" aria-expanded="false" aria-controls="el-sidebar">
                 <span></span><span></span><span></span>
             </button>
-            <div class="el-logo"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EDGELEAD</span></div>
+            <div class="el-logo"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EdgeLead</span></div>
             ${isClient || !me ? '' : `<button class="el-newwork el-newwork-top" type="button" id="el-newwork-top" aria-label="New work">${icon('plus')}</button>`}`;
 
         const scrim = document.createElement('div');
@@ -1478,7 +1478,7 @@
         const bar = document.createElement('div');
         bar.className = 'el-share-bar';
         bar.innerHTML = `
-            <div class="el-logo"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EDGELEAD</span></div>
+            <div class="el-logo"><img class="el-logo-mark" src="icons/logo-mark.png" alt="" width="27" height="32"><span>EdgeLead</span></div>
             <div id="el-share-meta">Shared report · read-only</div>
             <div>Prepared with EdgeLead</div>`;
         document.body.prepend(bar);
