@@ -33,7 +33,13 @@ const crypto = require('crypto');
 // AN IN-MEMORY POSTGREST
 // ===========================================================================
 const DB = {};
-const tbl = t => (t === 'leads_master' ? masterView() : (DB[t] = DB[t] || []));
+const tbl = t => (t === 'leads_master' ? masterView() : t === 'leads' ? withComputed(DB.leads = DB.leads || []) : (DB[t] = DB[t] || []));
+
+/** Generated columns, the way Postgres keeps them current (phase 40: kind_now). */
+function withComputed(rows) {
+    for (const r of rows) r.kind_now = r.kind_label || r.lead_kind || 'unsure';
+    return rows;
+}
 
 /**
  * The phase-29 view, computed the way the SQL does: one row per business
@@ -47,6 +53,7 @@ function masterView() {
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(r);
     }
+    withComputed(DB.leads || []);
     return [...groups.values()].map(g => {
         g.sort((a, b) => ((!!b.is_enriched) - (!!a.is_enriched))
             || (String(b.created_at) > String(a.created_at) ? 1 : String(b.created_at) < String(a.created_at) ? -1 : 0));
@@ -90,7 +97,12 @@ function orPredicate(dsl) {
 
 class Query {
     constructor(t) { this.t = t; this.op = 'select'; this.f = []; this.ord = []; this.lim = null; this.rng = null; this.one = null; this.count = null; this.head = false; this.rows = null; this.conflict = null; this.patch = null; }
-    select(_cols, o = {}) { if (o.count) this.count = o.count; if (o.head) this.head = true; return this; }
+    select(cols, o = {}) {
+        if (o.count) this.count = o.count; if (o.head) this.head = true;
+        // An embedded parent, 'leads(id, username)', as PostgREST joins it on <parent>_id.
+        this.embeds = [...String(cols || '').matchAll(/(\w+)\(/g)].map(m => m[1]);
+        return this;
+    }
     insert(rows) { this.op = 'insert'; this.rows = [].concat(rows); return this; }
     upsert(rows, o = {}) { this.op = 'upsert'; this.rows = [].concat(rows); this.conflict = String(o.onConflict || 'id').split(',').map(s => s.trim()); return this; }
     update(patch) { this.op = 'update'; this.patch = patch; return this; }
@@ -104,6 +116,7 @@ class Query {
     gte(c, v) { this.f.push(r => r[c] >= v); return this; }
     lt(c, v) { this.f.push(r => r[c] < v); return this; }
     lte(c, v) { this.f.push(r => r[c] <= v); return this; }
+    contains(c, arr) { this.f.push(r => Array.isArray(r[c]) && [].concat(arr).every(v => r[c].includes(v))); return this; }
     ilike(c, pat) { const n = String(pat).replace(/%/g, '').toLowerCase(); this.f.push(r => String(r[c] || '').toLowerCase().includes(n)); return this; }
     or(dsl) { this.f.push(orPredicate(dsl)); return this; }
     order(c, o = {}) { this.ord.push([c, o.ascending !== false]); return this; }
@@ -141,7 +154,12 @@ class Query {
         if (this.rng) m = m.slice(this.rng[0], this.rng[1] + 1);
         if (this.lim != null) m = m.slice(0, this.lim);
         if (this.head) return { data: null, error: null, count };
-        return this._shape(m.map(r => ({ ...r })), count);
+        const embed = r => {
+            const o = { ...r };
+            for (const e of this.embeds || []) { const fk = r[e.replace(/s$/, '') + '_id']; o[e] = tbl(e).find(x => x.id === fk) || null; }
+            return o;
+        };
+        return this._shape(m.map(embed), count);
     }
     then(res, rej) { let out; try { out = this._exec(); } catch (e) { return Promise.reject(e).then(res, rej); } return Promise.resolve(out).then(res, rej); }
     catch(rej) { return this.then(undefined, rej); }
@@ -212,6 +230,7 @@ const MAIL = { sent: [], fail: null };
 // is kept, so scope is proven by what reached the model.
 // ---------------------------------------------------------------------------
 const XP = { script: [], requests: [] };
+const APIFY = { actors: {}, calls: [], datasets: {} };
 const stubs = {
     nodemailer: {
         createTransport: (opts) => ({
@@ -226,7 +245,20 @@ const stubs = {
     // there are no files to serve, and CORS is not what is under test.
     express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), static: () => (_, __, n) => n && n() }),
     cors: () => (_, __, n) => n && n(),
-    'apify-client': { ApifyClient: class {} },
+    // An Apify that answers from the test's script (phase 40). Actors are
+    // functions of their input; every call is kept. A run finds a key only
+    // when the test sets APIFY_API_KEY, so nothing else can reach it.
+    'apify-client': { ApifyClient: class {
+        user() { return { get: async () => ({ username: 'apify-test' }) }; }
+        actor(id) { return { call: async (input) => {
+            APIFY.calls.push({ id, input });
+            const items = (APIFY.actors[id] || (() => []))(input) || [];
+            const ds = 'ds-' + APIFY.calls.length;
+            APIFY.datasets[ds] = items;
+            return { id: 'run-' + APIFY.calls.length, defaultDatasetId: ds, status: 'SUCCEEDED', usageTotalUsd: 0.001 };
+        } }; }
+        dataset(id) { return { listItems: async () => ({ items: APIFY.datasets[id] || [] }) }; }
+    } },
     '@supabase/supabase-js': { createClient: () => fakeSupabase },
     dotenv: { config() {} },
     '@google/genai': { GoogleGenAI: class {
@@ -268,6 +300,7 @@ process.env.META_APP_ID = '1234567890'; process.env.META_APP_SECRET = 'test-app-
 process.env.GEMINI_API_KEY = 'test-gemini-key';
 const GEMINI = { script: [], requests: [] };
 const FETCHED = [];   // image addresses the server fetched (phase 36)
+const WEB = {};       // business websites the review tracker reads (phase 41): url -> { html, status, location }
 global.fetch = async (url, opts = {}) => {
     const u = String(url);
     const reply = (status, body) => ({
@@ -287,6 +320,10 @@ global.fetch = async (url, opts = {}) => {
         // — the content plan's cell keys exist only once the scorecard does.
         if (typeof next === 'function') next = next(body);
         return reply(200, { candidates: [{ content: { role: 'model', parts: next.parts }, finishReason: 'STOP' }] });
+    }
+    if (WEB[u]) {
+        const w = WEB[u];
+        return { ok: (w.status || 200) < 300, status: w.status || 200, headers: { get: h => (/content-type/i.test(h) ? 'text/html; charset=utf-8' : /location/i.test(h) ? (w.location || null) : null) }, text: async () => w.html || '' };
     }
     if (/cdninstagram\.com\//.test(u)) {
         FETCHED.push(u);
@@ -2644,6 +2681,405 @@ test('one group gets its own read: the score explained, no ranking table', async
     assert.ok(titles.includes('Is this group worth your time') && !titles.includes('Which groups are worth your time'), titles.join(' | '));
     assert.ok(!titles.includes('Group rules and risks'), 'no risks from the AI and one group: nothing to show');
     assert.strictEqual(S.reportDoc({ report_type: 'fb_group', report_json: { group: fbRoom('X', { postsAnalyzed: 0 }) } }), null, 'a group with no posts has no document');
+});
+
+section('\nphase 40 — who a lead is, and the pipeline');
+const igPost = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 120, commentsCount: 14, timestamp: '2026-09-20T12:00:00Z', url: `https://www.instagram.com/p/${sc}/`, ...extra });
+test('a creator reviewing several places reads as an influencer, with the reasons', () => {
+    const posts = [
+        S.leadPostSignal(igPost('dhakafoodie', 'a1', 'Tried the smash burger here, honest review: 8/10 🍔', { locationId: 'L1', taggedUsers: [{ username: 'burgerhouse' }] }), 'm4', 'burgerhouse'),
+        S.leadPostSignal(igPost('dhakafoodie', 'a2', 'খেয়ে দেখলাম, স্বাদ দারুণ। রিভিউ নিচে', { locationId: 'L2' }), 'm4', 'pizzaplace'),
+        S.leadPostSignal(igPost('dhakafoodie', 'a3', 'Hidden gem in Banani, must try the ramen', { locationId: 'L3', isSponsored: true }), 'm3')
+    ];
+    const sig = S.leadSignalsAdd(null, posts);
+    assert.strictEqual(sig.posts, 3);
+    assert.deepStrictEqual(sig.venues.sort(), ['burgerhouse', 'pizzaplace']);
+    const c = S.classifyLead({ username: 'dhakafoodie' }, sig);
+    assert.strictEqual(c.kind, 'influencer', JSON.stringify(c));
+    assert.strictEqual(c.stage, 'discovery');
+    const said = c.reasons.map(r => r.text).join(' | ');
+    assert.ok(/paid partnership/.test(said) && /2 different businesses/.test(said), said);
+    const regular = S.classifyLead({ username: 'sam' }, S.leadSignalsAdd(null, [S.leadPostSignal(igPost('sam', 'r1', 'dinner with family'), 'm4', 'a'), S.leadPostSignal(igPost('sam', 'r2', 'lunch'), 'm4', 'b')]));
+    assert.notStrictEqual(regular.kind, 'influencer', 'someone who just ate at two places was called an influencer');
+    assert.ok(S.leadSignalsAdd(sig, posts).posts === 3, 'the same posts were counted twice');
+});
+test('a restaurant posting its own menu from its own place reads as a business', () => {
+    const posts = ['Order now! Home delivery all over Dhaka', 'Our new menu is here, visit us today', 'Weekend offer: 20% off, call us to book']
+        .map((cap, i) => S.leadPostSignal(igPost('burgerhouse_dhaka', 'b' + i, cap, { locationId: 'HOME' }), 'm3'));
+    const c = S.classifyLead({ username: 'burgerhouse_dhaka' }, S.leadSignalsAdd(null, posts));
+    assert.strictEqual(c.kind, 'business', JSON.stringify(c));
+    assert.ok(c.reasons.some(r => /same place/.test(r.text)), 'the one-location rule did not fire');
+});
+test('the profile outweighs the posts, and an ordinary small account is “personal”', () => {
+    const creator = S.classifyLead({ username: 'x', is_enriched: true, category: 'Digital creator', bio: 'Food reviews | 📩 for collabs', followers_count: 24000 }, null);
+    assert.strictEqual(creator.kind, 'influencer'); assert.strictEqual(creator.stage, 'profile');
+    const shop = S.classifyLead({ username: 'y', is_enriched: true, category: 'Restaurant', address: 'House 12, Road 5', followers_count: 3000 }, null);
+    assert.strictEqual(shop.kind, 'business');
+    const person = S.classifyLead({ username: 'z', is_enriched: true, followers_count: 312 }, null);
+    assert.strictEqual(person.kind, 'personal');
+});
+test('fit: engagement is read against size, and bought-looking followers lose points', () => {
+    const sig = { posts: 4, likes: 4 * 900, comments: 4 * 60, lastPostAt: new Date().toISOString(), venues: ['a', 'b'] };
+    const good = S.leadFit({ followers_count: 20000, is_enriched: true, email: 'hi@x.test' }, sig, 'influencer', ['m3', 'm4', 'm1']);
+    const fake = S.leadFit({ followers_count: 200000, is_enriched: true }, { ...sig, likes: 400, comments: 20 }, 'influencer', ['m3']);
+    assert.ok(good.score >= 80, JSON.stringify(good));
+    assert.ok(fake.reasons.some(r => /bought followers/.test(r.text)), JSON.stringify(fake));
+    assert.ok(good.score > fake.score);
+});
+
+test('a real search run sorts what it finds: creators from two tagged tabs, the shop from the hashtag', async () => {
+    process.env.APIFY_API_KEY = 'test-apify-key';
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        const out = [];
+        for (const u of input.directUrls || []) {
+            if (/explore\/tags\/dhakafood/.test(u)) {
+                out.push(igPost('burgerhouse_dhaka', 'h1', 'Order now! Home delivery all over Dhaka', { locationId: 'HOME' }),
+                         igPost('burgerhouse_dhaka', 'h2', 'Our new menu is here, visit us today', { locationId: 'HOME' }),
+                         igPost('burgerhouse_dhaka', 'h3', 'Call us to book a table this weekend', { locationId: 'HOME' }),
+                         igPost('rafi.eats', 'h4', 'Tried the new ramen place, honest review 8/10', { locationId: 'L9' }));
+            }
+            const m = /instagram\.com\/([^/]+)\/tagged/.exec(u);
+            if (m) {
+                out.push(igPost('rafi.eats', 't-' + m[1], `Must try at @${m[1]}! My favourite burger in town`, { inputUrl: u, locationId: 'V-' + m[1] }),
+                         igPost('happy_customer_22', 'c-' + m[1], 'dinner with family', { inputUrl: u, locationId: 'V-' + m[1] }));
+            }
+        }
+        return out;
+    };
+    tbl('jobs').filter(j => j.user_id === EMP.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/run-campaign', { token: 't-emp', body: {
+        clientId: state.C, campaignName: 'Dhaka food creators', selected_methods: ['method_3', 'method_4'],
+        hashtags: ['dhakafood'], competitor_handles: ['@burgerhouse', '@pizzaplace'] } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `${job.status}: ${job.error || ''}`);
+    const lead = h => tbl('leads').find(l => l.username === h && l.owner_user_id === EMP.id);
+    const rafi = lead('rafi.eats'), shop = lead('burgerhouse_dhaka'), cust = lead('happy_customer_22');
+    assert.strictEqual(rafi.lead_kind, 'influencer', JSON.stringify(rafi.kind_reasons));
+    assert.deepStrictEqual([...rafi.methods].sort(), ['m3', 'm4']);
+    assert.deepStrictEqual([...rafi.signals.venues].sort(), ['burgerhouse', 'pizzaplace']);
+    assert.strictEqual(shop.lead_kind, 'business', JSON.stringify(shop.kind_reasons));
+    assert.notStrictEqual(cust.lead_kind, 'influencer', 'a customer’s dinner photo was filed as an influencer');
+    state.rafi = rafi; state.shop = shop;
+
+    const inf = await call('GET', '/api/leads', { token: 't-admin', query: { kind: 'influencer' } });
+    assert.strictEqual(inf.statusCode, 200, JSON.stringify(inf.body));
+    assert.ok(inf.body.leads.some(l => l.username === 'rafi.eats') && !inf.body.leads.some(l => l.username === 'burgerhouse_dhaka'));
+    const biz = await call('GET', '/api/leads', { token: 't-admin', query: { kind: 'business', sort: 'fit' } });
+    assert.ok(biz.body.leads.some(l => l.username === 'burgerhouse_dhaka'));
+    const sum = await call('GET', '/api/leads/summary', { token: 't-admin' });
+    assert.ok(sum.body.byKind.influencer >= 1 && sum.body.byKind.business >= 1, JSON.stringify(sum.body.byKind));
+});
+test('filling in profiles reads the lead again, and the profile decides', async () => {
+    APIFY.actors['apify/instagram-profile-scraper'] = (input) => input.usernames.map(u => ({
+        username: u, fullName: u === 'rafi.eats' ? 'Rafi Ahmed' : 'Burger House',
+        followersCount: u === 'rafi.eats' ? 18400 : 5200, followsCount: 400, postsCount: 210,
+        biography: u === 'rafi.eats' ? 'Dhaka food reviews · 📩 rafi@eats.test for collabs' : 'Best burgers · Order: 01711-000000',
+        businessCategoryName: u === 'rafi.eats' ? 'Digital creator' : (u === 'burgerhouse_dhaka' ? 'Restaurant' : null),
+        isBusinessAccount: true
+    }));
+    tbl('jobs').filter(j => j.user_id === EMP.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const campaign = tbl('campaigns').find(c => c.name === 'Dhaka food creators');
+    const r = await call('POST', '/api/enrich-campaign', { token: 't-emp', body: { clientId: state.C, campaignId: campaign.id, batchSize: 25 } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `${job.status}: ${job.error || ''}`);
+    const rafi = tbl('leads').find(l => l.id === state.rafi.id);
+    assert.strictEqual(rafi.kind_stage, 'profile');
+    assert.strictEqual(rafi.lead_kind, 'influencer');
+    assert.ok(rafi.fit_score > 40, JSON.stringify(rafi.fit_reasons));
+    assert.ok(rafi.kind_reasons.some(r => /Digital creator/.test(r.text)));
+    delete process.env.APIFY_API_KEY;
+});
+test('a person’s correction wins, and is counted against the rules', async () => {
+    const cust = tbl('leads').find(l => l.username === 'happy_customer_22');
+    const r = await call('PATCH', `/api/leads/${cust.id}/kind`, { token: 't-emp', body: { kind: 'personal' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.lead.kind, 'personal');
+    assert.strictEqual(tbl('leads').find(l => l.id === cust.id).kind_now, 'personal');
+    await call('PATCH', `/api/leads/${state.rafi.id}/kind`, { token: 't-emp', body: { kind: 'influencer' } });
+    const acc = await call('GET', '/api/leads/accuracy', { token: 't-emp' });
+    assert.strictEqual(acc.body.labeled, 2);
+    assert.ok(acc.body.agree >= 1, JSON.stringify(acc.body));
+    const owner = await call('PATCH', `/api/leads/${cust.id}/kind`, { token: 't-client', body: { kind: 'business' } });
+    assert.ok([403, 404].includes(owner.statusCode), 'a client account relabelled an agency lead');
+});
+test('an influencer goes into a brand’s pipeline once, filed under the brand, with its history', async () => {
+    const add = await call('POST', '/api/leads/pipeline', { token: 't-emp', body: { leadIds: [state.rafi.id], clientId: state.C, note: 'Loves burgers, good fit for the grill night' } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    const row = add.body.added[0];
+    assert.deepStrictEqual([row.kind, row.stage, row.assignedTo], ['influencer', 'found', EMP.id]);
+    assert.ok(tbl('client_leads').some(x => x.client_id === state.C && x.lead_id === state.rafi.id), 'the influencer was not filed under the brand');
+    const again = await call('POST', '/api/leads/pipeline', { token: 't-emp', body: { leadIds: [state.rafi.id], clientId: state.C } });
+    assert.strictEqual(again.body.added.length, 0); assert.strictEqual(again.body.already.length, 1);
+    const today = new Date().toISOString().slice(0, 10);
+    const mv = await call('PATCH', `/api/leads/pipeline/${row.id}`, { token: 't-emp', body: { stage: 'contacted', followUpOn: today, rate: '৳8,000 per reel' } });
+    assert.strictEqual(mv.statusCode, 200, JSON.stringify(mv.body));
+    assert.strictEqual(mv.body.row.due, 'today');
+    const bad = await call('PATCH', `/api/leads/pipeline/${row.id}`, { token: 't-emp', body: { stage: 'meeting' } });
+    assert.strictEqual(bad.statusCode, 400, 'a business stage was accepted for an influencer');
+    await call('POST', `/api/leads/pipeline/${row.id}/notes`, { token: 't-emp', body: { body: 'Sent the DM, waiting' } });
+    const one = await call('GET', `/api/leads/pipeline/${row.id}`, { token: 't-emp' });
+    const said = one.body.notes.map(n => n.body).join(' | ');
+    assert.ok(/Moved to Contacted/.test(said) && /Sent the DM/.test(said) && /grill night/.test(said), said);
+    const list = await call('GET', '/api/leads/pipeline', { token: 't-emp', query: { client_id: state.C } });
+    assert.strictEqual(list.body.rows.length, 1); assert.strictEqual(list.body.dueNow, 1);
+    const inList = await call('GET', '/api/leads', { token: 't-emp', query: { client_only: '1', client_id: state.C } });
+    assert.strictEqual((inList.body.leads.find(l => l.username === 'rafi.eats').pipeline || [])[0].stageName, 'Contacted');
+    const owner = await call('GET', '/api/leads/pipeline', { token: 't-client' });
+    assert.strictEqual(owner.statusCode, 403, 'the owner reached the agency pipeline');
+    state.pipeRow = row.id;
+});
+test('a first message is drafted from their own posts, and nothing is sent', async () => {
+    GEMINI.script = [{ parts: [{ text: JSON.stringify({ message: 'Hi Rafi, loved your honest take on the smash burger at Burger House…' }) }] }];
+    GEMINI.requests.length = 0;
+    const r = await call('POST', `/api/leads/pipeline/${state.pipeRow}/draft`, { token: 't-emp', body: {} });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(/Rafi/.test(r.body.message));
+    const prompt = GEMINI.requests[0].contents[0].parts[0].text;
+    assert.ok(/My favourite burger|honest review/.test(prompt), 'the draft was not given their captions');
+    assert.ok(/Harbor|harbor/i.test(prompt), 'the brand was not named to the model');
+});
+test('a business pitched by the agency, won, becomes a client in one step', async () => {
+    const add = await call('POST', '/api/leads/pipeline', { token: 't-emp', body: { leadIds: [state.shop.id] } });
+    const row = add.body.added[0];
+    assert.deepStrictEqual([row.kind, row.stage, row.clientId], ['business', 'new', null]);
+    const won = await call('POST', `/api/leads/pipeline/${row.id}/convert`, { token: 't-emp', body: {} });
+    assert.strictEqual(won.statusCode, 201, JSON.stringify(won.body));
+    const c = tbl('clients').find(x => x.id === won.body.client.id);
+    assert.strictEqual(c.ig_handle, 'burgerhouse_dhaka');
+    assert.strictEqual(tbl('lead_pipeline').find(x => x.id === row.id).stage, 'won');
+    const inf = await call('POST', `/api/leads/pipeline/${state.pipeRow}/convert`, { token: 't-emp', body: {} });
+    assert.strictEqual(inf.statusCode, 400, 'an influencer was turned into a client');
+});
+
+section('\nphase 41 — the review tracker');
+test('a tagged post is sorted: review, paid review, customer photo, another business', () => {
+    const v = 'burgerhouse';
+    const c = (caption, extra = {}) => S.classifyTaggedPost({ ownerUsername: 'someone', caption, ...extra }, v).label;
+    assert.strictEqual(c('Tried the smash burger at @burgerhouse. Juicy patty, price 450 tk, worth it. 8/10, would recommend!'), 'review');
+    assert.strictEqual(c('খেয়ে দেখলাম @burgerhouse এর বার্গার। স্বাদ দারুণ, দাম ৪৫০ টাকা, রেটিং ৮/১০ দিলাম', { productType: 'clips' }), 'review');
+    assert.strictEqual(c('Invited by @burgerhouse for their new menu. The taste was great, portion huge, must try! 9/10'), 'review_paid');
+    assert.strictEqual(c('dinner with family ❤️'), 'customer');
+    assert.strictEqual(S.classifyTaggedPost({ ownerUsername: 'freshbuns_bakery', caption: 'Proud supplier of @burgerhouse buns. Order now!' }, v).label, 'business');
+    assert.strictEqual(S.classifyTaggedPost({ ownerUsername: 'burgerhouse', caption: 'Our new menu' }, v).label, 'business', 'the venue tagging itself is not a review');
+    assert.strictEqual(c('Weekend vibes at @burgerhouse, loved the place'), 'unclear', 'a half-opinion should go to the model, not be guessed');
+});
+test('Instagram links, name matching, and a website fetch that cannot reach our own network', async () => {
+    assert.strictEqual(S.igHandleFromUrl('https://www.instagram.com/harbor.sushi/?hl=en'), 'harbor.sushi');
+    assert.strictEqual(S.igHandleFromUrl('https://instagram.com/p/Cxyz123/'), null);
+    assert.ok(S.reviewNameMatch('Harbor Sushi Bar', { username: 'harborsushibar', fullName: 'Harbor Sushi Bar' }) >= 0.75);
+    assert.ok(S.reviewNameMatch('Harbor Sushi Bar', { username: 'pizzaplace', fullName: 'Pizza Place' }) < 0.5);
+    for (const ip of ['10.0.0.5', '127.0.0.1', '169.254.169.254', '192.168.1.1', '172.20.0.1', '::1']) assert.ok(S.reviewPrivateIp(ip), ip);
+    assert.ok(!S.reviewPrivateIp('93.184.216.34'));
+    S.__setReviewLookup(async host => [{ address: host === 'evil.test' ? '169.254.169.254' : '93.184.216.34' }]);
+    WEB['https://evil.test/'] = { html: '<a href="https://instagram.com/stolen">x</a>' };
+    assert.strictEqual(await S.safePublicFetch('https://evil.test/'), null, 'a site resolving to the metadata address was fetched');
+    WEB['https://redirector.test/'] = { status: 302, location: 'https://evil.test/' };
+    assert.strictEqual(await S.safePublicFetch('https://redirector.test/'), null, 'a redirect onto a private address was followed');
+    assert.strictEqual(await S.safePublicFetch('file:///etc/passwd'), null);
+});
+test('a scan: Maps finds the businesses, their Instagram is matched, tagged posts are read and the reviewers become leads', async () => {
+    process.env.APIFY_API_KEY = 'test-apify-key';
+    const cl = tbl('clients').find(c => c.id === state.C);
+    cl.ig_handle = 'harborcafe';
+    WEB['https://harborsushi.test/'] = { html: '<footer><a href="https://www.instagram.com/harbor.sushi/">Instagram</a></footer>' };
+    APIFY.actors['compass/crawler-google-places'] = (input) => {
+        assert.strictEqual(input.locationQuery, 'Gulshan, Dhaka');
+        return [
+            { title: 'Pizza Place', categoryName: 'Pizza restaurant', address: 'Road 11', instagrams: ['https://www.instagram.com/pizzaplace/'], totalScore: 4.4, reviewsCount: 812, placeId: 'P1' },
+            { title: 'Harbor Sushi', categoryName: 'Sushi restaurant', website: 'https://harborsushi.test/', placeId: 'P2' },
+            { title: 'Gulshan Grill House', categoryName: 'Restaurant', placeId: 'P3' },
+            { title: 'Tiny Tea Stall', categoryName: 'Tea house', placeId: 'P4' }
+        ];
+    };
+    APIFY.actors['apify/instagram-search-scraper'] = (input) => {
+        const q = input.searchQueries[0];
+        if (/Grill House/.test(q)) return [{ username: 'gulshangrillhouse', fullName: 'Gulshan Grill House' }, { username: 'grillfan99', fullName: 'Rahim' }];
+        return [{ username: 'randomtea', fullName: 'Random' }];
+    };
+    const tp = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 200, commentsCount: 30, timestamp: new Date(Date.now() - 5 * 86400000).toISOString(), url: `https://www.instagram.com/p/${sc}/`, ...extra });
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        const h = (/instagram\.com\/([^/]+)\/tagged/.exec(input.directUrls[0]) || [])[1];
+        const base = [tp('dinerdiary', 'dd-' + h, `Tried @${h} today: juicy, price 650 tk, worth it, 8/10, would recommend`), tp('family_pics_1', 'fp-' + h, 'dinner with family')];
+        if (h === 'pizzaplace') base.push(tp('rafi.eats', 're-' + h, `Weekend vibes at @${h}, loved the place`), tp('old', 'old-' + h, 'Tried it, 9/10 must try, great taste', { timestamp: '2025-01-01T00:00:00Z' }));
+        if (h === 'harbor.sushi') base.push(tp('rafi.eats', 'rs-' + h, 'Invited by @harbor.sushi, fresh salmon, great service and presentation. 9/10'));
+        return base;
+    };
+    GEMINI.script = [(body) => {
+        const items = JSON.parse(/Items \(JSON\):\n([\s\S]*?)\n\nReply/.exec(body.contents[0].parts[0].text)[1]);
+        return { parts: [{ text: JSON.stringify({ labels: items.map(x => ({ i: x.i, label: 'review', paid: false })) }) }] };
+    }];
+    tbl('jobs').filter(j => j.user_id === EMP.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reviews/scan', { token: 't-emp', body: { clientId: state.C, category: 'restaurants', area: 'Gulshan, Dhaka', seed: '@harborcafe', maxBusinesses: 4, days: 90, postsPer: 40 } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    assert.ok(r.body.estimatedUsd > 0);
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', `${job.status}: ${job.error || ''}`);
+    const rep = tbl('reports').find(x => x.id === job.result_report_id);
+    const j = rep.report_json;
+    const handles = j.board.map(b => b.handle).sort();
+    assert.deepStrictEqual(handles, ['gulshangrillhouse', 'harbor.sushi', 'harborcafe', 'pizzaplace'], 'the matched businesses: ' + handles.join(','));
+    assert.strictEqual(j.board.find(b => b.handle === 'gulshangrillhouse').match, 'likely');
+    assert.deepStrictEqual(j.unmatched.map(u => u.name), ['Tiny Tea Stall']);
+    const pizza = j.board.find(b => b.handle === 'pizzaplace');
+    assert.strictEqual(pizza.reviews, 2, 'the unclear post was sent to the model and counted; the old one was not');
+    assert.strictEqual(pizza.customers, 1);
+    const sushi = j.board.find(b => b.handle === 'harbor.sushi');
+    assert.strictEqual(sushi.paid, 1);
+    assert.ok(j.board.find(b => b.handle === 'harborcafe').isClient);
+    const rafi = j.reviewers.find(x => x.handle === 'rafi.eats');
+    assert.deepStrictEqual(rafi.venues.sort(), ['harbor.sushi', 'pizzaplace']);
+    assert.strictEqual(rafi.reviewedClient, false);
+    assert.ok(j.missedByClient.some(x => x.handle === 'rafi.eats'));
+    const lead = tbl('leads').find(l => l.username === 'dinerdiary' && l.owner_user_id === EMP.id);
+    assert.ok(lead && lead.methods.includes('review'), 'a reviewer was not saved as a lead');
+    assert.ok(tbl('client_leads').some(x => x.client_id === state.C && x.lead_id === lead.id));
+    assert.ok(!tbl('leads').some(l => l.username === 'family_pics_1'), 'a customer photo became a lead');
+    const doc = S.reportDoc({ ...rep });
+    const titles = doc.sections.map(x => x.title);
+    for (const t of ['At a glance', 'Who is being reviewed', 'The creators who review here', 'Businesses we could not read']) assert.ok(titles.includes(t), titles.join(' | '));
+    state.reviewReport = rep.id;
+
+    // A second scan of the same place marks only what is new.
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        const h = (/instagram\.com\/([^/]+)\/tagged/.exec(input.directUrls[0]) || [])[1];
+        const out = [tp('dinerdiary', 'dd-' + h, `Tried @${h} today: juicy, price 650 tk, worth it, 8/10, would recommend`)];
+        if (h === 'harborcafe') out.push(tp('newcritic', 'nc-1', 'Tried @harborcafe: great taste, fair price, must try 9/10'));
+        return out;
+    };
+    tbl('jobs').filter(j2 => j2.user_id === EMP.id && ['queued', 'running'].includes(j2.status)).forEach(j2 => { j2.status = 'done'; });
+    const r2 = await call('POST', '/api/reviews/scan', { token: 't-emp', body: { clientId: state.C, category: 'restaurants', area: 'Gulshan, Dhaka', seed: '@harborcafe', maxBusinesses: 4 } });
+    const job2 = await untilDone(r2.body.jobId);
+    assert.strictEqual(job2.status, 'done', job2.error || '');
+    const j2 = tbl('reports').find(x => x.id === job2.result_report_id).report_json;
+    assert.ok(j2.hasPrevious);
+    assert.strictEqual(j2.board.find(b => b.handle === 'harborcafe').newReviews, 1);
+    assert.ok(j2.reviewers.find(x => x.handle === 'newcritic').isNew && !j2.reviewers.find(x => x.handle === 'dinerdiary').isNew);
+    const list = await call('GET', '/api/reviews/scans', { token: 't-emp' });
+    assert.ok(list.body.scans.length >= 2);
+    const owner = await call('POST', '/api/reviews/scan', { token: 't-client', body: { category: 'x', area: 'y' } });
+    assert.ok([403].includes(owner.statusCode), 'an owner started a review scan: ' + owner.statusCode);
+    delete process.env.APIFY_API_KEY;
+});
+test('the scan can be repeated monthly, and the owner can open its document', async () => {
+    assert.strictEqual(S.SCHEDULABLE_TYPES.review_scan, 'leadgen');
+    const v = await call('GET', `/api/client/report/${state.reviewReport}`, { token: 't-client' });
+    assert.strictEqual(v.statusCode, 200, JSON.stringify(v.body));
+    assert.strictEqual(v.body.report.doc.type, 'review_scan');
+});
+
+section('\nphase 42 — the content plan as a calendar the owner approves');
+test('briefs land on their own weekday where they name one, never two on a day, never before the start', () => {
+    const d = S.cpScheduleDates([{ slot: 'Tue 7pm' }, { slot: 'Friday 20:00' }, { slot: '' }, { slot: 'Tue 7pm' }, {}], '2026-10-07');
+    const days = d.map(x => x.plannedOn);
+    assert.strictEqual(new Set(days).size, days.length, 'two posts on one day: ' + days.join(','));
+    assert.ok(days.every(x => x >= '2026-10-07'), days.join(','));
+    assert.strictEqual(new Date(days[1] + 'T00:00:00Z').getUTCDay(), 5, 'the Friday brief was not put on a Friday');
+    assert.strictEqual(d[0].time, '19:00');
+    assert.deepStrictEqual(S.cpParseSlot('Sat 11am'), { dow: 6, time: '11:00' });
+});
+test('staff put a plan on the calendar once; the owner sees what waits for them, and nothing about the team', async () => {
+    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    assert.strictEqual(put.statusCode, 201, JSON.stringify(put.body));
+    assert.ok(put.body.added >= 2, JSON.stringify(put.body));
+    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    assert.strictEqual(again.body.added, 0, 'pressing it twice doubled the calendar');
+    const own = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.strictEqual(own.statusCode, 200, JSON.stringify(own.body));
+    assert.ok(own.body.posts.length >= 2 && own.body.waiting === own.body.posts.length);
+    assert.strictEqual(own.body.posts[0].statusName, 'Waiting for your OK');
+    for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy']) assert.ok(!(k in own.body.posts[0]), `the owner was sent ${k}`);
+    state.cpPosts = put.body.posts;
+});
+test('the owner approves one (it goes on the board), asks for changes on another, and the team sees why', async () => {
+    const [a, b] = state.cpPosts;
+    const ok = await call('POST', `/api/client/content/${a.id}/decision`, { token: 't-client', body: { decision: 'approve' } });
+    assert.strictEqual(ok.statusCode, 200, JSON.stringify(ok.body));
+    const row = tbl('content_posts').find(x => x.id === a.id);
+    assert.deepStrictEqual([row.status, row.decided_by], ['approved', 'owner']);
+    const task = tbl('client_tasks').find(t => t.source_key === 'post:' + a.id);
+    assert.ok(task && task.client_id === state.C && /^Make the /.test(task.title), 'the approved post did not become a task');
+    const empty = await call('POST', `/api/client/content/${b.id}/decision`, { token: 't-client', body: { decision: 'changes' } });
+    assert.strictEqual(empty.statusCode, 400, 'changes were asked for without saying what');
+    await call('POST', `/api/client/content/${b.id}/decision`, { token: 't-client', body: { decision: 'changes', note: 'Use our new logo, not the old one' } });
+    const cal = await call('GET', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp' });
+    const seen = cal.body.posts.find(x => x.id === b.id);
+    assert.deepStrictEqual([seen.status, seen.ownerNote], ['changes', 'Use our new logo, not the old one']);
+    const owner = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-client', body: { status: 'posted' } });
+    assert.strictEqual(owner.statusCode, 403, 'an owner reached the staff route');
+});
+test('posted with its link: the task closes, and the monthly report says how the planned posts did', async () => {
+    const [a] = state.cpPosts;
+    const r = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-emp', body: { status: 'posted', postedUrl: 'https://www.instagram.com/p/PLAN123/' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const row = tbl('content_posts').find(x => x.id === a.id);
+    assert.strictEqual(row.shortcode, 'PLAN123');
+    assert.strictEqual(tbl('client_tasks').find(t => t.id === row.task_id).status, 'done');
+    tbl('posts').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'instagram', handle: 'harborcafe', shortcode: 'PLAN123', likes: 321, comments: 17, views: 0 });
+    const month = String(row.planned_on).slice(0, 7);
+    const cp = await S.contentPlanMonth(state.C, month);
+    const item = cp.items.find(i => i.url === 'https://www.instagram.com/p/PLAN123/');
+    assert.deepStrictEqual([item.likes, item.comments, item.status], [321, 17, 'posted']);
+    assert.ok(cp.planned >= 1 && cp.posted === 1);
+    const doc = S.reportDoc({ id: 'm', report_type: 'public_monthly', created_at: new Date().toISOString(),
+        report_json: { month, monthLabel: 'October 2026', client: { name: 'Harbor Cafe' }, context: {}, contentPlan: cp, plan: [] } });
+    const sec = doc.sections.find(x => x.title === 'What we planned, and how it did');
+    assert.ok(sec, doc.sections.map(x => x.title).join(' | '));
+});
+
+section('\nphase 41b — the review tracker set up fresh each time');
+test('step one finds and matches only: several kinds, a rating floor, no name search, nothing read yet', async () => {
+    process.env.APIFY_API_KEY = 'test-apify-key';
+    const before = APIFY.calls.length;
+    APIFY.actors['compass/crawler-google-places'] = (input) => {
+        assert.deepStrictEqual(input.searchStringsArray, ['cafés', 'bakeries']);
+        return [
+            { title: 'Top Cafe', categoryName: 'Cafe', instagrams: ['https://instagram.com/topcafe'], totalScore: 4.6, reviewsCount: 900, placeId: 'A' },
+            { title: 'Meh Cafe', categoryName: 'Cafe', instagrams: ['https://instagram.com/mehcafe'], totalScore: 3.1, reviewsCount: 40, placeId: 'B' },
+            { title: 'No Link Bakery', categoryName: 'Bakery', totalScore: 4.8, reviewsCount: 300, placeId: 'C' }
+        ];
+    };
+    tbl('jobs').filter(j => j.user_id === ADMIN.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reviews/find', { token: 't-admin', body: { clientId: state.C, categories: ['cafés', 'bakeries'], area: 'Banani, Dhaka', maxBusinesses: 5, minRating: 4, searchNames: false, handles: ['@rivalone'] } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    const names = job.result.places.map(p => p.name);
+    assert.ok(names.includes('Top Cafe') && !names.includes('Meh Cafe'), 'the rating floor was not applied: ' + names.join(','));
+    assert.ok(job.result.places.some(p => p.handle === 'rivalone' && p.source === 'given'), 'the own list was dropped');
+    const bakery = job.result.places.find(p => p.name === 'No Link Bakery');
+    assert.deepStrictEqual([bakery.handle, bakery.match], [null, 'none'], 'a name search ran although it was switched off');
+    const calls = APIFY.calls.slice(before).map(c => c.id);
+    assert.ok(!calls.includes('apify/instagram-scraper'), 'step one read tagged posts');
+    assert.ok(!calls.includes('apify/instagram-search-scraper'), 'step one searched names although told not to');
+    assert.ok(!tbl('reports').some(x => x.id === job.result_report_id && job.result_report_id), 'step one saved a report');
+});
+test('step two reads exactly the picked list: Maps is not asked again, and AI can be switched off', async () => {
+    const before = APIFY.calls.length;
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        const h = (/instagram\.com\/([^/]+)\/tagged/.exec(input.directUrls[0]) || [])[1];
+        const n = h === 'topcafe' ? 1 : 2;
+        return [{ ownerUsername: 'nadia.r' + n, shortCode: 'k-' + h, caption: `Tried @${h}: price 300 tk, great taste, 8/10`, likesCount: 50, commentsCount: 5, timestamp: new Date().toISOString() },
+                { ownerUsername: 'sam.k' + n, shortCode: 'v-' + h, caption: `Weekend vibes at @${h}, loved it`, likesCount: 10, commentsCount: 1, timestamp: new Date().toISOString() }];
+    };
+    GEMINI.requests.length = 0;
+    tbl('jobs').filter(j => j.user_id === ADMIN.id && ['queued', 'running'].includes(j.status)).forEach(j => { j.status = 'done'; });
+    const r = await call('POST', '/api/reviews/scan', { token: 't-admin', body: { clientId: state.C, useMaps: false, category: 'cafés, bakeries', area: 'Banani, Dhaka',
+        handles: [{ handle: 'topcafe', name: 'Top Cafe' }, { handle: 'nolinkbakery', name: 'No Link Bakery' }], days: 30, postsPer: 20, useAi: false } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    const job = await untilDone(r.body.jobId);
+    assert.strictEqual(job.status, 'done', job.error || '');
+    const ids = APIFY.calls.slice(before).map(c => c.id);
+    assert.ok(!ids.includes('compass/crawler-google-places'), 'Maps was asked again for a picked list');
+    assert.deepStrictEqual(APIFY.calls.slice(before).filter(c => c.id === 'apify/instagram-scraper').map(c => c.input.resultsLimit), [20, 20]);
+    assert.strictEqual(GEMINI.requests.length, 0, 'AI was used although it was switched off');
+    const j = tbl('reports').find(x => x.id === job.result_report_id).report_json;
+    assert.deepStrictEqual(j.board.map(b => b.handle).sort(), ['nolinkbakery', 'topcafe']);
+    assert.strictEqual(j.board.find(b => b.handle === 'topcafe').name, 'Top Cafe');
+    assert.strictEqual(j.counts.unclear, 2, 'the unclear posts should stay unclear, not be guessed');
+    assert.strictEqual(j.windowDays, 30);
+    delete process.env.APIFY_API_KEY;
 });
 
 (async () => {

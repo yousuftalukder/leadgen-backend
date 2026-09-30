@@ -191,6 +191,11 @@
                 body + (tasks && tasks.canEdit ? '<p class="rp-src no-print">Adding one puts it on the client’s task board. One marked “You” becomes the client’s to-do in their portal.</p>' : '')));
         }
 
+        // What was planned and how it did (phase 42): built on the server, drawn with the document blocks.
+        if (Array.isArray(v.contentPlanBlocks) && v.contentPlanBlocks.length) {
+            out.push(sec('What we planned, and how it did', 'The posts on this month’s content calendar.', v.contentPlanBlocks.filter(Boolean).map(block).join('')));
+        }
+
         if (v.conclusion) out.push(sec('Conclusion', '', `<p class="rp-verdict">${esc(v.conclusion)}</p>`));
 
         // 08 — about this report.

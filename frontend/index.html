@@ -101,6 +101,10 @@
                 <label class="checkbox-item"><input type="checkbox" name="method" value="method_4" checked> Method 4: Competitor Tagged</label>
                 <label class="checkbox-item"><input type="checkbox" name="method" value="method_6" checked> Method 6: TopSearch B2B</label>
             </div>
+            <p class="card-subtext" style="margin-top:10px">Every run keeps both kinds and sorts them: influencers and businesses land in their own lists on the
+                Leads page, with the reasons. <b>Looking for influencers?</b> Method 4 on several local businesses, creator hashtags
+                (e.g. #dhakafoodblogger rather than #dhakafood) and review phrases (“food review Dhaka”) find the most.
+                <b>Looking for businesses?</b> Method 6 and location pages do. An account found by several methods is scored higher.</p>
 
             <hr style="border: 0; border-top: 1px solid var(--card-border); margin: 30px 0;">
 
@@ -434,6 +438,7 @@
                     const r = j.result || {};
                     panel.log(`Complete. ${r.newUniqueLeads || 0} new lead(s), ${r.totalLinked || 0} on this campaign.`);
                     (r.warnings || []).forEach(w => panel.log(w));
+                    panel.log('Sorted into influencers and businesses: open Leads → Influencers or Businesses. Fill in their details (Stage 2) to sort the unsure ones.');
                     await loadHistory();
                 },
                 onPaused: j => panel.log('Stopped: ' + (j.error || j.status) + '. Nothing already scraped was lost.'),

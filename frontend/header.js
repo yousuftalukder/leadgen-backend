@@ -93,6 +93,7 @@
         { href: 'my-tasks.html',  icon: 'check',   label: 'My tasks',  engine: null, count: 'tasks' },
         { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
         { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
+        { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
@@ -129,7 +130,8 @@
             { href: 'leads.html',          name: 'Find Facebook Pages',      text: 'Local businesses with a contact button, ready for outreach.', engine: 'leadgen',      apify: true },
             { href: 'fb-communities.html', name: 'Find Facebook groups',     text: 'Local groups where people ask for recommendations.',          engine: 'fb_community', apify: true },
             { href: 'fb-audit.html',       name: 'Read Facebook groups',     text: 'Pull real customer requests out of recent group posts.',      engine: 'fb_community', apify: true },
-            { href: 'fb-leads.html',       name: 'Local demand',             text: 'The requests found so far, ready to answer.',                 engine: 'fb_community' }
+            { href: 'fb-leads.html',       name: 'Local demand',             text: 'The requests found so far, ready to answer.',                 engine: 'fb_community' },
+            { href: 'reviews.html',        name: 'Review tracker',           text: 'Who reviewed the businesses around a place, and the creators behind it.', engine: 'leadgen', apify: true }
         ] },
         { group: 'Ask', items: [
             { href: 'workspace.html', name: 'Account assistant', text: 'What we did, what is planned, and their numbers, in one chat.', engine: null, tab: 'ask' }
@@ -183,7 +185,8 @@
         'index.html', 'ig-report.html', 'ig-competitors.html',
         'fb-report.html', 'fb-communities.html', 'fb-audit.html', 'fb-advisor.html',
         'content-plan.html',
-        'leads.html'        // Facebook Page discovery starts from the Lead List
+        'leads.html',       // Facebook Page discovery starts from the Lead List
+        'reviews.html'      // the review tracker (phase 41)
     ];
 
     /**
@@ -1185,6 +1188,14 @@
                 const late = open.filter(t => t.dueDate && t.dueDate < new Date().toISOString().slice(0, 10)).length;
                 setCount('tasks', open.length, late ? `${late} overdue` : '', late > 0);
             }).catch(() => {});
+            // Follow-ups due today or overdue on your leads (phase 40). Quiet
+            // before the phase-40 SQL, and for anyone without the lead tools.
+            const me = EL.me || {};
+            if (me.role === 'admin' || (me.engines || []).includes('leadgen')) {
+                EL.api('/api/leads/pipeline?assigned=me&open=1').then(d => {
+                    setCount('followups', d.dueNow || 0, d.dueNow ? `${d.dueNow} follow-up${d.dueNow === 1 ? '' : 's'} due` : '', (d.dueNow || 0) > 0);
+                }).catch(() => {});
+            }
         }
     }
 

@@ -114,6 +114,8 @@
     <section id="cl-growth" class="cl-growth no-print" hidden></section>
     <!-- What is waiting on the owner, and what the agency is doing for them. -->
     <div id="cl-tasks" class="ws-grid g2e cl-tasks no-print" hidden></div>
+    <!-- The planned posts waiting for the owner's OK (phase 42). -->
+    <section id="cl-content" class="ws-card cp-own no-print" hidden></section>
     <div class="cl-wrap">
 
         <aside class="no-print">
@@ -166,6 +168,7 @@
         greet(me);
         loadGrowth(me);
         loadTasks();
+        loadContent();
 
         renderList();
         if (reports.length) open(reports[0].id);
@@ -235,6 +238,56 @@
                 loadTasks();
             } catch (err) { b.disabled = false; if (!err.handled) EL.toast(err.message, 'bad'); }
         }));
+    }
+
+    // ---- planned posts to approve (phase 42) ---------------------------------
+    async function loadContent() {
+        const host = $('cl-content');
+        let d;
+        try { d = await EL.api('/api/client/content'); } catch { return; }
+        const posts = d.posts || [];
+        if (!posts.length) { host.hidden = true; return; }
+        const waiting = posts.filter(p => p.status === 'idea');
+        const card = p => `<article class="cp-card is-${esc(p.status)}" data-post="${esc(p.id)}">
+            <div class="cp-top"><span class="cp-date">${esc(shortDay(p.plannedOn))}${p.time ? ' · ' + esc(p.time) : ''}</span>
+                ${p.format ? `<span class="cp-fmt">${esc(p.format)}</span>` : ''}<span class="cp-st">${esc(p.statusName)}</span></div>
+            <h3 class="cp-hook">${esc(p.hook || 'Planned post')}</h3>
+            ${p.shot ? `<p class="cp-line"><b>What it shows:</b> ${esc(p.shot)}</p>` : ''}
+            ${p.caption ? `<details class="cp-cap"><summary>Read the caption</summary><p>${esc(p.caption)}</p></details>` : ''}
+            ${p.yourNote ? `<p class="cp-line"><b>You said:</b> ${esc(p.yourNote)}</p>` : ''}
+            ${p.postedUrl ? `<a class="cp-link" href="${EL.safeUrl(p.postedUrl)}" target="_blank" rel="noopener noreferrer">See the post</a>` : ''}
+            ${['idea', 'changes', 'approved'].includes(p.status) ? `<div class="cp-acts">
+                ${p.status !== 'approved' ? `<button class="ws-btn is-gold is-sm" type="button" data-do="approve">Approve</button>` : ''}
+                <button class="ws-btn is-sm" type="button" data-do="changes">${p.status === 'changes' ? 'Change my note' : 'Ask for changes'}</button>
+                ${p.status !== 'approved' ? `<button class="ws-btn is-quiet is-sm" type="button" data-do="skip">Skip this one</button>` : ''}
+            </div>
+            <form class="cp-change" hidden><textarea rows="2" maxlength="2000" aria-label="What would you like changed?" placeholder="What would you like changed?">${esc(p.yourNote || '')}</textarea>
+                <button class="ws-btn is-sm" type="submit">Send</button></form>` : ''}
+        </article>`;
+        host.hidden = false;
+        host.innerHTML = `<div class="ws-card-h"><h2>Posts planned for you</h2><span class="el-muted ws-num">${waiting.length ? waiting.length + ' waiting for your OK' : 'all decided'}</span></div>
+            <p class="el-muted">Your agency made these for the coming weeks. Approve the ones you like; they go straight onto the team’s list to make.</p>
+            <div class="cp-list">${posts.map(card).join('')}</div>`;
+        const decide = async (id, decision, note) => {
+            try {
+                await EL.api(`/api/client/content/${encodeURIComponent(id)}/decision`, { method: 'POST', body: { decision, note } });
+                EL.toast(decision === 'approve' ? 'Approved. Your agency will make it.' : decision === 'skip' ? 'Skipped.' : 'Sent to your agency.');
+                loadContent();
+            } catch (err) { if (!err.handled) EL.toast(err.message, 'bad'); }
+        };
+        host.querySelectorAll('[data-post]').forEach(c => {
+            c.querySelectorAll('[data-do]').forEach(b => b.addEventListener('click', () => {
+                if (b.dataset.do === 'changes') { const f = c.querySelector('.cp-change'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('textarea').focus(); return; }
+                b.disabled = true; decide(c.dataset.post, b.dataset.do);
+            }));
+            const f = c.querySelector('.cp-change');
+            if (f) f.addEventListener('submit', e => {
+                e.preventDefault();
+                const v = f.querySelector('textarea').value.trim();
+                if (!v) { f.querySelector('textarea').focus(); return; }
+                decide(c.dataset.post, 'changes', v);
+            });
+        });
     }
 
     // ---- the numbers every day (phase 30) ---------------------------------

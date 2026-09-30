@@ -95,6 +95,7 @@
     <div id="report-actions"></div>
     <div class="tabs" style="margin-top:14px">
         <button class="tab is-on" data-tab="briefs" type="button">Briefs</button>
+        <button class="tab" data-tab="calendar" type="button">Calendar <span id="cal-n"></span></button>
         <button class="tab" data-tab="cells" type="button">Scorecard</button>
         <button class="tab" data-tab="formats" type="button" id="tab-formats-label">Reels · Carousels · Stills</button>
         <button class="tab" data-tab="captions" type="button">Captions</button>
@@ -103,6 +104,7 @@
         <button class="tab" data-tab="notes" type="button">Findings <span id="notes-n"></span></button>
     </div>
     <div data-pane="briefs"></div>
+    <div data-pane="calendar" class="is-hidden"></div>
     <div data-pane="cells" class="is-hidden"></div>
     <div data-pane="formats" class="is-hidden"></div>
     <div data-pane="captions" class="is-hidden"></div>
@@ -142,6 +144,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
+<script src="content-calendar.js"></script>
 <script>
 (async () => {
     await EL.init({ engine: 'content_plan', page: 'content-plan.html' });
@@ -292,6 +295,8 @@
         $('plan-warn').innerHTML = (p.warnings || []).map(w => `<div class="warn">${esc(w)}</div>`).join('')
             + (stale.length && !(p.warnings || []).some(w => /older than/.test(w)) ? `<div class="warn">Stored data is older than ${fr.staleAfterDays} days for ${stale.map(x => esc(x.name)).join(', ')}.</div>` : '');
         EL.reportActions('report-actions', { reportId: rep.id });
+        // The plan's posts on dates, for the owner to approve (phase 42).
+        if (rep.id && window.CPCal) CPCal.mount(pane('calendar'), rep.id, { onCount: n => { $('cal-n').textContent = n ? '· ' + n : ''; } });
 
         const b = p.briefs;
         pane('briefs').innerHTML = b ? `

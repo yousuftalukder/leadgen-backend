@@ -6328,6 +6328,299 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 });
 
 // ===========================================================================
+// PHASE 40 :: WHO A LEAD IS
+//
+// The discovery methods find POSTS and file whoever posted them. None of them
+// asks what kind of account that is, so a food-influencer run also files the
+// restaurants posting under #dhakafood, the venue posting from its own
+// location page and every "XYZ Food" the account search returns. The methods
+// stay exactly as they are; this is the step after them.
+//
+// Every lead is read twice:
+//   1. at discovery, free: the posts we already paid for (captions, the paid
+//      partnership label, where they post, who they tag, which businesses'
+//      tagged tabs they turn up in);
+//   2. at enrichment: the profile (Instagram's own category, the bio, the
+//      website, a business address, followers against following).
+// The result is influencer, business, personal (an ordinary account) or
+// unsure, with the reasons that decided it. A person's correction wins over
+// the rules and is kept, so the rules can be measured against it.
+// ===========================================================================
+
+const LEAD_KINDS = ['influencer', 'business', 'personal', 'unsure'];
+const LEAD_KIND_EDGE = 25;              // |score| at which a kind is called
+const LEAD_SIG_POSTS = 60;              // post ids remembered per lead, so a replayed post is not counted twice
+const LEAD_METHOD_NAMES = { m1: 'location page', m3: 'hashtag', m3_1: 'phrase search', m4: 'a business’s tagged posts', m6: 'account search', fb: 'Facebook search', review: 'review tracker' };
+
+// Caption wording, English and Bangla. A post counts once per list, however
+// many words it hits, so one long caption cannot outvote ten short ones.
+const LK_CREATOR_WORDS = /\b(tried|trying|must[- ]?try|review(ed|ing|s)?|honest (review|opinion|thoughts)|verdict|worth (it|the hype|every)|(would|highly|definitely) recommend|tast(e|ed|es|y|ing)|flavou?rs?|portion|my (favou?rite|go-?to|order|pick)|i (ordered|had|went|visited|tried|loved|got)|checked (it )?out|hidden gem|food ?blog(ger)?|foodie|vlog|collab|invited|gifted|thanks? (for|to) .{0,24}(having|hosting|inviting)|#ad\b|#pr\b|#?foodreview|#?foodblogger)\b/i;
+const LK_CREATOR_WORDS_BN = /(রিভিউ|খেয়ে দেখ|খেলাম|খেয়েছি|ট্রাই কর|টেস্ট কর|স্বাদ|রেটিং|অবশ্যই (ট্রাই|খেয়ে)|ঘুরে এলাম|গিয়েছিলাম|দাওয়াত|কোলাব|ভ্লগ|ফুডি)/;
+const LK_BUSINESS_WORDS = /\b(order (now|today|yours|online)|to order|for (order|orders|booking)|place (your|an) order|pre-?order|home delivery|free delivery|delivery (available|charge|all over)|cash on delivery|dm (us|to order|for (order|price|details))|inbox (us|for)|call (us|now|for)|hotline|whats ?app (us|for|to)|visit (us|our)|our (new|menu|shop|store|outlet|branch|kitchen|restaurant|cafe|customers?|products?|collection|team|chef)|we('re| are) (open|hiring|now|serving)|now open|open (daily|everyday|from|now)|opening hours|book (now|your|a table)|reserve (now|your)|reservations?|branch(es)?|outlets?|limited (stock|offer)|in stock|new arrivals?|shop now|buy now|grab yours|flat \d+ ?%|\d+ ?% off)\b/i;
+const LK_BUSINESS_WORDS_BN = /(অর্ডার কর|অর্ডার করতে|হোম ডেলিভারি|ডেলিভারি চার্জ|ক্যাশ অন ডেলিভারি|ইনবক্স কর|ইনবক্সে|যোগাযোগ কর|আমাদের (নতুন|মেনু|শাখা|আউটলেট|রেস্টুরেন্ট|দোকান)|শাখা|আউটলেট|বুকিং|কল করুন|হটলাইন)/;
+const LK_RATING = /(\b\d{1,2}(\.\d)?\s*\/\s*10\b|\b[1-5](\.\d)?\s*\/\s*5\b|(⭐|★){3,}|rating\s*[:\-]?\s*\d|রেটিং\s*[:\-]?\s*[\d০-৯])/i;
+
+// The profile.
+const LK_CREATOR_CATEGORY = /\b(digital creator|creator|blogger|personal blog|public figure|video creator|influencer|gamer|gaming video creator|vlogger|writer|artist|musician|comedian|athlete|actor|actress|model|journalist|news personality|youtuber)\b/i;
+const LK_BUSINESS_CATEGORY = /\b(restaurant|caf[eé]|coffee|bakery|food (and|&) beverage|food & drink|fast food|pizza|burger|dessert|sweet shop|caterer|catering|grocery|supermarket|shopping|retail|store|shop|boutique|clothing|brand|product\/service|local business|company|business|hotel|resort|salon|spa|beauty|cosmetic|clinic|hospital|dentist|pharmacy|real estate|property|school|college|university|agency|consult\w*|jewel\w*|furniture|electronics|gym|fitness cent\w*|travel (company|agency)|event plann\w*|e-?commerce|commercial|organi[sz]ation|non-?profit|bank|insurance|automotive|car dealer\w*|interior)\b/i;
+const LK_CREATOR_BIO = /(collab|collaboration|\bpr\b|for (business|collab|pr|work|brand)|business (inquir|enquir|email|mail)|management|content creator|creator|blogger|vlogger|influencer|\breviews?\b|foodie|📩|✉️|ambassador|youtube|tiktok)/i;
+const LK_BUSINESS_BIO = /(\border\b|delivery|open (daily|everyday|\d)|opening hours|hotline|call (us|now)|branch|outlet|visit us|our (shop|store|restaurant|cafe|menu|products)|we (are|deliver|make|serve|offer)|shop now|online shop|pre-?order|wholesale|since (19|20)\d\d|est\.?\s*(19|20)\d\d|\bltd\b|limited|pvt|অর্ডার|ডেলিভারি|শাখা|আউটলেট|হটলাইন)/i;
+const LK_SHOP_SITE = /(foodpanda|pathao|ubereats|doordash|grubhub|deliveroo|swiggy|zomato|daraz|myshopify|shopify|woocommerce|square\.site|toasttab|opentable|resy|\/menu|\/order|\/shop|\/store)/i;
+const LK_CREATOR_SITE = /(youtube\.com|youtu\.be|tiktok\.com|linktr\.ee|beacons\.ai|bio\.link|linkin\.bio|taplink|campsite\.bio|snipfeed|stan\.store)/i;
+const LK_BUSINESS_HANDLE = /(caf[eé]|kitchen|restaurant|resto|bistro|grill|bakery|bakers|bakehouse|catering|sweets|official|ltd|limited|outlet|store|shop|mart|boutique|salon|clinic|lounge|diner|eatery|pizzeria|biryani)/i;
+const LK_CREATOR_HANDLE = /(foodie|eats|diar(y|ies)|tales|vlogs?|blogger|blogs|explorer|hunter|lover|journal|travell?er|wanderer|reviews?|withme|with_|by_)/i;
+
+/** Where a tagged-tab post came from: the business whose /tagged/ page it was read off. */
+function leadTaggedSource(i) {
+    const m = /instagram\.com\/([^/?#]+)\/tagged/i.exec(String(i.inputUrl || i.input_url || i.url_input || ''));
+    return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * What one post says about whoever posted it. Kept small: this rides in the
+ * job's checkpoint and in the lead's signals.
+ */
+function leadPostSignal(i, method, venue = null) {
+    const caption = String(i.caption || i.text || '');
+    const handle = String(i.ownerUsername || i.owner?.username || i.username || '').toLowerCase();
+    const loc = i.locationId || i.location?.id || (i.locationName ? String(i.locationName).toLowerCase().slice(0, 60) : null);
+    const tagged = [...igTaggedUsers(i), ...(Array.isArray(i.mentions) ? i.mentions.map(m => String(m).toLowerCase().replace('@', '')) : [])]
+        .filter(h => h && h !== handle);
+    return {
+        id: String(i.shortCode || i.shortcode || i.id || '') || null,
+        m: method,
+        venue,
+        cw: LK_CREATOR_WORDS.test(caption) || LK_CREATOR_WORDS_BN.test(caption) ? 1 : 0,
+        bw: LK_BUSINESS_WORDS.test(caption) || LK_BUSINESS_WORDS_BN.test(caption) ? 1 : 0,
+        rt: LK_RATING.test(caption) ? 1 : 0,
+        sp: igIsSponsored(i) ? 1 : 0,
+        rl: /reel|clips|video/i.test(String(i.productType || i.type || '')) ? 1 : 0,
+        loc: loc ? String(loc) : null,
+        tg: [...new Set(tagged)].slice(0, 12),
+        lk: Number(i.likesCount) || 0,
+        cm: Number(i.commentsCount) || 0,
+        vw: getViews(i) || 0,
+        at: tsOf(i)?.toISOString() || null,
+        fn: i.ownerFullName || i.owner?.fullName || null,
+        cap: caption.replace(/\s+/g, ' ').trim().slice(0, 200) || null
+    };
+}
+
+function leadSignalsEmpty() {
+    return { v: 1, posts: 0, likes: 0, comments: 0, views: 0, cw: 0, bw: 0, rt: 0, sp: 0, reels: 0,
+        locs: {}, tagged: [], venues: [], seen: [], captions: [], lastPostAt: null, fullName: null };
+}
+
+/**
+ * Fold posts into a lead's signals. A post already counted (same id) is
+ * skipped, so a resumed run or a second campaign over the same hashtag does
+ * not double a creator's evidence.
+ */
+function leadSignalsAdd(sig, posts) {
+    const s = { ...leadSignalsEmpty(), ...(sig || {}) };
+    s.locs = { ...(s.locs || {}) };
+    const seen = new Set(s.seen || []);
+    const tagged = new Set(s.tagged || []), venues = new Set(s.venues || []);
+    const captions = [...(s.captions || [])];
+    for (const p of posts || []) {
+        if (!p) continue;
+        if (p.venue) venues.add(p.venue);
+        if (p.fn && !s.fullName) s.fullName = String(p.fn).slice(0, 120);
+        if (p.id && seen.has(p.id)) continue;
+        if (p.id) seen.add(p.id);
+        if (p.m === 'm6') continue;                     // an account-search hit is not a post
+        s.posts += 1;
+        s.likes += p.lk || 0; s.comments += p.cm || 0; s.views += p.vw || 0;
+        s.cw += p.cw || 0; s.bw += p.bw || 0; s.rt += p.rt || 0; s.sp += p.sp || 0; s.reels += p.rl || 0;
+        if (p.loc) s.locs[p.loc] = (s.locs[p.loc] || 0) + 1;
+        (p.tg || []).forEach(t => tagged.add(t));
+        if (p.at && (!s.lastPostAt || p.at > s.lastPostAt)) s.lastPostAt = p.at;
+        if (p.cap) { captions.unshift(p.cap); }
+    }
+    // Caps keep a lead's row small however many runs find it.
+    const locKeys = Object.keys(s.locs).sort((a, b) => s.locs[b] - s.locs[a]).slice(0, 20);
+    s.locs = Object.fromEntries(locKeys.map(k => [k, s.locs[k]]));
+    s.tagged = [...tagged].slice(0, 40);
+    s.venues = [...venues].slice(0, 25);
+    s.seen = [...seen].slice(-LEAD_SIG_POSTS);
+    s.captions = [...new Set(captions)].slice(0, 3);
+    return s;
+}
+
+/** Merge two leads' stored signals (the same business found by two runs). */
+function leadSignalsMerge(a, b) {
+    if (!a) return b || null;
+    if (!b) return a;
+    const out = leadSignalsAdd(a, []);
+    const seen = new Set(out.seen);
+    const fresh = (b.seen || []).filter(id => !seen.has(id)).length;
+    // Counts from b are only added in proportion to posts a has not seen;
+    // without per-post detail this is the honest approximation.
+    const share = b.posts ? Math.min(1, fresh / Math.max(1, Math.min(b.posts, (b.seen || []).length || b.posts))) : 0;
+    for (const k of ['posts', 'likes', 'comments', 'views', 'cw', 'bw', 'rt', 'sp', 'reels']) out[k] += Math.round((b[k] || 0) * share);
+    for (const [k, v] of Object.entries(b.locs || {})) out.locs[k] = (out.locs[k] || 0) + Math.round(v * share);
+    out.tagged = [...new Set([...out.tagged, ...(b.tagged || [])])].slice(0, 40);
+    out.venues = [...new Set([...out.venues, ...(b.venues || [])])].slice(0, 25);
+    out.seen = [...new Set([...out.seen, ...(b.seen || [])])].slice(-LEAD_SIG_POSTS);
+    out.captions = [...new Set([...(b.captions || []), ...out.captions])].slice(0, 3);
+    if (b.lastPostAt && (!out.lastPostAt || b.lastPostAt > out.lastPostAt)) out.lastPostAt = b.lastPostAt;
+    out.fullName = out.fullName || b.fullName || null;
+    return out;
+}
+
+const leadFollowerTier = f => (f == null ? null : f < 1000 ? 'starter' : f < 10000 ? 'nano' : f < 100000 ? 'micro' : f < 1000000 ? 'macro' : 'mega');
+const LEAD_TIER_NAME = { starter: 'under 1K', nano: 'nano (1K–10K)', micro: 'micro (10K–100K)', macro: 'macro (100K–1M)', mega: 'mega (1M+)' };
+// What a normal engagement rate looks like at each size: the bar a creator is read against.
+const LEAD_TIER_ER = { starter: 5, nano: 4, micro: 2.5, macro: 1.5, mega: 1 };
+
+/** Average likes + comments per post seen, as a share of followers. Null when either is unknown. */
+function leadEngagement(row, sig) {
+    const f = Number(row.followers_count) || 0;
+    if (!sig || !sig.posts || !f) return null;
+    return +(((sig.likes + sig.comments) / sig.posts) / f * 100).toFixed(2);
+}
+
+/**
+ * Influencer, business, personal or unsure — with the reasons.
+ * Positive points say creator, negative say business. Pure: rows and signals in, a verdict out.
+ */
+function classifyLead(row = {}, sig = null) {
+    const s = sig || leadSignalsEmpty();
+    const R = [];
+    const add = (w, text) => { if (w) R.push({ w, text }); };
+    const handle = String(row.username || '').toLowerCase();
+    const enriched = !!row.is_enriched;
+
+    // --- what the posts say (free, from discovery) -------------------------
+    if (s.sp > 0) add(30, `Posted ${s.sp === 1 ? 'a paid partnership' : `${s.sp} paid partnerships`}`);
+    const venues = (s.venues || []).length;
+    // Being in several businesses' tagged posts is a creator's pattern, but
+    // a regular who eats out tags places too, so on its own it is not enough.
+    if (venues >= 3) add(25, `Tagged ${venues} different businesses`);
+    else if (venues === 2) add(18, 'Tagged 2 different businesses');
+    else if (venues === 1) add(4, `Tagged @${s.venues[0]}`);
+    const locs = Object.values(s.locs || {});
+    const places = locs.length;
+    if (places >= 3) add(18, `Posts from ${places} different places`);
+    else if (s.posts >= 3 && places === 1 && locs[0] / s.posts >= 0.8) add(-22, 'Every post is at the same place (likely the venue itself)');
+    if ((s.tagged || []).length >= 4) add(10, `Tags ${s.tagged.length} other accounts`);
+    if (s.posts) {
+        const cw = s.cw / s.posts, bw = s.bw / s.posts;
+        if (cw >= 0.2) add(Math.round(28 * Math.min(1, cw * 1.5)), `Review-style captions (${Math.round(cw * 100)}% of posts)`);
+        if (bw >= 0.2) add(-Math.round(30 * Math.min(1, bw * 1.5)), `Selling captions: order, delivery, “our menu” (${Math.round(bw * 100)}% of posts)`);
+        if (s.rt > 0) add(10, 'Gives ratings (8/10, ⭐)');
+    }
+    if (LK_BUSINESS_HANDLE.test(handle)) add(-14, 'The handle reads like a business');
+    else if (LK_CREATOR_HANDLE.test(handle)) add(12, 'The handle reads like a creator');
+
+    // --- what the profile says (after enrichment) --------------------------
+    const cat = String(row.category || '');
+    if (cat && LK_CREATOR_CATEGORY.test(cat)) add(40, `Instagram category: ${cat}`);
+    else if (cat && LK_BUSINESS_CATEGORY.test(cat)) add(-45, `Instagram category: ${cat}`);
+    const bio = String(row.bio || '');
+    if (bio) {
+        if (LK_CREATOR_BIO.test(bio)) add(18, 'Bio talks about collabs or reviews');
+        if (LK_BUSINESS_BIO.test(bio)) add(-20, 'Bio sells: orders, delivery, branches');
+    }
+    const site = String(row.website || '');
+    if (site && LK_SHOP_SITE.test(site)) add(-15, 'Links to a menu, shop or delivery page');
+    else if (site && LK_CREATOR_SITE.test(site)) add(8, 'Links to a creator page (YouTube, TikTok, link-in-bio)');
+    if (row.address) add(-25, 'Has a business address');
+    const name = String(row.full_name || s.fullName || '');
+    if (name && LK_BUSINESS_HANDLE.test(name)) add(-10, 'The name reads like a business');
+    else if (/^[A-Z][a-z]+(\s[A-Z][a-z]+){1,2}$/.test(name.trim())) add(6, 'The name reads like a person');
+
+    const score = Math.max(-100, Math.min(100, R.reduce((a, r) => a + r.w, 0)));
+    const followers = row.followers_count == null ? null : Number(row.followers_count);
+    let kind = score >= LEAD_KIND_EDGE ? 'influencer' : score <= -LEAD_KIND_EDGE ? 'business' : 'unsure';
+    // An ordinary account: checked, small, and nothing says creator or shop.
+    if (kind === 'unsure' && enriched && followers != null && followers < 1000) {
+        kind = 'personal';
+        R.push({ w: 0, text: 'Under 1,000 followers and nothing marks it as a creator or a business' });
+    }
+    if (!R.length) R.push({ w: 0, text: enriched ? 'Nothing on the profile says either way' : 'Not enough to go on yet: fill in its details' });
+    const reasons = R.slice().sort((a, b) => Math.abs(b.w) - Math.abs(a.w)).slice(0, 5);
+    return { kind, score, stage: enriched ? 'profile' : 'discovery', reasons };
+}
+
+/**
+ * How good a lead of its kind is, 0–100, with the reasons. Influencers are
+ * read on reach that is real (engagement for their size), evidence (how many
+ * methods found them, how many businesses they have tagged) and whether they
+ * can be reached. Businesses on whether they can be reached, are active, and
+ * would plausibly need an agency.
+ */
+function leadFit(row = {}, sig = null, kind = 'unsure', methods = []) {
+    const s = sig || leadSignalsEmpty();
+    const R = [];
+    const add = (w, text) => R.push({ w, text });
+    const f = row.followers_count == null ? null : Number(row.followers_count);
+    const tier = leadFollowerTier(f);
+    const er = leadEngagement(row, s);
+    const reach = !!(row.email || row.phone || row.whatsapp);
+    const nMethods = new Set(methods || []).size;
+    const days = s.lastPostAt ? (Date.now() - new Date(s.lastPostAt).getTime()) / 86400000 : null;
+    let score = 0;
+
+    if (kind === 'influencer') {
+        if (tier) {
+            const t = { starter: 0, nano: 20, micro: 22, macro: 15, mega: 8 }[tier];
+            score += t; if (t) add(t, `${LEAD_TIER_NAME[tier]} followers`); else add(0, 'Under 1,000 followers');
+        }
+        if (er != null && tier) {
+            const ratio = er / LEAD_TIER_ER[tier];
+            if (ratio >= 1) { score += 25; add(25, `Engagement ${er}%, strong for their size`); }
+            else if (ratio >= 0.5) { score += 12; add(12, `Engagement ${er}%, normal for their size`); }
+            else if (ratio < 0.3 && f >= 10000) { score -= 10; add(-10, `Engagement ${er}% is low for ${f.toLocaleString('en-US')} followers: check for bought followers`); }
+        }
+        if (nMethods >= 3) { score += 15; add(15, `Found by ${nMethods} methods`); }
+        else if (nMethods === 2) { score += 8; add(8, 'Found by 2 methods'); }
+        if ((s.venues || []).length >= 2) { score += 10; add(10, `Has tagged ${s.venues.length} businesses`); }
+        if (s.sp > 0) { score += 5; add(5, 'Already does brand work'); }
+    } else if (kind === 'business') {
+        if (f != null && f >= 300 && f <= 50000) { score += 15; add(15, `${f.toLocaleString('en-US')} followers: a size that hires help`); }
+        else if (f != null && f > 200000) { score -= 10; add(-10, 'A large brand, less likely to need an agency'); }
+        if (er != null && tier && tier !== 'starter' && er / LEAD_TIER_ER[tier] < 0.5) { score += 12; add(12, `Engagement ${er}% is weak: room to help`); }
+        if (row.is_enriched && !row.website) { score += 8; add(8, 'No website'); }
+        if (nMethods >= 2) { score += 10; add(10, `Found by ${nMethods} methods`); }
+    }
+    if (kind === 'influencer' || kind === 'business') {
+        const w = kind === 'business' ? 25 : 10;
+        if (reach) { score += w; add(w, 'Has a contact'); } else if (row.is_enriched) add(0, 'No contact found');
+        if (days != null && days <= 30) { score += (kind === 'business' ? 15 : 10); add(kind === 'business' ? 15 : 10, 'Posted in the last 30 days'); }
+        else if (days != null && days > 90) { score -= 10; add(-10, 'No post seen in 3 months'); }
+    }
+    if (!row.is_enriched && (kind === 'influencer' || kind === 'business')) add(0, 'Fill in its details for a full score');
+    return { score: Math.max(0, Math.min(100, Math.round(score))), tier, engagement: er, reasons: R.filter(r => r.text).slice(0, 6) };
+}
+
+/** The columns a lead carries after being read. */
+function leadAssessment(row, sig, methods) {
+    const c = classifyLead(row, sig);
+    const kind = row.kind_label || c.kind;
+    const fit = leadFit(row, sig, kind, methods);
+    return {
+        lead_kind: c.kind, kind_score: c.score, kind_stage: c.stage, kind_reasons: c.reasons,
+        fit_score: fit.score, fit_reasons: fit.reasons, classified_at: new Date().toISOString()
+    };
+}
+
+// The phase-40 columns exist only once sql/schema-phase40.sql has run. Until
+// then a lead is saved exactly as before, so a server deployed ahead of its
+// SQL keeps finding leads instead of failing every insert.
+const _lead40 = { ok: null, t: 0 };
+async function leadsPhase40() {
+    if (_lead40.ok === true) return true;
+    if (_lead40.ok === false && Date.now() - _lead40.t < 300000) return false;
+    try {
+        const { error } = await supabase.from('leads').select('lead_kind').limit(1);
+        _lead40.ok = !error;
+    } catch { _lead40.ok = false; }
+    _lead40.t = Date.now();
+    return _lead40.ok;
+}
+
+// ===========================================================================
 // STAGE 1 :: DISCOVERY PIPELINE  (checkpointed job)
 //
 // This ran Apify inside the HTTP request until phase 6. A long run hit the
@@ -6396,8 +6689,12 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     const filedLocation = String(location || '').split(',').map(x => x.trim())
         .filter(x => x && !/instagram\.com/i.test(x))[0] || null;
 
-    // Shape one raw Apify item into the row the save phase writes.
-    const shape = (i) => {
+    // Shape one raw Apify item into the row the save phase writes. (phase 40)
+    // Each row also carries what its post says about who posted it — read
+    // from data already paid for, so sorting influencers from businesses
+    // costs nothing extra.
+    const onlyVenue = competitor_handles.length === 1 ? String(competitor_handles[0]).replace('@', '').trim().toLowerCase() : null;
+    const shape = (i, method) => {
         const handle = i.ownerUsername || i.owner?.username || i.username || i.user?.username;
         if (!handle) return null;
         return {
@@ -6406,17 +6703,18 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
             post_likes: i.likesCount || 0,
             post_comments: i.commentsCount || 0,
             post_timestamp: tsOf(i)?.toISOString() || new Date().toISOString(),
-            post_url: i.url || `https://instagram.com/p/${shortcodeOf(i)}`
+            post_url: i.url || `https://instagram.com/p/${shortcodeOf(i)}`,
+            sig: method ? leadPostSignal(i, method, method === 'm4' ? (leadTaggedSource(i) || onlyVenue) : null) : undefined
         };
     };
 
-    const collect = (items, filterKeywords) => {
+    const collect = (items, filterKeywords, method) => {
         const lower = (filterKeywords || []).map(k => String(k).toLowerCase().trim()).filter(Boolean);
         const out = [];
         (items || []).forEach(i => {
             const caption = String(i.caption || i.text || '').toLowerCase();
             if (lower.length && !lower.some(kw => caption.includes(kw))) return;
-            const row = shape(i);
+            const row = shape(i, method);
             if (row) out.push(row);
         });
         return out;
@@ -6475,7 +6773,7 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
                     const items = await runActor('apify/instagram-scraper',
                         { directUrls: [...new Set(directUrls)], resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
                         warnings, 'Method 1 (Locations)', client, { jobId });
-                    rows = collect(items, method1_keywords);
+                    rows = collect(items, method1_keywords, 'm1');
                 }
 
             } else if (u.kind === 'hashtags') {
@@ -6484,13 +6782,13 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
                 const items = await runActor('apify/instagram-scraper',
                     { directUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
                     warnings, 'Method 3 (Hashtags)', client, { jobId });
-                rows = collect(items);
+                rows = collect(items, null, 'm3');
 
             } else if (u.kind === 'phrase') {
                 const items = await runActor('apify/instagram-api-scraper',
                     { query: u.kw, limit: LEADGEN_RESULTS_LIMIT },
                     warnings, `Method 3.1 (${u.kw})`, client, { jobId });
-                rows = collect(items);
+                rows = collect(items, null, 'm3_1');
 
             } else if (u.kind === 'tagged') {
                 const taggedUrls = competitor_handles.map(h => String(h).replace('@', '').trim()).filter(Boolean)
@@ -6498,7 +6796,7 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
                 const items = await runActor('apify/instagram-scraper',
                     { directUrls: taggedUrls, resultsLimit: LEADGEN_RESULTS_LIMIT, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
                     warnings, 'Method 4 (Competitor Tagged)', client, { jobId });
-                rows = collect(items);
+                rows = collect(items, null, 'm4');
 
             } else if (u.kind === 'accounts') {
                 const { items } = await callActor(client, 'apify/instagram-search-scraper',
@@ -6511,7 +6809,8 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
                         username: String(handle).toLowerCase().trim().replace('@', ''),
                         post_views: 0, post_likes: 0, post_comments: 0,
                         post_timestamp: new Date().toISOString(),
-                        post_url: `https://instagram.com/${handle}`
+                        post_url: `https://instagram.com/${handle}`,
+                        sig: { id: null, m: 'm6', fn: it.fullName || it.full_name || null }
                     };
                 }).filter(Boolean);
                 warnings.push(`X-RAY (Method 6): ${rows.length} accounts for "${u.kw}".`);
@@ -6536,6 +6835,18 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     // 2000 sequential round trips on a 1000-lead campaign, which was a large
     // part of why this endpoint timed out before Apify was even the problem.
     await progress(75, 'Saving leads');
+
+    // Every post each account turned up in, and which methods found it —
+    // before the list is cut to one row per account. (phase 40)
+    const evidence = new Map();
+    discovered.forEach(p => {
+        const key = String(p?.username || '').trim().toLowerCase();
+        if (!key) return;
+        const e = evidence.get(key) || { posts: [], methods: new Set() };
+        if (p.sig) { e.posts.push(p.sig); if (p.sig.m) e.methods.add(p.sig.m); }
+        evidence.set(key, e);
+    });
+    const p40 = await leadsPhase40();
 
     const uniqueMap = new Map();
     discovered.forEach(p => {
@@ -6571,6 +6882,7 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
         (existing || []).forEach(l => idByUsername.set(l.username, l.id));
     }
 
+    const existedBefore = new Set(idByUsername.keys());
     let missing = posts.filter(p => !idByUsername.has(p.username));
 
     // The allowance is taken here, before the writes, so two campaigns running
@@ -6585,15 +6897,26 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     }
 
     for (let i = 0; i < missing.length; i += CHUNK) {
-        const batch = missing.slice(i, i + CHUNK).map(p => ({
-            owner_user_id: userId,
-            platform: 'instagram',          // explicit: it is part of the conflict key
-            username: p.username,
-            profile_url: `https://instagram.com/${p.username}`,
-            industry: p.industry || null,
-            location: filedLocation,
-            is_enriched: false
-        }));
+        const batch = missing.slice(i, i + CHUNK).map(p => {
+            const row = {
+                owner_user_id: userId,
+                platform: 'instagram',          // explicit: it is part of the conflict key
+                username: p.username,
+                profile_url: `https://instagram.com/${p.username}`,
+                industry: p.industry || null,
+                location: filedLocation,
+                is_enriched: false
+            };
+            if (p40) {
+                const e = evidence.get(p.username) || { posts: [], methods: new Set() };
+                const sig = leadSignalsAdd(null, e.posts);
+                row.signals = sig;
+                row.methods = [...e.methods];
+                if (sig.fullName) row.full_name = sig.fullName;
+                Object.assign(row, leadAssessment(row, sig, row.methods));
+            }
+            return row;
+        });
         // Upsert since phase 16, which added the unique key this conflicts on.
         // The select-then-insert above races: two campaigns both read before
         // either writes, and before that key existed both rows landed.
@@ -6644,6 +6967,28 @@ registerWorker('leadgen_campaign', (userId, input, jobId) => async (progress, ck
     }
 
     await progress(95, `Linked ${linked} lead(s) to the campaign`);
+
+    // Leads this person already had: add this run's evidence and read them
+    // again. A creator found once by a hashtag and now in two businesses'
+    // tagged posts should move up, not stay where the first run left them.
+    if (p40) {
+        const again = posts.filter(p => existedBefore.has(p.username)).map(p => idByUsername.get(p.username)).filter(Boolean);
+        for (let i = 0; i < again.length; i += CHUNK) {
+            const { data: rowsNow } = await supabase.from('leads').select('*').in('id', again.slice(i, i + CHUNK));
+            for (let j = 0; j < (rowsNow || []).length; j += 10) {
+                await Promise.all(rowsNow.slice(j, j + 10).map(async r => {
+                    const e = evidence.get(String(r.username).toLowerCase());
+                    if (!e) return;
+                    const sig = leadSignalsAdd(r.signals, e.posts);
+                    const methods = [...new Set([...(r.methods || []), ...e.methods])];
+                    const patch = { signals: sig, methods, ...leadAssessment({ ...r, full_name: r.full_name || sig.fullName }, sig, methods) };
+                    if (!r.full_name && sig.fullName) patch.full_name = sig.fullName;
+                    const { error } = await supabase.from('leads').update(patch).eq('id', r.id);
+                    if (error) logger.warn('lead_reassess_failed', { leadId: r.id, message: error.message });
+                }));
+            }
+        }
+    }
 
     // The campaign knows which client it was filed under; the leads should
     // too, or "for this client, these are the leads" cannot be answered.
@@ -6774,12 +7119,13 @@ registerWorker('leadgen_enrich', (userId, input, jobId) => async (progress, ck) 
             { waitSecs: 25, estimateUsd: estimate, maxItems: names.length, jobId });
 
         let batchUpdated = 0;
+        const p40 = await leadsPhase40();
         for (const p of (profiles || [])) {
             const username = String(p.username || p.ownerUsername || '').toLowerCase().trim();
             if (!username) continue;
 
             const contacts = extractBioContacts(p);
-            const { error: updErr } = await supabase.from('leads').update({
+            const patch = {
                 full_name: p.fullName || p.full_name || p.name || null,
                 email: contacts.email || p.inputEmail || null,
                 phone: contacts.phone || p.phoneNumber || null,
@@ -6793,12 +7139,28 @@ registerWorker('leadgen_enrich', (userId, input, jobId) => async (progress, ck) 
                 is_business: !!p.isBusinessAccount,
                 is_verified: !!p.verified,
                 city: p.city || p.cityName || null,
-                address: p.addressStreet || null,
+                address: p.addressStreet || (p.businessAddress && (p.businessAddress.street_address || p.businessAddress.streetAddress)) || null,
                 is_enriched: true
+            };
+            // The profile is the stronger evidence: read the lead again with
+            // it. (phase 40) The recent posts the scraper returns alongside
+            // the profile are evidence too, at no extra cost.
+            if (p40) {
+                const { data: cur } = await supabase.from('leads').select('*')
+                    .eq('username', username).eq('owner_user_id', userId).eq('platform', 'instagram').maybeSingle();
+                if (cur) {
+                    const recent = (Array.isArray(p.latestPosts) ? p.latestPosts : []).slice(0, 12)
+                        .map(x => leadPostSignal({ ownerUsername: username, ...x }, 'profile'));
+                    const sig = leadSignalsAdd(cur.signals, recent);
+                    patch.signals = sig;
+                    Object.assign(patch, leadAssessment({ ...cur, ...patch }, sig, cur.methods || []));
+                }
+            }
             // Scoped to instagram since phase 16: a Facebook page can share a
             // handle with an Instagram account, and enrichment from the IG
             // profile scraper must not overwrite the Facebook lead.
-            }).eq('username', username).eq('owner_user_id', userId).eq('platform', 'instagram');
+            const { error: updErr } = await supabase.from('leads').update(patch)
+                .eq('username', username).eq('owner_user_id', userId).eq('platform', 'instagram');
 
             if (!updErr) batchUpdated++;
         }
@@ -7044,6 +7406,15 @@ function leadFilters(q, scope, userId) {
     if (industry) s = s.or(`industry.ilike.%${industry}%,category.ilike.%${industry}%`);
     const where = clean(q.location || q.city);
     if (where) s = s.or(`location.ilike.%${where}%,city.ilike.%${where}%`);
+    // Which list (phase 40): influencers, businesses, personal accounts, or
+    // the ones still unsure. kind_now is the person's label first, then the
+    // rules; leads from before phase 40 read as unsure until sorted.
+    const kind = String(q.kind || '').toLowerCase();
+    if (LEAD_KINDS.includes(kind)) s = s.eq('kind_now', kind);
+    else if (kind === 'check') s = s.in('kind_now', ['unsure', 'personal']);
+    const minFit = parseInt(q.min_fit, 10);
+    if (Number.isFinite(minFit)) s = s.gte('fit_score', minFit);
+    if (String(q.method || '') && LEAD_METHOD_NAMES[String(q.method)]) s = s.contains('methods', [String(q.method)]);
     const finder = String(q.found_by || '');
     if (scope.kind !== 'mine' && UUID_RE.test(finder)) s = s.eq('owner_user_id', finder);
     const text = clean(q.q);
@@ -7057,7 +7428,8 @@ const LEAD_SORTS = {
     oldest:    { col: 'created_at',      asc: true  },
     followers: { col: 'followers_count', asc: false },
     smallest:  { col: 'followers_count', asc: true  },
-    username:  { col: 'username',        asc: true  }
+    username:  { col: 'username',        asc: true  },
+    fit:       { col: 'fit_score',       asc: false }
 };
 
 /**
@@ -7084,7 +7456,8 @@ app.get('/api/leads', async (req, res) => {
 
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
         const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-        const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+        let sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+        if (sort === LEAD_SORTS.fit && !(await leadsPhase40())) sort = LEAD_SORTS.newest;
 
         const scope = await leadScope(req, ctx);
         if (scope.kind === 'client') {
@@ -7100,7 +7473,7 @@ app.get('/api/leads', async (req, res) => {
             if (error) throw error;
             const rows = dedupeLeads(data);
             return res.json({
-                leads: await withFinders(rows.slice((page - 1) * limit, page * limit)),
+                leads: await withPipeline(await withFinders(rows.slice((page - 1) * limit, page * limit)), scope.client.id),
                 page, limit, total: rows.length,
                 pages: Math.max(1, Math.ceil(rows.length / limit)),
                 scope: 'client', client
@@ -7113,7 +7486,7 @@ app.get('/api/leads', async (req, res) => {
         if (error) throw error;
 
         res.json({
-            leads: await withFinders(data || []),
+            leads: await withPipeline(await withFinders(data || []), null),
             page, limit,
             total: count || 0,
             pages: Math.max(1, Math.ceil((count || 0) / limit)),
@@ -7161,6 +7534,7 @@ app.get('/api/leads/summary', async (req, res) => {
                 enriched: rows.filter(r => r.is_enriched).length,
                 withEmail: has('email'), withPhone: has('phone'),
                 reachable: rows.filter(r => r.email || r.phone || r.whatsapp).length,
+                byKind: Object.fromEntries(LEAD_KINDS.map(k => [k, rows.filter(r => (r.kind_label || r.lead_kind || 'unsure') === k).length])),
                 ...facets(rows),
                 sampledFrom: rows.length,
                 scope: 'client',
@@ -7174,15 +7548,19 @@ app.get('/api/leads/summary', async (req, res) => {
             : supabase.from('leads').select('id', { count: 'exact', head: true }).eq('owner_user_id', U);
         const countOf = fn => fn(base());
 
-        const [all, ig, fb, enriched, withEmail, withPhone, reachable] = await Promise.all([
+        const [all, ig, fb, enriched, withEmail, withPhone, reachable, ...kindCounts] = await Promise.all([
             countOf(q => q),
             countOf(q => q.eq('platform', 'instagram')),
             countOf(q => q.eq('platform', 'facebook')),
             countOf(q => q.eq('is_enriched', true)),
             countOf(q => q.not('email', 'is', null)),
             countOf(q => q.not('phone', 'is', null)),
-            countOf(q => q.or('email.not.is.null,phone.not.is.null,whatsapp.not.is.null'))
+            countOf(q => q.or('email.not.is.null,phone.not.is.null,whatsapp.not.is.null')),
+            ...LEAD_KINDS.map(k => countOf(q => q.eq('kind_now', k)))
         ]);
+        const byKind = (await leadsPhase40())
+            ? Object.fromEntries(LEAD_KINDS.map((k, i) => [k, (kindCounts[i] && kindCounts[i].count) || 0]))
+            : null;
 
         const sampleQ = scope.kind === 'agency'
             ? supabase.from('leads_master').select('industry, category, location, city, owner_user_id')
@@ -7196,6 +7574,7 @@ app.get('/api/leads/summary', async (req, res) => {
             withEmail: withEmail.count || 0,
             withPhone: withPhone.count || 0,
             reachable: reachable.count || 0,
+            byKind,
             ...facets(sample || []),
             sampledFrom: (sample || []).length,
             scope: scope.kind,
@@ -7209,7 +7588,8 @@ app.get(['/api/leads/export', '/api/leads/export.csv'], async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
         const cap = Math.min(Math.max(parseInt(req.query.limit, 10) || 5000, 1), 20000);
-        const sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+        let sort = LEAD_SORTS[String(req.query.sort || 'newest')] || LEAD_SORTS.newest;
+        if (sort === LEAD_SORTS.fit && !(await leadsPhase40())) sort = LEAD_SORTS.newest;
 
         const scope = await leadScope(req, ctx);
         let data;
@@ -7233,7 +7613,7 @@ app.get(['/api/leads/export', '/api/leads/export.csv'], async (req, res) => {
             found_by: r.found_by?.email || r.found_by?.name || ''
         }));
 
-        const cols = ['platform', 'username', 'full_name', 'industry', 'location',
+        const cols = ['platform', 'username', 'full_name', 'kind_now', 'fit_score', 'industry', 'location',
             'email', 'phone', 'whatsapp', 'website',
             'followers_count', 'following_count', 'posts_count', 'engagement_rate',
             'category', 'city', 'address', 'is_business', 'is_verified', 'is_enriched',
@@ -7254,6 +7634,492 @@ app.delete('/api/campaign/:id', async (req, res) => {
         if (error) throw error;
         res.status(200).json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===========================================================================
+// PHASE 40 :: THE PIPELINE, AND CORRECTING A LEAD
+//
+// A lead that has been found is where the work starts. One pipeline row is
+// one lead worked for one client brand (an influencer for a brand's campaign)
+// or for the agency itself (a business it is pitching). Stages differ by
+// kind. Every move writes a line in the row's history, so "who talked to
+// them last and what did they say" has one answer.
+// ===========================================================================
+
+const PIPE_STAGES = {
+    influencer: [['found', 'Found'], ['contacted', 'Contacted'], ['rates', 'Rates asked'], ['agreed', 'Agreed'], ['live', 'Content live'], ['paid', 'Paid'], ['dropped', 'Dropped']],
+    business:   [['new', 'New'], ['contacted', 'Contacted'], ['replied', 'Replied'], ['meeting', 'Meeting'], ['won', 'Won'], ['lost', 'Lost']]
+};
+const PIPE_CLOSED = new Set(['paid', 'dropped', 'won', 'lost']);
+const pipeStageName = (kind, st) => ((PIPE_STAGES[kind] || []).find(x => x[0] === st) || [st, st])[1];
+const PIPE_NIL = '00000000-0000-0000-0000-000000000000';
+
+async function pipelineReady() {
+    const { error } = await supabase.from('lead_pipeline').select('id').limit(1);
+    return !error;
+}
+function pipelineMissing(res) {
+    return res.status(503).json({ error: 'The lead pipeline needs the phase-40 database update. Run sql/schema-phase40.sql in the Supabase SQL editor.', code: 'migration_required' });
+}
+
+/** The clients this person may see: every one for an admin, else owned and member-of. */
+async function visibleClientIds(ctx) {
+    if (ctx.profile?.role === 'admin') return null;           // null = all
+    const [{ data: owned }, { data: mem }] = await Promise.all([
+        supabase.from('clients').select('id').eq('owner_user_id', ctx.user.id),
+        supabase.from('client_members').select('client_id').eq('user_id', ctx.user.id)
+    ]);
+    return new Set([...(owned || []).map(c => c.id), ...(mem || []).map(m => m.client_id)]);
+}
+
+/**
+ * The pipeline rows for a page of leads, by handle. In a client's list only
+ * that client's row; in the agency list every row, so "already being worked
+ * for Sakura by Rafi" shows before someone else starts the same conversation.
+ */
+async function withPipeline(rows, clientId) {
+    const list = rows || [];
+    if (!list.length || !(await leadsPhase40())) return list;
+    const names = [...new Set(list.map(r => String(r.username || '')).filter(Boolean))];
+    let q = supabase.from('lead_pipeline').select('id, platform, username, client_id, kind, stage, assigned_to, follow_up_on').in('username', names);
+    if (clientId) q = q.eq('client_id', clientId);
+    const { data, error } = await q;
+    if (error || !data || !data.length) return list;
+    const clientIds = [...new Set(data.map(p => p.client_id).filter(Boolean))];
+    const people = [...new Set(data.map(p => p.assigned_to).filter(Boolean))];
+    const [{ data: cs }, { data: us }] = await Promise.all([
+        clientIds.length ? supabase.from('clients').select('id, name, brand').in('id', clientIds) : { data: [] },
+        people.length ? supabase.from('app_users').select('id, email, full_name').in('id', people) : { data: [] }
+    ]);
+    const cName = id => { const c = (cs || []).find(x => x.id === id); return c ? (c.brand || c.name) : null; };
+    const uName = id => { const u = (us || []).find(x => x.id === id); return u ? (u.full_name || String(u.email || '').split('@')[0]) : null; };
+    return list.map(r => ({
+        ...r,
+        pipeline: data.filter(p => p.platform === (r.platform || 'instagram') && String(p.username).toLowerCase() === String(r.username || '').toLowerCase())
+            .map(p => ({ id: p.id, clientId: p.client_id, client: cName(p.client_id), kind: p.kind, stage: p.stage, stageName: pipeStageName(p.kind, p.stage), assignedTo: p.assigned_to, assignee: uName(p.assigned_to), followUpOn: p.follow_up_on }))
+    }));
+}
+
+/** One lead, as the detail drawer shows it. */
+function leadDetailView(r) {
+    const sig = r.signals || {};
+    const places = Object.keys(sig.locs || {}).length;
+    return {
+        id: r.id, platform: r.platform || 'instagram', username: r.username, fullName: r.full_name || null,
+        profileUrl: r.profile_url || null, kind: r.kind_label || r.lead_kind || 'unsure', machineKind: r.lead_kind || null,
+        labeled: !!r.kind_label, kindScore: r.kind_score ?? null, kindStage: r.kind_stage || null, kindReasons: r.kind_reasons || [],
+        fit: r.fit_score ?? null, fitReasons: r.fit_reasons || [], tier: leadFollowerTier(r.followers_count == null ? null : Number(r.followers_count)),
+        engagement: leadEngagement(r, sig), methods: (r.methods || []).map(m => ({ key: m, name: LEAD_METHOD_NAMES[m] || m })),
+        followers: r.followers_count ?? null, following: r.following_count ?? null, posts: r.posts_count ?? null,
+        category: r.category || null, bio: r.bio || null, website: r.website || null,
+        email: r.email || null, phone: r.phone || null, whatsapp: r.whatsapp || null,
+        industry: r.industry || null, location: r.location || r.city || null, enriched: !!r.is_enriched, verified: !!r.is_verified,
+        evidence: { postsSeen: sig.posts || 0, places, businessesTagged: sig.venues || [], paidPartnerships: sig.sp || 0, lastPostAt: sig.lastPostAt || null, captions: sig.captions || [] }
+    };
+}
+
+// Correct a lead's kind. Applied to every copy of the business (one per
+// person who found it), so the lists agree, and kept apart from the rules'
+// verdict so the rules can be measured against people.
+app.patch('/api/leads/:id/kind', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await leadsPhase40())) return pipelineMissing(res);
+        const kind = req.body?.kind === null || req.body?.kind === '' ? null : String(req.body?.kind || '');
+        if (kind !== null && !['influencer', 'business', 'personal'].includes(kind)) return res.status(400).json({ error: 'Kind must be influencer, business or personal.' });
+        if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Lead not found.' });
+        const { data: lead } = await supabase.from('leads').select('*').eq('id', req.params.id).maybeSingle();
+        if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+        const { data: copies } = await supabase.from('leads').select('*').eq('platform', lead.platform || 'instagram').eq('username', lead.username);
+        for (const r of (copies || [lead])) {
+            const fit = leadFit(r, r.signals, kind || r.lead_kind || 'unsure', r.methods || []);
+            await supabase.from('leads').update({
+                kind_label: kind, labeled_by: kind ? ctx.user.id : null, labeled_at: kind ? new Date().toISOString() : null,
+                fit_score: fit.score, fit_reasons: fit.reasons
+            }).eq('id', r.id);
+        }
+        const { data: now } = await supabase.from('leads').select('*').eq('id', lead.id).maybeSingle();
+        res.json({ lead: leadDetailView(now || lead), copies: (copies || []).length });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/leads/:id/detail', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Lead not found.' });
+        const { data: lead } = await supabase.from('leads').select('*').eq('id', req.params.id).maybeSingle();
+        if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+        const [withP] = await withPipeline([lead], null);
+        const visible = await visibleClientIds(ctx);
+        const pipeline = (withP.pipeline || []).filter(p => !p.clientId || !visible || visible.has(p.clientId));
+        res.json({ lead: leadDetailView(lead), pipeline, stages: PIPE_STAGES });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** How often the rules agree with the people who corrected them. */
+app.get('/api/leads/accuracy', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await leadsPhase40())) return pipelineMissing(res);
+        const { data } = await supabase.from('leads').select('lead_kind, kind_label').not('kind_label', 'is', null).limit(5000);
+        const rows = data || [];
+        const grid = {};
+        let agree = 0, unsure = 0;
+        for (const r of rows) {
+            const m = r.lead_kind || 'unsure';
+            grid[r.kind_label] = grid[r.kind_label] || {};
+            grid[r.kind_label][m] = (grid[r.kind_label][m] || 0) + 1;
+            if (m === r.kind_label) agree++;
+            if (m === 'unsure') unsure++;
+        }
+        res.json({
+            labeled: rows.length, agree, unsure, wrong: rows.length - agree - unsure,
+            agreement: rows.length ? Math.round(agree / rows.length * 100) : null,
+            grid,
+            note: rows.length < 50 ? 'Mark at least 50 leads (the “Is this right?” buttons) for this number to mean much.' : null
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+// Sort every lead again: after the rules change, or for leads collected
+// before phase 40. A job, like all work, and free: no Apify, no model.
+registerWorker('leads_reclassify', (userId, input) => async (progress) => {
+    let from = 0, done = 0;
+    const PAGE = 500;
+    for (;;) {
+        const { data } = await supabase.from('leads').select('*').order('created_at', { ascending: true }).range(from, from + PAGE - 1);
+        const rows = data || [];
+        if (!rows.length) break;
+        for (let i = 0; i < rows.length; i += 20) {
+            await Promise.all(rows.slice(i, i + 20).map(async r => {
+                const methods = r.methods && r.methods.length ? r.methods : (r.platform === 'facebook' ? ['fb'] : []);
+                const patch = r.platform === 'facebook'
+                    ? { methods, lead_kind: 'business', kind_score: -60, kind_stage: 'profile', kind_reasons: [{ w: -60, text: 'A Facebook business Page' }],
+                        ...(() => { const f = leadFit(r, r.signals, r.kind_label || 'business', methods); return { fit_score: f.score, fit_reasons: f.reasons, classified_at: new Date().toISOString() }; })() }
+                    : { methods, ...leadAssessment(r, r.signals, methods) };
+                await supabase.from('leads').update(patch).eq('id', r.id);
+            }));
+        }
+        done += rows.length; from += PAGE;
+        await progress(Math.min(95, 5 + Math.round(done / (done + PAGE) * 90)), `Sorted ${done.toLocaleString('en-US')} leads`);
+        if (rows.length < PAGE) break;
+    }
+    return { sorted: done };
+});
+
+app.post('/api/leads/reclassify', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (ctx.profile?.role !== 'admin') return res.status(403).json({ error: 'Only an admin can re-sort the whole list.' });
+        if (!(await leadsPhase40())) return pipelineMissing(res);
+        await assertJobSlot(ctx.user.id);
+        const job = await createJob(ctx.user.id, 'leads_reclassify', 'leadgen', {}, 0);
+        runJob(job.id, JOB_WORKERS['leads_reclassify'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id });
+    } catch (err) { sendErr(res, err); }
+});
+
+// --- the pipeline -------------------------------------------------------------
+
+async function pipeRowFor(ctx, id, need = 'viewer') {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data: p } = await supabase.from('lead_pipeline').select('*').eq('id', id).maybeSingle();
+    if (!p) return null;
+    if (p.client_id && !(await clientAccess(ctx.user.id, p.client_id, need))) return null;
+    return p;
+}
+
+async function pipeNote(pipelineId, authorId, body, auto = false) {
+    const text = String(body || '').trim().slice(0, 2000);
+    if (!text) return null;
+    const { data } = await supabase.from('lead_notes').insert([{ pipeline_id: pipelineId, author_id: authorId, body: text, auto }]).select().maybeSingle();
+    return data;
+}
+
+/** The pipeline row, with the lead it is about and the names people read. */
+async function pipeViews(rows) {
+    const list = rows || [];
+    if (!list.length) return [];
+    const names = [...new Set(list.map(p => p.username))];
+    const [{ data: leads }, { data: cs }, { data: us }, { data: notes }] = await Promise.all([
+        supabase.from('leads_master').select('*').in('username', names),
+        supabase.from('clients').select('id, name, brand').in('id', [...new Set(list.map(p => p.client_id).filter(Boolean))]),
+        supabase.from('app_users').select('id, email, full_name').in('id', [...new Set(list.map(p => p.assigned_to).filter(Boolean))]),
+        supabase.from('lead_notes').select('pipeline_id, body, auto, created_at').in('pipeline_id', list.map(p => p.id)).order('created_at', { ascending: false })
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    return list.map(p => {
+        const l = (leads || []).find(x => (x.platform || 'instagram') === p.platform && String(x.username).toLowerCase() === String(p.username).toLowerCase()) || null;
+        const c = (cs || []).find(x => x.id === p.client_id);
+        const u = (us || []).find(x => x.id === p.assigned_to);
+        const last = (notes || []).find(n => n.pipeline_id === p.id && !n.auto) || (notes || []).find(n => n.pipeline_id === p.id) || null;
+        return {
+            id: p.id, platform: p.platform, username: p.username, kind: p.kind, stage: p.stage, stageName: pipeStageName(p.kind, p.stage),
+            closed: PIPE_CLOSED.has(p.stage),
+            clientId: p.client_id || null, client: c ? (c.brand || c.name) : null,
+            assignedTo: p.assigned_to || null, assignee: u ? (u.full_name || String(u.email || '').split('@')[0]) : null,
+            followUpOn: p.follow_up_on || null,
+            due: p.follow_up_on && !PIPE_CLOSED.has(p.stage) ? (p.follow_up_on < today ? 'overdue' : p.follow_up_on === today ? 'today' : null) : null,
+            rate: p.rate || null, lostReason: p.lost_reason || null, stageAt: p.stage_at || p.created_at, updatedAt: p.updated_at || p.created_at,
+            lastNote: last ? { body: last.body, auto: !!last.auto, at: last.created_at } : null,
+            lead: l ? {
+                id: l.id, fullName: l.full_name || null, followers: l.followers_count ?? null, fit: l.fit_score ?? null,
+                email: l.email || null, phone: l.phone || null, whatsapp: l.whatsapp || null,
+                profileUrl: l.profile_url || null, why: (l.kind_reasons || [])[0]?.text || null
+            } : null
+        };
+    });
+}
+
+/** Who a lead can be handed to: the agency's active people. */
+app.get('/api/leads/team', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const { data } = await supabase.from('app_users').select('id, email, full_name, role, is_active').neq('role', 'client');
+        res.json({ people: (data || []).filter(u => u.is_active !== false)
+            .map(u => ({ id: u.id, name: u.full_name || String(u.email || '').split('@')[0], me: u.id === ctx.user.id }))
+            .sort((a, b) => (b.me - a.me) || a.name.localeCompare(b.name)) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/leads/pipeline', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        let q = supabase.from('lead_pipeline').select('*');
+        const kind = String(req.query.kind || '');
+        if (PIPE_STAGES[kind]) q = q.eq('kind', kind);
+        const cid = String(req.query.client_id || req.query.clientId || '');
+        if (cid === 'agency') q = q.is('client_id', null);
+        else if (UUID_RE.test(cid)) {
+            if (!(await clientAccess(ctx.user.id, cid, 'viewer'))) return res.status(404).json({ error: 'Client not found.' });
+            q = q.eq('client_id', cid);
+        }
+        const who = String(req.query.assigned || '');
+        if (who === 'me') q = q.eq('assigned_to', ctx.user.id);
+        else if (UUID_RE.test(who)) q = q.eq('assigned_to', who);
+        const { data, error } = await q.order('updated_at', { ascending: false }).limit(1000);
+        if (error) throw error;
+        const visible = await visibleClientIds(ctx);
+        let rows = await pipeViews((data || []).filter(p => !p.client_id || !visible || visible.has(p.client_id)));
+        const due = String(req.query.due || '');
+        if (due === 'now') rows = rows.filter(r => r.due);
+        if (String(req.query.open || '') === '1') rows = rows.filter(r => !r.closed);
+        res.json({ rows, stages: PIPE_STAGES, dueNow: rows.filter(r => r.due && r.assignedTo === ctx.user.id).length });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Put leads in the pipeline, for a client brand or for the agency. One lead
+ * or many (the list's checkboxes). A lead already being worked for the same
+ * brand is not duplicated: the answer says who has it.
+ */
+app.post('/api/leads/pipeline', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const b = req.body || {};
+        const ids = [...new Set([].concat(b.leadIds || [], b.leadId || []).map(String).filter(id => UUID_RE.test(id)))].slice(0, 100);
+        if (!ids.length) return res.status(400).json({ error: 'Choose at least one lead.' });
+        let clientId = null;
+        if (b.clientId) {
+            const c = await clientAccess(ctx.user.id, String(b.clientId), 'editor');
+            if (!c) return res.status(403).json({ error: 'You need edit access to that client to add leads for it.' });
+            clientId = c.id;
+        }
+        const assignedTo = b.assignedTo === null ? null : (UUID_RE.test(String(b.assignedTo || '')) ? String(b.assignedTo) : ctx.user.id);
+        const followUpOn = /^\d{4}-\d{2}-\d{2}$/.test(String(b.followUpOn || '')) ? b.followUpOn : null;
+        const { data: leads } = await supabase.from('leads').select('*').in('id', ids);
+        const added = [], already = [], skipped = [];
+        for (const l of (leads || [])) {
+            const kind = ['influencer', 'business'].includes(b.kind) ? b.kind : (l.kind_label || l.lead_kind);
+            if (!['influencer', 'business'].includes(kind)) { skipped.push({ username: l.username, why: 'Mark it as an influencer or a business first.' }); continue; }
+            const username = String(l.username), platform = l.platform || 'instagram';
+            let ex = supabase.from('lead_pipeline').select('*').eq('platform', platform).eq('username', username);
+            ex = clientId ? ex.eq('client_id', clientId) : ex.is('client_id', null);
+            const { data: existing } = await ex.maybeSingle();
+            if (existing) { already.push(existing); continue; }
+            const stage = (PIPE_STAGES[kind].find(s => s[0] === b.stage) || PIPE_STAGES[kind][0])[0];
+            const { data: row, error } = await supabase.from('lead_pipeline').insert([{
+                platform, username, client_id: clientId, kind, stage, assigned_to: assignedTo, follow_up_on: followUpOn,
+                created_by: ctx.user.id, updated_by: ctx.user.id
+            }]).select().maybeSingle();
+            if (error) { skipped.push({ username, why: error.message }); continue; }
+            await pipeNote(row.id, ctx.user.id, `Added${clientId ? '' : ' as the agency’s own prospect'} at ${pipeStageName(kind, stage)}.`, true);
+            if (b.note) await pipeNote(row.id, ctx.user.id, b.note);
+            added.push(row);
+            // Assigning an influencer to a brand files the lead under it too.
+            if (clientId) {
+                const { data: copies } = await supabase.from('leads').select('id').eq('platform', platform).eq('username', username);
+                await linkLeadsToClient(clientId, (copies || []).map(x => x.id), 'pipeline', null);
+            }
+        }
+        res.status(added.length ? 201 : 200).json({
+            added: await pipeViews(added), already: await pipeViews(already), skipped
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.get('/api/leads/pipeline/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'viewer');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        const [view] = await pipeViews([p]);
+        const { data: notes } = await supabase.from('lead_notes').select('*').eq('pipeline_id', p.id).order('created_at', { ascending: false }).limit(200);
+        const authors = [...new Set((notes || []).map(n => n.author_id).filter(Boolean))];
+        const { data: us } = authors.length ? await supabase.from('app_users').select('id, email, full_name').in('id', authors) : { data: [] };
+        const nm = id => { const u = (us || []).find(x => x.id === id); return u ? (u.full_name || String(u.email || '').split('@')[0]) : null; };
+        const { data: lead } = view.lead ? await supabase.from('leads').select('*').eq('id', view.lead.id).maybeSingle() : { data: null };
+        res.json({
+            row: view, lead: lead ? leadDetailView(lead) : null, stages: PIPE_STAGES[p.kind],
+            notes: (notes || []).map(n => ({ id: n.id, body: n.body, auto: !!n.auto, at: n.created_at, author: nm(n.author_id) }))
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/leads/pipeline/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'editor');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        const b = req.body || {};
+        const patch = { updated_at: new Date().toISOString(), updated_by: ctx.user.id };
+        const lines = [];
+        if (b.stage !== undefined) {
+            if (!PIPE_STAGES[p.kind].some(s => s[0] === b.stage)) return res.status(400).json({ error: 'That stage does not exist for this lead.' });
+            if (b.stage !== p.stage) { patch.stage = b.stage; patch.stage_at = patch.updated_at; lines.push(`Moved to ${pipeStageName(p.kind, b.stage)}.`); }
+        }
+        if (b.assignedTo !== undefined) {
+            const to = b.assignedTo === null ? null : (UUID_RE.test(String(b.assignedTo)) ? String(b.assignedTo) : undefined);
+            if (to === undefined) return res.status(400).json({ error: 'Choose someone on the team.' });
+            if (to !== p.assigned_to) {
+                patch.assigned_to = to;
+                const { data: u } = to ? await supabase.from('app_users').select('email, full_name').eq('id', to).maybeSingle() : { data: null };
+                lines.push(to ? `Handed to ${u ? (u.full_name || String(u.email || '').split('@')[0]) : 'someone'}.` : 'Unassigned.');
+            }
+        }
+        if (b.followUpOn !== undefined) {
+            const d = b.followUpOn === null || b.followUpOn === '' ? null : (/^\d{4}-\d{2}-\d{2}$/.test(String(b.followUpOn)) ? b.followUpOn : undefined);
+            if (d === undefined) return res.status(400).json({ error: 'Follow-up must be a date.' });
+            if (d !== p.follow_up_on) { patch.follow_up_on = d; lines.push(d ? `Follow up on ${docDay(d + 'T00:00:00Z')}.` : 'Follow-up cleared.'); }
+        }
+        if (b.rate !== undefined) patch.rate = b.rate ? String(b.rate).slice(0, 120) : null;
+        if (b.lostReason !== undefined) patch.lost_reason = b.lostReason ? String(b.lostReason).slice(0, 300) : null;
+        const { data: row, error } = await supabase.from('lead_pipeline').update(patch).eq('id', p.id).select().maybeSingle();
+        if (error) throw error;
+        if (lines.length) await pipeNote(p.id, ctx.user.id, lines.join(' '), true);
+        if (b.note) await pipeNote(p.id, ctx.user.id, b.note);
+        const [view] = await pipeViews([row || { ...p, ...patch }]);
+        res.json({ row: view });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/leads/pipeline/:id/notes', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'viewer');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        const n = await pipeNote(p.id, ctx.user.id, req.body?.body);
+        if (!n) return res.status(400).json({ error: 'Write something first.' });
+        await supabase.from('lead_pipeline').update({ updated_at: new Date().toISOString(), updated_by: ctx.user.id }).eq('id', p.id);
+        res.status(201).json({ note: { id: n.id, body: n.body, auto: false, at: n.created_at, author: null } });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.delete('/api/leads/pipeline/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'editor');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        await supabase.from('lead_pipeline').delete().eq('id', p.id);
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * A first message, written from what this person actually posts. Staff read
+ * it, change it and send it themselves: nothing is sent from here, because
+ * automated Instagram messages break Meta's rules and get accounts banned.
+ */
+app.post('/api/leads/pipeline/:id/draft', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'viewer');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        if (!geminiAvailable()) return res.status(503).json({ error: 'No Gemini key is set up, so a draft cannot be written.' });
+        const { data: l } = await supabase.from('leads_master').select('*').eq('platform', p.platform).eq('username', p.username).maybeSingle();
+        const { data: c } = p.client_id ? await supabase.from('clients').select('name, brand, niche, location, ig_handle').eq('id', p.client_id).maybeSingle() : { data: null };
+        const sig = (l && l.signals) || {};
+        const facts = {
+            to: { handle: '@' + p.username, name: l?.full_name || null, kind: p.kind, followers: l?.followers_count ?? null, category: l?.category || null,
+                  bio: l?.bio ? String(l.bio).slice(0, 300) : null, recentCaptions: (sig.captions || []).slice(0, 3), businessesTheyTagged: (sig.venues || []).slice(0, 5) },
+            from: c ? { brand: c.brand || c.name, niche: c.niche || null, location: c.location || null, instagram: c.ig_handle ? '@' + c.ig_handle : null } : { brand: 'our agency', offer: 'social media marketing for local businesses' },
+            purpose: p.kind === 'influencer' ? 'invite them to a paid or gifted collaboration with the brand' : 'offer a free look at their Instagram and a short call about growing it',
+            tone: String(req.body?.tone || 'friendly').slice(0, 30)
+        };
+        const prompt =
+`Write the first direct message to send on Instagram. Facts (JSON):
+${JSON.stringify(facts)}
+
+Rules:
+- 3 to 5 short sentences. Plain, warm, specific. No hashtags, no emojis beyond one, no "I hope this finds you well".
+- Mention ONE specific thing from their recent captions or the businesses they tagged, so it is clearly not a mass message. If there is nothing specific, say what you noticed about their account in general terms instead of inventing a post.
+- Say who is writing and why in one sentence. End with one easy question.
+- Never promise a fee, a result or numbers. Never claim you saw something not in the facts.
+- Write in the language the captions are in (English or Bangla).
+Reply with ONLY this JSON: {"message": "..."}`;
+        const r = await geminiCallDetailed(prompt, { temperature: 0.7, maxOutputTokens: 800, tag: 'Gemini lead draft', userId: ctx.user.id });
+        if (!r.ok || !r.data?.message) return res.status(502).json({ error: aiReasonText(r.reason) || 'The draft could not be written. Try again.' });
+        res.json({ message: String(r.data.message).slice(0, 1200) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * A won business becomes a client, carrying the handle across, so the audit
+ * that won it and the work that follows sit in one place.
+ */
+app.post('/api/leads/pipeline/:id/convert', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await pipelineReady())) return pipelineMissing(res);
+        const p = await pipeRowFor(ctx, req.params.id, 'editor');
+        if (!p) return res.status(404).json({ error: 'Not found.' });
+        if (p.kind !== 'business') return res.status(400).json({ error: 'Only a business becomes a client.' });
+        const { data: l } = await supabase.from('leads_master').select('*').eq('platform', p.platform).eq('username', p.username).maybeSingle();
+        const name = oneLine(req.body?.name || l?.full_name || p.username, 120);
+        const row = cleanClientBody({
+            name, ig_handle: p.platform === 'instagram' ? p.username : undefined,
+            fb_page: p.platform === 'facebook' ? (l?.profile_url || p.username) : undefined,
+            niche: l?.industry || l?.category || undefined, location: l?.location || l?.city || undefined
+        });
+        const insert = { owner_user_id: ctx.user.id };
+        for (const [k, v] of Object.entries(row)) if (v !== undefined) insert[k] = v;
+        const { data: client, error } = await supabase.from('clients').insert([insert]).select().maybeSingle();
+        if (error) throw error;
+        await supabase.from('lead_pipeline').update({ stage: 'won', stage_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: ctx.user.id }).eq('id', p.id);
+        await pipeNote(p.id, ctx.user.id, `Won. Became the client “${client.name}”.`, true);
+        const { data: copies } = await supabase.from('leads').select('id').eq('platform', p.platform).eq('username', l?.username || p.username);
+        await linkLeadsToClient(client.id, (copies || []).map(x => x.id), 'won', null);
+        res.status(201).json({ client: { id: client.id, name: client.name } });
+    } catch (err) { sendErr(res, err); }
 });
 
 // ===========================================================================
@@ -11052,6 +11918,18 @@ registerWorker('fb_lead_discovery', (userId, input, jobId) => async (progress, c
     await progress(92, `Saving ${rows.length} business(es)`);
     let saved = 0;
 
+    // A Facebook Page found by a business search is a business: filed as one
+    // on the Businesses list, scored the same way. (phase 40)
+    if (await leadsPhase40()) {
+        for (const r of rows) {
+            r.methods = ['fb'];
+            const a = leadAssessment(r, null, r.methods);
+            Object.assign(r, a, { lead_kind: 'business', kind_score: -60, kind_stage: 'profile',
+                kind_reasons: [{ w: -60, text: 'A Facebook business Page' }],
+                ...(() => { const f = leadFit(r, null, 'business', r.methods); return { fit_score: f.score, fit_reasons: f.reasons }; })() });
+        }
+    }
+
     for (let i = 0; i < rows.length; i += 100) {
         const slice = rows.slice(i, i + 100);
         // Upsert, not insert: phase 16 added the unique key these conflict on,
@@ -13601,7 +14479,10 @@ Give 3 to 5 recommendations, highest priority first, each doable by one person w
     if (!aiStatus.ok) warnings.push(`Narrative unavailable: ${aiStatus.message}`);
 
     await progress(96, 'Saving');
-    const payload = { ...summary, ai, aiStatus, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
+    // What was planned for the month and how it did (phase 42). Quiet when
+    // there is no calendar yet.
+    const contentPlan = await contentPlanMonth(input.clientId || conn.client_id || null, month).catch(() => null);
+    const payload = { ...summary, ai, aiStatus, contentPlan, generatedAt: new Date().toISOString(), connection: { id: conn.id, pageName: conn.page_name, igUsername: conn.ig_username } };
     const { data: saved } = await supabase.from('reports').insert([{
         user_id: userId,
         client_id: input.clientId || conn.client_id || null,
@@ -14720,6 +15601,312 @@ app.delete('/api/content-plan/notes/:noteId', async (req, res) => {
 });
 
 // ===========================================================================
+// PHASE 42 :: THE PLAN AS A CALENDAR THE OWNER APPROVES
+//
+// A plan used to end at a list of briefs. Now each brief becomes a post on a
+// date (the brief's own best slot where it names one, else spread over four
+// weeks), the owner approves, asks for changes or skips it from their portal,
+// an approved post becomes a task for the team, and a posted one carries its
+// link, so the monthly report can say how the planned posts actually did.
+// ===========================================================================
+
+const CP_POST_STATUS = [['idea', 'Waiting for approval'], ['changes', 'Changes asked'], ['approved', 'Approved'], ['made', 'Made'], ['posted', 'Posted'], ['skipped', 'Skipped']];
+const cpStatusName = s => (CP_POST_STATUS.find(x => x[0] === s) || [s, s])[1];
+const CP_DOW = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+/** A brief's slot ("Tue 7pm", "Friday 20:00") as a weekday and a time. */
+function cpParseSlot(slot) {
+    const s = String(slot || '').toLowerCase();
+    const d = /\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/.exec(s);
+    const t = /\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/.exec(s.replace(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/, ''));
+    let time = null;
+    if (t) {
+        let h = +t[1]; const m = t[2] ? +t[2] : 0;
+        if (t[3] === 'pm' && h < 12) h += 12;
+        if (t[3] === 'am' && h === 12) h = 0;
+        if (h <= 23 && m <= 59) time = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+    return { dow: d ? CP_DOW[d[1]] : null, time };
+}
+
+/**
+ * Dates for a plan's briefs, from `start`, over four weeks. A brief keeps its
+ * own weekday when it names one; no two posts share a day unless a week is
+ * fuller than seven. Pure.
+ */
+function cpScheduleDates(briefs, start) {
+    const s = new Date(String(start).slice(0, 10) + 'T00:00:00Z');
+    const monday = new Date(s); monday.setUTCDate(s.getUTCDate() - ((s.getUTCDay() + 6) % 7));
+    const weeks = 4, n = briefs.length, used = new Set();
+    const order = [2, 4, 6, 1, 3, 5, 0];      // Tue, Thu, Sat, Mon, Wed, Fri, Sun
+    const day = d => d.toISOString().slice(0, 10);
+    return briefs.map((b, i) => {
+        const week = Math.min(weeks - 1, Math.floor(i * weeks / Math.max(1, n)));
+        const slot = cpParseSlot(b.slot);
+        const tryDows = slot.dow !== null ? [slot.dow, ...order.filter(x => x !== slot.dow)] : order;
+        for (let w = week; w < week + 3; w++) {
+            for (const dow of tryDows) {
+                const d = new Date(monday); d.setUTCDate(monday.getUTCDate() + w * 7 + ((dow + 6) % 7));
+                if (d < s || used.has(day(d))) continue;
+                used.add(day(d));
+                return { plannedOn: day(d), time: slot.time };
+            }
+        }
+        const d = new Date(s); d.setUTCDate(s.getUTCDate() + i);
+        return { plannedOn: day(d), time: slot.time };
+    });
+}
+
+async function contentPostsReady() {
+    const { error } = await supabase.from('content_posts').select('id').limit(1);
+    return !error;
+}
+function contentPostsMissing(res) {
+    return res.status(503).json({ error: 'The content calendar needs the phase-42 database update. Run sql/schema-phase42.sql in the Supabase SQL editor.', code: 'migration_required' });
+}
+
+/** The staff view of a planned post. */
+function contentPostView(p) {
+    const b = p.brief || {};
+    return {
+        id: p.id, planId: p.report_id, clientId: p.client_id || null, key: p.brief_key, format: p.format || null,
+        hook: p.hook || null, caption: p.caption || null, plannedOn: p.planned_on, time: p.planned_time || null,
+        status: p.status, statusName: cpStatusName(p.status), ownerNote: p.owner_note || null,
+        decidedBy: p.decided_by || null, decidedAt: p.decided_at || null, taskId: p.task_id || null,
+        postedUrl: p.posted_url || null, postedAt: p.posted_at || null,
+        brief: { concept: b.concept || null, script: b.script || [], shot: b.shot || null, why: b.why || null, evidence: b.evidence || [], band: b.predicted_band || null, boost: b.boost || null, cell: b.cell || null }
+    };
+}
+
+/** The owner's view: what the post is and what is asked of them. No people, no plan ids. */
+function contentPostOwnerView(p) {
+    const b = p.brief || {};
+    return {
+        id: p.id, plannedOn: p.planned_on, time: p.planned_time || null, format: p.format || null,
+        hook: p.hook || null, caption: p.caption || null, shot: b.shot || null, why: b.why || null,
+        status: p.status, statusName: p.status === 'idea' ? 'Waiting for your OK' : cpStatusName(p.status),
+        yourNote: p.owner_note || null, postedUrl: p.posted_url || null
+    };
+}
+
+/** Approving a post puts "make it" on the team's board, once. */
+async function contentPostTask(p, byUserId) {
+    if (!p.client_id || p.task_id) return p.task_id || null;
+    const key = 'post:' + p.id;
+    const { data: dup } = await supabase.from('client_tasks').select('id').eq('client_id', p.client_id).eq('source_id', p.report_id).eq('source_key', key).maybeSingle();
+    if (dup) return dup.id;
+    const b = p.brief || {};
+    const due = new Date(p.planned_on + 'T00:00:00Z'); due.setUTCDate(due.getUTCDate() - 2);
+    const today = new Date().toISOString().slice(0, 10);
+    const notes = [b.concept, b.shot ? 'Shot: ' + b.shot : null, (b.script || []).length ? 'Script:\n' + b.script.map((x, i) => `${i + 1}. ${x}`).join('\n') : null, p.caption ? 'Caption:\n' + p.caption : null]
+        .filter(Boolean).join('\n\n').slice(0, 4000);
+    const { data, error } = await supabase.from('client_tasks').insert([{
+        client_id: p.client_id, title: oneLine(`Make the ${String(p.format || 'post').toLowerCase()}: ${p.hook || 'planned post'}`, 300),
+        notes, status: 'todo', due_date: due.toISOString().slice(0, 10) < today ? today : due.toISOString().slice(0, 10),
+        labels: ['Content'], checklist: [], assignee_user_id: null, assigned_to_client: false, visible_to_client: false,
+        source_type: 'report', source_id: p.report_id, source_key: key, source_label: `Content plan · ${docDay(p.planned_on + 'T00:00:00Z')}`,
+        position: await endOfColumn(p.client_id, 'todo'), created_by: byUserId || null
+    }]).select('id').maybeSingle();
+    if (error) { logger.warn('content_task_failed', { postId: p.id, message: error.message }); return null; }
+    return data ? data.id : null;
+}
+
+/** Move a post; the decision, the task and the link follow from the status. */
+async function contentPostMove(p, status, { by = 'team', userId = null, note, postedUrl } = {}) {
+    const now = new Date().toISOString();
+    const patch = { status, updated_at: now };
+    if (['approved', 'changes', 'skipped'].includes(status)) { patch.decided_by = by; patch.decided_at = now; }
+    if (note !== undefined && by === 'owner') patch.owner_note = note ? String(note).slice(0, 2000) : null;
+    if (status === 'approved' || status === 'made' || status === 'posted') {
+        const taskId = await contentPostTask({ ...p, ...patch }, userId);
+        if (taskId) patch.task_id = taskId;
+    }
+    if (status === 'posted') {
+        patch.posted_at = p.posted_at || now;
+        if (postedUrl !== undefined) {
+            const u = String(postedUrl || '').trim();
+            patch.posted_url = /^https:\/\/(www\.)?(instagram|facebook)\.com\//i.test(u) ? u.slice(0, 500) : null;
+            const m = /instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/.exec(u);
+            patch.shortcode = m ? m[1] : null;
+        }
+        const taskId = patch.task_id || p.task_id;
+        if (taskId) await supabase.from('client_tasks').update({ status: 'done', completed_at: now, updated_at: now }).eq('id', taskId);
+    }
+    const { data } = await supabase.from('content_posts').update(patch).eq('id', p.id).select().maybeSingle();
+    return data || { ...p, ...patch };
+}
+
+/**
+ * The month's planned posts and how the posted ones did: public likes and
+ * comments from the posts collected, and owner reach where Meta is
+ * connected — side by side, never blended (rule 3).
+ */
+async function contentPlanMonth(clientId, month) {
+    if (!clientId || !/^\d{4}-\d{2}$/.test(String(month || ''))) return null;
+    const [y, m] = month.split('-').map(Number);
+    const from = `${month}-01`, to = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+    const { data, error } = await supabase.from('content_posts').select('*').eq('client_id', clientId).gte('planned_on', from).lt('planned_on', to);
+    if (error || !data || !data.length) return null;
+    const codes = data.map(p => p.shortcode).filter(Boolean);
+    const [{ data: pub }, { data: own }] = codes.length ? await Promise.all([
+        supabase.from('posts').select('shortcode, likes, comments, views').in('shortcode', codes),
+        supabase.from('meta_media').select('shortcode, insights').in('shortcode', codes)
+    ]) : [{ data: [] }, { data: [] }];
+    const items = data.sort((a, b) => String(a.planned_on).localeCompare(String(b.planned_on))).map(p => {
+        const s = (pub || []).find(x => x.shortcode === p.shortcode) || null;
+        const o = (own || []).find(x => x.shortcode === p.shortcode) || null;
+        return { plannedOn: p.planned_on, format: p.format || null, hook: p.hook || null, status: p.status,
+            url: p.posted_url || null, likes: s ? s.likes ?? null : null, comments: s ? s.comments ?? null : null,
+            reach: o && o.insights ? docNum(o.insights.reach) : null, band: (p.brief || {}).predicted_band || null };
+    });
+    const n = st => items.filter(i => i.status === st).length;
+    return { planned: items.length, approved: items.filter(i => ['approved', 'made', 'posted'].includes(i.status)).length,
+        posted: n('posted'), skipped: n('skipped'), waiting: n('idea') + n('changes'), items };
+}
+
+/** The month's planned posts as document blocks, shared by both monthly reports. */
+function cpDocBlocks(cp) {
+    if (!cp || !cp.planned) return null;
+    const hasReach = cp.items.some(i => i.reach != null);
+    const tone = st => (st === 'posted' ? 'good' : st === 'skipped' ? '' : st === 'changes' || st === 'idea' ? 'watch' : 'gold');
+    return [
+        { type: 'kpis', items: [
+            { label: 'Posts planned', value: docFmt(cp.planned), sub: 'from the content plan' },
+            { label: 'Approved', value: docFmt(cp.approved), sub: cp.waiting ? `${cp.waiting} still waiting for an OK` : 'all decided', tone: cp.waiting ? 'watch' : 'good' },
+            { label: 'Posted', value: docFmt(cp.posted), sub: cp.planned ? `${Math.round(cp.posted / cp.planned * 100)}% of the plan` : '', tone: cp.posted ? 'good' : '' },
+            cp.skipped ? { label: 'Skipped', value: docFmt(cp.skipped), sub: 'left out on purpose' } : null
+        ].filter(Boolean) },
+        { type: 'table', cols: [{ label: 'Planned for' }, { label: 'Post' }, { label: 'Status' }, { label: 'Likes', num: true }, { label: 'Comments', num: true }].concat(hasReach ? [{ label: 'Reach (your Meta)', num: true }] : []),
+            rows: cp.items.slice(0, 20).map(i => [docDay(i.plannedOn + 'T00:00:00Z'), `${i.format ? i.format + ': ' : ''}${oneLine(i.hook, 90) || '—'}`, { chip: cpStatusName(i.status), tone: tone(i.status) },
+                i.likes == null ? '—' : docFmt(i.likes), i.comments == null ? '—' : docFmt(i.comments)].concat(hasReach ? [i.reach == null ? '—' : docFmt(i.reach)] : [])) },
+        { type: 'note', text: `Likes and comments are the public counts for posts we have the link for${hasReach ? '; reach is from your own Meta numbers, shown beside them and never added together' : ''}.` }
+    ];
+}
+
+async function planForCalendar(ctx, id, need = 'viewer') {
+    if (!UUID_RE.test(String(id || ''))) return null;
+    const { data } = await supabase.from('reports').select('id, user_id, client_id, report_type, report_json, ai_json').eq('id', id).maybeSingle();
+    if (!data || data.report_type !== 'content_plan' || !(await canReadReport(ctx, data))) return null;
+    if (need === 'editor' && data.client_id && !(await clientAccess(ctx.user.id, data.client_id, 'editor'))) return null;
+    if (need === 'editor' && !data.client_id && data.user_id !== ctx.user.id && ctx.profile?.role !== 'admin') return null;
+    return data;
+}
+
+app.get('/api/content-plan/:id/calendar', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const plan = await planForCalendar(ctx, req.params.id);
+        if (!plan) return res.status(404).json({ error: 'Plan not found' });
+        const { data } = await supabase.from('content_posts').select('*').eq('report_id', plan.id).order('planned_on', { ascending: true });
+        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: !!plan.client_id });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Put a plan's briefs on dates. Pressing it again adds only briefs not yet on it. */
+app.post('/api/content-plan/:id/calendar', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const plan = await planForCalendar(ctx, req.params.id, 'editor');
+        if (!plan) return res.status(404).json({ error: 'Plan not found, or you cannot edit it.' });
+        const p = plan.report_json || {};
+        const b = p.briefs || plan.ai_json || {};
+        const spec = Array.isArray(p.formatSpec) && p.formatSpec.length ? p.formatSpec : [{ key: 'Reel', plural: 'reels' }, { key: 'Carousel', plural: 'carousels' }, { key: 'Still', plural: 'stills' }];
+        const briefs = spec.flatMap(f => (Array.isArray(b[f.plural]) ? b[f.plural] : []).map((x, i) => ({ ...x, _key: `${f.plural}:${i}`, _format: f.label || f.key })));
+        if (!briefs.length) return res.status(400).json({ error: 'This plan has no briefs to schedule.' });
+        const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.start || '')) ? req.body.start : new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+        const { data: have } = await supabase.from('content_posts').select('brief_key').eq('report_id', plan.id);
+        const taken = new Set((have || []).map(x => x.brief_key));
+        const todo = briefs.filter(x => !taken.has(x._key));
+        const dates = cpScheduleDates(todo, start);
+        const rows = todo.map((x, i) => ({
+            report_id: plan.id, client_id: plan.client_id || null, brief_key: x._key, format: String(x._format).replace(/s$/, ''),
+            hook: oneLine(x.hook || x.concept, 300) || null, caption: x.caption ? String(x.caption).slice(0, 4000) : null,
+            brief: { concept: x.concept || null, script: Array.isArray(x.script) ? x.script.slice(0, 8) : [], shot: x.shot || null, why: x.why || null,
+                evidence: (x.evidence || []).slice(0, 3), predicted_band: x.predicted_band || null, boost: x.boost || null, cell: x.cell || null, slot: x.slot || null },
+            planned_on: dates[i].plannedOn, planned_time: dates[i].time, status: 'idea', created_by: ctx.user.id
+        }));
+        if (rows.length) {
+            const { error } = await supabase.from('content_posts').insert(rows);
+            if (error) throw error;
+        }
+        const { data } = await supabase.from('content_posts').select('*').eq('report_id', plan.id).order('planned_on', { ascending: true });
+        res.status(rows.length ? 201 : 200).json({ added: rows.length, posts: (data || []).map(contentPostView) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/content-posts/:id', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'content_plan'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
+        const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).maybeSingle();
+        if (!p || !(await planForCalendar(ctx, p.report_id, 'editor'))) return res.status(404).json({ error: 'Post not found, or you cannot edit it.' });
+        const b = req.body || {};
+        const patch = {};
+        if (b.plannedOn !== undefined) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.plannedOn))) return res.status(400).json({ error: 'The date is not valid.' });
+            patch.planned_on = b.plannedOn;
+        }
+        if (b.time !== undefined) patch.planned_time = /^\d{2}:\d{2}$/.test(String(b.time || '')) ? b.time : null;
+        if (b.hook !== undefined) patch.hook = oneLine(b.hook, 300) || null;
+        if (b.caption !== undefined) patch.caption = b.caption ? String(b.caption).slice(0, 4000) : null;
+        if (Object.keys(patch).length) {
+            patch.updated_at = new Date().toISOString();
+            await supabase.from('content_posts').update(patch).eq('id', p.id);
+            Object.assign(p, patch);
+        }
+        let row = p;
+        if (b.status !== undefined && b.status !== p.status) {
+            if (!CP_POST_STATUS.some(s => s[0] === b.status)) return res.status(400).json({ error: 'That status does not exist.' });
+            row = await contentPostMove(p, b.status, { by: 'team', userId: ctx.user.id, postedUrl: b.postedUrl });
+        } else if (b.postedUrl !== undefined && p.status === 'posted') {
+            row = await contentPostMove(p, 'posted', { by: 'team', userId: ctx.user.id, postedUrl: b.postedUrl });
+        }
+        res.json({ post: contentPostView(row) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// --- the owner's side -----------------------------------------------------------
+
+app.get('/api/client/content', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
+        if (!(await contentPostsReady())) return res.json({ posts: [] });
+        const own = await ownClientFor(ctx);
+        if (!own) return res.json({ posts: [] });
+        const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+        const { data } = await supabase.from('content_posts').select('*').eq('client_id', own.id).gte('planned_on', since)
+            .neq('status', 'skipped').order('planned_on', { ascending: true }).limit(60);
+        const posts = (data || []).map(contentPostOwnerView);
+        res.json({ posts, waiting: posts.filter(p => p.status === 'idea').length });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/client/content/:id/decision', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
+        if (!(await contentPostsReady())) return contentPostsMissing(res);
+        const own = await ownClientFor(ctx);
+        if (!own || !UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
+        const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).eq('client_id', own.id).maybeSingle();
+        if (!p) return res.status(404).json({ error: 'Post not found.' });
+        const to = { approve: 'approved', changes: 'changes', skip: 'skipped' }[String(req.body?.decision || '')];
+        if (!to) return res.status(400).json({ error: 'Choose approve, changes or skip.' });
+        if (['made', 'posted'].includes(p.status)) return res.status(409).json({ error: 'This post is already made.' });
+        const note = req.body?.note ? String(req.body.note).trim().slice(0, 2000) : null;
+        if (to === 'changes' && !note) return res.status(400).json({ error: 'Say what you would like changed.' });
+        const row = await contentPostMove(p, to, { by: 'owner', note });
+        res.json({ post: contentPostOwnerView(row) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
 // PHASE 11 :: SCHEDULED RUNS
 //
 // A monthly report a human has to remember to click is a report that gets
@@ -14742,7 +15929,8 @@ const SCHEDULABLE_TYPES = {
     deep_audit:         'report',
     fb_community_audit: 'fb_community',
     fb_page_report:     'fb_page',
-    meta_insights:      'content_plan'
+    meta_insights:      'content_plan',
+    review_scan:        'leadgen'          // monthly: new reviews since the last scan (phase 41)
 };
 
 /**
@@ -15054,7 +16242,8 @@ const REPORT_PAGE = {
     fb_page: 'fb-report.html',
     fb_community: 'fb-audit.html', fb_group: 'fb-audit.html',
     content_plan: 'content-plan.html', meta_owned: 'content-plan.html',
-    public_monthly: 'report.html'
+    public_monthly: 'report.html',
+    review_scan: 'report.html'
 };
 
 /**
@@ -15691,6 +16880,8 @@ function monthlyView(row) {
         audience: { ...audience, note: aiOk && ai.audience && !/not enough data/i.test(ai.audience) ? oneLine(ai.audience, 400) : null },
         recommendations: monthRecs(ai || {}),
         platforms: monthPlatforms(byKey, acc),
+        contentPlan: r.contentPlan || null,
+        contentPlanBlocks: cpDocBlocks(r.contentPlan),
         conclusion: aiOk ? (oneLine(ai.conclusion, 600) || null) : null,
         about: {
             source: 'Every figure in this report is your own Meta Insights, the numbers only the account owner can see. Nothing in it is scraped or estimated.',
@@ -16436,6 +17627,7 @@ function reportDoc(row) {
         if (row.report_type === 'fb_page') return fbDoc(row);
         if (row.report_type === 'fb_community' || row.report_type === 'fb_group') return fbGroupsDoc(row);
         if (row.report_type === 'public_monthly') return publicMonthlyDoc(row);
+        if (row.report_type === 'review_scan') return reviewDoc(row);
     } catch (err) {
         logger.warn('report_doc_failed', { type: row.report_type, message: err.message });
     }
@@ -16556,7 +17748,8 @@ registerWorker('public_monthly', (userId, input, jobId) => async (progress) => {
     const { data: plan } = await supabase.from('client_tasks').select('title, assigned_to_client, due_date')
         .eq('client_id', client.id).eq('visible_to_client', true).neq('status', 'done').order('due_date', { ascending: true }).limit(5)
         .then(r => r, () => ({ data: [] }));
-    const payload = { ...data, context: ctx, plan: (plan || []).map(t => ({ title: oneLine(t.title, 200), who: t.assigned_to_client ? 'You' : 'Our team', due: t.due_date || null })), generatedAt: createdAt };
+    const contentPlan = await contentPlanMonth(client.id, input.month).catch(() => null);
+    const payload = { ...data, context: ctx, contentPlan, plan: (plan || []).map(t => ({ title: oneLine(t.title, 200), who: t.assigned_to_client ? 'You' : 'Our team', due: t.due_date || null })), generatedAt: createdAt };
     await progress(92, 'Saving');
     const { data: saved } = await supabase.from('reports').insert([{
         user_id: userId, client_id: client.id,
@@ -16634,6 +17827,9 @@ function publicMonthlyDoc(row) {
     const done = [...(work.done || []).map(t => ({ title: t.title, text: `done ${docDay(t.date)}` })), ...(work.filed || []).map(f => ({ title: f.title, text: `delivered ${docDay(f.date)}` })), ...(leads && leads.thisMonth ? [{ title: `${docFmt(leads.thisMonth)} new leads found`, text: `${docFmt(leads.toDate)} to date` }] : [])];
     if (done.length) sections.push({ title: `What we did in ${m}`, source: ['ours'], blocks: [{ type: 'points', tone: 'good', items: done.slice(0, 8) }] });
 
+    const cpBlocks = cpDocBlocks(j.contentPlan);
+    if (cpBlocks) sections.push({ title: 'What we planned, and how it did', source: ['ours', 'pub'], blocks: cpBlocks });
+
     const plan = [{ first: true, title: 'Connect Facebook and Instagram to EdgeLead, so we can report reach, visits and bookings', who: 'You · 2 minutes' }, ...(j.plan || []).map(t => ({ title: t.title, who: t.who }))];
     sections.push({ title: 'Plan for next month', source: ['ours'], blocks: [
         { type: 'table', cols: [{ label: 'What' }, { label: 'Who' }], rows: plan.map(p => [p.first ? { text: p.title, tone: 'good' } : p.title, p.who]) }
@@ -16678,6 +17874,620 @@ app.post('/api/reports/public-monthly', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+
+// ===========================================================================
+// PHASE 41 :: THE REVIEW TRACKER
+//
+// What staff did by hand, one handle at a time: open a restaurant's tagged
+// posts and read which ones were reviews. Now for a whole area at once:
+//   1. the businesses of a kind around a place, from Google Maps;
+//   2. each one's Instagram: the link on Maps or on their website (sure),
+//      else an Instagram search checked against the name (likely, or "check"
+//      for a person to confirm — never a guess passed off as a match);
+//   3. each one's tagged posts over a window (90 days by default);
+//   4. every tagged post read: a review (organic or paid), a customer's
+//      photo, another business, or unclear. Rules decide the clear ones for
+//      free; only the unclear go to the model, twenty captions a call;
+//   5. the creators who reviewed become influencer leads, and a scoreboard
+//      says who is being reviewed and by whom.
+// Public posts only. The tagged tab shows photo tags, not caption mentions
+// or collab posts; the report says so.
+// ===========================================================================
+
+const REVIEW_MAPS_ACTOR    = process.env.REVIEW_MAPS_ACTOR || 'compass/crawler-google-places';
+const REVIEW_MAPS_CONTACTS = String(process.env.REVIEW_MAPS_CONTACTS || 'true') !== 'false';
+const COST_PER_1K_PLACES   = parseFloat(process.env.COST_PER_1K_PLACES || (REVIEW_MAPS_CONTACTS ? '7' : '4'));
+const REVIEW_MAX_BUSINESSES = 30;
+const REVIEW_MAX_POSTS      = 100;
+const REVIEW_AI_BATCH       = 20;
+
+/** What a scan will cost at most, before it starts. */
+function reviewEstimate({ places = 0, businesses = 0, postsPer = 40, searches = 0 } = {}) {
+    const usd = (places / 1000) * COST_PER_1K_PLACES
+        + (businesses * postsPer / 1000) * COST_PER_1K_POSTS
+        + searches * (COST_PER_1K_PROFILE / 20);
+    return +usd.toFixed(4);
+}
+
+// --- a website fetch that cannot be turned on our own network --------------
+// A Maps listing's website is someone else's text. Fetching it from the
+// server is fine; fetching whatever it redirects to on 10.x or the metadata
+// address is not. Every hop is resolved and checked.
+function reviewPrivateIp(ip) {
+    const v = String(ip || '').toLowerCase();
+    if (v === '::1' || v === '::' || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('fe80')) return true;
+    const m = /^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(v);
+    if (!m) return false;
+    const [a, b] = [+m[1], +m[2]];
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+        || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+}
+let _reviewLookup = (host) => require('dns').promises.lookup(host, { all: true });
+async function safePublicFetch(url, { maxBytes = 600000, timeoutMs = 8000, hops = 3 } = {}) {
+    let target = String(url || '');
+    for (let i = 0; i <= hops; i++) {
+        let u;
+        try { u = new URL(target); } catch { return null; }
+        if (!/^https?:$/.test(u.protocol)) return null;
+        const host = u.hostname.replace(/^\[|\]$/g, '');
+        const net = require('net');
+        const ips = net.isIP(host) ? [{ address: host }] : await _reviewLookup(host).catch(() => []);
+        if (!ips.length || ips.some(x => reviewPrivateIp(x.address))) return null;
+        let r;
+        try { r = await fetch(u.toString(), { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs), headers: { 'User-Agent': 'Mozilla/5.0 (EdgeLead review tracker)' } }); }
+        catch { return null; }
+        if (r.status >= 300 && r.status < 400 && r.headers && r.headers.get && r.headers.get('location')) {
+            target = new URL(r.headers.get('location'), u).toString();
+            continue;
+        }
+        if (!r.ok) return null;
+        const type = String((r.headers && r.headers.get && r.headers.get('content-type')) || '');
+        if (type && !/text\/html|application\/xhtml/i.test(type)) return null;
+        const text = await r.text().catch(() => '');
+        return text.slice(0, maxBytes);
+    }
+    return null;
+}
+
+const IG_RESERVED = new Set(['p', 'reel', 'reels', 'explore', 'stories', 'accounts', 'tv', 'about', 'developer', 'legal', 'direct', 'web', 'share']);
+/** An Instagram handle from a link, or null. */
+function igHandleFromUrl(v) {
+    const m = /instagram\.com\/(?:#!\/)?([A-Za-z0-9._]{1,30})(?:[/?#]|$)/i.exec(String(v || ''));
+    if (!m) return null;
+    const h = m[1].toLowerCase().replace(/\.+$/, '');
+    return IG_RESERVED.has(h) ? null : h;
+}
+
+/** One Maps listing, whatever the actor calls its fields. */
+function reviewPlace(it) {
+    const socials = [].concat(it.instagrams || [], it.instagram || [], (it.socialMedia && it.socialMedia.instagram) || [], it.socialProfiles || [])
+        .map(x => (typeof x === 'string' ? x : (x && (x.url || x.link)) || '')).filter(Boolean);
+    const website = it.website || it.url_website || null;
+    const handle = socials.map(igHandleFromUrl).find(Boolean) || igHandleFromUrl(website) || null;
+    return {
+        key: String(it.placeId || it.place_id || it.cid || it.url || it.title || it.name || '').slice(0, 200),
+        name: oneLine(it.title || it.name || '', 120) || null,
+        category: oneLine(it.categoryName || it.category || (Array.isArray(it.categories) ? it.categories[0] : '') || '', 80) || null,
+        address: oneLine(it.address || it.street || '', 200) || null,
+        phone: it.phone || it.phoneUnformatted || null,
+        website: website && /^https?:\/\//i.test(website) && !/instagram\.com/i.test(website) ? website : null,
+        rating: docNum(it.totalScore ?? it.rating),
+        reviews: docNum(it.reviewsCount ?? it.reviews),
+        mapsUrl: /^https:\/\/(www\.)?google\.[a-z.]+\/maps/i.test(String(it.url || '')) ? it.url : null,
+        handle, source: handle ? 'maps' : null
+    };
+}
+
+/** How alike a business name and an Instagram account are, 0–1. */
+function reviewNameMatch(name, acct) {
+    const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\b(the|and|restaurant|cafe|café|bd|dhaka|ltd|official)\b/g, ' ').split(/\s+/).filter(t => t.length > 1);
+    const a = new Set(norm(name));
+    if (!a.size) return 0;
+    const b = new Set([...norm(acct.fullName || acct.full_name), ...norm(String(acct.username || '').replace(/[._]/g, ' '))]);
+    const squash = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    let hit = 0; for (const t of a) if (b.has(t)) hit++;
+    let score = hit / a.size;
+    if (squash(acct.username).includes(squash([...a].join(''))) && [...a].join('').length >= 4) score = Math.max(score, 0.9);
+    return +Math.min(1, score).toFixed(2);
+}
+
+// What a tagged post is. Signals, each counted once per post.
+const RV_SIGNALS = [
+    [/\b(review(ed|ing)?|rating|rated|verdict|overall|pros|cons)\b|রিভিউ|রেটিং/i, 'calls it a review'],
+    [/\b(tast(e|ed|y)|flavou?r|portion|ambien(ce|ce)|ambiance|service|presentation|texture|spicy|juicy|crispy)\b|স্বাদ|পরিবেশ|সার্ভিস/i, 'talks about taste, portions or service'],
+    [/\b(price|priced|tk\.?\s?\d|\d+\s?tk|taka|bdt|\$\d|worth (it|the|every))\b|৳|দাম/i, 'mentions the price or value'],
+    [/\b(must[- ]?try|(would|highly|definitely|don'?t) recommend|go[- ]to|hidden gem|come back|again)\b|অবশ্যই|আবার/i, 'recommends it (or not)'],
+    [/\b(tried|trying|visited|checked (it )?out|went to|first time)\b|ট্রাই|খেয়ে দেখ|গিয়েছিলাম|ঘুরে এলাম/i, 'describes a visit']
+];
+const RV_PAID = /\b(in collaboration with|collab(oration)?|invited( by)?|gifted|complimentary|hosted by|thanks? (to|for) .{0,24}(having|hosting|inviting)|#ad\b|#pr\b|#sponsored|paid partnership)\b|দাওয়াত/i;
+
+/**
+ * One tagged post: review (organic or paid), customer, business, or unclear.
+ * Unclear goes to the model; everything else is decided here, for free.
+ */
+function classifyTaggedPost(p, venue) {
+    const caption = String(p.caption || p.text || '');
+    const poster = String(p.ownerUsername || p.owner?.username || '').toLowerCase();
+    const reasons = [];
+    if (!poster) return { label: 'other', reasons: ['No poster'], score: 0 };
+    if (venue && poster === String(venue).toLowerCase()) return { label: 'business', reasons: ['Posted by the business itself'], score: 0 };
+    let score = 0;
+    for (const [re, why] of RV_SIGNALS) if (re.test(caption)) { score += 1; reasons.push(why); }
+    if (LK_RATING.test(caption)) { score += 2; reasons.push('gives a rating'); }
+    if (caption.length > 180) { score += 1; reasons.push('a long caption'); }
+    if (/reel|clips|video/i.test(String(p.productType || p.type || ''))) { score += 1; reasons.push('a Reel or video'); }
+    const paid = igIsSponsored(p) || RV_PAID.test(caption);
+    const sells = LK_BUSINESS_WORDS.test(caption) || LK_BUSINESS_WORDS_BN.test(caption);
+    if ((LK_BUSINESS_HANDLE.test(poster) || sells) && score < 3) return { label: 'business', reasons: [sells ? 'The caption sells something' : 'Posted by another business'], score };
+    if (score >= 3) return { label: paid ? 'review_paid' : 'review', reasons: paid ? ['marked as a collaboration or ad', ...reasons] : reasons, score };
+    // A short caption with no opinion at all is someone's photo from a
+    // visit. "Loved the place" is an opinion, just a thin one: that goes to
+    // the model rather than being guessed either way.
+    const opinion = /\b(lov(e|ed|ing)|amazing|awesome|delicious|yumm?y|tasty|best|favou?rite|disappoint\w*|overrated|underrated|meh|not worth|bad|great)\b|মজা|অসাধারণ|দারুণ|ভালো|খারাপ/i.test(caption);
+    if (score === 0 && caption.length < 90 && !paid && !opinion) return { label: 'customer', reasons: ['A short caption with nothing about the place'], score };
+    return { label: 'unclear', reasons, score, paid };
+}
+
+/** The unclear ones, twenty at a time. Returns labels by index; missing means still unclear. */
+async function reviewAiLabels(items, userId) {
+    if (!items.length || !geminiAvailable()) return {};
+    const prompt =
+`Each item is an Instagram post that tagged a business (the venue). Decide what each post is.
+Labels:
+- "review": the poster gives an opinion of the venue (food, price, service, recommend or not), as a creator or a customer writing a review.
+- "customer": a photo from a visit with no real opinion (e.g. "dinner with family", "birthday!").
+- "business": posted by another business, a supplier, an event, or an ad.
+- "other": anything else.
+Set "paid": true only when the caption says it was a collaboration, invitation, gift or ad.
+Captions may be in English or Bangla. Judge only from the text given.
+
+Items (JSON):
+${JSON.stringify(items.map(x => ({ i: x.i, venue: '@' + x.venue, poster: '@' + x.poster, caption: String(x.caption || '').slice(0, 500) })))}
+
+Reply with ONLY this JSON: {"labels":[{"i":0,"label":"review","paid":false}]}`;
+    const r = await geminiCallDetailed(prompt, { temperature: 0.1, maxOutputTokens: 2000, tag: 'Gemini review sort', userId });
+    if (!r.ok || !Array.isArray(r.data?.labels)) return {};
+    const out = {};
+    for (const x of r.data.labels) {
+        if (!x || !Number.isInteger(x.i)) continue;
+        const l = String(x.label || '');
+        if (l === 'review') out[x.i] = x.paid ? 'review_paid' : 'review';
+        else if (['customer', 'business', 'other'].includes(l)) out[x.i] = l;
+    }
+    return out;
+}
+
+const RV_IS_REVIEW = l => l === 'review' || l === 'review_paid';
+
+/** The scoreboard and the reviewer list, from the posts read. Pure. */
+function reviewAggregate(businesses, posts, { clientHandle = null, previous = null } = {}) {
+    const prevIds = new Set((previous && previous.postIds) || []);
+    const prevReviewers = new Set((previous && previous.reviewers) || []);
+    const byBiz = new Map(businesses.map(b => [b.handle, { ...b, tagged: 0, reviews: 0, paid: 0, customers: 0, unclear: 0, reviewers: new Set(), lastReview: null, newReviews: 0 }]));
+    const people = new Map();
+    for (const p of posts) {
+        const b = byBiz.get(p.venue);
+        if (!b) continue;
+        b.tagged++;
+        if (p.label === 'customer') b.customers++;
+        if (p.label === 'unclear') b.unclear++;
+        if (!RV_IS_REVIEW(p.label)) continue;
+        b.reviews++; if (p.label === 'review_paid') b.paid++;
+        b.reviewers.add(p.poster);
+        if (p.at && (!b.lastReview || p.at > b.lastReview)) b.lastReview = p.at;
+        const isNew = !!previous && !prevIds.has(p.id);
+        if (isNew) b.newReviews++;
+        const r = people.get(p.poster) || { handle: p.poster, reviews: 0, paid: 0, venues: new Set(), engagement: 0, last: null, posts: [], isNew: false };
+        r.reviews++; if (p.label === 'review_paid') r.paid++;
+        r.venues.add(p.venue);
+        r.engagement += (p.likes || 0) + (p.comments || 0);
+        if (p.at && (!r.last || p.at > r.last)) r.last = p.at;
+        if (r.posts.length < 3) r.posts.push({ url: p.url, venue: p.venue, caption: oneLine(p.caption, 200), at: p.at, paid: p.label === 'review_paid' });
+        people.set(p.poster, r);
+    }
+    const client = clientHandle ? String(clientHandle).toLowerCase() : null;
+    const reviewers = [...people.values()].map(r => ({
+        handle: r.handle, reviews: r.reviews, paid: r.paid, venues: [...r.venues],
+        avgEngagement: Math.round(r.engagement / Math.max(1, r.reviews)), last: r.last, posts: r.posts,
+        reviewedClient: client ? r.venues.has(client) : null,
+        isNew: !!previous && !prevReviewers.has(r.handle)
+    })).sort((a, b) => (b.venues.length - a.venues.length) || (b.avgEngagement - a.avgEngagement));
+    const board = [...byBiz.values()].map(b => ({
+        name: b.name, handle: b.handle, match: b.match || null, rating: b.rating ?? null, mapsReviews: b.reviews_maps ?? null,
+        tagged: b.tagged, reviews: b.reviews, paid: b.paid, customers: b.customers, unclear: b.unclear,
+        creators: b.reviewers.size, lastReview: b.lastReview, newReviews: b.newReviews, isClient: !!client && b.handle === client
+    })).sort((a, b) => b.reviews - a.reviews);
+    return { board, reviewers, missedByClient: client ? reviewers.filter(r => !r.reviewedClient).slice(0, 25) : [] };
+}
+
+
+/** The kinds of business to look for: one or several, comma-separated. */
+function reviewCategories(input) {
+    const raw = Array.isArray(input.categories) ? input.categories : String(input.category || '').split(',');
+    return [...new Set(raw.map(c => oneLine(c, 60)).filter(Boolean))].slice(0, 5);
+}
+
+/**
+ * Steps 1 and 2 of a scan, also run on their own (review_places) so staff can
+ * see the list, untick businesses, fix a handle or add rivals before paying
+ * to read anyone's tagged posts. Each run sets its own sources:
+ *   - Google Maps: one or more kinds of business around an area, as many as
+ *     asked, filtered by rating and review count;
+ *   - a list of Instagram handles (the old manual rival style), used as given;
+ *   - one business to include (usually the client).
+ */
+async function reviewGatherPlaces(userId, input, jobId, progress, ck, warnings) {
+    const maxBiz = Math.min(REVIEW_MAX_BUSINESSES, Math.max(1, parseInt(input.maxBusinesses, 10) || 15));
+    const cats = reviewCategories(input);
+    const area = oneLine(input.area, 120) || null;
+    const minRating = docNum(input.minRating), minReviews = docNum(input.minReviews);
+    const skip = new Set((input.exclude || []).map(x => String(x || '').toLowerCase()));
+    let places = ck.get('places');
+    if (!places) {
+        places = [];
+        for (const h of (input.handles || []).slice(0, REVIEW_MAX_BUSINESSES)) {
+            const handle = String(h.handle || h || '').replace('@', '').trim().toLowerCase();
+            if (/^[a-z0-9._]{1,30}$/.test(handle) && !places.some(p => p.handle === handle)) places.push({ key: 'ig:' + handle, name: oneLine(h.name, 120) || '@' + handle, handle, source: 'given', match: 'sure' });
+        }
+        if (cats.length && area && input.useMaps !== false) {
+            await progress(5, `Finding ${cats.join(', ')} around ${area} on Google Maps`);
+            // Asked for per kind, filtered after: a rating filter can only
+            // remove, so ask for a little more when one is set.
+            const per = Math.min(REVIEW_MAX_BUSINESSES, Math.ceil(maxBiz / cats.length * (minRating || minReviews ? 1.5 : 1)));
+            const need = +(per * cats.length / 1000 * COST_PER_1K_PLACES).toFixed(4);
+            const { client } = await getWorkingClient('leadgen', userId, { needUsd: need, jobId });
+            try {
+                const { items } = await callActor(client, REVIEW_MAPS_ACTOR, {
+                    searchStringsArray: cats, locationQuery: area, maxCrawledPlacesPerSearch: per,
+                    language: 'en', skipClosedPlaces: true, ...(REVIEW_MAPS_CONTACTS ? { scrapeContacts: true } : {})
+                }, { estimateUsd: need, maxItems: per * cats.length, jobId });
+                const seen = new Set(places.map(p => p.handle).filter(Boolean)), keys = new Set();
+                let dropped = 0, added = 0;
+                for (const it of (items || []).map(reviewPlace)) {
+                    if (!it.name || keys.has(it.key)) continue;
+                    keys.add(it.key);
+                    if (it.handle && (seen.has(it.handle) || skip.has(it.handle))) continue;
+                    if ((minRating !== null && (it.rating === null || it.rating < minRating)) || (minReviews !== null && (it.reviews === null || it.reviews < minReviews))) { dropped++; continue; }
+                    if (added >= maxBiz) break;
+                    if (it.handle) seen.add(it.handle);
+                    places.push({ ...it, match: it.handle ? 'sure' : null, reviews_maps: it.reviews });
+                    added++;
+                }
+                if (dropped) warnings.push(`${dropped} business(es) on Maps were below the rating or review count asked for and were left out.`);
+            } catch (e) {
+                if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+                warnings.push(`Google Maps search failed: ${e.message}`);
+            }
+        }
+        if (input.seed) {
+            const h = igHandleFromUrl(input.seed) || (/^@?[a-z0-9._]{1,30}$/i.test(String(input.seed).trim()) ? String(input.seed).trim().replace('@', '').toLowerCase() : null);
+            if (h && !places.some(p => p.handle === h)) places.unshift({ key: 'ig:' + h, name: '@' + h, handle: h, source: 'given', match: 'sure' });
+        }
+        await ck.done('places', places);
+    }
+    if (!places.length) throw Object.assign(new Error('No businesses to scan. Give a kind of business and an area, or Instagram handles.'), { statusCode: 422 });
+
+    // --- 2. their Instagram ---------------------------------------------------
+    await progress(15, 'Finding each business’s Instagram');
+    for (let i = 0; i < places.length; i++) {
+        const p = places[i];
+        if (p.handle) continue;
+        const unit = 'match:' + p.key;
+        if (ck.isDone(unit)) { Object.assign(p, ck.get(unit) || {}); continue; }
+        let found = null;
+        if (p.website) {
+            const html = await safePublicFetch(p.website);
+            const h = html ? [...html.matchAll(/instagram\.com\/(?:#!\/)?[A-Za-z0-9._]{1,30}/gi)].map(m => igHandleFromUrl(m[0])).find(Boolean) : null;
+            if (h) found = { handle: h, source: 'website', match: 'sure' };
+        }
+        // The name search costs a little each; a run can switch it off and
+        // leave unlinked businesses for a person to fill in.
+        if (!found && p.name && input.searchNames !== false) {
+            const need = +(COST_PER_1K_PROFILE / 20).toFixed(4);
+            try {
+                const { client } = await getWorkingClient('leadgen', userId, { needUsd: need, jobId });
+                const { items } = await callActor(client, 'apify/instagram-search-scraper',
+                    { searchQueries: [`${p.name} ${area || ''}`.trim()], searchType: 'user' }, { estimateUsd: need, maxItems: 10, jobId });
+                const best = (items || []).map(a => ({ a, s: reviewNameMatch(p.name, a) })).filter(x => x.a && (x.a.username || x.a.ownerUsername)).sort((x, y) => y.s - x.s)[0];
+                if (best && best.s >= 0.5) found = { handle: String(best.a.username || best.a.ownerUsername).toLowerCase(), source: 'search', match: best.s >= 0.75 ? 'likely' : 'check', matchScore: best.s };
+            } catch (e) {
+                if (e.code === 'NO_CREDIT' || e.code === 'CANCELLED') throw e;
+                warnings.push(`Instagram search for “${p.name}” failed: ${e.message}`);
+            }
+        }
+        Object.assign(p, found || { handle: null, match: 'none' });
+        await ck.done(unit, found || { handle: null, match: 'none' });
+        await progress(15 + Math.round(15 * (i + 1) / places.length), `Matched ${i + 1} of ${places.length}`);
+    }
+    return places;
+}
+
+/** Step one on its own: the list to choose from, before any tagged posts are read. */
+registerWorker('review_places', (userId, input, jobId) => async (progress, ck) => {
+    const warnings = [];
+    const places = await reviewGatherPlaces(userId, input, jobId, progress, ck, warnings);
+    await progress(100, `${places.length} business(es) found`);
+    return {
+        places: places.map(p => ({ key: p.key, name: p.name || null, category: p.category || null, address: p.address || null, rating: p.rating ?? null,
+            reviews: p.reviews_maps ?? p.reviews ?? null, handle: p.handle || null, match: p.match || 'none', matchScore: p.matchScore ?? null,
+            source: p.source || null, website: p.website || null, mapsUrl: p.mapsUrl || null })),
+        warnings
+    };
+});
+
+registerWorker('review_scan', (userId, input, jobId) => async (progress, ck) => {
+    const warnings = [];
+    const days = Math.min(365, Math.max(7, parseInt(input.days, 10) || 90));
+    const postsPer = Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(input.postsPer, 10) || 40));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const category = reviewCategories(input).join(', ') || null, area = oneLine(input.area, 120) || null;
+
+    const places = await reviewGatherPlaces(userId, input, jobId, progress, ck, warnings);
+
+    const scan = places.filter(p => p.handle && (p.match === 'sure' || p.match === 'likely'));
+    const unmatched = places.filter(p => !p.handle || p.match === 'check' || p.match === 'none');
+
+    // --- 3. tagged posts ------------------------------------------------------
+    const posts = [];
+    for (let i = 0; i < scan.length; i++) {
+        const b = scan[i];
+        const unit = 'tagged:' + b.handle;
+        let rows = ck.get(unit);
+        if (!ck.isDone(unit)) {
+            await progress(30 + Math.round(45 * i / Math.max(1, scan.length)), `Reading posts that tagged @${b.handle} (${i + 1} of ${scan.length})`);
+            const need = +(postsPer / 1000 * COST_PER_1K_POSTS).toFixed(4);
+            const { client } = await getWorkingClient('leadgen', userId, { needUsd: need, jobId });
+            const items = await runActor('apify/instagram-scraper',
+                { directUrls: [`https://www.instagram.com/${b.handle}/tagged/`], resultsLimit: postsPer, scrollWaitSecs: 5, pageTimeoutSecs: 60 },
+                warnings, `Tagged @${b.handle}`, client, { jobId, estimateUsd: need, maxItems: postsPer });
+            rows = (items || []).map(p => ({
+                id: String(p.shortCode || p.shortcode || p.id || ''), venue: b.handle,
+                poster: String(p.ownerUsername || p.owner?.username || '').toLowerCase(),
+                caption: String(p.caption || '').slice(0, 1200), at: tsOf(p)?.toISOString() || null,
+                likes: Number(p.likesCount) || 0, comments: Number(p.commentsCount) || 0,
+                url: /^https:\/\/(www\.)?instagram\.com\//.test(String(p.url || '')) ? p.url : (shortcodeOf(p) ? `https://www.instagram.com/p/${shortcodeOf(p)}/` : null),
+                sig: leadPostSignal(p, 'review', b.handle),
+                ...(() => { const c = classifyTaggedPost(p, b.handle); return { label: c.label, why: c.reasons, decided: 'rules' }; })()
+            })).filter(p => p.id && p.poster && (!p.at || p.at >= since));
+            await ck.done(unit, rows);
+        }
+        posts.push(...(rows || []));
+    }
+
+    // --- 4. the unclear ones ---------------------------------------------------
+    const unclear = input.useAi === false ? [] : posts.map((p, i) => ({ p, i })).filter(x => x.p.label === 'unclear');
+    for (let s = 0; s < unclear.length; s += REVIEW_AI_BATCH) {
+        const unit = 'ai:' + s;
+        let labels = ck.get(unit);
+        if (!ck.isDone(unit)) {
+            await progress(78, `Reading ${unclear.length - s} unclear post(s)`);
+            labels = await reviewAiLabels(unclear.slice(s, s + REVIEW_AI_BATCH).map(x => ({ i: x.i, venue: x.p.venue, poster: x.p.poster, caption: x.p.caption })), userId);
+            await ck.done(unit, labels);
+        }
+        for (const [i, l] of Object.entries(labels || {})) { posts[+i].label = l; posts[+i].decided = 'ai'; }
+    }
+
+    // --- 5. the scoreboard, the reviewers, and the leads -------------------------
+    await progress(85, 'Adding up who reviewed whom');
+    const clientRow = input.clientId ? (await supabase.from('clients').select('id, ig_handle').eq('id', input.clientId).maybeSingle()).data : null;
+    const clientHandle = clientRow && clientRow.ig_handle ? String(clientRow.ig_handle).replace('@', '').toLowerCase() : null;
+    const keyOf = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    let prevQ = supabase.from('reports').select('report_json, created_at').eq('report_type', 'review_scan');
+    prevQ = input.clientId ? prevQ.eq('client_id', input.clientId) : prevQ.eq('user_id', userId);
+    const { data: prevRows } = await prevQ.order('created_at', { ascending: false }).limit(5);
+    const prev = (prevRows || []).map(r => r.report_json || {}).find(j => keyOf(j.category) === keyOf(category) && keyOf(j.area) === keyOf(area)) || null;
+    const agg = reviewAggregate(scan, posts, { clientHandle, previous: prev ? { postIds: prev.postIds || [], reviewers: (prev.reviewers || []).map(r => r.handle) } : null });
+
+    let savedLeads = 0;
+    if (await leadsPhase40()) {
+        const reviewersAll = agg.reviewers;
+        const names = reviewersAll.map(r => r.handle);
+        const { data: existing } = names.length ? await supabase.from('leads').select('*').eq('owner_user_id', userId).eq('platform', 'instagram').in('username', names) : { data: [] };
+        const have = new Map((existing || []).map(l => [l.username, l]));
+        const fresh = names.filter(n => !have.has(n));
+        const allowed = await takeLeadQuota(userId, fresh.length);
+        if (allowed < fresh.length) warnings.push(`Lead allowance reached: ${fresh.length - allowed} reviewer(s) were not saved as leads.`);
+        const postsBy = h => posts.filter(p => p.poster === h && RV_IS_REVIEW(p.label)).map(p => p.sig);
+        const ids = [];
+        for (const h of fresh.slice(0, allowed)) {
+            const sig = leadSignalsAdd(null, postsBy(h));
+            const row = { owner_user_id: userId, platform: 'instagram', username: h, profile_url: `https://instagram.com/${h}`,
+                industry: category, location: area, is_enriched: false, signals: sig, methods: ['review'], full_name: sig.fullName || null };
+            Object.assign(row, leadAssessment(row, sig, row.methods));
+            const { data } = await supabase.from('leads').upsert([row], { onConflict: 'owner_user_id,platform,username', ignoreDuplicates: false }).select('id').maybeSingle();
+            if (data) { ids.push(data.id); savedLeads++; }
+        }
+        for (const [h, l] of have) {
+            const sig = leadSignalsAdd(l.signals, postsBy(h));
+            const methods = [...new Set([...(l.methods || []), 'review'])];
+            await supabase.from('leads').update({ signals: sig, methods, ...leadAssessment(l, sig, methods) }).eq('id', l.id);
+            ids.push(l.id);
+        }
+        if (input.clientId) await linkLeadsToClient(input.clientId, ids, 'review_scan', jobId);
+    }
+
+    const counts = {
+        businesses: places.length, scanned: scan.length, unmatched: unmatched.length,
+        tagged: posts.length, reviews: posts.filter(p => RV_IS_REVIEW(p.label)).length,
+        paid: posts.filter(p => p.label === 'review_paid').length, customers: posts.filter(p => p.label === 'customer').length,
+        unclear: posts.filter(p => p.label === 'unclear').length, byAi: posts.filter(p => p.decided === 'ai').length,
+        creators: agg.reviewers.length
+    };
+    const top = posts.filter(p => RV_IS_REVIEW(p.label)).sort((a, b) => (b.likes + b.comments) - (a.likes + a.comments)).slice(0, 6)
+        .map(p => ({ url: p.url, venue: p.venue, poster: p.poster, caption: oneLine(p.caption, 240), at: p.at, likes: p.likes, comments: p.comments, paid: p.label === 'review_paid' }));
+    const report = {
+        category, area, windowDays: days, postsPer, generatedAt: new Date().toISOString(),
+        clientHandle, counts, board: agg.board, reviewers: agg.reviewers.slice(0, 60), missedByClient: agg.missedByClient, top,
+        unmatched: unmatched.map(p => ({ name: p.name, handle: p.handle || null, match: p.match, address: p.address || null, website: p.website || null, mapsUrl: p.mapsUrl || null })),
+        postIds: posts.map(p => p.id), hasPrevious: !!prev, warnings: warnings.slice(0, 20)
+    };
+    await progress(95, 'Saving the scoreboard');
+    const { data: saved, error } = await supabase.from('reports').insert([{
+        user_id: userId, client_id: input.clientId || null, platform: 'instagram', report_type: 'review_scan',
+        target_handle: [category, area].filter(Boolean).join(' · ') || scan.map(b => '@' + b.handle).slice(0, 3).join(', '),
+        posts_analyzed: posts.length, snapshot_date: new Date().toISOString().slice(0, 10),
+        report_json: report
+    }]).select('id').maybeSingle();
+    if (error) throw error;
+    return { reportId: saved?.id || null, ...counts, savedLeads, warnings };
+});
+
+/** Recent scans this person can open: their own, and those filed under their clients. */
+app.get('/api/reviews/scans', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const { data } = await supabase.from('reports').select('id, user_id, client_id, target_handle, created_at, report_json')
+            .eq('report_type', 'review_scan').order('created_at', { ascending: false }).limit(200);
+        const visible = await visibleClientIds(ctx);
+        const rows = (data || []).filter(r => r.user_id === ctx.user.id || (r.client_id && (!visible || visible.has(r.client_id)))).slice(0, 20);
+        const names = {};
+        const ids = [...new Set(rows.map(r => r.client_id).filter(Boolean))];
+        if (ids.length) { const { data: cs } = await supabase.from('clients').select('id, name, brand').in('id', ids); (cs || []).forEach(c => { names[c.id] = c.brand || c.name; }); }
+        res.json({ scans: rows.map(r => ({ id: r.id, title: r.target_handle, createdAt: r.created_at, clientId: r.client_id, client: names[r.client_id] || null,
+            counts: (r.report_json && r.report_json.counts) || {}, windowDays: r.report_json && r.report_json.windowDays })) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Before a scan: what it will cost at most. */
+app.get('/api/reviews/estimate', async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        const max = Math.min(REVIEW_MAX_BUSINESSES, Math.max(1, parseInt(req.query.max, 10) || 15));
+        const postsPer = Math.min(REVIEW_MAX_POSTS, Math.max(10, parseInt(req.query.posts, 10) || 40));
+        const handles = Math.min(REVIEW_MAX_BUSINESSES, parseInt(req.query.handles, 10) || 0);
+        const maps = String(req.query.maps || '1') !== '0';
+        const names = String(req.query.names || '1') !== '0';
+        const step = String(req.query.step || 'scan');
+        const usd = step === 'find'
+            ? reviewEstimate({ places: maps ? max : 0, searches: maps && names ? max : 0 })
+            : reviewEstimate({ places: maps ? max : 0, businesses: (maps ? max : 0) + handles, postsPer, searches: maps && names ? max : 0 });
+        res.json({ usd, note: 'The most it can cost: every business needing an Instagram search and every tagged post read. Most runs cost less.' });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** The per-run choices both steps take, cleaned once. */
+function reviewInput(b = {}) {
+    const handles = (Array.isArray(b.handles) ? b.handles : String(b.handles || '').split(/[\s,]+/))
+        .map(h => (typeof h === 'string' ? { handle: h } : h))
+        .filter(h => h && /^@?[a-z0-9._]{1,30}$/i.test(String(h.handle || '').trim())).slice(0, REVIEW_MAX_BUSINESSES)
+        .map(h => ({ handle: String(h.handle).replace('@', '').trim().toLowerCase(), name: h.name ? oneLine(h.name, 120) : null }));
+    const num = (v, lo, hi) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : null; };
+    const categories = reviewCategories({ categories: b.categories, category: b.category });
+    return {
+        categories, category: categories.join(', ') || null, area: oneLine(b.area, 120) || null,
+        seed: b.seed ? oneLine(b.seed, 200) : null, handles,
+        exclude: (Array.isArray(b.exclude) ? b.exclude : []).map(x => String(x || '').replace('@', '').toLowerCase()).filter(Boolean).slice(0, 60),
+        maxBusinesses: Math.round(num(b.maxBusinesses, 1, REVIEW_MAX_BUSINESSES) || 15),
+        minRating: num(b.minRating, 0, 5), minReviews: num(b.minReviews, 0, 100000),
+        useMaps: b.useMaps !== false, searchNames: b.searchNames !== false, useAi: b.useAi !== false,
+        postsPer: Math.round(num(b.postsPer, 10, REVIEW_MAX_POSTS) || 40),
+        days: Math.round(num(b.days, 7, 365) || 90)
+    };
+}
+const reviewUsesMaps = i => !!(i.useMaps && i.categories.length && i.area);
+
+/** Step one: find the businesses, match their Instagram, and stop — nothing is read yet. */
+app.post('/api/reviews/find', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const input = reviewInput(req.body || {});
+        if (!reviewUsesMaps(input) && !input.handles.length && !input.seed) return res.status(400).json({ error: 'Give a kind of business and an area, or Instagram handles.' });
+        const clientId = await resolveClientId(req, ctx);
+        await assertJobSlot(ctx.user.id);
+        input.clientId = clientId || null;
+        const maps = reviewUsesMaps(input);
+        const estimate = reviewEstimate({ places: maps ? input.maxBusinesses : 0, businesses: 0, searches: maps && input.searchNames ? input.maxBusinesses : 0 });
+        const job = await createJob(ctx.user.id, 'review_places', 'leadgen', input, estimate);
+        runJob(job.id, JOB_WORKERS['review_places'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id, estimatedUsd: estimate });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * The scan. Either in one go (Maps and/or handles), or — the usual way from
+ * the page — with the exact list picked after step one, passed as handles
+ * with Maps switched off.
+ */
+app.post('/api/reviews/scan', spendLimit, async (req, res) => {
+    try {
+        const ctx = await requireEngine(req, res, 'leadgen'); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const input = reviewInput(req.body || {});
+        if (!reviewUsesMaps(input) && !input.handles.length && !input.seed) return res.status(400).json({ error: 'Give a kind of business and an area (e.g. “restaurants”, “Gulshan, Dhaka”), or Instagram handles to scan.' });
+        const clientId = await resolveClientId(req, ctx);
+        if (clientId && !(await clientAccess(ctx.user.id, clientId, 'editor'))) return res.status(403).json({ error: 'You need edit access to that client.' });
+        await assertJobSlot(ctx.user.id);
+        input.clientId = clientId || null;
+        const maps = reviewUsesMaps(input);
+        const n = (maps ? input.maxBusinesses : 0) + input.handles.length + (input.seed ? 1 : 0);
+        const estimate = reviewEstimate({ places: maps ? input.maxBusinesses : 0, businesses: n, postsPer: input.postsPer, searches: maps && input.searchNames ? input.maxBusinesses : 0 });
+        const job = await createJob(ctx.user.id, 'review_scan', 'leadgen', input, estimate);
+        runJob(job.id, JOB_WORKERS['review_scan'](ctx.user.id, job.input, job.id));
+        res.status(202).json({ jobId: job.id, estimatedUsd: estimate, budget: await budgetSnapshot('leadgen', ctx.user.id, estimate) });
+    } catch (err) { sendErr(res, err); }
+});
+
+// --- the scoreboard as a document ----------------------------------------------
+function reviewDoc(row) {
+    const j = row.report_json || {};
+    const c = j.counts || {};
+    if (!Array.isArray(j.board)) return null;
+    const where = [j.category, j.area].filter(Boolean).join(' in ');
+    const ig = h => `@${h}`;
+    const link = u => (/^https:\/\/(www\.)?instagram\.com\//.test(String(u || '')) ? u : null);
+    const clientRow = j.board.find(b => b.isClient) || null;
+    const total = c.reviews || 0;
+    const sections = [];
+
+    sections.push({ title: 'At a glance', source: ['pub', 'ours'], blocks: [
+        { type: 'kpis', items: [
+            { label: 'Businesses read', value: docFmt(c.scanned), sub: c.unmatched ? `${c.unmatched} more could not be matched to Instagram` : `found on Google Maps${j.area ? ' around ' + j.area : ''}` },
+            { label: 'Reviews found', value: docFmt(total), sub: `in ${docFmt(c.tagged)} tagged posts over ${j.windowDays} days`, tone: total ? 'good' : '' },
+            { label: 'Creators reviewing', value: docFmt(c.creators), sub: c.paid ? `${c.paid} review${c.paid === 1 ? ' was' : 's were'} paid or hosted` : 'none marked as paid' },
+            clientRow ? { label: 'Your share of reviews', value: total ? docPct(clientRow.reviews / total * 100, 0) : '—', sub: `${clientRow.reviews} of ${total}`, tone: total && clientRow.reviews / total < 1 / Math.max(2, j.board.length) ? 'watch' : 'good' } : null
+        ] },
+        (j.missedByClient || []).length && clientRow ? { type: 'verdict', text: `${j.missedByClient.length} creator${j.missedByClient.length === 1 ? '' : 's'} reviewed nearby ${j.category || 'businesses'} in the last ${j.windowDays} days but not @${clientRow.handle}.` } : null
+    ] });
+
+    sections.push({ title: 'Who is being reviewed', lead: 'Posts that tagged each business, read one by one.', source: ['pub'], blocks: [
+        { type: 'table', highlight: j.board.findIndex(b => b.isClient),
+            cols: [{ label: 'Business' }, { label: 'Tagged posts', num: true }, { label: 'Reviews', num: true }, { label: 'Paid', num: true }, { label: 'Creators', num: true }, { label: 'Last review' }].concat(j.hasPrevious ? [{ label: 'New', num: true }] : []),
+            rows: j.board.map(b => [`${b.name && b.name !== ig(b.handle) ? oneLine(b.name, 40) + ' · ' : ''}${ig(b.handle)}${b.match === 'likely' ? ' *' : ''}`, b.tagged, { text: String(b.reviews), tone: b.reviews ? 'good' : '' }, b.paid, b.creators, b.lastReview ? docDay(b.lastReview) : '—'].concat(j.hasPrevious ? [b.newReviews ? { text: '+' + b.newReviews, tone: 'good' } : '0'] : [])) },
+        j.board.some(b => b.match === 'likely') ? { type: 'note', text: '* Instagram account found by a search on the business name and checked against it, not linked from the listing.' } : null,
+        { type: 'bars', title: 'Share of all reviews found', unit: '%', max: 100, rows: j.board.filter(b => b.reviews).slice(0, 8).map(b => ({ label: ig(b.handle), value: total ? +(b.reviews / total * 100).toFixed(1) : 0, tone: b.isClient ? 'good' : 'gold' })) }
+    ] });
+
+    const rv = (j.reviewers || []).slice(0, 15);
+    if (rv.length) sections.push({ title: 'The creators who review here', lead: 'Most businesses reviewed first. Each is on the Influencers list, ready to add to a pipeline.', source: ['pub'], blocks: [
+        { type: 'table', cols: [{ label: 'Creator' }, { label: 'Reviews', num: true }, { label: 'Businesses', num: true }, { label: 'Avg likes + comments', num: true }, { label: 'Last' }].concat(clientRow ? [{ label: 'Reviewed you' }] : []),
+            rows: rv.map(r => [ig(r.handle) + (r.isNew ? ' (new)' : ''), r.reviews, r.venues.length, docFmt(r.avgEngagement), r.last ? docDay(r.last) : '—']
+                .concat(clientRow ? [r.reviewedClient ? { chip: 'Yes', tone: 'good' } : { chip: 'Not yet', tone: 'watch' }] : [])) }
+    ] });
+
+    if ((j.top || []).length) sections.push({ title: 'Reviews that got the most attention', source: ['pub'], blocks: [
+        { type: 'quotes', items: j.top.slice(0, 4).map(p => ({ tag: `${ig(p.poster)} on ${ig(p.venue)}${p.at ? ' · ' + docDay(p.at) : ''}`, text: p.caption || '(no caption)', meta: `${docFmt(p.likes)} likes · ${docFmt(p.comments)} comments`, chip: p.paid ? { text: 'Paid or hosted', tone: 'gold' } : null, link: link(p.url) })) }
+    ] });
+
+    if ((j.unmatched || []).length) sections.push({ title: 'Businesses we could not read', lead: 'No Instagram account could be confirmed. Add the right handle and scan again to include them.', source: ['ours'], blocks: [
+        { type: 'table', cols: [{ label: 'Business' }, { label: 'What we found' }], rows: j.unmatched.slice(0, 20).map(u => [oneLine(u.name || '', 60) || '—', u.handle ? `Maybe @${u.handle}: check` : 'No account found']) }
+    ] });
+
+    return docFinish({
+        type: 'review_scan',
+        cover: { kind: `Review tracker · ${docMonth(row.created_at)}`, title: where ? where.replace(/^\w/, x => x.toUpperCase()) : 'Tagged-post reviews',
+            sub: `Who reviewed the businesses${j.area ? ' around ' + j.area : ''} on Instagram in the last ${j.windowDays} days, and the creators behind the reviews.`,
+            receipt: [[docFmt(c.scanned), 'businesses'], [docFmt(c.tagged), 'tagged posts'], [docFmt(total), 'reviews'], [docFmt(c.creators), 'creators']],
+            builtAt: j.generatedAt || row.created_at },
+        sections,
+        about: [
+            `Built from public Instagram posts that tagged each business in the photo, over the ${j.windowDays} days before ${docDay(j.generatedAt || row.created_at)}. Posts that only mention a business in the caption, or collab posts, do not appear in its tagged posts and are not counted.`,
+            `Businesses come from Google Maps. An Instagram account is used when the listing or the business’s website links to it, or when a search on the name finds a close match.`,
+            `A post counts as a review when it gives an opinion: taste, price, service, a rating or a recommendation. Clear cases are sorted by rules; ${c.byAi ? `${c.byAi} unclear post${c.byAi === 1 ? ' was' : 's were'} read by AI` : 'none needed AI'}${c.unclear ? `, and ${c.unclear} stayed unclear and are not counted` : ''}.`
+        ]
+    });
+}
 
 // ===========================================================================
 // OWNER ASSISTANT  (phase 15)
@@ -17483,7 +19293,8 @@ const CLIENT_REPORT_TITLES = {
     content_plan: 'Content plan',
     meta_owned:   'Owner report',
     meta_monthly: 'Monthly report',
-    public_monthly: 'Monthly report'
+    public_monthly: 'Monthly report',
+    review_scan: 'Who is reviewing local businesses'
 };
 
 app.get('/api/client/reports', async (req, res) => {
@@ -18146,7 +19957,11 @@ async function schemaProbe() {
         { table: 'schedules',     column: 'next_run_at', migration: 'schema-phase11.sql',
           impact: 'Scheduled runs cannot be created or fired.' },
         { table: 'report_shares', column: 'token',     migration: 'schema-phase11.sql',
-          impact: 'Report share links cannot be created.' }
+          impact: 'Report share links cannot be created.' },
+        { table: 'content_posts', column: 'planned_on', migration: 'schema-phase42.sql',
+          impact: 'Content plans cannot be put on the calendar and owners see no posts to approve.' },
+        { table: 'leads',         column: 'kind_now',  migration: 'schema-phase40.sql',
+          impact: 'Leads are saved but not sorted into influencers and businesses, and the pipeline answers 503.' }
     ];
 
     const missing = [];
@@ -18402,5 +20217,9 @@ module.exports = {
     // phase 35
     assistantScope, assistantAnswer,
     // phase 36
+    cpScheduleDates, cpParseSlot, contentPlanMonth,
+    classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
+    __setReviewLookup: fn => { _reviewLookup = fn; },
+    classifyLead, leadFit, leadPostSignal, leadSignalsAdd, leadSignalsMerge, leadAssessment, PIPE_STAGES,
     reportDoc, igDoc, ciDoc, fbDoc, fbGroupsDoc, publicMonthlyDoc, publicMonthData, monthPlatforms, monthTrends, keepAuditImages, storeMediaImage, MEDIA_HOST_RE
 };
