@@ -1578,3 +1578,23 @@ body.el-drawer-open { overflow: hidden; }
 .cs-step > p.cs-line { font-size: 0.86rem; color: var(--text-secondary); }
 .cs-sched input[type=date], .cs-bar input[type=month] { width: auto; }
 .cs-sched .cs-inl, .cs-bar .cs-inl { display: inline-block; margin: 0 8px 0 0; }
+
+/* ---- creator posts (phase 46): cr-* --------------------------------------------- */
+.cr-for { color: var(--text-muted); font-weight: 600; }
+.cr-add { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 0.8fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; margin-top: 16px; }
+.cr-add label { margin: 0 0 6px; }
+@media (max-width: 720px) { .cr-add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .cr-add-link { grid-column: 1 / -1; } }
+.cr-meta { margin: 10px 0 14px; font-size: 0.8rem; color: var(--text-muted); }
+.cr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.cr-card { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: var(--r-md); background: var(--surface-1); border: 1px solid var(--card-border); min-width: 0; }
+.cr-thumb { width: 88px; height: 110px; object-fit: cover; border-radius: var(--r-sm); display: block; max-width: 100%; }
+.cr-thumb.is-empty { background: var(--surface-2); }
+.cr-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 0.82rem; color: var(--text-secondary); }
+.cr-who { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cr-who b { color: var(--text-primary); font-size: 0.9rem; }
+.cr-who span { color: var(--text-muted); font-size: 0.76rem; }
+.cr-cap { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.cr-nums { display: flex; gap: 12px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.cr-nums b { color: var(--text-primary); }
+.cr-line { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.cr-muted { color: var(--text-muted); }

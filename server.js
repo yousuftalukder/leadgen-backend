@@ -13369,7 +13369,8 @@ const META_GRAPH_VERSION = (process.env.META_GRAPH_VERSION || 'v24.0').trim();
 const META_SCOPES        = (process.env.META_SCOPES ||
     // Phase 45: comments are read too (pages_read_user_content, instagram_manage_comments), so the
     // Owner Assistant's comment digest works. Owners connected before this reconnect once to grant them.
-    'pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments,business_management')
+    // Phase 46: ads_read, so Edge Meta AI can answer about ad spend and results. Read only.
+    'pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments,business_management,ads_read')
     .split(',').map(s => s.trim()).filter(Boolean);
 const FRONTEND_URL       = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
 const BACKEND_URL_ENV    = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
@@ -20771,7 +20772,17 @@ setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
 // first deploy mounted them after it, so every /api/xp request was a 404.
 xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger,
     // Edge Meta AI draws from the same keys as everything else: the person's own, then the pool, then the server key.
-    geminiKeys: { list: () => geminiCandidates(ELS.getStore()?.userId || null), report: geminiReportKey } });
+    geminiKeys: { list: () => geminiCandidates(ELS.getStore()?.userId || null), report: geminiReportKey },
+    // Creator posts (phase 46) run on EdgeLead's Apify keys: the person's own first when staff start a
+    // look, the shared keys for the weekly pass; same budget gate and spend ledger as every engine.
+    apifyRun: xpApifyRun });
+
+async function xpApifyRun(actorId, input, { maxItems, maxTotalChargeUsd } = {}) {
+    const { client } = await getWorkingClient('report', ELS.getStore()?.userId || null, { needUsd: maxTotalChargeUsd || 0 });
+    const { run, items, usd } = await callActor(client, actorId, input, { estimateUsd: maxTotalChargeUsd || 0.05, maxItems });
+    return { items: items || [], runId: run?.id || null, costUsd: usd, key: { id: client.__el?.keyId || null, label: client.__el?.apifyUsername || 'EdgeLead key' },
+        status: run?.status === 'TIMED-OUT' ? 'TIMED-OUT' : 'SUCCEEDED' };
+}
 
 app.use('/api', (req, res) => {
     res.status(404).json({
@@ -21269,7 +21280,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
-    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData,
+    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData, xpApifyRun,
     csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },

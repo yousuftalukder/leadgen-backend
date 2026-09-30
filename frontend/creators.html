@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Creator posts — EdgeLead</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body class="el-has-header">
+
+<div class="el-page">
+    <div class="card">
+        <h2 class="card-title">Creator posts <span class="cr-for" id="cr-for"></span></h2>
+        <p class="card-subtitle">Posts other accounts published about this business: collabs on its grid, and posts on its tagged tab.
+            They are looked for once a week. A post from a creator (a collab, 1,000+ followers, or 1,000+ views) is shown straight away;
+            one that looks like a customer’s stays hidden until you show it. Only shown posts reach the owner’s Edge Meta AI.</p>
+        <div class="ld-actions">
+            <button class="ws-btn is-gold is-sm" type="button" id="cr-look">Look for new posts now</button>
+            <button class="ws-btn is-sm" type="button" id="cr-refresh">Refresh the numbers</button>
+            <span class="ws-note" id="cr-job"></span>
+        </div>
+        <form class="cr-add" id="cr-add">
+            <div class="cr-add-link"><label for="cr-link">Add a post by its link</label><input id="cr-link" placeholder="https://www.instagram.com/reel/…" autocomplete="off"></div>
+            <div><label for="cr-cost">Cost (USD)</label><input id="cr-cost" inputmode="decimal" placeholder="optional"></div>
+            <div><label for="cr-visit">Visit date</label><input id="cr-visit" type="date"></div>
+            <div class="cr-add-go"><button class="ws-btn is-sm" type="submit">Add</button></div>
+        </form>
+        <p class="ws-note" id="cr-note"></p>
+    </div>
+
+    <div class="card">
+        <div class="ll-kinds" role="tablist" aria-label="Which posts">
+            <button class="ll-kind is-on" type="button" role="tab" aria-selected="true" data-s="ACTIVE">Shown <b id="cr-n-ACTIVE">·</b></button>
+            <button class="ll-kind" type="button" role="tab" aria-selected="false" data-s="HIDDEN">Hidden <b id="cr-n-HIDDEN">·</b></button>
+        </div>
+        <p class="ws-hint cr-meta" id="cr-meta"></p>
+        <div class="cr-grid" id="cr-grid"><p class="el-muted">Loading…</p></div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script>
+(async () => {
+    await EL.init({ engine: null, page: 'creators.html' });
+    const $ = id => document.getElementById(id);
+    const esc = EL.escape;
+    const clientId = EL.clientId();
+    if (!clientId) { $('cr-grid').innerHTML = '<p class="el-muted">Open this from a client: Clients → the client → Ask AI → Creator posts.</p>'; return; }
+    const list = await EL.clients().catch(() => []);
+    const cl = list.find(x => x.id === clientId);
+    if (cl) $('cr-for').textContent = '· ' + cl.name;
+    let data = null, showing = 'ACTIVE', polling = null;
+    const n = v => (v === null || v === undefined ? '—' : Number(v).toLocaleString('en-US'));
+    const day = iso => (iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
+    const note = (t, tone) => { $('cr-note').className = 'ws-note' + (tone ? ' is-' + tone : ''); $('cr-note').textContent = t || ''; };
+
+    async function load() {
+        try { data = await EL.api('/api/xp/creators?client_id=' + encodeURIComponent(clientId)); }
+        catch (err) { $('cr-grid').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; return; }
+        for (const s of ['ACTIVE', 'HIDDEN']) $('cr-n-' + s).textContent = data.posts.filter(p => p.status === s).length;
+        $('cr-meta').textContent = [data.last_look_at ? `Last looked ${day(data.last_look_at)}` : 'Not looked yet',
+            data.usual_reel_views ? `Their usual reel: ${n(data.usual_reel_views.median)} views` : null].filter(Boolean).join(' · ');
+        showJob(data.job);
+        draw();
+    }
+
+    function draw() {
+        const posts = data.posts.filter(p => p.status === showing);
+        $('cr-grid').innerHTML = posts.length ? posts.map(x => {
+            const p = x.post, c = x.creator, m = x.metrics;
+            return `<article class="cr-card">
+                ${p.thumbnail_url ? `<img class="cr-thumb" src="${EL.safeUrl(p.thumbnail_url)}" alt="" loading="lazy">` : '<div class="cr-thumb is-empty"></div>'}
+                <div class="cr-body">
+                    <div class="cr-who"><b>@${esc(c.username)}</b>${c.followers !== null ? `<span>${n(c.followers)} followers</span>` : ''}${x.collab ? '<span class="el-chip is-gold">Collab</span>' : ''}</div>
+                    <p class="cr-cap">${esc((p.caption || '').slice(0, 140) || 'No caption')}</p>
+                    <div class="cr-nums"><span><b>${n(p.views)}</b> views</span><span><b>${p.likes_hidden ? 'hidden' : n(p.likes)}</b> likes</span><span><b>${n(p.comments)}</b> comments</span></div>
+                    <p class="cr-line">${esc(p.format || 'Post')} · ${day(p.posted_at)}${m.vs_usual_reel ? ` · ${m.vs_usual_reel}× their usual reel` : ''}${x.cost_usd !== null ? ` · $${x.cost_usd}${m.cost_per_1000_views !== null ? ` ($${m.cost_per_1000_views} per 1,000 views)` : ''}` : ''}</p>
+                    ${x.notes ? `<p class="cr-line cr-muted">${esc(x.notes)}</p>` : ''}
+                    <div class="ld-actions">
+                        <a class="ws-btn is-quiet is-sm" href="${EL.safeUrl(p.url)}" target="_blank" rel="noopener noreferrer">Open</a>
+                        <button class="ws-btn is-sm" type="button" data-toggle="${esc(x.id)}">${x.status === 'ACTIVE' ? 'Hide' : 'Show'}</button>
+                        <button class="ws-btn is-quiet is-sm" type="button" data-edit="${esc(x.id)}">Cost and notes</button>
+                    </div>
+                </div>
+            </article>`;
+        }).join('') : `<p class="el-muted">${showing === 'ACTIVE' ? 'No creator posts yet. Look for new posts, or add one by its link.' : 'Nothing hidden.'}</p>`;
+        $('cr-grid').querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', async () => {
+            const x = data.posts.find(p => p.id === b.dataset.toggle);
+            try { await EL.api('/api/xp/creators/' + encodeURIComponent(x.id), { method: 'PATCH', body: { clientId, status: x.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE' } }); load(); }
+            catch (err) { EL.toast(err.message, 'bad'); }
+        }));
+        $('cr-grid').querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => edit(data.posts.find(p => p.id === b.dataset.edit))));
+    }
+
+    function edit(x) {
+        const dw = EL.drawer({
+            title: '@' + esc(x.creator.username), sub: esc(day(x.post.posted_at)),
+            body: `<div class="ws-form">
+                <div class="ws-form two">
+                    <div><label for="ce-cost">Cost (USD)</label><input id="ce-cost" inputmode="decimal" value="${x.cost_usd ?? ''}"></div>
+                    <div><label for="ce-visit">Visit date</label><input id="ce-visit" type="date" value="${esc(x.visit_date || '')}"></div>
+                </div>
+                <div><label for="ce-notes">Notes</label><textarea id="ce-notes" rows="3" maxlength="1000">${esc(x.notes || '')}</textarea></div>
+                <p class="ws-note" id="ce-note"></p></div>`,
+            foot: `<button class="ws-btn is-danger is-sm" type="button" id="ce-del">Remove</button><span class="cs-grow"></span>
+                <button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="ce-save">Save</button>`
+        });
+        const v = s => dw.el.querySelector(s).value;
+        dw.el.querySelector('#ce-save').addEventListener('click', async () => {
+            try { await EL.api('/api/xp/creators/' + encodeURIComponent(x.id), { method: 'PATCH', body: { clientId, costUsd: v('#ce-cost'), visitDate: v('#ce-visit'), notes: v('#ce-notes') } }); EL.closeDrawer(); load(); }
+            catch (err) { const e = dw.el.querySelector('#ce-note'); e.className = 'ws-note is-bad'; e.textContent = err.message; }
+        });
+        dw.el.querySelector('#ce-del').addEventListener('click', async () => {
+            try { await EL.api('/api/xp/creators/' + encodeURIComponent(x.id) + '?client_id=' + encodeURIComponent(clientId), { method: 'DELETE' }); EL.closeDrawer(); load(); }
+            catch (err) { const e = dw.el.querySelector('#ce-note'); e.className = 'ws-note is-bad'; e.textContent = err.message; }
+        });
+    }
+
+    function showJob(j) {
+        const busy = j && !j.finished_at;
+        $('cr-look').disabled = $('cr-refresh').disabled = !!busy;
+        const el = $('cr-job');
+        if (!j) { el.textContent = ''; return; }
+        if (busy) el.textContent = j.kind === 'refresh' ? 'Refreshing the numbers…' : 'Looking for new posts… this takes a minute or two.';
+        else if (j.error) { el.className = 'ws-note is-bad'; el.textContent = j.error; }
+        else if (j.result && j.kind === 'discover') { el.className = 'ws-note is-good'; el.textContent = `${j.result.new_shown || 0} new shown, ${j.result.new_hidden || 0} new hidden.`; }
+        else if (j.result) { el.className = 'ws-note is-good'; el.textContent = `${j.result.read || 0} post(s) refreshed.`; }
+        clearTimeout(polling);
+        if (busy) polling = setTimeout(load, 5000);
+    }
+
+    async function start(refresh) {
+        try { const r = await EL.api('/api/xp/creators/look', { method: 'POST', body: { clientId, refresh } }); showJob(r.job); }
+        catch (err) { $('cr-job').className = 'ws-note is-bad'; $('cr-job').textContent = err.message; }
+    }
+    $('cr-look').addEventListener('click', () => start(false));
+    $('cr-refresh').addEventListener('click', () => start(true));
+    $('cr-add').addEventListener('submit', async e => {
+        e.preventDefault();
+        const link = $('cr-link').value.trim();
+        if (!link) { note('Paste the post’s link.', 'bad'); return; }
+        note('Reading the post…');
+        try {
+            const r = await EL.api('/api/xp/creators', { method: 'POST', body: { clientId, link, costUsd: $('cr-cost').value, visitDate: $('cr-visit').value || null } });
+            note(r.already ? 'That post was already here; it is shown now.' : 'Added.', 'good');
+            $('cr-link').value = ''; $('cr-cost').value = ''; $('cr-visit').value = '';
+            load();
+        } catch (err) { note(err.message, 'bad'); }
+    });
+    document.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => {
+        showing = b.dataset.s;
+        document.querySelectorAll('[data-s]').forEach(x => { x.classList.toggle('is-on', x === b); x.setAttribute('aria-selected', x === b); });
+        if (data) draw();
+    }));
+    load();
+})();
+</script>
+</body>
+</html>

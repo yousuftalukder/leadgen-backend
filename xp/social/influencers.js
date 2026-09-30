@@ -41,7 +41,10 @@ const err = (status, message) => Object.assign(new Error(message), { status });
 async function tracked(purpose, clientId, input, { maxItems, timeoutSecs = 600 } = {}) {
   const row = await q(supabase.from('xp_apify_runs').insert({ actor: ACTOR, purpose, client_id: clientId || null, status: 'RUNNING' }).select('id').single(), 'apify run start');
   try {
-    const r = await apify.pool().runTracked(ACTOR, input, { maxItems, maxTotalChargeUsd: capUsd(maxItems), timeoutSecs });
+    const host = apify.hostRunner();   // EdgeLead: its own Apify keys, budget and ledger
+    const r = host
+      ? await host(ACTOR, input, { maxItems, maxTotalChargeUsd: capUsd(maxItems), clientId, purpose })
+      : await apify.pool().runTracked(ACTOR, input, { maxItems, maxTotalChargeUsd: capUsd(maxItems), timeoutSecs });
     const items = r.items.filter((x) => x && !x.error), errors = r.items.filter((x) => x && x.error);
     await q(supabase.from('xp_apify_runs').update({ status: r.status === 'TIMED-OUT' ? 'PARTIAL' : 'OK', run_id: r.runId, key_label: r.key.label, items: items.length,
       cost_usd: r.costUsd, error: errors.length ? `${errors.length} not returned: ${[...new Set(errors.map((x) => x.errorDescription || x.error))].join(', ')}`.slice(0, 500) : null,
@@ -132,10 +135,10 @@ async function creatorProfiles(usernames, clientId, { read = true } = {}) {
 async function facebookWindow(clientId) {
   const cut = DateTime.utc().minus({ days: FB_WINDOW_DAYS }).toISO();
   const rows = await q(supabase.from('xp_influencer_posts').select('status, xp_social_posts!inner(posted_at,raw)').eq('client_id', clientId).gte('xp_social_posts.posted_at', cut), 'facebook window');
-  const shared = rows.filter((r) => r.status === 'ACTIVE' && r.social_posts.raw?.fb && r.social_posts.posted_at);
+  const shared = rows.filter((r) => r.status === 'ACTIVE' && r.xp_social_posts.raw?.fb && r.xp_social_posts.posted_at);
   if (!shared.length) return null;
-  const oldest = shared.map((r) => r.social_posts.posted_at).sort()[0];
-  const known = rows.filter((r) => r.social_posts.posted_at && r.social_posts.posted_at >= oldest).length;
+  const oldest = shared.map((r) => r.xp_social_posts.posted_at).sort()[0];
+  const known = rows.filter((r) => r.xp_social_posts.posted_at && r.xp_social_posts.posted_at >= oldest).length;
   return { since: DateTime.fromISO(oldest).toUTC().minus({ days: 1 }).startOf('day'), limit: Math.min(FB_LIMIT_MAX, Math.max(LIMITS.weekly.mentions, known + 6)), posts: shared.length };
 }
 
@@ -275,7 +278,7 @@ async function refreshNumbers({ clientId = null, ids = null, force = false } = {
   if (ids) s = s.in('id', ids);
   const due = new Map();   // one read per post, even when two businesses share it
   for (const r of await q(s, 'influencer posts due')) {
-    const p = r.social_posts;
+    const p = r.xp_social_posts;
     if (p && p.url && (force || IG.refreshDue(p))) due.set(p.id, p);
   }
   const posts = [...due.values()];
@@ -307,15 +310,18 @@ async function daily() {
 }
 async function dailyPass() {
   await closeInterrupted().catch(() => {});
-  let keys;
-  try { keys = await apify.pool().checkAll(); } catch (e) { return { skipped: `Apify keys could not be checked: ${e.message}` }; }
-  if (!keys.usable) return { skipped: 'no Apify key with credit' };
-  if (keys.left_usd < SCHEDULE_FLOOR_USD) return { skipped: `less than $${SCHEDULE_FLOOR_USD.toFixed(2)} of Apify credit left this month` };
+  // EdgeLead runs Apify through its own pool, whose budget gate refuses a run a key cannot afford.
+  if (!apify.hostRunner()) {
+    let keys;
+    try { keys = await apify.pool().checkAll(); } catch (e) { return { skipped: `Apify keys could not be checked: ${e.message}` }; }
+    if (!keys.usable) return { skipped: 'no Apify key with credit' };
+    if (keys.left_usd < SCHEDULE_FLOOR_USD) return { skipped: `less than $${SCHEDULE_FLOOR_USD.toFixed(2)} of Apify credit left this month` };
+  }
   const out = { refresh: null, discover: [] };
   out.refresh = await refreshNumbers().catch((e) => ({ error: e.message }));
   const clients = await q(supabase.from('xp_clients').select('id,client_name, xp_meta_assets(platform,username,status)').eq('is_active', true), 'xp_clients');
   for (const c of clients) {
-    if (!(c.meta_assets || []).some((a) => a.platform === 'IG' && a.username && a.status !== 'REMOVED')) continue;
+    if (!(c.xp_meta_assets || []).some((a) => a.platform === 'IG' && a.username && a.status !== 'REMOVED')) continue;
     const [ok, tried] = await Promise.all([lastRun(c.id, 'DISCOVER'), lastRun(c.id, 'DISCOVER', null)]);
     if (ok && Date.now() - Date.parse(ok.started_at) < DISCOVER_EVERY_DAYS * DAY - 6 * HOUR) continue;
     const failedLast = tried && (!ok || Date.parse(tried.started_at) > Date.parse(ok.started_at));
@@ -357,15 +363,15 @@ function shownNumbers(p) {
 async function listFor(clientId) {
   const rows = await q(supabase.from('xp_influencer_posts').select(`id,influencer_username,source,status,visit_date,cost_usd,notes,added_by,created_at,updated_at, xp_social_posts(${store.POST_COLS})`)
     .eq('client_id', clientId).order('created_at', { ascending: false }).limit(200), 'influencer posts');
-  const list = rows.filter((r) => r.social_posts);
+  const list = rows.filter((r) => r.xp_social_posts);
   const handle = (await q(supabase.from('xp_meta_assets').select('username').eq('client_id', clientId).eq('platform', 'IG').limit(1), 'ig account'))[0]?.username?.toLowerCase() || null;
   const [creators, usual, snaps] = await Promise.all([
-    creatorProfiles(list.map((r) => r.social_posts.owner_username), clientId, { read: false }),
+    creatorProfiles(list.map((r) => r.xp_social_posts.owner_username), clientId, { read: false }),
     usualReelViews(clientId),
-    list.length ? q(supabase.from('xp_social_post_snapshots').select('post_id,fetched_at,views,likes,comments').in('post_id', list.map((r) => r.social_posts.id)).order('fetched_at').limit(10000), 'snapshots') : []
+    list.length ? q(supabase.from('xp_social_post_snapshots').select('post_id,fetched_at,views,likes,comments').in('post_id', list.map((r) => r.xp_social_posts.id)).order('fetched_at').limit(10000), 'snapshots') : []
   ]);
   const posts = list.map((r) => {
-    const p = r.social_posts, c = creators.get(p.owner_username) || {}, n = shownNumbers(p);
+    const p = r.xp_social_posts, c = creators.get(p.owner_username) || {}, n = shownNumbers(p);
     const engaged = p.likes !== null && p.comments !== null ? p.likes + p.comments : null;   // Instagram's part; hidden likes: no rate rather than a low one
     const engagedAll = n.likes !== null && p.comments !== null ? n.likes + p.comments : null;
     const series = snaps.filter((s) => s.post_id === p.id).map((s) => ({ at: s.fetched_at, views: s.views, likes: s.likes, comments: s.comments }));

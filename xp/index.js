@@ -16,6 +16,8 @@
 const cron = require('node-cron');
 const cfg = require('./config');
 const { supabase, q } = require('./db');
+const influencers = require('./social/influencers');
+const apify = require('./apify');
 const S = require('./security');
 const T = require('./time');
 const chat = require('./ai/chat');
@@ -199,7 +201,9 @@ async function runCron(triggeredBy) {
   const results = await syncAll({ runType: 'CRON', triggeredBy });
   let adsResult = null;
   if (ads && ads.syncAds) adsResult = await ads.syncAds({ triggeredBy }).catch((e) => ({ error: e.message }));
-  return { results, ads: adsResult };
+  // EdgeLead (phase 46): creator posts — refresh what is due, and each business's weekly look.
+  const creators = apify.hostRunner() ? await influencers.daily().catch((e) => ({ error: e.message })) : null;
+  return { results, ads: adsResult, creators };
 }
 
 const running = new Map();   // clientId → started at
@@ -236,6 +240,7 @@ async function status(clientId) {
 function mount(app, d) {
   deps = d;
   if (d.geminiKeys) chat.setKeySource(d.geminiKeys);
+  if (d.apifyRun) apify.setHostRunner(d.apifyRun);   // EdgeLead (phase 46): creator posts on EdgeLead's Apify keys
   const { auth, requireAdmin, rateLimit, bearerId, logger } = d;
   const log = logger || console;
 
@@ -358,6 +363,46 @@ function mount(app, d) {
       if (!rows.length) return res.status(404).json({ error: 'Conversation not found.' });
       res.json({ success: true, title: rows[0].title });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- creator posts (phase 46): staff only. The weekly look keeps posts that look like a customer's
+  // hidden until staff show them, and only shown posts reach the owner's answers.
+  async function creatorsContext(req, res, wanted, need) {
+    const a = await chatContext(req, res, wanted, need); if (!a) return null;
+    if (a.ctx.profile && a.ctx.profile.role === 'client') { res.status(403).json({ error: 'Creator posts are managed by your agency.' }); return null; }
+    if (!(await ensureProvisioned(a.clientId))) { res.status(409).json({ error: 'Connect this business\'s Facebook Page and Instagram account first.' }); return null; }
+    return a;
+  }
+  const creatorErr = (res, e) => res.status(e.status && e.status < 600 ? e.status : (e.code === 'NO_CREDIT' ? 402 : 500)).json({ error: typeof e.message === 'string' ? e.message : String(e.message || e) });
+  app.get('/api/xp/creators', async (req, res) => {
+    const a = await creatorsContext(req, res, req.query.client_id, 'viewer'); if (!a) return;
+    try { res.json(await influencers.pageFor(a.clientId)); } catch (e) { creatorErr(res, e); }
+  });
+  app.post('/api/xp/creators/look', rateLimit({ windowMs: 60000, max: 3, key: bearerId }), async (req, res) => {
+    const a = await creatorsContext(req, res, req.body && req.body.clientId, 'editor'); if (!a) return;
+    try {
+      const by = a.ctx.profile?.full_name || a.ctx.user.email || 'staff';
+      const kind = req.body && req.body.refresh ? 'refresh' : 'discover';
+      const job = influencers.startJob(a.clientId, kind, by, kind === 'refresh'
+        ? () => influencers.refreshNumbers({ clientId: a.clientId, force: true }) : () => influencers.discover(a.clientId, { by }));
+      res.status(202).json({ job: influencers.publicJob(job) });
+    } catch (e) { creatorErr(res, e); }
+  });
+  app.post('/api/xp/creators', rateLimit({ windowMs: 60000, max: 10, key: bearerId }), async (req, res) => {
+    const a = await creatorsContext(req, res, req.body && req.body.clientId, 'editor'); if (!a) return;
+    const b = req.body || {};
+    try { res.status(201).json(await influencers.addByLink(a.clientId, b.link, { visitDate: b.visitDate, costUsd: b.costUsd, notes: b.notes, by: a.ctx.profile?.full_name || a.ctx.user.email })); }
+    catch (e) { creatorErr(res, e); }
+  });
+  app.patch('/api/xp/creators/:id', async (req, res) => {
+    const a = await creatorsContext(req, res, req.body && req.body.clientId, 'editor'); if (!a) return;
+    const b = req.body || {};
+    try { res.json(await influencers.update(req.params.id, a.clientId, { status: b.status, visitDate: b.visitDate, costUsd: b.costUsd, notes: b.notes })); }
+    catch (e) { creatorErr(res, e); }
+  });
+  app.delete('/api/xp/creators/:id', async (req, res) => {
+    const a = await creatorsContext(req, res, req.query.client_id, 'editor'); if (!a) return;
+    try { res.json(await influencers.remove(req.params.id, a.clientId)); } catch (e) { creatorErr(res, e); }
   });
 
   /** What the warehouse holds for this client: assets, last reads, coverage, whether a read is running. */
