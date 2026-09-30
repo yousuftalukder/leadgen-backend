@@ -3513,6 +3513,21 @@ test('an AQ. key is added to the pool; a key Google refuses mid-call hands over 
     } finally { global.fetch = realFetch; }
 });
 
+section('\nkeys: what each covers, and one personal Apify key for all of a person\'s work');
+test('a staff member saves one Apify key for all their work; the admin page says what every key covers', async () => {
+    const r = await call('POST', '/api/update-apify-key', { token: 't-emp', body: { newApiKey: 'apify_api_empAllWork0123456789abcdef', engine: 'any' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual([r.body.engine, r.body.scope], ['any', 'personal']);
+    const row = tbl('apify_keys').find(k => k.owner_user_id === EMP.id && k.engine === 'any');
+    assert.ok(row, 'the all-work key was not stored as engine "any"');
+    const v = await call('GET', '/api/admin/key-pools', { token: 't-admin' });
+    assert.strictEqual(v.statusCode, 200, JSON.stringify(v.body));
+    assert.deepStrictEqual(v.body.coverage.apify.map(e => e.engine), ['leadgen', 'report', 'fb_community', 'fb_page']);
+    assert.ok(v.body.coverage.gemini.length && v.body.coverage.whose.length);
+    const me = v.body.people.find(p => p.id === EMP.id);
+    assert.ok(Object.values(me.apify.next).every(x => x === 'own key'), 'an all-work key did not cover every engine: ' + JSON.stringify(me.apify.next));
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

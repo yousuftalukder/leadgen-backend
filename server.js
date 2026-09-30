@@ -5813,7 +5813,8 @@ app.post('/api/update-apify-key', async (req, res) => {
 
         const { newApiKey, engine } = req.body;
         if (!newApiKey) return res.status(400).json({ error: 'Key required' });
-        const activeEngine = ENGINES.includes(engine) ? engine : 'leadgen';
+        // A personal key may pay for all of that person's work ('any'); an admin's key is an engine's primary.
+        const activeEngine = engine === 'any' && ctx.profile.role !== 'admin' ? 'any' : ENGINES.includes(engine) ? engine : 'leadgen';
 
         const apifyUser = await new ApifyClient({ token: newApiKey }).user().get();
 
@@ -13296,6 +13297,24 @@ app.post('/api/gemini-keys', async (req, res) => {
 // their next run would draw from. Pure over rows, so it can be tested.
 // ---------------------------------------------------------------------------
 const APIFY_ENGINES = ['leadgen', 'report', 'fb_community', 'fb_page'];
+/** What each kind of key pays for, in the words the team uses. One list, shown on the admin key page. */
+const KEY_COVERAGE = {
+    apify: [
+        { engine: 'leadgen', label: 'Lead finder', covers: ['Lead searches (Instagram and Facebook Pages)', 'Finding lead contact details', 'Review tracker: finding businesses and reading their tagged posts'] },
+        { engine: 'report', label: 'Reports & competitors', covers: ['Instagram audits', 'Competitor intel and finding competitors', 'Monthly report without Meta', 'Creator posts: the weekly look and staff looks'] },
+        { engine: 'fb_community', label: 'Facebook communities', covers: ['Facebook group reads', 'Finding and checking Facebook groups'] },
+        { engine: 'fb_page', label: 'Facebook Pages', covers: ['Facebook Page reports'] }
+    ],
+    gemini: ['Every report write-up (Instagram, Facebook Page, Facebook groups, monthly reports)', 'Content plan briefs, the business audit and idea suggestions',
+        'Review tracker: telling reviews from other posts', 'Lead first-message drafts', 'Ask AI for staff', 'Edge Meta AI for owners and staff'],
+    free: ['Content plans built from stored posts', 'Meta owner numbers and the Edge Meta AI twice-daily read (Meta, not Apify)'],
+    whose: [
+        { who: 'A run a staff member starts', uses: 'their own key first, then the shared keys (never shared keys if set to "Own keys only")' },
+        { who: 'A scheduled run', uses: 'the key of the person who made the schedule, then the shared keys' },
+        { who: 'An owner using the portal and Edge Meta AI', uses: 'the shared keys (owners add no keys)' },
+        { who: 'Automatic background work (creator posts weekly look)', uses: 'the shared keys' }
+    ]
+};
 function keyPoolSummary({ people = [], apify = [], primaries = {}, gemini = [], envApify = false, envGemini = false, now = Date.now() }) {
     const apifyUsable = k => k.status === 'active' && !(k.remainingUsd != null && k.remainingUsd <= 0);
     const geminiState = k => k.status === 'invalid' ? 'invalid'
@@ -13366,8 +13385,8 @@ app.get('/api/admin/key-pools', async (req, res) => {
             const v = await getEnginePrimary(e);
             primaries[e] = v ? { configured: true, creditUsd: await enginePrimaryCredit(e), spentUsd: +(await cycleUsage(tokenHash(v))).toFixed(4) } : { configured: false };
         }
-        res.json(keyPoolSummary({ people: (people || []).filter(u => u.is_active !== false), apify: apifyRows, primaries, gemini: gemini || [],
-            envApify: !!(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN), envGemini: !!GEMINI_API_KEY }));
+        res.json({ ...keyPoolSummary({ people: (people || []).filter(u => u.is_active !== false), apify: apifyRows, primaries, gemini: gemini || [],
+            envApify: !!(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN), envGemini: !!GEMINI_API_KEY }), coverage: KEY_COVERAGE });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -21322,7 +21341,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
-    cleanGeminiKey, geminiProbeKey, keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData, xpApifyRun,
+    KEY_COVERAGE, cleanGeminiKey, geminiProbeKey, keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData, xpApifyRun,
     csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },

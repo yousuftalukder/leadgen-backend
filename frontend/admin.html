@@ -100,6 +100,10 @@
     .pool-chip.ok { color: var(--success); border-color: rgba(63,191,143,0.35); }
     .pool-chip.warn { color: var(--warn); border-color: rgba(251,191,36,0.35); }
     .pool-chip.bad { color: var(--danger); border-color: rgba(248,113,113,0.35); }
+    .pool-cover { padding: 8px 0; border-top: 1px solid var(--card-border); font-size: 0.84rem; }
+    .pool-cover:first-of-type { border-top: 0; }
+    .pool-cover b { color: #fff; }
+    .pool-cover ul, .pool-list { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); font-size: 0.82rem; line-height: 1.55; }
     .pool-who td small { display: block; color: var(--text-muted); font-size: 0.72rem; }
     .primary-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
     .primary-chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
@@ -1050,6 +1054,22 @@
                 <p class="card-subtitle" style="margin:8px 0 0;font-size:0.76rem;">Used by every report, plan, draft, Ask AI and Edge Meta AI.</p>
             </div>
         </div>
+        ${d.coverage ? `<h3 style="margin:18px 0 8px;font-size:0.95rem;color:#fff;">What each key covers</h3>
+        <div class="pool-grid">
+            <div class="pool-col"><h3>Apify keys pay for scraping, by engine</h3>
+                ${d.coverage.apify.map(e => `<div class="pool-cover"><b>${esc(e.label)}</b><ul>${e.covers.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`).join('')}
+                <p class="card-subtitle" style="margin:8px 0 0;font-size:0.76rem;">A personal key set to “All my work” pays for all four engines for that person.</p>
+            </div>
+            <div class="pool-col"><h3>Gemini keys pay for every AI step</h3>
+                <ul class="pool-list">${d.coverage.gemini.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+                <h3 style="margin-top:14px">Needs neither</h3>
+                <ul class="pool-list">${d.coverage.free.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+            </div>
+        </div>
+        <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Whose work</th><th>Which key it uses</th></tr></thead><tbody>
+            ${d.coverage.whose.map(w => `<tr><td>${esc(w.who)}</td><td>${esc(w.uses)}</td></tr>`).join('')}
+        </tbody></table></div>
+        <p class="card-subtitle" style="margin-top:8px;">Shared keys, in order: Apify — the engine’s company primary, then the shared pool, then the Render key. Gemini — the shared pool, then the Render key.</p>` : ''}
         <h3 style="margin:18px 0 8px;font-size:0.95rem;color:#fff;">Who draws from what</h3>
         <div class="table-wrap"><table class="pool-who"><thead><tr><th>Person</th><th>Keys rule</th><th>Own Apify</th><th>Next scraping run</th><th>Own AI</th><th>Next AI call</th></tr></thead><tbody>
             ${d.people.map(p => {
