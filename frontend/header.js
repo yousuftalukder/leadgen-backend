@@ -1131,7 +1131,7 @@
         bar.id = 'el-sidebar';
         bar.innerHTML = `
             <div class="el-side-top">
-                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png?v=2" alt="" width="27" height="32"><span>EdgeLead</span></a>
+                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png?v=2" alt="" width="27" height="32"><span class="el-logo-text"><span>EdgeLead</span>${isClient ? '' : '<small class="el-logo-sub">Workspace</small>'}</span></a>
                 ${isClient || !me ? '' : `
                 <button class="el-newwork" type="button" id="el-newwork">${icon('plus')}<span>New work</span></button>
                 <div class="el-find" role="search">
