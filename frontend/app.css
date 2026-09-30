@@ -1617,3 +1617,15 @@ body.el-drawer-open { overflow: hidden; }
 .el-btn.el-needs { position: relative; border-color: rgba(217,181,108,0.6); }
 .el-btn.el-needs::after { content: ''; position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-solid); box-shadow: 0 0 8px var(--accent-solid); }
 @media (prefers-reduced-motion: no-preference) { .el-keynudge-dot { animation: el-pulse 1.6s infinite; } }
+
+/* ---- the Edge mark beside the wordmark ------------------------------------------ */
+/* As on edgeleadweb.netlify.app: the gold mark straight on the dark jade, and "EdgeLead" in bold cream. */
+.el-logo, .su-logo, .wl-logo { display: inline-flex; align-items: center; gap: 10px;
+    background: none; -webkit-text-fill-color: currentColor; color: var(--text-primary); letter-spacing: -0.01em; font-weight: 800; }
+.el-sidebar a.el-logo { display: inline-flex; }
+.el-logo-mark { width: auto; height: 34px; flex: none; }
+.el-sidebar .el-logo-mark { height: 36px; }
+.el-sidebar .el-logo { font-size: 1.42rem; gap: 12px; }
+.el-topbar .el-logo-mark { height: 28px; }
+.el-topbar .el-logo { font-size: 1.2rem; }
+.el-install-ico img { width: auto; height: 26px; display: block; }
