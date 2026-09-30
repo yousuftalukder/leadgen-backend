@@ -204,6 +204,7 @@ async function status(clientId) {
 // ---------------------------------------------------------------- routes
 function mount(app, d) {
   deps = d;
+  if (d.geminiKeys) chat.setKeySource(d.geminiKeys);
   const { auth, requireAdmin, rateLimit, bearerId, logger } = d;
   const log = logger || console;
 

@@ -3150,13 +3150,17 @@ async function geminiCandidates(userId) {
     const usable = rows.filter(r => !(r.status === 'cooldown' && r.cooldown_until && new Date(r.cooldown_until).getTime() > now))
                        .filter(r => !(_geminiCoolLocal.get(r.id) > now));
     const own = usable.filter(r => userId && r.owner_user_id === userId);
-    const shared = usable.filter(r => !r.owner_user_id);
+    // "Own keys only" (app_users.byo_key_only) holds for AI as it does for
+    // Apify: that person's calls never reach the shared pool or the server key.
+    const byo = await isByoOnly(userId);
+    const shared = byo ? [] : usable.filter(r => !r.owner_user_id);
     const out = [];
     for (const r of [...own, ...shared]) {
         try { out.push({ id: r.id, key: decryptSecret(r.key_enc), source: r.owner_user_id ? 'personal' : 'pool' }); }
         catch (err) { logger.warn('gemini_key_undecryptable', { id: r.id }); }
     }
-    if (GEMINI_API_KEY) out.push({ id: null, key: GEMINI_API_KEY, source: 'env' });
+    if (GEMINI_API_KEY && !byo) out.push({ id: null, key: GEMINI_API_KEY, source: 'env' });
+    if (byo && !out.length) out.byoMissing = true;
     return out;
 }
 
@@ -3164,6 +3168,19 @@ async function geminiMarkKey(id, patch) {
     if (!id) return;
     try { await supabase.from('gemini_keys').update(patch).eq('id', id); } catch (_) {}
     invalidateGeminiPool();
+}
+
+/** How a key did, for callers that talk to Gemini themselves (Edge Meta AI's streaming chat). */
+async function geminiReportKey(id, outcome, detail) {
+    if (!id) return;
+    if (outcome === 'cooldown') {
+        _geminiCoolLocal.set(id, Date.now() + GEMINI_KEY_COOLDOWN_MS);
+        await geminiMarkKey(id, { status: 'cooldown', cooldown_until: new Date(Date.now() + GEMINI_KEY_COOLDOWN_MS).toISOString(), last_error: String(detail || '429').slice(0, 200) });
+    } else if (outcome === 'invalid') {
+        await geminiMarkKey(id, { status: 'invalid', last_error: String(detail || 'rejected').slice(0, 200), fail_count: 99 });
+    } else if (outcome === 'ok') {
+        await geminiMarkKey(id, { last_used_at: new Date().toISOString(), status: 'active', cooldown_until: null });
+    }
 }
 
 function geminiIsThinkingLevelModel(model) { return /gemini-3/i.test(model); }
@@ -3186,7 +3203,7 @@ async function geminiCallDetailed(prompt, {
 } = {}) {
     const uid = userId || ELS.getStore()?.userId || null;
     const candidates = await geminiCandidates(uid);
-    if (!candidates.length) return { ok: false, data: null, reason: 'no_key' };
+    if (!candidates.length) return { ok: false, data: null, reason: candidates.byoMissing ? 'no_own_key' : 'no_key' };
 
     METRICS.gemini.calls += 1;
     METRICS.ai.promptChars += prompt.length;
@@ -3334,6 +3351,7 @@ function aiReasonText(reason) {
     switch (reason) {
         case 'ok':          return 'Generated.';
         case 'no_key':      return 'No Gemini API key is configured on this server.';
+        case 'no_own_key':  return 'This account uses its own AI key only, and has no working Gemini key. Add one with the AI key button.';
         case 'max_tokens':  return 'The model ran out of output budget before it finished. Raise GEMINI_MAX_OUTPUT_TOKENS.';
         case 'blocked':     return 'The model declined to answer for this content.';
         case 'empty':       return 'The model returned an empty response.';
@@ -13221,9 +13239,93 @@ app.post('/api/gemini-keys', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+// ---------------------------------------------------------------------------
+// KEY POOLS AT A GLANCE (phase 44)
+//
+// Every Apify and Gemini key the server can reach, sorted into the tiers it
+// tries them in, with what is usable right now — and, per person, which tier
+// their next run would draw from. Pure over rows, so it can be tested.
+// ---------------------------------------------------------------------------
+const APIFY_ENGINES = ['leadgen', 'report', 'fb_community', 'fb_page'];
+function keyPoolSummary({ people = [], apify = [], primaries = {}, gemini = [], envApify = false, envGemini = false, now = Date.now() }) {
+    const apifyUsable = k => k.status === 'active' && !(k.remainingUsd != null && k.remainingUsd <= 0);
+    const geminiState = k => k.status === 'invalid' ? 'invalid'
+        : (k.status === 'cooldown' && k.cooldown_until && new Date(k.cooldown_until).getTime() > now) ? 'cooldown' : 'active';
+    const count = (rows, stateOf) => rows.reduce((m, k) => { const st = stateOf(k); m[st] = (m[st] || 0) + 1; m.total += 1; return m; }, { total: 0 });
+    const apifyState = k => apifyUsable(k) ? 'active' : (k.status === 'active' ? 'out of credit' : k.status);
+    const forEngine = (rows, e) => rows.filter(k => k.engine === e || k.engine === 'any');
+    const sharedApify = apify.filter(k => !k.owner_user_id);
+    const sharedGemini = gemini.filter(k => !k.owner_user_id);
+    const primaryOk = e => !!(primaries[e] && primaries[e].configured && !(primaries[e].creditUsd && primaries[e].spentUsd >= primaries[e].creditUsd));
+    const apifyNext = (own, byo, e) => {
+        if (forEngine(own, e).some(apifyUsable)) return 'own key';
+        if (byo) return 'nothing (own key only)';
+        if (primaryOk(e)) return 'company primary';
+        if (forEngine(sharedApify, e).some(apifyUsable)) return 'shared pool';
+        if (envApify) return 'server key';
+        return 'nothing';
+    };
+    const geminiNext = (own, byo) => {
+        if (own.some(k => geminiState(k) === 'active')) return 'own key';
+        if (byo) return own.some(k => geminiState(k) === 'cooldown') ? 'nothing right now (own key resting)' : 'nothing (own key only)';
+        if (sharedGemini.some(k => geminiState(k) === 'active')) return 'shared pool';
+        if (envGemini) return 'server key';
+        return 'nothing';
+    };
+    return {
+        apify: {
+            order: ['Own key', 'Company primary for the engine', 'Shared pool', 'Server key'],
+            primaries: APIFY_ENGINES.map(e => ({ engine: e, label: ENGINE_LABELS[e] || e, configured: !!(primaries[e] && primaries[e].configured),
+                usable: primaryOk(e), creditUsd: primaries[e] ? primaries[e].creditUsd ?? null : null, spentUsd: primaries[e] ? primaries[e].spentUsd ?? null : null })),
+            shared: { ...count(sharedApify, apifyState), byEngine: Object.fromEntries(['any', ...APIFY_ENGINES].map(e => [e, sharedApify.filter(k => k.engine === e && apifyUsable(k)).length])) },
+            personal: count(apify.filter(k => k.owner_user_id), apifyState),
+            env: !!envApify
+        },
+        gemini: {
+            order: ['Own key', 'Shared pool', 'Server key'],
+            shared: count(sharedGemini, geminiState),
+            personal: count(gemini.filter(k => k.owner_user_id), geminiState),
+            env: !!envGemini
+        },
+        people: people.map(u => {
+            const ownA = apify.filter(k => k.owner_user_id === u.id), ownG = gemini.filter(k => k.owner_user_id === u.id);
+            const byo = !!u.byo_key_only;
+            return { id: u.id, name: u.full_name || String(u.email || '').split('@')[0], role: u.role, ownKeysOnly: byo,
+                apify: { keys: ownA.length, active: ownA.filter(apifyUsable).length, next: Object.fromEntries(APIFY_ENGINES.map(e => [e, apifyNext(ownA, byo, e)])) },
+                gemini: { keys: ownG.length, active: ownG.filter(k => geminiState(k) === 'active').length, next: geminiNext(ownG, byo) } };
+        })
+    };
+}
+
+app.get('/api/admin/key-pools', async (req, res) => {
+    try {
+        const ctx = await requireAdmin(req, res); if (!ctx) return;
+        const [{ data: people }, { data: apify }, { data: gemini }] = await Promise.all([
+            supabase.from('app_users').select('id, email, full_name, role, is_active, byo_key_only').neq('role', 'client'),
+            supabase.from('apify_keys').select('id, owner_user_id, engine, label, status, monthly_credit_usd, token_hash, last_used_at'),
+            supabase.from('gemini_keys').select('id, owner_user_id, label, status, cooldown_until, calls_total, last_used_at')
+        ]);
+        const month = cycleMonth();
+        const apifyRows = [];
+        for (const k of apify || []) {
+            const credit = Number(k.monthly_credit_usd) > 0 ? Number(k.monthly_credit_usd) : APIFY_CYCLE_CREDIT;
+            const spent = k.token_hash ? await cycleUsage(k.token_hash, month) : 0;
+            apifyRows.push({ ...k, token_hash: undefined, remainingUsd: +(credit - spent).toFixed(4) });
+        }
+        const primaries = {};
+        for (const e of APIFY_ENGINES) {
+            const v = await getEnginePrimary(e);
+            primaries[e] = v ? { configured: true, creditUsd: await enginePrimaryCredit(e), spentUsd: +(await cycleUsage(tokenHash(v))).toFixed(4) } : { configured: false };
+        }
+        res.json(keyPoolSummary({ people: (people || []).filter(u => u.is_active !== false), apify: apifyRows, primaries, gemini: gemini || [],
+            envApify: !!(process.env.APIFY_API_KEY || process.env.APIFY_API_TOKEN), envGemini: !!GEMINI_API_KEY }));
+    } catch (err) { sendErr(res, err); }
+});
+
 app.post('/api/gemini-keys/:id/reset', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
+        _geminiCoolLocal.delete(req.params.id);   // a reset key is usable at once, not after its local rest
         let q = supabase.from('gemini_keys').update({ status: 'active', cooldown_until: null, fail_count: 0, last_error: null }).eq('id', req.params.id);
         if (ctx.profile.role !== 'admin') q = q.eq('owner_user_id', ctx.user.id);
         const { error } = await q;
@@ -20636,7 +20738,9 @@ setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
 // behind EdgeLead's own auth and client access. They must be registered
 // BEFORE the catch-all below: Express runs in registration order, and the
 // first deploy mounted them after it, so every /api/xp request was a 404.
-xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger });
+xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger,
+    // Edge Meta AI draws from the same keys as everything else: the person's own, then the pool, then the server key.
+    geminiKeys: { list: () => geminiCandidates(ELS.getStore()?.userId || null), report: geminiReportKey } });
 
 app.use('/api', (req, res) => {
     res.status(404).json({
@@ -21132,6 +21236,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
+    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed,
     csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },
