@@ -50,14 +50,19 @@
 <div class="card">
     <h2 class="card-title">Content Plan</h2>
     <p class="card-subtitle" style="margin-bottom:0">
-        Built from posts already stored by a Performance Audit or Competitor Intel run — nothing new is scraped, so it costs no Apify credit.
-        Every format × hook × length × topic cell is scored for the target and its rivals. Cells rivals win and the target has never used are
-        <b>gaps</b>; cells the target already wins are <b>double down</b>; cells it posts and loses are <b>stop</b>. Briefs are written only inside
-        those cells, with the evidence posts linked. If the client's Meta account is connected, reach, saves and shares are attached to the target's
-        own posts and shown as <span class="src insights">insights</span> — never blended with scraped numbers.
+        Start from the business: what it is and sells, then topics by category, then one idea per topic from the team’s idea library,
+        with your own idea, script and style notes. Final picks go on the calendar for the owner to approve. The scorecard shows what wins
+        against rivals, from posts already collected. Nothing here makes the content — it chooses topics and suggests ideas.
     </p>
+    <div class="cs-modes el-owner-only" id="cs-modes" role="tablist">
+        <button class="tab is-on" type="button" data-mode="plan" role="tab">This client’s plan</button>
+        <button class="tab" type="button" data-mode="library" role="tab">Idea library</button>
+        <button class="tab" type="button" data-mode="scorecard" role="tab">Scorecard vs rivals</button>
+    </div>
 </div>
-
+<div class="card el-owner-only" data-modepane="plan" id="cs-plan"></div>
+<div class="card el-owner-only is-hidden" data-modepane="library" id="cs-lib"></div>
+<div data-modepane="scorecard" class="is-hidden" id="cs-score">
 <div class="card el-owner-only" id="form-card">
     <h3 class="card-title" style="font-size:1rem">Build a plan</h3>
     <label>Platform</label>
@@ -145,9 +150,24 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="header.js"></script>
 <script src="content-calendar.js"></script>
+<script src="content-strategy.js"></script>
 <script>
 (async () => {
     await EL.init({ engine: 'content_plan', page: 'content-plan.html' });
+    // ---- modes (phase 43): the client's plan, the team's library, the scorecard --------
+    const mounted = {};
+    function setMode(m) {
+        document.querySelectorAll('#cs-modes [data-mode]').forEach(b => { b.classList.toggle('is-on', b.dataset.mode === m); b.setAttribute('aria-selected', b.dataset.mode === m); });
+        document.querySelectorAll('[data-modepane]').forEach(p => p.classList.toggle('is-hidden', p.dataset.modepane !== m));
+        if (m === 'plan' && !mounted.plan) { mounted.plan = true; CSPlan.mount(document.getElementById('cs-plan'), EL.clientId()); }
+        if (m === 'library' && !mounted.library) { mounted.library = true; CSLib.mount(document.getElementById('cs-lib')); }
+        try { localStorage.setItem('el.cp.mode', m); } catch (_) { /* per-viewer only */ }
+    }
+    document.querySelectorAll('#cs-modes [data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+    let startMode = 'plan';
+    try { startMode = localStorage.getItem('el.cp.mode') || 'plan'; } catch (_) { /* no storage */ }
+    if (EL.isShared() || EL.reportParam()) startMode = 'scorecard';
+    setMode(['plan', 'library', 'scorecard'].includes(startMode) ? startMode : 'plan');
     const $ = id => document.getElementById(id);
     const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
     const num = (v, d = 1) => (v == null || isNaN(v)) ? '—' : Number(v).toFixed(d);

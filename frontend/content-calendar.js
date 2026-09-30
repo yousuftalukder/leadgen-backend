@@ -2,6 +2,7 @@
  * content-calendar.js — a content plan's posts on dates. (phase 42)
  *
  *   CPCal.mount(host, planId, { onCount })
+ *   CPCal.mount(host, null, { listUrl, emptyText, onCount })   a client's month, whatever plan the posts came from (phase 43)
  *
  * Staff put a plan's briefs on the calendar, move them, mark them made or
  * posted (with the link), and see the owner's answer on each. The owner
@@ -19,12 +20,13 @@
         if (!host) return;
         host.innerHTML = '<p class="el-muted">Loading the calendar…</p>';
         let d;
-        try { d = await EL.api(`/api/content-plan/${encodeURIComponent(planId)}/calendar`); }
+        try { d = await EL.api(opts.listUrl || `/api/content-plan/${encodeURIComponent(planId)}/calendar`); }
         catch (err) { host.innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; if (opts.onCount) opts.onCount(0); return; }
         const posts = d.posts || [], statuses = d.statuses || [];
         if (opts.onCount) opts.onCount(posts.length);
         const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
 
+        if (!posts.length && opts.listUrl) { host.innerHTML = `<p class="el-muted">${esc(opts.emptyText || 'Nothing on the calendar yet.')}</p>`; return; }
         if (!posts.length) {
             host.innerHTML = `<div class="cp-empty">
                 <p>Put this plan’s briefs on dates. Each one keeps its own best day where it names one; the rest are spread over four weeks.
@@ -55,6 +57,7 @@
                     <div class="cp-top"><span class="cp-date">${esc(day(p.plannedOn))}${p.time ? ' · ' + esc(p.time) : ''}</span>${p.format ? `<span class="cp-fmt">${esc(p.format)}</span>` : ''}
                         <span class="el-chip ${TONE[p.status] || ''}">${esc(p.statusName)}</span></div>
                     <span class="cp-hook">${esc(p.hook || 'Planned post')}</span>
+                    ${p.brief && p.brief.topic ? `<span class="cp-line">${esc(p.brief.topic)}</span>` : ''}
                     ${p.ownerNote ? `<span class="cp-line"><b>Owner:</b> ${esc(p.ownerNote)}</span>` : ''}
                 </button>`).join('')}</div></section>`).join('')}`;
         host.querySelectorAll('[data-post]').forEach(b => b.addEventListener('click', () => open(posts.find(p => p.id === b.dataset.post), statuses, () => mount(host, planId, opts))));
@@ -82,7 +85,8 @@
                     ${br.shot ? `<p class="ld-line"><b>Shot:</b> ${esc(br.shot)}</p>` : ''}
                     ${(br.script || []).length ? `<ol class="cp-script">${br.script.map(x => `<li>${esc(x)}</li>`).join('')}</ol>` : ''}
                     ${br.why ? `<p class="ld-line"><b>Why:</b> ${esc(br.why)}</p>` : ''}
-                    ${(br.evidence || []).length ? `<p class="ld-line"><b>Proof:</b> ${br.evidence.map((u, i) => `<a href="${EL.safeUrl(u)}" target="_blank" rel="noopener noreferrer">post ${i + 1}</a>`).join(' · ')}</p>` : ''}
+                    ${(br.tools || []).length ? `<p class="ld-line"><b>Tools:</b> ${esc(br.tools.join(', '))}</p>` : ''}
+                    ${(br.evidence || []).length ? `<p class="ld-line"><b>${p.pickId ? 'The idea' : 'Proof'}:</b> ${br.evidence.map((u, i) => `<a href="${EL.safeUrl(u)}" target="_blank" rel="noopener noreferrer">${p.pickId ? 'the post it came from' : 'post ' + (i + 1)}</a>`).join(' · ')}</p>` : ''}
                 </section>
                 <div class="ws-note" id="cpd-note"></div>`,
             foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="cpd-save">Save</button>`
