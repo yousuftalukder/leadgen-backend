@@ -5722,6 +5722,14 @@ app.get('/api/me', async (req, res) => {
             .eq('role', 'client').not('activation_requested_at', 'is', null);
         body.pendingActivations = count || 0;
     }
+    // Staff (not admins, not owners) are reminded until they have added their own Apify and AI keys.
+    if (ctx.profile.role !== 'admin' && ctx.profile.role !== 'client') {
+        const [{ data: ak }, { data: gk }] = await Promise.all([
+            supabase.from('apify_keys').select('id').eq('owner_user_id', ctx.user.id).eq('status', 'active').limit(1),
+            supabase.from('gemini_keys').select('id').eq('owner_user_id', ctx.user.id).neq('status', 'invalid').limit(1)
+        ]);
+        body.ownKeys = { apify: !!(ak && ak.length), ai: !!(gk && gk.length) };
+    }
 
     if (ctx.profile.role === 'client') {
         const own = await ownClientFor(ctx).catch(() => null);
