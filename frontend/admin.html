@@ -105,6 +105,31 @@
     .pool-cover b { color: #fff; }
     .pool-cover ul, .pool-list { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); font-size: 0.82rem; line-height: 1.55; }
     .pool-who td small { display: block; color: var(--text-muted); font-size: 0.72rem; }
+    /* ---- Meta & Edge AI (phase 47) ---- */
+    .mx-head-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .mx-sched { font-size: 0.8rem; color: var(--text-muted); margin: 12px 0 0; }
+    .mx-filter { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .mx-f { font: inherit; font-size: 0.8rem; font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+        color: var(--text-secondary); background: transparent; border: 1px solid var(--card-border); }
+    .mx-f.is-on { color: var(--text-primary); border-color: var(--accent-solid); background: rgba(12,120,86,0.12); }
+    .mx-f b { font-variant-numeric: tabular-nums; margin-left: 4px; }
+    .mx-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 14px; padding: 16px 0; border-top: 1px solid var(--card-border); }
+    .mx-row:first-child { border-top: 0; }
+    .mx-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; background: var(--success); }
+    .mx-dot.warn { background: var(--warn); } .mx-dot.bad { background: var(--danger); }
+    .mx-name { font-weight: 800; color: var(--text-primary); text-decoration: none; }
+    .mx-name:hover { text-decoration: underline; }
+    .mx-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+    .mx-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); gap: 6px 18px; margin-top: 10px; font-size: 0.8rem; }
+    .mx-facts span { color: var(--text-muted); display: block; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
+    .mx-facts b { color: var(--text-primary); font-weight: 600; }
+    .mx-facts .is-bad { color: var(--danger); } .mx-facts .is-warn { color: var(--warn); }
+    .mx-issues { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .mx-acts { display: flex; flex-direction: column; gap: 6px; align-items: stretch; min-width: 150px; }
+    .mx-acts .ws-btn { justify-content: center; }
+    .mx-err { font-size: 0.76rem; color: var(--danger); margin-top: 6px; overflow-wrap: anywhere; }
+    .mx-how { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.86rem; line-height: 1.7; }
+    @media (max-width: 720px) { .mx-row { grid-template-columns: 10px minmax(0, 1fr); } .mx-acts { grid-column: 2; flex-direction: row; flex-wrap: wrap; min-width: 0; } }
     .primary-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
     .primary-chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
         padding: 13px 17px; font-size: 0.82rem; }
@@ -119,6 +144,7 @@
         <button class="segment-btn active" type="button" data-tab="users">People</button>
         <button class="segment-btn" type="button" data-tab="keys">Keys (Apify &amp; AI)</button>
         <button class="segment-btn" type="button" data-tab="plans">Trial &amp; plans</button>
+        <button class="segment-btn" type="button" data-tab="meta">Meta &amp; Edge AI</button>
         <button class="segment-btn" type="button" data-tab="health">Spend &amp; health</button>
     </div>
 
@@ -330,6 +356,44 @@
         </div>
     </section>
 
+    <!-- ================= META & EDGE META AI (phase 47) ================= -->
+    <section id="tab-meta" class="hidden">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:6px;">
+                <div>
+                    <h2 class="card-title">Meta connections and Edge Meta AI</h2>
+                    <p class="card-subtitle" style="margin:0;">Every business with Meta, and whether it needs you. Owners do nothing but
+                        connect and ask: the first read starts the moment Meta is connected (90 days and every post), then the
+                        numbers are read twice a day on their own. You step in only for what is marked here.</p>
+                </div>
+                <div class="mx-head-acts">
+                    <button class="ws-btn" type="button" id="mx-reload">Refresh</button>
+                    <button class="ws-btn is-gold" type="button" id="mx-all">Read everyone now</button>
+                </div>
+            </div>
+            <div class="kpi-row" id="mx-kpis"></div>
+            <p class="mx-sched" id="mx-sched"></p>
+        </div>
+        <div class="card">
+            <div class="mx-filter" role="tablist" aria-label="Which businesses">
+                <button type="button" class="mx-f is-on" data-f="all">All</button>
+                <button type="button" class="mx-f" data-f="attn">Needs you</button>
+                <button type="button" class="mx-f" data-f="noowner">No owner login</button>
+            </div>
+            <div id="mx-list" class="empty">Loading…</div>
+        </div>
+        <div class="card">
+            <h2 class="card-title">What runs by itself</h2>
+            <ul class="mx-how">
+                <li><b>Connect:</b> the owner (Home → Connect Meta) or you (client → Meta → Connect Meta). Reading starts at once, in the background, and takes a few minutes.</li>
+                <li><b>Every day:</b> at the scheduled times each business is read again: the last days are re-read until Meta settles them, new posts and comments come in, ads follow.</li>
+                <li><b>Catch-up:</b> after a server restart, anyone whose history was never read is started again, one at a time.</li>
+                <li><b>Only a person can fix:</b> a login Meta refused or that is about to end (someone reconnects), and a business with no owner login (you invite them).</li>
+                <li><b>Re-read history</b> reads the 90 days and every post again. <b>Read days</b> re-reads a range you choose (up to 93 days), for a gap marked here.</li>
+            </ul>
+        </div>
+    </section>
+
     <section id="tab-health" class="hidden">
 
         <div class="card">
@@ -431,7 +495,8 @@
         btn.addEventListener('click', () => {
             document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            ['users', 'keys', 'plans', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            ['users', 'keys', 'plans', 'meta', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'meta') loadMeta();
             if (btn.dataset.tab === 'keys') { loadPools(); loadKeys(); loadGemini(); }
             if (btn.dataset.tab === 'plans') loadPlans();
             if (btn.dataset.tab === 'health') loadMetrics();
@@ -930,6 +995,171 @@
      * broken". Until this existed the numbers were only reachable by curl,
      * which is why the cost constants stayed guesses through two releases.
      */
+    // ---- Meta & Edge Meta AI (phase 47) ------------------------------------------
+    // One row per business, worst first. Each row says what is wrong in words and
+    // offers the fix beside it; a healthy business needs nothing from anyone.
+    let mx = null, mxFilter = 'all';
+    const mxAgo = iso => {
+        if (!iso) return 'never';
+        const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+        if (m < 1) return 'just now';
+        if (m < 60) return m + ' min ago';
+        const h = Math.round(m / 60); if (h < 36) return h + ' h ago';
+        return Math.round(h / 24) + ' days ago';
+    };
+    const mxDay = iso => (iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
+    const mxWhen = sc => {
+        if (!sc || !sc.enabled) return 'The twice-daily read is switched off on the server (XP_CRON_ENABLED).';
+        const m = /^(\d+)\s+([\d,]+)\s+\*\s+\*\s+\*$/.exec(sc.cron || '');
+        const times = m ? m[2].split(',').map(h => h.padStart(2, '0') + ':' + m[1].padStart(2, '0')).join(' and ') : sc.cron;
+        return `Reads itself at ${times} ${sc.tz || 'UTC'}.`;
+    };
+
+    async function loadMeta() {
+        $('mx-list').innerHTML = 'Loading…'; $('mx-list').className = 'empty';
+        try { mx = await EL.api('/api/xp/admin/overview'); }
+        catch (err) { $('mx-list').innerHTML = esc(err.message); return; }
+        const t = mx.totals;
+        $('mx-kpis').innerHTML = `
+            <div class="kpi"><span>Businesses with Meta</span><strong>${t.businesses}</strong></div>
+            <div class="kpi"><span>All good</span><strong>${t.ok}</strong></div>
+            <div class="kpi"><span>Need you</span><strong>${t.bad + t.warn}</strong><small>${t.bad} urgent</small></div>
+            <div class="kpi"><span>Reading now</span><strong>${t.running}</strong></div>
+            <div class="kpi"><span>Owners with a login</span><strong>${t.withOwnerLogin} of ${t.businesses}</strong></div>`;
+        $('mx-sched').textContent = `${mxWhen(mx.schedule)} Edge Meta AI answers with ${mx.model || 'Gemini'}.`;
+        document.querySelectorAll('.mx-f').forEach(b => {
+            const n = b.dataset.f === 'all' ? t.businesses : b.dataset.f === 'attn' ? t.bad + t.warn : mx.rows.filter(r => !r.owners.length).length;
+            b.innerHTML = `${b.textContent.replace(/\s*\d+$/, '')} <b>${n}</b>`;
+        });
+        drawMeta();
+        // While anything is reading, check back so the row turns green on its own.
+        clearTimeout(loadMeta._t);
+        if (t.running && !$('tab-meta').classList.contains('hidden')) loadMeta._t = setTimeout(loadMeta, 20000);
+    }
+
+    function drawMeta() {
+        const rows = (mx.rows || []).filter(r => mxFilter === 'all' ? true : mxFilter === 'attn' ? r.verdict !== 'ok' : !r.owners.length);
+        const host = $('mx-list');
+        if (!rows.length) {
+            host.className = 'empty';
+            host.innerHTML = mxFilter === 'attn' ? 'Nothing needs you. Every connected business is being read.' : mxFilter === 'noowner' ? 'Every business has an owner login.' : 'No business has Meta connected yet. Connect one from the client’s Meta tab, or invite the owner and they connect it themselves.';
+            return;
+        }
+        host.className = '';
+        host.innerHTML = rows.map(r => {
+            const ws = `workspace.html?client=${encodeURIComponent(r.clientId)}`;
+            const conn = r.connections.filter(c => c.status === 'active');
+            const ig = r.assets.find(a => a.platform === 'IG'), fb = r.assets.find(a => a.platform === 'FB');
+            const history = !r.assets.length ? '—' : r.running && r.assets.some(a => !a.historyReadAt) ? 'Reading now…' : r.assets.every(a => a.historyReadAt) ? 'Read ' + mxDay(r.assets.map(a => a.historyReadAt).sort()[0]) : 'Not yet';
+            const gaps = r.assets.reduce((n, a) => n + (a.missingDays30 || 0), 0);
+            const failed = r.assets.map(a => a.lastRun).filter(x => x && x.status !== 'OK' && x.status !== 'RUNNING');
+            const soon = r.accessUntil && Date.parse(r.accessUntil) - Date.now() < 10 * 86400000;
+            const issueChips = r.issues.map(i => `<span class="el-chip ${i.level === 'bad' ? 'is-bad' : i.level === 'warn' ? 'is-warn' : ''}">${esc(i.text)}</span>`).join('');
+            const needsReconnect = r.issues.some(i => i.code === 'reconnect' || i.code === 'expiring' || i.code === 'no_connection');
+            return `<div class="mx-row">
+                <span class="mx-dot ${r.verdict === 'ok' ? '' : r.verdict}" aria-label="${r.verdict === 'ok' ? 'All good' : r.verdict === 'bad' ? 'Urgent' : 'Needs a look'}"></span>
+                <div>
+                    <a class="mx-name" href="${ws}&tab=meta">${esc(r.name)}</a>${r.archived ? ' <span class="el-chip">Archived</span>' : ''}
+                    <div class="mx-sub">${conn.length ? conn.map(c => `${esc(c.page)}${c.instagram ? ' · @' + esc(c.instagram) : ' · no Instagram on this Page'}`).join(' &nbsp;|&nbsp; ') : 'No active Meta connection'}</div>
+                    <div class="mx-facts">
+                        <div><span>Meta access</span><b class="${soon ? 'is-warn' : ''}">${r.accessUntil ? 'until ' + mxDay(r.accessUntil) : conn.length ? 'no end date' : '—'}</b></div>
+                        <div><span>History</span><b>${esc(history)}</b></div>
+                        <div><span>Last read</span><b>${esc(mxAgo(r.lastReadAt))}</b></div>
+                        <div><span>Days missing (30)</span><b class="${gaps > 2 ? 'is-warn' : ''}">${r.assets.length ? gaps : '—'}</b></div>
+                        <div><span>Owner login</span><b>${r.owners.length ? esc(r.owners.map(o => o.name || o.email).join(', ')) : 'None'}</b></div>
+                        <div><span>Chats (30 days)</span><b>${r.chats30}${r.lastChatAt ? ' · last ' + esc(mxAgo(r.lastChatAt)) : ''}</b></div>
+                    </div>
+                    ${issueChips ? `<div class="mx-issues">${issueChips}</div>` : ''}
+                    ${failed.length && failed[0].error ? `<div class="mx-err">${esc(failed[0].error)}</div>` : ''}
+                    <div class="ws-note" data-mx-note="${esc(r.clientId)}"></div>
+                </div>
+                <div class="mx-acts">
+                    ${r.assets.length ? `<button class="ws-btn is-sm" type="button" data-mx-read="${esc(r.clientId)}" ${r.running ? 'disabled' : ''}>${r.running ? 'Reading…' : 'Read now'}</button>` : ''}
+                    ${r.assets.length ? `<button class="ws-btn is-sm is-quiet" type="button" data-mx-more="${esc(r.clientId)}">History and days</button>` : ''}
+                    ${needsReconnect ? `<a class="ws-btn is-sm ${r.verdict === 'bad' ? 'is-gold' : ''}" href="${ws}&tab=meta">Reconnect Meta</a>` : ''}
+                    ${r.owners.length ? '' : `<button class="ws-btn is-sm ${needsReconnect ? '' : 'is-gold'}" type="button" data-mx-invite="${esc(r.clientId)}">Invite the owner</button>`}
+                    <a class="ws-btn is-sm is-quiet" href="${ws}&tab=ask">Ask as them</a>
+                </div>
+            </div>`;
+        }).join('');
+
+        const note = (id, text, tone) => { const n = host.querySelector(`[data-mx-note="${CSS.escape(id)}"]`); if (n) { n.className = 'ws-note' + (tone ? ' is-' + tone : ''); n.textContent = text; } };
+        host.querySelectorAll('[data-mx-read]').forEach(b => b.addEventListener('click', async () => {
+            b.disabled = true; b.textContent = 'Starting…';
+            try { await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: b.dataset.mxRead } }); note(b.dataset.mxRead, 'Reading now. This row updates by itself.', 'good'); setTimeout(loadMeta, 4000); }
+            catch (err) { b.disabled = false; b.textContent = 'Read now'; note(b.dataset.mxRead, err.message, 'bad'); }
+        }));
+        host.querySelectorAll('[data-mx-more]').forEach(b => b.addEventListener('click', () => metaHistory(mx.rows.find(r => r.clientId === b.dataset.mxMore))));
+        host.querySelectorAll('[data-mx-invite]').forEach(b => b.addEventListener('click', () => metaInvite(mx.rows.find(r => r.clientId === b.dataset.mxInvite))));
+    }
+
+    /** Re-read the whole history, or a range of days — the two repairs a person chooses. */
+    function metaHistory(r) {
+        const today = new Date().toISOString().slice(0, 10);
+        const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+        const assets = r.assets.map(a => `<li><b>${a.platform === 'IG' ? 'Instagram' : 'Facebook'}</b> ${esc(a.name || '')}: history ${a.historyReadAt ? 'read ' + esc(mxDay(a.historyReadAt)) : 'not read yet'}, last read ${esc(mxAgo(a.lastReadAt))}${a.missingDays30 ? `, <b>${a.missingDays30}</b> day(s) missing in the last 30` : ''}${a.lastRun ? `, last run ${esc(a.lastRun.type.toLowerCase())} ${esc(a.lastRun.status.toLowerCase())}` : ''}</li>`).join('');
+        const dw = EL.drawer({
+            title: esc(r.name), sub: 'History and days',
+            body: `<div class="ws-form">
+                <ul class="mx-how">${assets}</ul>
+                <div><b>Re-read the history</b><p class="el-muted" style="margin:4px 0 8px">Reads the last 90 days of account numbers and every post again. A few minutes. Settled days are never changed, only filled in.</p>
+                    <button class="ws-btn" type="button" id="mh-full">Re-read the history</button></div>
+                <div><b>Read chosen days</b><p class="el-muted" style="margin:4px 0 8px">For a gap marked here. Up to 93 days at a time.</p>
+                    <div class="ws-form two"><div><label for="mh-a">From</label><input id="mh-a" type="date" value="${monthAgo}" max="${today}"></div><div><label for="mh-b">To</label><input id="mh-b" type="date" value="${today}" max="${today}"></div></div>
+                    <button class="ws-btn" type="button" id="mh-range" style="margin-top:8px">Read these days</button></div>
+                <p class="ws-note" id="mh-note"></p></div>`,
+            foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button>`
+        });
+        const q = sel => dw.el.querySelector(sel);
+        const go = async body => {
+            const n = q('#mh-note'); n.className = 'ws-note'; n.textContent = 'Starting…';
+            try { await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: r.clientId, ...body } }); n.className = 'ws-note is-good'; n.textContent = 'Started. It runs in the background; the list updates by itself.'; setTimeout(loadMeta, 4000); }
+            catch (err) { n.className = 'ws-note is-bad'; n.textContent = err.message; }
+        };
+        q('#mh-full').addEventListener('click', () => go({ fullBackfill: true }));
+        q('#mh-range').addEventListener('click', () => go({ rangeStart: q('#mh-a').value, rangeEnd: q('#mh-b').value }));
+    }
+
+    /** The owner's login, from here: the same invite as the client's Access tab. */
+    function metaInvite(r) {
+        const dw = EL.drawer({
+            title: 'Invite the owner', sub: esc(r.name),
+            body: `<div class="ws-form">
+                <p class="el-muted" style="margin:0">They get a link to choose a password. Their login opens ${esc(r.name)} only: their reports, their numbers and Edge Meta AI. Never your costs, keys or other clients.</p>
+                <div class="ws-form two"><div><label for="mi-email">Owner’s email</label><input id="mi-email" type="email" placeholder="owner@business.com"></div><div><label for="mi-name">Their name</label><input id="mi-name" placeholder="Optional"></div></div>
+                <div id="mi-out"></div></div>`,
+            foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="mi-go">Invite</button>`
+        });
+        const q = sel => dw.el.querySelector(sel);
+        q('#mi-go').addEventListener('click', async () => {
+            const out = q('#mi-out'), email = q('#mi-email').value.trim();
+            if (!email) { out.innerHTML = '<p class="ws-note is-bad">Enter the owner’s email.</p>'; return; }
+            out.innerHTML = '<p class="ws-note">Inviting…</p>';
+            try {
+                const res = await EL.api(`/api/clients/${encodeURIComponent(r.clientId)}/portal-invite`, { method: 'POST', body: { email, name: q('#mi-name').value.trim() || null } });
+                const app = new URL('ai/', location.href).href;
+                out.innerHTML = res.link
+                    ? `<p class="ws-note is-good"><b>Send this link to the owner.</b> ${esc(res.note || '')}</p><p><code style="overflow-wrap:anywhere">${esc(res.link)}</code></p>
+                       <p class="el-muted">After they choose a password, Edge Meta AI on its own opens at <code>${esc(app)}</code>. They can add it to the home screen as an app.</p>`
+                    : `<p class="ws-note is-good">${esc(res.note || 'Invite sent.')}</p>`;
+                q('#mi-go').disabled = true;
+                loadMeta();
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
+        });
+    }
+
+    $('mx-reload').addEventListener('click', loadMeta);
+    $('mx-all').addEventListener('click', async () => {
+        const b = $('mx-all'); b.disabled = true; b.textContent = 'Starting…';
+        try { await EL.api('/api/xp/admin/sync-all', { method: 'POST', body: {} }); b.textContent = 'Reading everyone…'; setTimeout(() => { b.disabled = false; b.textContent = 'Read everyone now'; loadMeta(); }, 8000); }
+        catch (err) { b.disabled = false; b.textContent = 'Read everyone now'; EL.toast(err.message, 'bad'); }
+    });
+    document.querySelectorAll('.mx-f').forEach(b => b.addEventListener('click', () => {
+        mxFilter = b.dataset.f;
+        document.querySelectorAll('.mx-f').forEach(x => x.classList.toggle('is-on', x === b));
+        if (mx) drawMeta();
+    }));
+
     async function loadMetrics() {
         const kpis = $('m-kpis');
         kpis.innerHTML = '<div class="kpi"><span>Loading</span><strong>…</strong></div>';

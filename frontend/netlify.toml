@@ -27,6 +27,26 @@
     Referrer-Policy = "strict-origin-when-cross-origin"
 
 [[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# Edge Meta AI, the app (phase 47): its page is ai/ — a folder, which the
+# *.html rule above does not match — and it has a manifest of its own.
+[[headers]]
+  for = "/ai/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/ai/manifest.webmanifest"
+  [headers.values]
+    Content-Type = "application/manifest+json"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
   for = "/app.css"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"

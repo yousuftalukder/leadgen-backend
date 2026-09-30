@@ -207,13 +207,80 @@ async function runCron(triggeredBy) {
 }
 
 const running = new Map();   // clientId → started at
-function startSync(clientId, opts) {
+// What a read runs. A seam for the tests, which have no Graph behind them: they swap in a recorder.
+const hooks = { sync: syncClient, ads: ads && ads.syncAds ? ads.syncAds : null };
+function _setHooks(h = {}) {
+  hooks.sync = h.sync || syncClient;
+  hooks.ads = h.ads !== undefined ? h.ads : (ads && ads.syncAds ? ads.syncAds : null);
+  kicks.clear();
+}
+function startSync(clientId, opts, after) {
   if (running.has(clientId)) { const e = new Error('A sync for this client is already running.'); e.status = 409; throw e; }
   running.set(clientId, new Date().toISOString());
-  syncClient(clientId, opts)
-    .then((r) => console.log('[xp sync]', JSON.stringify({ client: r.client, status: r.status })))
+  hooks.sync(clientId, opts)
+    .then((r) => { console.log('[xp sync]', JSON.stringify({ client: r.client, status: r.status })); if (after) return after(r); })
     .catch((e) => console.error('[xp sync]', clientId, e.message))
     .finally(() => running.delete(clientId));
+}
+
+/**
+ * EdgeLead (phase 47): a business is read the moment its Meta is connected, not at the next 09:00 or
+ * 21:00. Nobody presses anything: the connect callback, filing a Page under a client, the boot pass
+ * and the status route all land here. The first read of an asset is its full backfill (90 days and
+ * every post) because it has none yet; the ads pass follows, since ads are found through the login.
+ *
+ * `kicks` keeps one automatic start per business per half hour, so a read that fails is not retried
+ * on every status poll; the twice-daily pass and staff's "Read now" still run it.
+ */
+const KICK_COOLDOWN_MS = 30 * 60000;
+const kicks = new Map();     // clientId → last automatic start (ms)
+async function kickoff(clientId, triggeredBy = 'connect', { force = false } = {}) {
+  if (!clientId) return { started: false, reason: 'no_client' };
+  if (running.has(clientId)) return { started: false, reason: 'running' };
+  const last = kicks.get(clientId) || 0;
+  if (!force && Date.now() - last < KICK_COOLDOWN_MS) return { started: false, reason: 'cooldown' };
+  const p = await provisionClient(clientId);
+  if (!p.ok || !p.assets) return { started: false, reason: p.ok ? 'no_assets' : 'error', error: p.error };
+  kicks.set(clientId, Date.now());
+  try {
+    startSync(clientId, { runType: 'BACKFILL', triggeredBy }, () => (hooks.ads ? Promise.resolve(hooks.ads({ triggeredBy })).catch(() => null) : null));
+  } catch (e) { return { started: false, reason: 'running' }; }
+  return { started: true, assets: p.assets };
+}
+
+/** Businesses whose Meta is connected but whose history was never read: started once, after boot. */
+async function catchUp() {
+  const { data } = await supabase.from('xp_meta_assets').select('client_id').is('last_full_backfill_at', null).in('status', ['ACTIVE']);
+  const { data: conns } = await supabase.from('meta_connections').select('client_id').eq('status', 'active');
+  const { data: known } = await supabase.from('xp_clients').select('id');
+  const have = new Set((known || []).map((r) => r.id));
+  const ids = new Set([...(data || []).map((r) => r.client_id), ...(conns || []).map((r) => r.client_id).filter((id) => id && !have.has(id))]);
+  const out = [];
+  for (const id of ids) {
+    if (!id) continue;
+    out.push({ clientId: id, ...(await kickoff(id, 'catch-up').catch((e) => ({ started: false, error: e.message }))) });
+    // one at a time: each first read is a few hundred Graph calls, and they share the app's rate limit
+    while (running.size) await new Promise((r) => setTimeout(r, 2000));
+  }
+  return out;
+}
+
+/**
+ * Where a business stands, in one word the pages can switch on:
+ *   not_connected  no Meta connection filed under it
+ *   reconnect      Meta refused the token; only a new login fixes it
+ *   reading        connected, history not read yet (a read is running or about to)
+ *   ready          there is something to answer from
+ */
+function phaseOf(s) {
+  const assets = s.assets || [];
+  if (!s.provisioned || !assets.length) return 'not_connected';
+  const live = assets.filter((a) => a.status === 'ACTIVE' || a.status === 'EXPIRED');
+  if (!live.length) return 'not_connected';
+  const cov = s.coverage && Array.isArray(s.coverage.assets) ? s.coverage.assets : [];
+  const hasData = cov.some((a) => a.account_days > 0 || a.post_days > 0);
+  if ((s.client && s.client.token_status === 'EXPIRED') || live.every((a) => a.status === 'EXPIRED')) return 'reconnect';
+  return hasData ? 'ready' : 'reading';
 }
 
 async function status(clientId) {
@@ -224,7 +291,7 @@ async function status(clientId) {
   ]);
   let coverage = null;
   if (xc) { try { coverage = await chat.coverage(clientId); } catch (e) { coverage = { error: e.message }; } }
-  return {
+  const out = {
     provisioned: !!xc,
     client: xc || null,
     assets: assets || [],
@@ -234,6 +301,8 @@ async function status(clientId) {
     model: cfg.gemini.model,
     schedule: { cron: cfg.cron.schedule, tz: cfg.cron.tz, enabled: cfg.cron.enabled }
   };
+  out.phase = phaseOf(out);
+  return out;
 }
 
 // ---------------------------------------------------------------- routes
@@ -408,7 +477,16 @@ function mount(app, d) {
   /** What the warehouse holds for this client: assets, last reads, coverage, whether a read is running. */
   app.get('/api/xp/status', async (req, res) => {
     const a = await chatContext(req, res, req.query.client_id || req.query.clientId); if (!a) return;
-    try { res.json(await status(a.clientId)); } catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+      let s = await status(a.clientId);
+      // EdgeLead (phase 47): opening the page is enough. A business with Meta connected and nothing
+      // read yet is started here, so nobody is ever shown a button they have to find and press.
+      if (!s.running && (s.phase === 'reading' || s.phase === 'not_connected')) {
+        const k = await kickoff(a.clientId, 'status').catch(() => ({ started: false }));
+        if (k.started) s = await status(a.clientId);
+      }
+      res.json(s);
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   /** Read the numbers now: provision from EdgeLead's connection, then XpulseAI's sync, in the background. */
@@ -418,8 +496,18 @@ function mount(app, d) {
       const p = await provisionClient(a.clientId);
       if (!p.ok) return res.status(400).json({ error: p.error });
       if (!p.assets) return res.status(409).json({ error: 'No Meta connection filed under this client yet. Connect a Facebook Page and Instagram account first.' });
-      startSync(a.clientId, { runType: 'MANUAL', triggeredBy: (a.ctx.user && a.ctx.user.email) || 'user', fullBackfill: !!(req.body && req.body.fullBackfill) });
-      res.status(202).json({ started: true, assets: p.assets });
+      // Re-reading the whole history, or a range of days, is the team's tool; an owner's read is the normal one.
+      const b = req.body || {};
+      const staff = !(a.ctx.profile && a.ctx.profile.role === 'client');
+      const opts = { runType: 'MANUAL', triggeredBy: (a.ctx.user && a.ctx.user.email) || 'user' };
+      if (staff && b.fullBackfill) Object.assign(opts, { runType: 'BACKFILL', fullBackfill: true });
+      if (staff && (b.rangeStart || b.rangeEnd)) {
+        const r = rangeError(b.rangeStart, b.rangeEnd);
+        if (r) return res.status(400).json({ error: r });
+        Object.assign(opts, { runType: 'BACKFILL', rangeStart: b.rangeStart, rangeEnd: b.rangeEnd });
+      }
+      startSync(a.clientId, opts);
+      res.status(202).json({ started: true, assets: p.assets, runType: opts.runType });
     } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
   });
 
@@ -435,11 +523,108 @@ function mount(app, d) {
       res.json({ health: health || [], runs: runs || [], clients: clients || [], running: [...running.keys()], schedule: { cron: cfg.cron.schedule, tz: cfg.cron.tz, enabled: cfg.cron.enabled }, model: cfg.gemini.model });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+  /**
+   * EdgeLead (phase 47): every business with Meta, on one screen — the connection and its access, what
+   * the assistant has read and what it is missing, the last read, the owner's login and whether they
+   * use the chat. Built for the question "who needs me today?", so each row carries its own verdict.
+   */
+  app.get('/api/xp/admin/overview', async (req, res) => {
+    const ctx = await requireAdmin(req, res); if (!ctx) return;
+    try { res.json(await overview()); } catch (e) { res.status(500).json({ error: e.message }); }
+  });
   app.post('/api/xp/admin/sync-all', async (req, res) => {
     const ctx = await requireAdmin(req, res); if (!ctx) return;
     runCron(ctx.user.email || 'admin').then((r) => console.log('[xp cron]', JSON.stringify(r).slice(0, 500))).catch((e) => console.error('[xp cron]', e.message));
     res.status(202).json({ started: true });
   });
+}
+
+/** A staff backfill range: two real days, oldest first, not in the future, at most 93 days (one Graph window). */
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function rangeError(start, end) {
+  if (!DAY_RE.test(String(start || '')) || !DAY_RE.test(String(end || ''))) return 'Give both days, like 2026-08-01 and 2026-08-31.';
+  const a = Date.parse(start + 'T00:00:00Z'), b = Date.parse(end + 'T00:00:00Z');
+  // Round-trip, because Date.parse reads 2026-02-30 as 2 March instead of refusing it.
+  if (Number.isNaN(a) || Number.isNaN(b) || new Date(a).toISOString().slice(0, 10) !== start || new Date(b).toISOString().slice(0, 10) !== end) return 'Those are not real days.';
+  if (a > b) return 'The first day comes after the last.';
+  if (b > Date.now() + 86400000) return 'The last day is in the future.';
+  if ((b - a) / 86400000 > 92) return 'At most 93 days at a time. Read a long gap in pieces.';
+  return null;
+}
+
+const DAY_MS = 86400000;
+/** The overview behind the admin's Meta tab. Reads everything once and joins in memory. */
+async function overview(now = Date.now()) {
+  const [{ data: conns }, { data: xcs }, { data: assets }, { data: health }, { data: runs }, { data: convs }] = await Promise.all([
+    supabase.from('meta_connections').select('id, client_id, page_id, page_name, ig_username, status, token_expires_at, last_error, last_sync_at, created_at'),
+    supabase.from('xp_clients').select('id, client_name, last_synced_at, token_status, is_active'),
+    supabase.from('xp_meta_assets').select('id, client_id, platform, name, username, status, first_synced_at, last_synced_at, last_full_backfill_at'),
+    supabase.from('xp_v_sync_health').select('asset_id, missing_days_30'),
+    supabase.from('xp_sync_runs').select('id, client_id, asset_id, run_type, status, errors, started_at, finished_at').order('started_at', { ascending: false }).limit(400),
+    supabase.from('xp_ai_conversations').select('client_id, updated_at').is('deleted_at', null).gte('updated_at', new Date(now - 30 * DAY_MS).toISOString())
+  ]);
+  const ids = [...new Set([...(conns || []).map((c) => c.client_id), ...(xcs || []).map((c) => c.id)].filter(Boolean))];
+  const [{ data: clients }, { data: members }] = ids.length ? await Promise.all([
+    supabase.from('clients').select('id, name, archived').in('id', ids),
+    supabase.from('client_members').select('client_id, user_id, created_at').in('client_id', ids)
+  ]) : [{ data: [] }, { data: [] }];
+  const memberIds = [...new Set((members || []).map((m) => m.user_id))];
+  const { data: users } = memberIds.length ? await supabase.from('app_users').select('id, email, full_name, role').in('id', memberIds) : { data: [] };
+  const userById = new Map((users || []).map((u) => [u.id, u]));
+  const missing = new Map((health || []).map((h) => [h.asset_id, Number(h.missing_days_30) || 0]));
+  const lastRun = new Map();
+  for (const r of runs || []) if (r.asset_id && !lastRun.has(r.asset_id)) lastRun.set(r.asset_id, r);
+
+  const rows = ids.map((id) => {
+    const c = (clients || []).find((x) => x.id === id) || {};
+    const xc = (xcs || []).find((x) => x.id === id) || null;
+    const cs = (conns || []).filter((x) => x.client_id === id);
+    const as = (assets || []).filter((x) => x.client_id === id && x.status !== 'REMOVED').map((a) => {
+      const r = lastRun.get(a.id) || null;
+      return {
+        id: a.id, platform: a.platform, name: a.name, username: a.username, status: a.status,
+        firstReadAt: a.first_synced_at, lastReadAt: a.last_synced_at, historyReadAt: a.last_full_backfill_at,
+        missingDays30: missing.has(a.id) ? missing.get(a.id) : null,
+        lastRun: r ? { type: r.run_type, status: r.status, at: r.finished_at || r.started_at, error: Array.isArray(r.errors) && r.errors[0] ? String(r.errors[0].message || r.errors[0].error || '').slice(0, 200) : null } : null
+      };
+    });
+    const owners = (members || []).filter((m) => m.client_id === id && (userById.get(m.user_id) || {}).role === 'client')
+      .map((m) => ({ userId: m.user_id, email: userById.get(m.user_id).email, name: userById.get(m.user_id).full_name || null, since: m.created_at }));
+    const chats = (convs || []).filter((x) => x.client_id === id);
+    const expiries = cs.filter((x) => x.status === 'active' && x.token_expires_at).map((x) => Date.parse(x.token_expires_at));
+    const accessUntil = expiries.length ? new Date(Math.min(...expiries)).toISOString() : null;
+    const running_ = running.has(id);
+
+    // One verdict, worst first, and what to do about it.
+    const issues = [];
+    if (!cs.some((x) => x.status === 'active')) issues.push({ level: 'bad', code: 'no_connection', text: cs.length ? 'Meta disconnected' : 'Meta not connected' });
+    if ((xc && xc.token_status === 'EXPIRED') || as.some((a) => a.status === 'EXPIRED') || cs.some((x) => ['error', 'expired', 'revoked'].includes(x.status))) issues.push({ level: 'bad', code: 'reconnect', text: 'Meta refused the login: reconnect' });
+    else if (accessUntil && Date.parse(accessUntil) - now < 10 * DAY_MS) issues.push({ level: 'warn', code: 'expiring', text: 'Meta access ends ' + accessUntil.slice(0, 10) + ': reconnect before then' });
+    if (as.length && as.some((a) => !a.historyReadAt)) issues.push({ level: running_ ? 'info' : 'warn', code: 'history', text: running_ ? 'Reading the history now' : 'History not read yet' });
+    if (as.some((a) => a.lastRun && a.lastRun.status === 'FAILED')) issues.push({ level: 'bad', code: 'failed', text: 'Last read failed' });
+    else if (as.some((a) => a.lastRun && a.lastRun.status === 'PARTIAL')) issues.push({ level: 'warn', code: 'partial', text: 'Last read partly failed' });
+    const stale = as.some((a) => a.historyReadAt && (!a.lastReadAt || now - Date.parse(a.lastReadAt) > 1.5 * DAY_MS));
+    if (stale) issues.push({ level: 'warn', code: 'stale', text: 'Not read for over a day' });
+    if (as.some((a) => (a.missingDays30 || 0) > 2 && a.historyReadAt)) issues.push({ level: 'warn', code: 'gaps', text: 'Days missing in the last 30' });
+    if (!owners.length) issues.push({ level: 'info', code: 'no_owner', text: 'Owner has no login' });
+    const worst = issues.find((i) => i.level === 'bad') ? 'bad' : issues.find((i) => i.level === 'warn') ? 'warn' : 'ok';
+
+    return {
+      clientId: id, name: c.name || (xc && xc.client_name) || 'Client', archived: !!c.archived,
+      connections: cs.map((x) => ({ id: x.id, page: x.page_name || x.page_id, instagram: x.ig_username || null, status: x.status, accessUntil: x.token_expires_at, error: x.last_error || null, since: x.created_at })),
+      accessUntil, assets: as, running: running_,
+      lastReadAt: xc ? xc.last_synced_at : null,
+      owners, chats30: chats.length, lastChatAt: chats.map((x) => x.updated_at).sort().pop() || null,
+      issues, verdict: worst
+    };
+  }).sort((a, b) => ({ bad: 0, warn: 1, ok: 2 }[a.verdict] - { bad: 0, warn: 1, ok: 2 }[b.verdict]) || a.name.localeCompare(b.name));
+
+  return {
+    rows,
+    totals: { businesses: rows.length, ok: rows.filter((r) => r.verdict === 'ok').length, warn: rows.filter((r) => r.verdict === 'warn').length, bad: rows.filter((r) => r.verdict === 'bad').length, running: running.size, withOwnerLogin: rows.filter((r) => r.owners.length).length },
+    schedule: { cron: cfg.cron.schedule, tz: cfg.cron.tz, enabled: cfg.cron.enabled },
+    model: cfg.gemini.model
+  };
 }
 
 /** EdgeLead (phase 45): chats not touched for CHAT_RETENTION_DAYS (default 365) are deleted, daily. */
@@ -454,10 +639,13 @@ async function purgeOldChats(now = Date.now()) {
 function start() {
   setInterval(() => purgeOldChats().then((n) => { if (n) console.log('[xp] old chats deleted', n); }).catch((e) => console.error('[xp] purgeOldChats', e.message)), 86400000).unref?.();
   if (!cfg.cron.enabled) return { enabled: false };
-  setTimeout(() => provisionAll().then((r) => console.log('[xp] provisioned', JSON.stringify(r))).catch((e) => console.error('[xp] provision', e.message)), 20000).unref?.();
+  setTimeout(() => provisionAll()
+    .then((r) => { console.log('[xp] provisioned', JSON.stringify(r)); return catchUp(); })
+    .then((r) => { if (r && r.length) console.log('[xp] first reads started', r.filter((x) => x.started).length); })
+    .catch((e) => console.error('[xp] provision', e.message)), 20000).unref?.();
   cron.schedule(cfg.cron.schedule, () => runCron('internal-cron').then((r) => console.log('[xp cron]', JSON.stringify(r).slice(0, 500))).catch((e) => console.error('[xp cron]', e.message)), { timezone: cfg.cron.tz });
   console.log(`[xp] owner assistant sync on: "${cfg.cron.schedule}" ${cfg.cron.tz}`);
   return { enabled: true, schedule: cfg.cron.schedule };
 }
 
-module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats };
+module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks };

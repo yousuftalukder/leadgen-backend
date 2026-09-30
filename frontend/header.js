@@ -549,13 +549,25 @@
         async signOut() {
             if (EL.isShared()) return;
             try { await EL.supabase.auth.signOut(); } catch {}
-            window.location.href = 'index.html';
+            // The Edge Meta AI app signs in on its own page, so it signs out to it too. (phase 47)
+            window.location.href = EL._app ? 'ai/' : 'index.html';
+        },
+
+        /**
+         * The Supabase client, available before init (phase 47): the Edge Meta AI
+         * app signs in on its own page instead of sending the owner out to the
+         * EdgeLead login, which on a phone would leave the installed app.
+         */
+        authClient() {
+            if (!EL.supabase) EL.supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            return EL.supabase;
         },
 
         /** Boots the header. Resolves with /api/me, or blocks the page and never resolves. */
         async init(options = {}) {
-            const { engine = 'leadgen', page, requireAdmin = false } = options;
+            const { engine = 'leadgen', page, requireAdmin = false, app = null } = options;
             EL.engine = engine;
+            EL._app = app;
 
             injectStyles();
 
@@ -568,10 +580,10 @@
                 return { shared: true, role: 'viewer', engines: [] };
             }
 
-            EL.supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            EL.authClient();
 
             const { data } = await EL.supabase.auth.getSession();
-            if (!data.session) { window.location.href = 'index.html'; return new Promise(() => {}); }
+            if (!data.session) { window.location.href = app ? 'ai/' : 'index.html'; return new Promise(() => {}); }
             EL.session = data.session;
             EL.user = data.session.user;
 
@@ -617,7 +629,7 @@
             // being shown a console built for somebody else. Engine grants
             // alone would not catch this: a trial holds the report grant, so
             // nothing would stop them opening the full audit workbench.
-            if (me.role === 'client') {
+            if (me.role === 'client' && !app) {
                 const allowed = CLIENT_NAV.map(t => t.href);
                 if (!allowed.includes(currentPage(page))) {
                     window.location.href = 'client.html';
@@ -625,7 +637,13 @@
                 }
             }
 
-            if (EL.isEmbedded()) {
+            if (app) {
+                // An app of its own (phase 47): the page draws everything. No rail,
+                // no plan banner, no key strip; installable under its own name.
+                document.body.classList.add('el-app');
+                registerServiceWorker();
+                mountInstallNudge(APPS[app]);
+            } else if (EL.isEmbedded()) {
                 // Inside the client page's report viewer (phase 31.3): the page's
                 // content alone, without the rail, the plan banner or the work-for
                 // bar. The access checks below still apply.
@@ -1402,21 +1420,30 @@
      * taps written out. "Not now" is remembered for two weeks; an installed
      * app never sees it.
      */
-    function mountInstallNudge() {
+    /** Installable apps besides EdgeLead itself, as the install nudge names them. (phase 47) */
+    const APPS = {
+        ai: { name: 'Edge Meta AI', icon: 'icons/ai-192.png?v=1', key: 'el-install-dismissed-ai', mount: '#ai-nudge',
+              blurb: 'Opens straight into your chat, full screen, one tap from your phone. Ask about your Instagram and Facebook any time.' }
+    };
+    const EDGELEAD_APP = { name: 'EdgeLead', icon: 'icons/logo-mark.png?v=2', key: 'el-install-dismissed', mount: '.el-page',
+        blurb: 'Opens like an app, full screen, one tap from your phone — your reports, your numbers every day, and a place to ask.' };
+
+    function mountInstallNudge(appInfo) {
+        const A = appInfo || EDGELEAD_APP;
         if (isStandalone() || document.getElementById('el-install')) return;
         let dismissed = 0;
-        try { dismissed = Number(localStorage.getItem('el-install-dismissed') || 0); } catch { /* private mode */ }
+        try { dismissed = Number(localStorage.getItem(A.key) || 0); } catch { /* private mode */ }
         if (dismissed && Date.now() - dismissed < 14 * 86400000) return;
 
-        const host = document.querySelector('.el-page') || document.body;
+        const host = document.querySelector(A.mount) || document.querySelector('.el-page') || document.body;
         const card = document.createElement('div');
         card.className = 'el-install';
         card.id = 'el-install';
         card.innerHTML = `
-            <div class="el-install-ico" aria-hidden="true"><img src="icons/logo-mark.png?v=2" alt="" width="27" height="32"></div>
+            <div class="el-install-ico" aria-hidden="true"><img src="${A.icon}" alt="" width="${A === EDGELEAD_APP ? 27 : 32}" height="32"></div>
             <div class="el-install-txt">
-                <b>Put EdgeLead on your home screen</b>
-                <span>Opens like an app, full screen, one tap from your phone — your reports, your numbers every day, and a place to ask.</span>
+                <b>Put ${A.name} on your home screen</b>
+                <span>${A.blurb}</span>
             </div>
             <div class="el-install-act">
                 <button class="el-btn el-mini el-install-go" type="button" id="el-install-go">${_installEvt ? 'Add to home screen' : 'Show me how'}</button>
@@ -1433,16 +1460,17 @@
                     if (choice && choice.outcome === 'accepted') { card.remove(); return; }
                 } catch { /* fall through to the written steps */ }
             }
-            showInstallHow();
+            showInstallHow(A);
         });
         card.querySelector('#el-install-no').addEventListener('click', () => {
-            try { localStorage.setItem('el-install-dismissed', String(Date.now())); } catch { /* private mode */ }
+            try { localStorage.setItem(A.key, String(Date.now())); } catch { /* private mode */ }
             card.remove();
         });
         window.addEventListener('appinstalled', () => card.remove());
     }
 
-    function showInstallHow() {
+    function showInstallHow(appInfo) {
+        const A = appInfo || EDGELEAD_APP;
         if (document.getElementById('el-install-how')) return;
         const ua = navigator.userAgent || '';
         const iOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -1452,13 +1480,13 @@
                'Scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.']
             : ['Open your browser\'s menu — the three dots, top right.',
                'Tap <b>Add to Home screen</b> (or <b>Install app</b>).',
-               'Tap <b>Add</b> or <b>Install</b>. EdgeLead appears next to your other apps.'];
+               `Tap <b>Add</b> or <b>Install</b>. ${A.name} appears next to your other apps.`];
         const scrim = document.createElement('div');
         scrim.className = 'el-scrim';
         scrim.id = 'el-install-how';
         scrim.innerHTML = `
             <div class="el-modal" role="dialog" aria-modal="true" aria-labelledby="el-install-title">
-                <h3 id="el-install-title">Add EdgeLead to your home screen</h3>
+                <h3 id="el-install-title">Add ${A.name} to your home screen</h3>
                 <p>Three taps. It then opens full screen, like an app, and stays signed in.</p>
                 <ol class="el-install-steps">${steps.map(t => `<li>${t}</li>`).join('')}</ol>
                 <div class="el-modal-actions">

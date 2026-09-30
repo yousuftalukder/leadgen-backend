@@ -425,6 +425,7 @@
                     </ul>
                 </section>
             </div>
+            ${conns.length ? '<section class="ws-card" style="margin-bottom:16px" id="xa"><div class="ws-card-h"><h2>Edge Meta AI data</h2></div><p class="el-muted">Loading…</p></section>' : ''}
             ${gr && !gr.empty ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Numbers, day by day</h2>${UI.srcChip('meta')}</div>
                 <div class="ws-table-wrap"><table class="ws-table gtable"><thead><tr><th>Day</th><th class="ws-num">Followers</th><th class="ws-num">Reach</th><th class="ws-num">Profile visits</th><th class="ws-num">Interactions</th></tr></thead>
                 <tbody>${(gr.series || []).slice(-14).reverse().map(r => `<tr><td>${esc(r.day)}</td><td class="ws-num">${num(r.followers)}</td><td class="ws-num">${num(r.reach)}</td><td class="ws-num">${num(r.profile_views)}</td><td class="ws-num">${num(r.interactions)}</td></tr>`).join('')}</tbody></table></div>
@@ -445,7 +446,12 @@
         });
         body.querySelectorAll('[data-read]').forEach(b => b.addEventListener('click', async () => {
             b.disabled = true; note.className = 'ws-note'; note.textContent = 'Reading today’s numbers…';
-            try { await EL.api('/api/meta/daily-sync', { method: 'POST', body: { connectionId: b.dataset.read } }); growth = null; note.className = 'ws-note is-good'; note.textContent = 'Read. The numbers below are up to date.'; setTimeout(() => tabMeta(body), 600); }
+            try {
+                await EL.api('/api/meta/daily-sync', { method: 'POST', body: { connectionId: b.dataset.read } });
+                // Edge Meta AI keeps its own copy; read that too, unless a read is already running.
+                await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: c.id } }).catch(() => null);
+                growth = null; note.className = 'ws-note is-good'; note.textContent = 'Read. The numbers below are up to date; Edge Meta AI finishes in the background.'; setTimeout(() => tabMeta(body), 600);
+            }
             catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; b.disabled = false; }
         }));
         body.querySelectorAll('[data-disc]').forEach(b => b.addEventListener('click', async () => {
@@ -453,6 +459,7 @@
             try { await EL.api(`/api/meta/connections/${b.dataset.disc}`, { method: 'DELETE' }); await refreshDetail(); growth = null; render(); }
             catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; }
         }));
+        if ($('xa')) aiData($('xa'));
         const pull = $('m-pull');
         if (pull) pull.addEventListener('click', async () => {
             const cx = live[0]; pull.disabled = true;
@@ -492,6 +499,49 @@
                 });
             } catch (err) { if (!err.handled) { n.className = 'ws-note is-bad'; n.textContent = err.message; } build.disabled = false; }
         });
+    }
+
+    /**
+     * What Edge Meta AI has read for this client (phase 47). Nobody has to press anything for it to
+     * work: this card is for seeing that it did, and for the two repairs a person chooses.
+     */
+    async function aiData(host) {
+        let s;
+        try { s = await EL.api(`/api/xp/status?client_id=${encodeURIComponent(c.id)}`); }
+        catch (err) { host.innerHTML = `<div class="ws-card-h"><h2>Edge Meta AI data</h2></div><p class="ws-note is-bad">${esc(err.message)}</p>`; return; }
+        const cov = new Map(((s.coverage && s.coverage.assets) || []).map(a => [a.asset_id || a.id, a]));
+        const ago = iso => (iso ? UI.ago(iso) : 'never');
+        const PH = { ready: ['is-jade', 'Answering from their numbers'], reading: ['is-gold', s.running ? 'Reading the history now' : 'History not read yet'], reconnect: ['is-bad', 'Meta refused the login: reconnect'], not_connected: ['', 'Not set up yet'] };
+        const [tone, label] = PH[s.phase] || ['', s.phase || ''];
+        const sc = s.schedule || {};
+        const m = /^(\d+)\s+([\d,]+)\s/.exec(sc.cron || '');
+        const when = !sc.enabled ? 'The twice-daily read is off on the server.' : m ? `Reads itself at ${m[2].split(',').map(h => h.padStart(2, '0') + ':' + m[1].padStart(2, '0')).join(' and ')} ${sc.tz || 'UTC'}.` : '';
+        const today = new Date().toISOString().slice(0, 10), monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+        host.innerHTML = `<div class="ws-card-h"><h2>Edge Meta AI data</h2><span class="el-chip ${tone}">${esc(label)}</span></div>
+            <p class="el-muted">What the assistant answers from. It started reading when Meta was connected and keeps itself up to date: ${esc(when)} ${s.running ? '<b>A read is running now.</b>' : ''}</p>
+            <div class="ws-rows">${(s.assets || []).map(a => { const v = cov.get(a.id) || {}; return `<div class="ws-row"><span class="ws-sev ${a.status === 'ACTIVE' ? 'is-jade' : 'is-bad'}"></span><div class="ws-grow">
+                <div class="ws-t">${a.platform === 'IG' ? 'Instagram' : 'Facebook'} · ${esc(a.name || a.username || '')}</div>
+                <div class="ws-m">History ${a.last_full_backfill_at ? 'read ' + esc(UI.day(a.last_full_backfill_at)) : 'not read yet'} · last read ${esc(ago(a.last_synced_at))}${v.account_days !== undefined ? ` · ${v.account_days} day(s) and ${v.post_days || 0} post day(s) held` : ''}${a.status !== 'ACTIVE' ? ' · ' + esc(String(a.status).toLowerCase()) : ''}</div></div></div>`; }).join('') || '<p class="el-muted">Nothing read yet. It starts by itself within a minute of Meta being connected.</p>'}</div>
+            ${(s.runs || []).length ? `<details style="margin-top:10px"><summary class="el-muted" style="cursor:pointer">Last reads</summary><div class="ws-rows">${s.runs.map(r => `<div class="ws-row"><span class="ws-sev ${r.status === 'OK' ? 'is-jade' : r.status === 'RUNNING' ? 'is-gold' : 'is-bad'}"></span><div class="ws-grow"><div class="ws-t">${esc(String(r.run_type).toLowerCase())} · ${esc(String(r.status).toLowerCase())}</div>
+                <div class="ws-m">${esc(ago(r.started_at))} · ${r.posts_seen || 0} posts seen · ${r.snapshots_written || 0} readings written${(r.errors || []).length ? ' · ' + esc(String(r.errors[0].message || r.errors[0].error || '').slice(0, 160)) : ''}</div></div></div>`).join('')}</div></details>` : ''}
+            ${canEdit() && (s.assets || []).length ? `<div class="ws-actions" style="margin-top:12px">
+                <button class="ws-btn is-sm" type="button" id="xa-read" ${s.running ? 'disabled' : ''}>Read now</button>
+                <button class="ws-btn is-sm is-quiet" type="button" id="xa-full" ${s.running ? 'disabled' : ''}>Re-read the history</button>
+                <span class="el-muted" style="font-size:0.8rem">or read days</span>
+                <input id="xa-a" type="date" value="${monthAgo}" max="${today}" style="width:auto" aria-label="From">
+                <input id="xa-b" type="date" value="${today}" max="${today}" style="width:auto" aria-label="To">
+                <button class="ws-btn is-sm is-quiet" type="button" id="xa-range" ${s.running ? 'disabled' : ''}>Read these days</button></div>` : ''}
+            <div class="ws-note" id="xa-note"></div>`;
+        const go = async (extra, btn) => {
+            const n = $('xa-note'); btn.disabled = true; n.className = 'ws-note'; n.textContent = 'Starting…';
+            try { await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: c.id, ...extra } }); n.className = 'ws-note is-good'; n.textContent = 'Reading in the background. This card updates by itself.'; setTimeout(() => host.isConnected && aiData(host), 5000); }
+            catch (err) { n.className = 'ws-note is-bad'; n.textContent = err.message; btn.disabled = false; }
+        };
+        if ($('xa-read')) $('xa-read').addEventListener('click', e => go({}, e.currentTarget));
+        if ($('xa-full')) $('xa-full').addEventListener('click', e => go({ fullBackfill: true }, e.currentTarget));
+        if ($('xa-range')) $('xa-range').addEventListener('click', e => go({ rangeStart: $('xa-a').value, rangeEnd: $('xa-b').value }, e.currentTarget));
+        clearTimeout(aiData._t);
+        if (s.running) aiData._t = setTimeout(() => host.isConnected && aiData(host), 20000);
     }
 
     // ---- ask ai -----------------------------------------------------------------

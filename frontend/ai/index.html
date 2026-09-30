@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!--
+        Edge Meta AI as an app of its own (phase 47). The same chat as
+        client-assistant.html (meta-ai.js / meta-ai.css), with nothing of
+        EdgeLead around it: installable under its own name and icon, opening
+        straight into the chat, signing in on its own screen.
+
+        It lives in ai/ so its manifest's scope is ai/ and a phone keeps it
+        apart from the EdgeLead app. Everything else it loads is the site's own,
+        through the base below: header.js, the stylesheets, the icons, the
+        service worker.
+    -->
+    <base href="../">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+    <title>Edge Meta AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+    <link rel="stylesheet" href="meta-ai.css">
+    <link rel="manifest" href="ai/manifest.webmanifest">
+    <meta name="theme-color" content="#06140f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Edge Meta AI">
+    <link rel="apple-touch-icon" href="icons/ai-apple-touch-icon.png?v=1">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/ai-192.png?v=1">
+    <style>
+    /* ai/index.html — the app frame only. The chat's own rules are in meta-ai.css. */
+    html, body { height: 100%; }
+    body { margin: 0; padding: 0 !important; overflow: hidden; background: var(--bg-color); }
+    [hidden] { display: none !important; }
+
+    /* ---- sign in ---- */
+    .ai-gate { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); overflow-y: auto; }
+    .ai-card { width: 100%; max-width: 380px; text-align: center; }
+    .ai-card img { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 14px 40px rgba(0,0,0,0.45); }
+    .ai-card h1 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin: 18px 0 6px; }
+    .ai-card h1 .a { color: var(--accent-solid); }
+    .ai-card > p { color: var(--text-secondary); font-size: 0.92rem; line-height: 1.6; margin: 0 0 22px; }
+    .ai-form { text-align: left; display: grid; gap: 12px; }
+    .ai-form label { font-size: 0.74rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); display: block; margin-bottom: 6px; }
+    .ai-form input { width: 100%; }
+    .ai-form .btn-primary { width: 100%; margin-top: 4px; }
+    .ai-err { min-height: 18px; font-size: 0.84rem; color: var(--danger); margin: 0; }
+    .ai-err.is-good { color: var(--success); }
+    .ai-link { background: none; border: 0; padding: 0; color: var(--text-muted); font: inherit; font-size: 0.84rem; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    .ai-fine { font-size: 0.76rem; color: var(--text-muted); margin-top: 22px; line-height: 1.55; }
+
+    /* ---- the app: one screen, the chat scrolls inside it ---- */
+    .ai-page { height: 100dvh; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+    .ai-page .oa-wrap { flex: 1; min-height: 0; grid-template-columns: 270px minmax(0, 1fr); gap: 0; align-items: stretch; }
+    .ai-page .oa-side { position: relative; top: 0; height: 100%; overflow-y: auto; padding: max(16px, env(safe-area-inset-top)) 14px 16px; border-right: 1px solid var(--card-border); background: rgba(255,255,255,0.015); }
+    .ai-page .oa-main { min-height: 0; height: 100%; padding: 0 16px; }
+    .ai-page .oa-head { margin: 0 -16px; padding: max(10px, env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--card-border); flex-wrap: nowrap;
+        background: rgba(6,20,15,0.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+    .ai-page .oa-scroll { min-height: 0; padding-top: 18px; }
+    .ai-page .oa-form { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+    .ai-page .oa-to-bottom { bottom: 120px; }
+    .ai-mark { width: 30px; height: 30px; border-radius: 8px; flex: none; }
+    .ai-title { flex: 1; min-width: 0; line-height: 1.2; }
+    .ai-title .oa-brand { font-size: 1rem; white-space: nowrap; }
+    .ai-title .oa-by { display: block; margin: 1px 0 0 !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ai-page .oa-state { max-width: 42%; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ai-more { flex: none; }
+    .ai-menu { right: 12px; top: calc(max(10px, env(safe-area-inset-top)) + 48px); width: 200px; }
+    #ai-nudge:empty { display: none; }
+    #ai-nudge .el-install { margin: 12px auto 0; max-width: 860px; }
+    @media (max-width: 940px) {
+        .ai-page .oa-wrap { grid-template-columns: minmax(0, 1fr); }
+        .ai-page .oa-side { display: block; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(84vw, 320px); background: #081a14;
+            transform: translateX(-102%); transition: transform .22s ease; box-shadow: 20px 0 50px rgba(0,0,0,0.5); }
+        .ai-page .oa-side.is-open { transform: none; }
+        .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); }
+        .ai-page .oa-state { display: none; }   /* on a phone the screen itself says it: the reading card, the reconnect banner */
+    }
+    @media (min-width: 941px) { .ai-scrim { display: none; } .ai-page .oa-side-toggle { display: none; } }
+    </style>
+</head>
+<body>
+
+<!-- Signing in, inside the app: leaving for EdgeLead's login would leave the installed app. -->
+<div class="ai-gate" id="ai-signin" hidden>
+    <div class="ai-card">
+        <img src="icons/ai-192.png?v=1" alt="">
+        <h1>Edge Meta <span class="a">AI</span></h1>
+        <p>Your Instagram and Facebook, answered from your own numbers. Sign in with the login your agency sent you.</p>
+        <form class="ai-form" id="ai-form" novalidate>
+            <div><label for="ai-email">Email</label><input id="ai-email" type="email" autocomplete="username" inputmode="email" required></div>
+            <div><label for="ai-pass">Password</label><input id="ai-pass" type="password" autocomplete="current-password" required></div>
+            <p class="ai-err" id="ai-err" role="alert"></p>
+            <button class="btn-primary" type="submit" id="ai-go">Sign in</button>
+            <div style="text-align:center"><button class="ai-link" type="button" id="ai-forgot">Forgot your password?</button></div>
+        </form>
+        <p class="ai-fine">No login yet? Ask your agency to invite you. Your numbers are read only from your own accounts, and only you and your agency see them.</p>
+    </div>
+</div>
+
+<!-- The app is for business owners; staff read a client's numbers from the client. -->
+<div class="ai-gate" id="ai-staff" hidden>
+    <div class="ai-card">
+        <img src="icons/ai-192.png?v=1" alt="">
+        <h1>Edge Meta <span class="a">AI</span></h1>
+        <p>This app is the business owner’s. On your team, you ask about a client from the client itself: Clients → the client → Ask AI.</p>
+        <a class="btn-primary" style="display:block;text-decoration:none" href="clients.html">Open Clients</a>
+        <div style="margin-top:14px"><button class="ai-link" type="button" data-signout>Sign out</button></div>
+    </div>
+</div>
+
+<div class="el-page ai-page" id="ai-app" hidden>
+    <div class="oa-wrap">
+        <aside class="oa-side" id="oa-side">
+            <button class="btn-secondary oa-new" id="oa-new" type="button">+ New chat</button>
+            <h3 class="oa-side-h">Recent chats</h3>
+            <div id="chat-history"></div>
+        </aside>
+        <div class="ai-scrim" id="ai-scrim" hidden></div>
+
+        <main class="oa-main">
+            <div class="oa-head">
+                <button class="icon-btn oa-side-toggle" id="oa-side-toggle" type="button" aria-label="Recent chats">☰</button>
+                <img class="ai-mark" src="icons/ai-192.png?v=1" alt="">
+                <div class="ai-title"><div class="oa-brand"><span>Edge Meta</span> <span class="oa-a">AI</span></div><span class="oa-by" id="oa-for"></span></div>
+                <span class="oa-state" id="oa-state"></span>
+                <button class="icon-btn ai-more" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu" aria-label="More">⋯</button>
+            </div>
+            <div id="ai-nudge"></div>
+            <div id="chat-scroll" class="oa-scroll"><div id="chat-box" class="oa-box"></div></div>
+            <button type="button" id="to-bottom" class="oa-to-bottom hidden" aria-label="Jump to the latest">↓</button>
+            <form id="chat-form" class="oa-form">
+                <div class="composer">
+                    <textarea id="chat-input" rows="1" maxlength="2000" placeholder="Ask about your numbers…" aria-label="Your question"></textarea>
+                    <button type="submit" id="send-btn" class="send-btn" aria-label="Send" disabled></button>
+                </div>
+                <p id="composer-hint" class="oa-hint">Answers come from your own Instagram and Facebook data. The most recent days can still change.</p>
+            </form>
+        </main>
+    </div>
+    <div id="conv-menu" role="menu" aria-label="Chat" class="oa-menu hidden">
+        <button type="button" role="menuitem" data-action="conv-rename">Rename</button>
+        <button type="button" role="menuitem" data-action="conv-delete" class="danger">Delete</button>
+    </div>
+    <div id="ai-menu" role="menu" aria-label="More" class="oa-menu ai-menu hidden">
+        <a role="menuitem" href="client.html" style="display:block;padding:9px 11px;color:var(--text-primary);text-decoration:none;font-size:0.84rem;border-radius:8px">Open EdgeLead</a>
+        <button type="button" role="menuitem" data-signout>Sign out</button>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="header.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script id="chartjs" src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" defer></script>
+<script src="meta-ai.js"></script>
+<script>
+(async function () {
+    'use strict';
+    const $ = id => document.getElementById(id);
+    document.querySelectorAll('[data-signout]').forEach(b => b.addEventListener('click', () => { EL._app = 'ai'; EL.signOut(); }));
+
+    const sb = EL.authClient();
+    const { data } = await sb.auth.getSession();
+    if (data.session) boot(); else signIn();
+
+    function signIn() {
+        $('ai-signin').hidden = false;
+        const err = $('ai-err');
+        $('ai-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            const email = $('ai-email').value.trim(), password = $('ai-pass').value;
+            if (!email || !password) { err.className = 'ai-err'; err.textContent = 'Enter your email and password.'; return; }
+            const go = $('ai-go'); go.disabled = true; go.textContent = 'Signing in…'; err.textContent = '';
+            try {
+                const { error } = await sb.auth.signInWithPassword({ email, password });
+                if (error) throw error;
+                $('ai-signin').hidden = true;
+                boot();
+            } catch (x) {
+                err.className = 'ai-err';
+                err.textContent = /invalid/i.test(x.message || '') ? 'That email and password do not match.' : (x.message || 'Could not sign in.');
+                go.disabled = false; go.textContent = 'Sign in';
+            }
+        });
+        $('ai-forgot').addEventListener('click', async () => {
+            const email = $('ai-email').value.trim();
+            if (!email) { err.className = 'ai-err'; err.textContent = 'Enter your email above, then tap this again.'; return; }
+            try {
+                // welcome.html is where a password is chosen, for an invite and a reset alike.
+                await sb.auth.resetPasswordForEmail(email, { redirectTo: new URL('welcome.html', document.baseURI).href });
+                err.className = 'ai-err is-good'; err.textContent = 'If that email has a login, a link to choose a new password is on its way.';
+            } catch (x) { err.className = 'ai-err'; err.textContent = x.message || 'Could not send the link.'; }
+        });
+    }
+
+    async function boot() {
+        const me = await EL.init({ engine: null, page: 'ai/index.html', app: 'ai' });
+        if (me.role !== 'client') { $('ai-staff').hidden = false; return; }
+        $('ai-app').hidden = false;
+
+        // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.
+        const side = $('oa-side'), scrim = $('ai-scrim');
+        new MutationObserver(() => { scrim.hidden = !side.classList.contains('is-open'); }).observe(side, { attributes: true, attributeFilter: ['class'] });
+        scrim.addEventListener('click', () => side.classList.remove('is-open'));
+
+        const menu = $('ai-menu'), more = $('ai-more');
+        more.addEventListener('click', e => { e.stopPropagation(); const open = menu.classList.toggle('hidden') === false; more.setAttribute('aria-expanded', String(open)); });
+        document.addEventListener('click', e => { if (!e.target.closest('#ai-menu')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); } });
+
+        MetaAI.start(me, { app: true });
+    }
+})();
+</script>
+</body>
+</html>

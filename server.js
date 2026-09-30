@@ -13512,6 +13512,19 @@ function igShortcodeFromPermalink(p) {
     return m ? m[1] : null;
 }
 
+/**
+ * Phase 47: hand a business that just got a Meta connection to Edge Meta AI's first read, in the
+ * background. Never awaited by the request and never fails it: the boot pass, the status route and
+ * the twice-daily read all try again if this one could not start.
+ */
+function startFirstRead(clientId, why) {
+    // The Home page's daily numbers too: the hourly pass would get there, this gets there now.
+    Promise.resolve().then(() => metaDailyTick()).catch(() => {});
+    Promise.resolve().then(() => xp.kickoff(clientId, why, { force: true }))
+        .then(r => logger.info('xp_first_read', { clientId, why, started: !!(r && r.started), reason: r && r.reason }))
+        .catch(e => logger.warn('xp_first_read_failed', { clientId, why, message: e.message }));
+}
+
 app.get('/api/meta/status', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -13611,6 +13624,8 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         // person reads "select a Page" and goes hunting through a dialog that
         // never offered them one.
         if (!saved) return back({ meta: 'error', message: 'Login worked but Meta returned no Pages. Either no Page was ticked in the dialog, or this Facebook account has no role on the EdgeLead Meta app yet — while the app is in Development Mode only Admins, Developers and Testers get Pages back.' });
+        // Phase 47: the business is read now, not at the next 09:00 or 21:00, and nobody presses anything.
+        if (st.client_id) startFirstRead(st.client_id, 'connect');
         back({ meta: 'ok', pages: saved, client: st.client_id || '' });
     } catch (err) {
         logger.error('meta_oauth_callback', { message: err.message });
@@ -13740,6 +13755,7 @@ app.patch('/api/meta/connections/:id', async (req, res) => {
         if (req.body.clientId && !clientId) return res.status(403).json({ error: 'No edit access to that client.' });
         const { error } = await supabase.from('meta_connections').update({ client_id: clientId }).eq('id', conn.id);
         if (error) throw error;
+        if (clientId) startFirstRead(clientId, 'filed');
         res.json({ success: true });
     } catch (err) { sendErr(res, err); }
 });
@@ -13791,6 +13807,7 @@ app.post('/api/meta/connections/:id/onboard', async (req, res) => {
         }
 
         logger.info('meta_client_onboarded', { userId: ctx.user.id, clientId: client.id, pageId: conn.page_id });
+        startFirstRead(client.id, 'onboard');
         res.status(201).json({ client: { ...client, access: 'owner' }, connectionId: conn.id });
     } catch (err) { sendErr(res, err); }
 });

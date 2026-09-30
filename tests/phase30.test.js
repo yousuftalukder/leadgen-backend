@@ -144,7 +144,8 @@ test('the service worker parses, is network-first, and never caches another orig
     new vm.Script(src);                                     // throws on a syntax error
     assert.ok(/url\.origin !== self\.location\.origin/.test(src), 'the API and the CDNs must go straight through');
     assert.ok(/fetch\(req\)\.then/.test(src), 'network first, so a deploy reaches the phone');
-    assert.ok(/caches\.match\('client\.html'\)/.test(src), 'an offline navigation falls back to the dashboard');
+    assert.ok(/caches\.match\([\s\S]{0,80}'client\.html'\)/.test(src), 'an offline navigation falls back to the dashboard');
+    assert.ok(/startsWith\('\/ai\/'\) \? 'ai\/'/.test(src), 'inside the Edge Meta AI app, to the chat');
 });
 test('every client page carries the manifest and the iOS tags', () => {
     for (const p of ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html']) {
@@ -160,13 +161,63 @@ test('header.js catches the install prompt at parse time and installs for client
     const init = h.indexOf('async init(options');
     assert.ok(listener > 0 && listener < init, 'the prompt fires before init runs, so the listener must be registered first');
     assert.ok(/if \(me\.role === 'client'\) \{ registerServiceWorker\(\); mountInstallNudge\(\); \}/.test(h), 'clients only');
-    assert.ok(/localStorage\.setItem\('el-install-dismissed'/.test(h), '"not now" is remembered');
+    assert.ok(/key: 'el-install-dismissed'/.test(h) && /localStorage\.setItem\(A\.key/.test(h), '"not now" is remembered, per app');
     assert.ok(/display-mode: standalone/.test(h), 'an installed app never sees the nudge');
 });
 test('the worker is never served stale, and the manifest has its own type', () => {
     const n = fs.readFileSync(path.join(FRONT, 'netlify.toml'), 'utf8');
     assert.ok(/for = "\/sw\.js"[\s\S]*?Cache-Control = "no-cache"/.test(n));
     assert.ok(/for = "\/manifest\.webmanifest"[\s\S]*?application\/manifest\+json/.test(n));
+});
+
+console.log('Edge Meta AI, an app of its own (phase 47)');
+const AI = path.join(FRONT, 'ai');
+test('its manifest is its own: another name, another icon, scoped to ai/', () => {
+    const m = JSON.parse(fs.readFileSync(path.join(AI, 'manifest.webmanifest'), 'utf8'));
+    const main = JSON.parse(fs.readFileSync(path.join(FRONT, 'manifest.webmanifest'), 'utf8'));
+    assert.strictEqual(m.display, 'standalone');
+    assert.strictEqual(m.scope, './', 'scoped to its folder, so a phone keeps it apart from EdgeLead');
+    assert.ok(m.start_url.startsWith('./'), 'starts inside its scope: ' + m.start_url);
+    assert.ok(/source=pwa/.test(m.start_url), 'an installed app never sees the install nudge');
+    assert.notStrictEqual(m.name, main.name);
+    assert.ok(m.id && m.id !== main.id, 'a distinct app id');
+    assert.ok(m.icons.some(i => i.purpose === 'maskable'));
+    const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    for (const i of m.icons) {
+        const buf = fs.readFileSync(path.join(AI, i.src.split('?')[0]));
+        assert.ok(buf.subarray(0, 8).equals(sig), i.src + ' is not a PNG');
+        assert.ok(!main.icons.some(x => x.src.split('?')[0] === i.src.split('?')[0].replace('../', '')), 'its own icon, not EdgeLead\'s');
+    }
+});
+test('its page resolves the site through one base, and boots as the app', () => {
+    const h = fs.readFileSync(path.join(AI, 'index.html'), 'utf8');
+    assert.ok(/<base href="\.\.\/">/.test(h), 'header.js, the styles and the icons are the site\'s own');
+    assert.ok(/rel="manifest" href="ai\/manifest\.webmanifest"/.test(h));
+    assert.ok(/apple-mobile-web-app-title" content="Edge Meta AI"/.test(h) && /apple-touch-icon" href="icons\/ai-apple-touch-icon\.png/.test(h));
+    assert.ok(fs.existsSync(path.join(FRONT, 'icons', 'ai-apple-touch-icon.png')));
+    assert.ok(/EL\.init\(\{[^}]*app: 'ai'/.test(h), 'EL.init in app mode');
+    assert.ok(/MetaAI\.start\(me, \{ app: true \}\)/.test(h));
+    assert.ok(/signInWithPassword/.test(h), 'it signs in on its own screen, never leaving the app');
+    assert.ok(/<script src="meta-ai\.js">/.test(h) && /href="meta-ai\.css"/.test(h));
+    for (const m of h.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) new Function(m[1]);
+});
+test('the chat is one piece of code, in EdgeLead and in the app', () => {
+    const ca = fs.readFileSync(path.join(FRONT, 'client-assistant.html'), 'utf8');
+    assert.ok(/<script src="meta-ai\.js">/.test(ca) && /MetaAI\.start\(me\)/.test(ca));
+    const js = fs.readFileSync(path.join(FRONT, 'meta-ai.js'), 'utf8');
+    new vm.Script(js);
+    assert.ok(/window\.MetaAI = \{ start \}/.test(js));
+    assert.ok(!/data-sync/.test(js), 'no button an owner has to press to get their numbers read');
+    assert.ok(/pollTimer = setTimeout\(loadStatus/.test(js), 'while the first read runs, the page checks back by itself');
+    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
+    assert.ok(/if \(me\.role === 'client' && !app\)/.test(h), 'the owner pages\' redirect leaves the app alone');
+    assert.ok(/window\.location\.href = EL\._app \? 'ai\/' : 'index\.html'/.test(h), 'signing out of the app lands on its own sign-in');
+});
+test('the worker keeps the app offline too, and Netlify serves its manifest right', () => {
+    const src = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
+    assert.ok(/'ai\/'/.test(src) && /'meta-ai\.js'/.test(src));
+    const n = fs.readFileSync(path.join(FRONT, 'netlify.toml'), 'utf8');
+    assert.ok(/for = "\/ai\/manifest\.webmanifest"[\s\S]*?application\/manifest\+json/.test(n));
 });
 
 console.log(`\n${passed} passed`);
