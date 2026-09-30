@@ -3258,6 +3258,15 @@ async function geminiCallDetailed(prompt, {
                 continue;
             }
 
+            if (r.status === 401) {
+                // The key itself is refused (retired, revoked, wrong type): the next key may be fine.
+                const body = (await r.text()).slice(0, 400);
+                logger.warn('gemini_key_invalid', { tag, keySource: cand.source, keyId: cand.id, status: 401, body });
+                if (cand.source === 'env') alertOnce('gemini_env_key_refused', 'Google refused the server GEMINI_API_KEY (401). Replace it on Render with a new AI Studio key (starts with AQ.).', {});
+                await geminiMarkKey(cand.id, { status: 'invalid', last_error: body.slice(0, 200), fail_count: 99 });
+                keyIdx += 1; lastReason = 'http_401';
+                continue;
+            }
             if (r.status === 404 || r.status === 400 || r.status === 403 || r.status >= 500) {
                 const body = (await r.text()).slice(0, 400);
                 const isModelProblem = r.status === 404 || /model|not found|no longer available|not supported/i.test(body);
@@ -13209,6 +13218,8 @@ app.get('/api/gemini-keys', async (req, res) => {
         res.json({
             keys: (data || []).map(k => ({ ...k, scope: k.owner_user_id ? 'personal' : 'pool' })),
             envConfigured: !!GEMINI_API_KEY,
+            // Google stopped accepting standard (AIza) keys in September 2026.
+            envLegacy: /^AIza/.test(GEMINI_API_KEY),
             envKey: !!GEMINI_API_KEY,
             poolKeys: (data || []).filter(k => !k.owner_user_id && k.status !== 'invalid').length,
             discovered: _geminiDiscovered.models.slice(0, 3),
@@ -13219,16 +13230,46 @@ app.get('/api/gemini-keys', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+/**
+ * A Gemini key as pasted: trimmed, unquoted, without a "GEMINI_API_KEY=" in front. Google changed the
+ * format in 2026: new AI Studio keys are auth keys that start with "AQ.", older standard keys start
+ * with "AIza" (and stopped being accepted in September 2026). Both are accepted here; the shape check
+ * only refuses what cannot be a key, and Google itself decides the rest. Null when it is no key.
+ */
+function cleanGeminiKey(raw) {
+    const k = String(raw || '').trim().replace(/^GEMINI_API_KEY\s*=\s*/i, '').replace(/^["'`]+|["'`]+$/g, '').trim();
+    return /^[A-Za-z0-9._-]{30,400}$/.test(k) ? k : null;
+}
+/** Ask Google whether a key works: the models list first, then one tiny request. A 429 means the key is fine but busy. */
+async function geminiProbeKey(key) {
+    const why = async r => { try { const j = await r.json(); return j?.error?.message || ''; } catch { return ''; } };
+    let r;
+    try { r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key } }); }
+    catch { return { ok: false, error: 'Google could not be reached to check the key. Try again in a minute.' }; }
+    if (r.ok || r.status === 429) return { ok: true };
+    const first = await why(r);
+    try {
+        r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 1 } })
+        });
+    } catch { return { ok: false, error: 'Google could not be reached to check the key. Try again in a minute.' }; }
+    if (r.ok || r.status === 429) return { ok: true };
+    const second = await why(r);
+    const legacy = /^AIza/.test(key) ? ' Keys that start with AIza were retired by Google in September 2026; create a new one in Google AI Studio (it starts with AQ.).' : '';
+    return { ok: false, error: `Google rejected that key${second || first ? ': ' + (second || first).slice(0, 160) : '.'}${legacy}` };
+}
+
 app.post('/api/gemini-keys', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
-        const key = String(req.body.key || req.body.token || '').trim();
-        if (!/^AIza[0-9A-Za-z_-]{20,}$/.test(key)) return res.status(400).json({ error: 'That does not look like a Gemini API key (they start with AIza).' });
+        const key = cleanGeminiKey(req.body.key || req.body.token);
+        if (!key) return res.status(400).json({ error: 'Paste the whole key from Google AI Studio. New keys start with AQ. and older ones with AIza.' });
         const isGlobal = !!req.body.global && ctx.profile.role === 'admin';
 
-        // Verify with one tiny call before storing anything.
-        const probe = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1`, { headers: { 'x-goog-api-key': key } });
-        if (probe.status === 400 || probe.status === 403) return res.status(400).json({ error: 'Google rejected that key.' });
+        // Google decides, not the shape: verify with one tiny call before storing anything.
+        const check = await geminiProbeKey(key);
+        if (!check.ok) return res.status(400).json({ error: check.error });
 
         const row = {
             owner_user_id: isGlobal ? null : ctx.user.id,
@@ -21066,6 +21107,7 @@ function preflight() {
     }
     if (!process.env.SUPABASE_URL) problems.push('SUPABASE_URL is not set');
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY is not set');
+    if (/^AIza/.test(GEMINI_API_KEY)) problems.push('GEMINI_API_KEY is an old standard key (AIza…). Google stopped accepting those in September 2026 — replace it with a new AI Studio key (AQ.…)');
     if (!ENC_KEY) problems.push(ENC_REQUIRED
         ? 'APP_ENCRYPTION_KEY is not set — connecting Meta and saving Apify or AI keys will be refused until it is'
         : 'APP_ENCRYPTION_KEY is not set — secrets are stored in plaintext (allowed only outside production)');
@@ -21280,7 +21322,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
-    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData, xpApifyRun,
+    cleanGeminiKey, geminiProbeKey, keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData, xpApifyRun,
     csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },

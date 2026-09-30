@@ -252,7 +252,7 @@
             </div>
             <div id="gemini-meta" class="card-subtitle" style="margin-bottom:10px;"></div>
             <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:14px;">
-                <div style="flex:2; min-width:260px;"><label style="display:block;font-size:0.72rem;font-weight:700;color:var(--accent-solid);margin-bottom:6px;">Gemini API key (AIza…)</label>
+                <div style="flex:2; min-width:260px;"><label style="display:block;font-size:0.72rem;font-weight:700;color:var(--accent-solid);margin-bottom:6px;">Gemini API key (starts with AQ. or AIza)</label>
                     <input type="password" id="gemini-key" autocomplete="off" style="width:100%;padding:11px 13px;background:var(--input-bg);border:1px solid var(--card-border);color:#fff;border-radius:10px;font-family:inherit;"></div>
                 <div style="flex:1; min-width:160px;"><label style="display:block;font-size:0.72rem;font-weight:700;color:var(--accent-solid);margin-bottom:6px;">Label</label>
                     <input type="text" id="gemini-label" placeholder="e.g. studio-2" style="width:100%;padding:11px 13px;background:var(--input-bg);border:1px solid var(--card-border);color:#fff;border-radius:10px;font-family:inherit;"></div>
@@ -1072,10 +1072,10 @@
         try {
             const d = await EL.api('/api/gemini-keys');
             $('gemini-meta').innerHTML = `Model: <strong>${esc(d.model)}</strong> → ${d.fallbacks.map(esc).join(' → ')}`
-                + ` · env key ${d.envConfigured ? '<span class="status-active">set</span>' : '<span class="status-bad">not set</span>'}`
+                + ` · env key ${d.envConfigured ? (d.envLegacy ? '<span class="status-bad">set, but an old AIza key Google no longer accepts: replace GEMINI_API_KEY on Render with a new AQ. key</span>' : '<span class="status-active">set</span>') : '<span class="status-bad">not set</span>'}`
                 + (d.deadModels.length ? ` · unavailable right now: ${d.deadModels.map(esc).join(', ')}` : '');
             const keys = d.keys || [];
-            if (!keys.length) { box.innerHTML = 'No pool keys. Add two or three free AI Studio keys and the 429s stop mattering.'; return; }
+            if (!keys.length) { box.innerHTML = 'No pool keys. Add two or three free AI Studio keys (they start with AQ.) and the 429s stop mattering.'; return; }
             box.className = '';
             box.innerHTML = `<div class="table-wrap"><table>
                 <thead><tr><th>Label</th><th>Scope</th><th>Status</th><th>Calls</th><th>Last used</th><th>Last error</th><th></th></tr></thead>

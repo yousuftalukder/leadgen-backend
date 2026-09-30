@@ -3490,6 +3490,29 @@ test('creator posts: the weekly look runs on EdgeLead\'s Apify keys, shows creat
     delete process.env.APIFY_API_KEY;
 });
 
+section('\nGemini keys in Google\'s 2026 format');
+test('a new AQ. key is accepted as pasted, junk is refused, and Google decides the rest', () => {
+    assert.strictEqual(S.cleanGeminiKey('  "AQ.Ab8RN6Lx_example-KEY.value1234567890"  '), 'AQ.Ab8RN6Lx_example-KEY.value1234567890');
+    assert.strictEqual(S.cleanGeminiKey('GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopq'), 'AIzaSyA1234567890abcdefghijklmnopq');
+    assert.strictEqual(S.cleanGeminiKey('hello world'), null);
+    assert.strictEqual(S.cleanGeminiKey('short'), null);
+});
+test('an AQ. key is added to the pool; a key Google refuses mid-call hands over to the next one', async () => {
+    const add = await call('POST', '/api/gemini-keys', { token: 't-admin', body: { key: 'AQ.Ab8RN6Lx_newformat-pool.key0123456789', label: 'studio 2 free', global: true } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    const realFetch = global.fetch;
+    let n = 0;
+    global.fetch = async (url, opts) => {
+        if (/:generateContent$/.test(String(url)) && n++ === 0) return { status: 401, ok: false, text: async () => '{"error":{"message":"API keys are not supported by this API"}}', json: async () => ({}) };
+        return realFetch(url, opts);
+    };
+    GEMINI.script = [{ parts: [{ text: '{"ok":true}' }] }];
+    try {
+        const r = await S.geminiCallDetailed('{"q":1}', { tag: 'test' });
+        assert.ok(r.ok, 'a refused key stopped the call instead of moving on: ' + r.reason);
+    } finally { global.fetch = realFetch; }
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');
