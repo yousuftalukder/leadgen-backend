@@ -2211,16 +2211,120 @@ test('provisioning again changes nothing: one connection, two assets', async () 
     assert.strictEqual(tbl('xp_meta_connections').filter(x => x.client_id === state.C).length, 1);
     assert.strictEqual(tbl('xp_meta_assets').filter(x => x.client_id === state.C).length, 2);
 });
+// Phase 47: reads are started by the server, not by a button. The tests have no Graph behind the
+// warehouse sync, so a recorder stands in for it and says what would have been read, and why.
+const XPREAD = { calls: [], ads: 0, hold: 30 };
+xp._setHooks({
+    sync: (clientId, opts) => { XPREAD.calls.push({ clientId, ...opts }); return new Promise(r => setTimeout(() => r({ client: 'x', status: 'OK' }), XPREAD.hold)); },
+    ads: () => { XPREAD.ads += 1; return Promise.resolve({}); }
+});
+const XPREAD_SYNC = (clientId, opts) => { XPREAD.calls.push({ clientId, ...opts }); return new Promise(r => setTimeout(() => r({ client: 'x', status: 'OK' }), XPREAD.hold)); };
+const xpSettle = (ms = 80) => new Promise(r => setTimeout(r, ms));
 test('the client sees what the warehouse holds for it; a stranger sees nothing', async () => {
     const r = await call('GET', '/api/xp/status', { token: 't-client' });
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.provisioned, true);
     assert.strictEqual(r.body.assets.length, 2);
-    assert.strictEqual(r.body.running, false);
+    // Nothing read yet, so opening the page started the first read: no button to find.
+    assert.strictEqual(r.body.phase, 'reading');
+    assert.strictEqual(r.body.running, true, 'the first read starts on its own');
+    assert.strictEqual(XPREAD.calls.length, 1);
+    assert.strictEqual(XPREAD.calls[0].clientId, state.C);
+    assert.strictEqual(XPREAD.calls[0].runType, 'BACKFILL');
+    await xpSettle();
+    assert.strictEqual(XPREAD.ads, 1, 'the ads pass follows a first read');
+    const again = await call('GET', '/api/xp/status', { token: 't-client' });
+    assert.strictEqual(again.body.running, false);
+    assert.strictEqual(XPREAD.calls.length, 1, 'a read that found nothing is not restarted on every poll');
     assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
     assert.strictEqual(r.body.model, xp.cfg.gemini.model);
     const s = await call('GET', '/api/xp/status', { token: 't-stranger', query: { client_id: state.C } });
     assert.strictEqual(s.statusCode, 403, JSON.stringify(s.body));
+});
+
+section('\nphase 47: Meta connected, the assistant reads by itself; the team sees who needs them');
+test('the phase says where a business stands, in one word the pages switch on', () => {
+    const cov = n => ({ assets: [{ account_days: n, post_days: n }] });
+    assert.strictEqual(xp.phaseOf({ provisioned: false, assets: [] }), 'not_connected');
+    assert.strictEqual(xp.phaseOf({ provisioned: true, assets: [{ status: 'REMOVED' }] }), 'not_connected');
+    assert.strictEqual(xp.phaseOf({ provisioned: true, assets: [{ status: 'ACTIVE' }], coverage: cov(0) }), 'reading');
+    assert.strictEqual(xp.phaseOf({ provisioned: true, assets: [{ status: 'ACTIVE' }], coverage: cov(12) }), 'ready');
+    assert.strictEqual(xp.phaseOf({ provisioned: true, client: { token_status: 'EXPIRED' }, assets: [{ status: 'ACTIVE' }], coverage: cov(12) }), 'reconnect');
+    assert.strictEqual(xp.phaseOf({ provisioned: true, assets: [{ status: 'EXPIRED' }], coverage: cov(0) }), 'reconnect');
+});
+test('filing a Page under a client starts its first read at once', async () => {
+    XPREAD.calls.length = 0;
+    const r = await call('PATCH', `/api/meta/connections/${state.moConn.id}`, { token: 't-emp', body: { clientId: state.C } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    await xpSettle();
+    assert.ok(XPREAD.calls.some(c => c.clientId === state.C && c.runType === 'BACKFILL' && c.triggeredBy === 'filed'), JSON.stringify(XPREAD.calls));
+});
+test('an owner reads the normal way only; re-reading history or chosen days is the team\'s', async () => {
+    XPREAD.calls.length = 0;
+    const own = await call('POST', '/api/xp/sync', { token: 't-client', body: { fullBackfill: true, rangeStart: '2026-01-01', rangeEnd: '2026-01-31' } });
+    assert.strictEqual(own.statusCode, 202, JSON.stringify(own.body));
+    assert.strictEqual(own.body.runType, 'MANUAL');
+    assert.ok(!XPREAD.calls[0].fullBackfill && !XPREAD.calls[0].rangeStart, 'an owner cannot re-read the history');
+    await xpSettle();
+    const full = await call('POST', '/api/xp/sync', { token: 't-emp', body: { clientId: state.C, fullBackfill: true } });
+    assert.strictEqual(full.statusCode, 202, JSON.stringify(full.body));
+    assert.strictEqual(full.body.runType, 'BACKFILL');
+    assert.strictEqual(XPREAD.calls[1].fullBackfill, true);
+    const busy = await call('POST', '/api/xp/sync', { token: 't-emp', body: { clientId: state.C } });
+    assert.strictEqual(busy.statusCode, 409, 'one read per business at a time');
+    await xpSettle();
+    // Three reads a minute per person, so the ranges are checked directly and one bad one through the route.
+    for (const [a, b] of [['2026-02-10', '2026-02-01'], ['2026-01-01', '2026-06-30'], ['nope', '2026-01-02'], ['2099-01-01', '2099-01-02'], ['2026-02-30', '2026-03-01']]) {
+        assert.ok(xp.rangeError(a, b), `${a}..${b} should be refused`);
+    }
+    assert.strictEqual(xp.rangeError('2026-08-01', '2026-08-31'), null);
+    const bad = await call('POST', '/api/xp/sync', { token: 't-admin', body: { clientId: state.C, rangeStart: '2026-02-10', rangeEnd: '2026-02-01' } });
+    assert.strictEqual(bad.statusCode, 400, JSON.stringify(bad.body));
+    const ok = await call('POST', '/api/xp/sync', { token: 't-admin', body: { clientId: state.C, rangeStart: '2026-08-01', rangeEnd: '2026-08-31' } });
+    assert.strictEqual(ok.statusCode, 202, JSON.stringify(ok.body));
+    assert.strictEqual(XPREAD.calls[XPREAD.calls.length - 1].rangeStart, '2026-08-01');
+    await xpSettle();
+    const stranger = await call('POST', '/api/xp/sync', { token: 't-stranger', body: { clientId: state.C, fullBackfill: true } });
+    assert.strictEqual(stranger.statusCode, 403);
+});
+test('the admin sees every business with Meta, with its verdict, its owner login and what to do', async () => {
+    const no = await call('GET', '/api/xp/admin/overview', { token: 't-emp' });
+    assert.strictEqual(no.statusCode, 403, 'admins only');
+    const r = await call('GET', '/api/xp/admin/overview', { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const row = r.body.rows.find(x => x.clientId === state.C);
+    assert.ok(row, 'Harbor Cafe is on the list');
+    assert.strictEqual(row.name, 'Harbor Cafe');
+    assert.strictEqual(row.assets.length, 2);
+    assert.ok(row.connections.some(c => c.page === 'Harbor Cafe' && c.instagram === 'harborcafe'));
+    assert.ok(row.owners.some(o => o.email === CLIENT.email), 'the owner\'s portal login is shown: ' + JSON.stringify(row.owners));
+    assert.ok(row.issues.some(i => i.code === 'history'), 'history not read yet is flagged: ' + JSON.stringify(row.issues));
+    assert.ok(['warn', 'bad'].includes(row.verdict));
+    assert.strictEqual(r.body.totals.businesses, r.body.rows.length);
+    assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
+    // A business whose history is read, recently, with no gaps and an owner is simply fine.
+    const now = new Date().toISOString();
+    tbl('xp_meta_assets').filter(a => a.client_id === state.C).forEach(a => { a.last_full_backfill_at = now; a.last_synced_at = now; });
+    const xc = tbl('xp_clients').find(x => x.id === state.C); const was = xc.last_synced_at; xc.last_synced_at = now;
+    const conn = tbl('meta_connections').find(c => c.id === state.moConn.id); const exp = conn.token_expires_at; conn.token_expires_at = new Date(Date.now() + 50 * 86400000).toISOString();
+    const r2 = await call('GET', '/api/xp/admin/overview', { token: 't-admin' });
+    const row2 = r2.body.rows.find(x => x.clientId === state.C);
+    assert.strictEqual(row2.verdict, 'ok', JSON.stringify(row2.issues));
+    // Meta access about to end is said before it happens.
+    conn.token_expires_at = new Date(Date.now() + 3 * 86400000).toISOString();
+    const r3 = await call('GET', '/api/xp/admin/overview', { token: 't-admin' });
+    assert.ok(r3.body.rows.find(x => x.clientId === state.C).issues.some(i => i.code === 'expiring'));
+    tbl('xp_meta_assets').filter(a => a.client_id === state.C).forEach(a => { a.last_full_backfill_at = null; a.last_synced_at = null; });
+    xc.last_synced_at = was; conn.token_expires_at = exp;
+});
+test('after a restart, a business connected but never read is started, once', async () => {
+    XPREAD.calls.length = 0;
+    xp._setHooks({ sync: XPREAD_SYNC, ads: () => Promise.resolve({}) });
+    const out = await xp.catchUp();
+    assert.ok(out.some(x => x.clientId === state.C && x.started), JSON.stringify(out));
+    await xpSettle();
+    const again = await xp.catchUp();
+    assert.ok(!again.some(x => x.started), 'the cooldown holds: ' + JSON.stringify(again));
 });
 
 section('\nthe Owner Assistant answers, XpulseAI\'s way');

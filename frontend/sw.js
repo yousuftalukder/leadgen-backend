@@ -9,11 +9,13 @@
  *     next open, exactly as the must-revalidate caching rule says.
  *   - Only this origin. The API (Render) and the CDNs go straight through and
  *     are never cached — a cached /api/me would be a stale account state.
- *   - Offline fallback: the last good copy of the page, else the dashboard.
+ *   - Offline fallback: the last good copy of the page, else the dashboard
+ *     (or, inside the Edge Meta AI app, the chat).
  */
-const VERSION = 'el-shell-v3';   // v3: the gold Edge logo and icons
+const VERSION = 'el-shell-v4';   // v4: Edge Meta AI as its own app (ai/), the chat in meta-ai.js
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
-    'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2'];
+    'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
+    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();
@@ -43,7 +45,8 @@ self.addEventListener('fetch', event => {
             return res;
         }).catch(() =>
             caches.match(req, { ignoreSearch: true }).then(hit =>
-                hit || (req.mode === 'navigate' ? caches.match('client.html') : undefined)
+                // Offline, each app opens on its own last good screen: the chat for ai/, else the dashboard.
+                hit || (req.mode === 'navigate' ? caches.match(url.pathname.startsWith('/ai/') ? 'ai/' : 'client.html') : undefined)
             ).then(hit => hit || Response.error())
         )
     );

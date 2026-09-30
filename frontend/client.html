@@ -151,8 +151,18 @@
         // engine: null — this page is the client's home and is not gated on any
         // single tool grant. EL.init still enforces the session and the account
         // state, and a lapsed account never gets this far.
+        // Back from Meta's login, having started it in the Edge Meta AI app: back to the app. (phase 47)
+        const metaBack = new URLSearchParams(location.search).get('meta');
+        if (metaBack) {
+            let after = null;
+            try { after = JSON.parse(localStorage.getItem('el-after-meta') || 'null'); localStorage.removeItem('el-after-meta'); } catch { /* private mode */ }
+            if (after && after.to === 'ai/' && Date.now() - after.at < 20 * 60000) { location.replace('ai/' + location.search); return; }
+        }
         const me = await EL.init({ engine: null, page: 'client.html' });
         esc = EL.escape;
+        if (metaBack === 'ok') EL.toast('Connected. Your numbers are being read now; Edge Meta AI is ready in a few minutes.');
+        else if (metaBack === 'error') EL.toast(new URLSearchParams(location.search).get('message') || 'Meta did not connect. Try again.', 'bad');
+        if (metaBack) history.replaceState(null, '', location.pathname);
 
         try {
             const r = await EL.api('/api/client/reports');
@@ -329,13 +339,15 @@
         const c = g.connection || {};
         const name = c.ig_username ? '@' + c.ig_username : (c.page_name || 'your account');
         const syncedAt = c.daily_synced_at ? new Date(c.daily_synced_at) : null;
-        const syncBtn = `<button class="btn-secondary btn-mini cl-gsync" type="button" id="cl-gsync">Sync now</button>`;
+        // Phase 47: nothing to press. The numbers are read when Meta connects and every hour after.
+        const syncBtn = `<span class="cl-gsub cl-gsync">Updates by itself</span>`;
         const lastTry = c.daily_error ? ` Last try did not finish: ${esc(c.daily_error)}` : '';
 
         if (gr.empty) {
             host.innerHTML = `<div class="card"><div class="cl-gtop"><h3>Your numbers, every day</h3>
-                <span class="cl-gsub">${esc(name)} is connected. The first numbers arrive within the hour.${lastTry}</span>${syncBtn}</div></div>`;
-            wireSync();
+                <span class="cl-gsub">${esc(name)} is connected. Your first numbers are being read now and appear here in a few minutes.${lastTry}</span></div></div>`;
+            // Check back a few times, so the numbers appear without a reload.
+            if ((renderGrowth._tries = (renderGrowth._tries || 0) + 1) <= 6) setTimeout(() => loadGrowth(EL.me), 45000);
             return;
         }
 
@@ -376,17 +388,6 @@
             <p class="cl-gfoot">Read from your own Meta account${syncedAt ? ', last at ' + esc(syncedAt.toLocaleString()) : ''}. A day's reach, visits and
                interactions are written the day after, once the day is complete; followers are the count on that day.${lastTry}</p>
         </div>`;
-        wireSync();
-    }
-
-    function wireSync() {
-        const b = $('cl-gsync');
-        if (!b) return;
-        b.addEventListener('click', async () => {
-            b.disabled = true; b.textContent = 'Reading…';
-            try { renderGrowth(await EL.api('/api/meta/daily-sync', { method: 'POST', body: {} })); }
-            catch (err) { b.disabled = false; b.textContent = 'Sync now'; if (!err.handled) alert(err.message); }
-        });
     }
 
     function showRunForm(firstRun) {
