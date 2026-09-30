@@ -134,7 +134,7 @@ test('the manifest is valid, standalone, and starts on the client dashboard', ()
     assert.ok(m.icons.length >= 3 && m.icons.some(i => i.purpose === 'maskable'), 'a 192, a 512 and a maskable icon');
     const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     for (const i of m.icons) {
-        const buf = fs.readFileSync(path.join(FRONT, i.src));
+        const buf = fs.readFileSync(path.join(FRONT, i.src.split('?')[0]));   // ?v= only busts caches
         assert.ok(buf.subarray(0, 8).equals(sig), i.src + ' is not a PNG');
     }
     assert.ok(fs.existsSync(path.join(FRONT, 'icons', 'apple-touch-icon.png')));
