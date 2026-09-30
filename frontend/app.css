@@ -719,7 +719,9 @@ body.el-has-sidebar {
 
 /* ---- mobile: the rail becomes a drawer ---- */
 .el-topbar { display: none; }
-.el-scrim { display: none; }
+/* The phone menu's overlay is #el-scrim. Modals (keys, share) are .el-scrim too, so these rules
+   name the id: as a class they hid every modal on every screen. */
+#el-scrim { display: none; }
 
 @media (max-width: 900px) {
     .el-topbar {
@@ -737,9 +739,9 @@ body.el-has-sidebar {
     .el-sidebar { transform: translateX(-100%); transition: transform .22s ease; width: 272px; }
     body.el-nav-open .el-sidebar { transform: none; }
 
-    .el-scrim { display: block; position: fixed; inset: 0; z-index: 9998;
+    #el-scrim { display: block; position: fixed; inset: 0; z-index: 9998;
         background: rgba(2,4,10,.6); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
-    body.el-nav-open .el-scrim { opacity: 1; pointer-events: auto; }
+    body.el-nav-open #el-scrim { opacity: 1; pointer-events: auto; }
 
     body.el-has-sidebar { padding: 76px 16px 60px; max-width: none; }
     /* The trial strip sits under the top bar rather than under a 75px header. */
@@ -1598,3 +1600,9 @@ body.el-drawer-open { overflow: hidden; }
 .cr-nums b { color: var(--text-primary); }
 .cr-line { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
 .cr-muted { color: var(--text-muted); }
+.el-modal { max-height: calc(100vh - 40px); overflow-y: auto; }
+.el-guide { margin: 0 0 6px; padding: 10px 14px; border: 1px solid rgba(217,181,108,0.3); border-radius: 10px; background: rgba(217,181,108,0.06); }
+.el-guide summary { cursor: pointer; font-size: 0.82rem; font-weight: 800; color: #d9b56c; }
+.el-guide ol { margin: 8px 0 2px; padding-left: 18px; font-size: 0.8rem; line-height: 1.55; color: #cbd5e1; }
+.el-guide li { margin: 4px 0; }
+.el-guide code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.76rem; color: #f0d39a; }

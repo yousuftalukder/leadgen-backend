@@ -1583,16 +1583,22 @@
         scrim.id = 'el-key-modal';
         scrim.innerHTML = `
             <div class="el-modal" role="dialog" aria-modal="true" aria-labelledby="el-key-title">
-                <h3 id="el-key-title">Update Apify key</h3>
+                <h3 id="el-key-title">${isAdmin ? 'Update Apify key' : 'Your Apify key'}</h3>
                 <p>${isAdmin
                     ? 'Saved as the shared primary key for the selected engine. The old key stays in the pool as failover.'
-                    : 'Saved as your personal key, encrypted, and used only for runs you start. It is never added to the shared pool and never used by another account.'}</p>
-                <label for="el-key-engine">Engine</label>
+                    : 'Apify pays for reading public Instagram and Facebook: lead searches, the review tracker, audits, competitor intel, Facebook reports and creator posts. Your key is encrypted and used only for runs you start; it is never shared.'}</p>
+                ${isAdmin ? '' : `<details class="el-guide" open><summary>How to get one (2 minutes)</summary><ol>
+                    <li>Go to <b>console.apify.com</b> and sign up with your own email. The free plan gives about $5 of credit each month.</li>
+                    <li>Open <b>Settings → API &amp; Integrations</b> and copy your <b>Personal API token</b>. It starts with <code>apify_api_</code>.</li>
+                    <li>Paste it below, keep <b>All my work</b>, and save. Your runs use it first; if it runs out, the agency’s shared keys take over (unless an admin set you to own keys only).</li>
+                </ol></details>`}
+                <label for="el-key-engine">${isAdmin ? 'Engine' : 'Use it for'}</label>
                 <select id="el-key-engine">
-                    <option value="leadgen" ${EL.engine === 'leadgen' ? 'selected' : ''}>Lead finder</option>
-                    <option value="report" ${EL.engine === 'report' ? 'selected' : ''}>Reports &amp; competitors</option>
-                    <option value="fb_community" ${EL.engine === 'fb_community' ? 'selected' : ''}>Facebook communities</option>
-                    <option value="fb_page" ${EL.engine === 'fb_page' ? 'selected' : ''}>Facebook Pages</option>
+                    ${isAdmin ? '' : '<option value="any" selected>All my work</option>'}
+                    <option value="leadgen" ${isAdmin && EL.engine === 'leadgen' ? 'selected' : ''}>Lead finder</option>
+                    <option value="report" ${isAdmin && EL.engine === 'report' ? 'selected' : ''}>Reports &amp; competitors</option>
+                    <option value="fb_community" ${isAdmin && EL.engine === 'fb_community' ? 'selected' : ''}>Facebook communities</option>
+                    <option value="fb_page" ${isAdmin && EL.engine === 'fb_page' ? 'selected' : ''}>Facebook Pages</option>
                 </select>
                 <label for="el-key-value">API token</label>
                 <input type="password" id="el-key-value" placeholder="apify_api_…" autocomplete="off">
@@ -1650,8 +1656,14 @@
         scrim.innerHTML = `
             <div class="el-modal" role="dialog" aria-modal="true" aria-labelledby="el-ai-title">
                 <h3 id="el-ai-title">Gemini API key</h3>
-                <p>Used for report narratives, drafts and content plans. Your key is encrypted, tried first for runs you start, and never used for anyone else's.
-                   Get one free at <b>aistudio.google.com</b>.${isAdmin ? ' Shared pool keys are managed on the Admin page.' : ''}</p>
+                <p>Gemini writes every AI part: report write-ups, content plan briefs and ideas, lead message drafts, Ask AI and Edge Meta AI when you use it.
+                   Your key is encrypted, tried first for runs you start, and never used for anyone else's.${isAdmin ? ' Shared pool keys are managed on the Admin page.' : ''}</p>
+                ${EL.me && EL.me.role === 'client' ? '' : `<details class="el-guide"><summary>How to get one (2 minutes)</summary><ol>
+                    <li>Go to <b>aistudio.google.com</b> and sign in with <b>your own</b> Google account.</li>
+                    <li>Press <b>Get API key → Create API key</b>. New keys start with <code>AQ.</code></li>
+                    <li>For heavy use, turn on billing for that project in Google AI Studio: higher limits, and Google does not use your data to improve its products. At our volume it costs a few dollars a month.</li>
+                    <li>Paste it below and save. Use one key from one account; more keys from the same project do not add capacity.</li>
+                </ol></details>`}
                 <div id="el-ai-list" class="el-note">Loading…</div>
                 <label for="el-ai-label">Label</label>
                 <input type="text" id="el-ai-label" placeholder="e.g. my studio key" autocomplete="off">
