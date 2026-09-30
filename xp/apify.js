@@ -281,4 +281,11 @@ function pool() {
   return shared;
 }
 
-module.exports = { createPool, supabaseStore, pool, runCost, primaryPrice, MIN_LEFT_USD };
+// EdgeLead (phase 46): when the host app runs Apify itself (its own key pool, budget gates and spend
+// ledger), creator-post reads go through it instead of this pool. fn(actorId, input, { maxItems,
+// maxTotalChargeUsd, clientId, purpose }) → { items, runId, costUsd, key: { id, label }, status }.
+let host = null;
+function setHostRunner(fn) { host = typeof fn === 'function' ? fn : null; }
+const hostRunner = () => host;
+
+module.exports = { createPool, supabaseStore, pool, runCost, primaryPrice, MIN_LEFT_USD, setHostRunner, hostRunner };

@@ -95,12 +95,13 @@ function orPredicate(dsl) {
     return r => preds.some(p => p(r));
 }
 
+const EMBED_JOINS = { 'xp_influencer_posts.xp_social_posts': { fk: 'post_id' }, 'xp_clients.xp_meta_assets': { children: 'client_id' } };
 class Query {
     constructor(t) { this.t = t; this.op = 'select'; this.f = []; this.ord = []; this.lim = null; this.rng = null; this.one = null; this.count = null; this.head = false; this.rows = null; this.conflict = null; this.patch = null; }
     select(cols, o = {}) {
         if (o.count) this.count = o.count; if (o.head) this.head = true;
         // An embedded parent, 'leads(id, username)', as PostgREST joins it on <parent>_id.
-        this.embeds = [...String(cols || '').matchAll(/(\w+)\(/g)].map(m => m[1]);
+        this.embeds = [...String(cols || '').matchAll(/(\w+)(?:!inner)?\(/g)].map(m => m[1]);
         return this;
     }
     insert(rows) { this.op = 'insert'; this.rows = [].concat(rows); return this; }
@@ -117,6 +118,7 @@ class Query {
     lt(c, v) { this.f.push(r => r[c] < v); return this; }
     lte(c, v) { this.f.push(r => r[c] <= v); return this; }
     contains(c, arr) { this.f.push(r => Array.isArray(r[c]) && [].concat(arr).every(v => r[c].includes(v))); return this; }
+    like(c, pat) { const re = new RegExp('^' + String(pat).split('%').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'); this.f.push(r => re.test(String(r[c] ?? ''))); return this; }
     ilike(c, pat) { const n = String(pat).replace(/%/g, '').toLowerCase(); this.f.push(r => String(r[c] || '').toLowerCase().includes(n)); return this; }
     or(dsl) { this.f.push(orPredicate(dsl)); return this; }
     order(c, o = {}) { this.ord.push([c, o.ascending !== false]); return this; }
@@ -156,7 +158,12 @@ class Query {
         if (this.head) return { data: null, error: null, count };
         const embed = r => {
             const o = { ...r };
-            for (const e of this.embeds || []) { const fk = r[e.replace(/s$/, '') + '_id']; o[e] = tbl(e).find(x => x.id === fk) || null; }
+            for (const e of this.embeds || []) {
+                // Joins the name alone cannot tell (phase 46): a creator post's post, a business's accounts.
+                const how = EMBED_JOINS[`${this.t}.${e}`];
+                if (how && how.children) { o[e] = tbl(e).filter(x => x[how.children] === r.id); continue; }
+                const fk = r[how ? how.fk : e.replace(/s$/, '') + '_id']; o[e] = tbl(e).find(x => x.id === fk) || null;
+            }
             return o;
         };
         return this._shape(m.map(embed), count);
@@ -3426,6 +3433,84 @@ test('the login asks for comment access, and production never falls back to a ke
     assert.ok(/APP_ENCRYPTION_KEY is not set/.test(run({ RENDER: 'true' })), 'production sealed a token with the built-in key');
     assert.strictEqual(run({ RENDER: 'true', APP_ENCRYPTION_KEY: 'a'.repeat(64) }), 'sealed');
     assert.strictEqual(run({}), 'sealed', 'local development lost its fallback');
+});
+
+section('\nphase 46 — ads and creator posts switched on in Edge Meta AI');
+test('the Facebook login asks for read-only ads access', async () => {
+    const m = await call('GET', '/api/meta/status', { token: 't-admin' });
+    assert.ok(m.body.scopes.includes('ads_read'), m.body.scopes.join(','));
+    assert.ok(!m.body.scopes.some(s => /ads_management|publish/.test(s)), 'the login asks to change ads or publish');
+});
+test('creator posts: the weekly look runs on EdgeLead\'s Apify keys, shows creators, hides customers, and only staff manage it', async () => {
+    process.env.APIFY_API_KEY = 'test-apify-key';
+    const ago = d => new Date(Date.now() - d * 86400000).toISOString();
+    const reel = (id, owner, extra) => ({ id, shortCode: 'SC' + id, url: `https://www.instagram.com/p/SC${id}/`, ownerUsername: owner, type: 'Video', productType: 'clips', timestamp: ago(3), likesCount: 120, commentsCount: 9, caption: 'At @harborcafe', ...extra });
+    APIFY.actors['apify/instagram-scraper'] = (input) => {
+        if (input.resultsType === 'mentions') return [
+            reel('101', 'foodie.maya', { videoPlayCount: 5400, taggedUsers: [{ username: 'harborcafe' }] }),
+            reel('102', 'jo.customer', { videoPlayCount: 60, likesCount: 4, taggedUsers: [{ username: 'harborcafe' }] })
+        ];
+        if (input.resultsType === 'posts') return [
+            reel('103', 'harborcafe', { videoPlayCount: 900 }),
+            reel('104', 'chef.rahim', { videoPlayCount: 300, coauthorProducers: [{ username: 'harborcafe' }] })
+        ];
+        if (input.resultsType === 'details') return input.directUrls.map(u => {
+            const name = /instagram\.com\/([^/]+)/.exec(u)[1];
+            return { username: name, followersCount: name === 'foodie.maya' ? 48000 : name === 'chef.rahim' ? 700 : 150, fullName: name };
+        });
+        return [];
+    };
+    const before = APIFY.calls.length;
+    const owner = await call('GET', '/api/xp/creators', { token: 't-client', query: { client_id: state.C } });
+    assert.strictEqual(owner.statusCode, 403, 'an owner reached the staff list of creator posts');
+    const r = await call('POST', '/api/xp/creators/look', { token: 't-emp', body: { clientId: state.C } });
+    assert.strictEqual(r.statusCode, 202, JSON.stringify(r.body));
+    let page;
+    for (let i = 0; i < 100; i++) {
+        page = await call('GET', '/api/xp/creators', { token: 't-emp', query: { client_id: state.C } });
+        if (page.body.job && page.body.job.finished_at) break;
+        await new Promise(res => setTimeout(res, 20));
+    }
+    assert.strictEqual(page.statusCode, 200, JSON.stringify(page.body));
+    assert.ok(page.body.job.finished_at && !page.body.job.error, JSON.stringify(page.body.job));
+    const calls = APIFY.calls.slice(before).map(c => c.input.resultsType);
+    assert.ok(calls.includes('mentions') && calls.includes('posts'), 'the look did not read the tagged tab and the grid: ' + calls.join(','));
+    assert.ok(tbl('apify_usage_events').some(e => e.actor_id === 'apify/instagram-scraper' && e.engine === 'report'), 'the spend was not recorded in EdgeLead\'s ledger');
+    const by = Object.fromEntries(page.body.posts.map(p => [p.creator.username, p]));
+    assert.ok(!by['harborcafe'], 'the business\'s own post was counted as a creator post');
+    assert.deepStrictEqual([by['foodie.maya'].status, by['chef.rahim'].status, by['jo.customer'].status], ['ACTIVE', 'ACTIVE', 'HIDDEN']);
+    assert.ok(by['chef.rahim'].collab, 'a collab was not recognised');
+    // Only shown posts reach the owner's answers.
+    const infl = require(path.join(__dirname, '..', 'xp', 'social', 'influencers'));
+    const own = await infl.forOwner(state.C);
+    assert.deepStrictEqual(own.posts.map(p => p.creator).sort(), ['@chef.rahim', '@foodie.maya']);
+    const show = await call('PATCH', `/api/xp/creators/${by['jo.customer'].id}`, { token: 't-emp', body: { clientId: state.C, status: 'ACTIVE', costUsd: '40' } });
+    assert.strictEqual(show.statusCode, 200, JSON.stringify(show.body));
+    assert.strictEqual((await infl.forOwner(state.C)).posts.length, 3, 'a post staff showed did not reach the owner');
+    delete process.env.APIFY_API_KEY;
+});
+
+section('\nGemini keys in Google\'s 2026 format');
+test('a new AQ. key is accepted as pasted, junk is refused, and Google decides the rest', () => {
+    assert.strictEqual(S.cleanGeminiKey('  "AQ.Ab8RN6Lx_example-KEY.value1234567890"  '), 'AQ.Ab8RN6Lx_example-KEY.value1234567890');
+    assert.strictEqual(S.cleanGeminiKey('GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopq'), 'AIzaSyA1234567890abcdefghijklmnopq');
+    assert.strictEqual(S.cleanGeminiKey('hello world'), null);
+    assert.strictEqual(S.cleanGeminiKey('short'), null);
+});
+test('an AQ. key is added to the pool; a key Google refuses mid-call hands over to the next one', async () => {
+    const add = await call('POST', '/api/gemini-keys', { token: 't-admin', body: { key: 'AQ.Ab8RN6Lx_newformat-pool.key0123456789', label: 'studio 2 free', global: true } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    const realFetch = global.fetch;
+    let n = 0;
+    global.fetch = async (url, opts) => {
+        if (/:generateContent$/.test(String(url)) && n++ === 0) return { status: 401, ok: false, text: async () => '{"error":{"message":"API keys are not supported by this API"}}', json: async () => ({}) };
+        return realFetch(url, opts);
+    };
+    GEMINI.script = [{ parts: [{ text: '{"ok":true}' }] }];
+    try {
+        const r = await S.geminiCallDetailed('{"q":1}', { tag: 'test' });
+        assert.ok(r.ok, 'a refused key stopped the call instead of moving on: ' + r.reason);
+    } finally { global.fetch = realFetch; }
 });
 
 (async () => {

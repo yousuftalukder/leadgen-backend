@@ -38,8 +38,8 @@ async function tokenExpiryReport(withinDays = 7) {
 async function alertTokenExpiry(withinDays = 7) {
   const r = await tokenExpiryReport(withinDays);
   const lines = [];
-  for (const c of r.connections) lines.push(`- ${c.clients?.client_name || c.client_id}: ${c.connection_type} connection ${c.status}${c.token_expires_at ? ` (expires ${c.token_expires_at.slice(0, 10)})` : ''}${c.validation_error ? ` — ${c.validation_error}` : ''}`);
-  for (const a of r.assets) lines.push(`- ${a.clients?.client_name || a.client_id}: ${a.platform} ${a.name} ${a.status}${a.token_expires_at ? ` (expires ${a.token_expires_at.slice(0, 10)})` : ''}`);
+  for (const c of r.connections) lines.push(`- ${c.xp_clients?.client_name || c.client_id}: ${c.connection_type} connection ${c.status}${c.token_expires_at ? ` (expires ${c.token_expires_at.slice(0, 10)})` : ''}${c.validation_error ? ` — ${c.validation_error}` : ''}`);
+  for (const a of r.assets) lines.push(`- ${a.xp_clients?.client_name || a.client_id}: ${a.platform} ${a.name} ${a.status}${a.token_expires_at ? ` (expires ${a.token_expires_at.slice(0, 10)})` : ''}`);
   for (const p of r.live_problems || []) lines.push(`- live check: ${JSON.stringify(p)}`);
   if (!lines.length) return { alerted: false, count: 0 };
   const uniq = [...new Set(lines)];

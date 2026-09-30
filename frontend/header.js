@@ -1656,7 +1656,7 @@
                 <label for="el-ai-label">Label</label>
                 <input type="text" id="el-ai-label" placeholder="e.g. my studio key" autocomplete="off">
                 <label for="el-ai-value">API key</label>
-                <input type="password" id="el-ai-value" placeholder="AIza…" autocomplete="off">
+                <input type="password" id="el-ai-value" placeholder="AQ.… (from Google AI Studio)" autocomplete="off">
                 <div class="el-note" id="el-ai-note"></div>
                 <div class="el-modal-actions">
                     <button class="el-btn el-btn-go" type="button" id="el-ai-save">Save key</button>

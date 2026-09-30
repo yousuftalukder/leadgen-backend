@@ -500,7 +500,7 @@
     function tabAsk(body) {
         const owner = portalLogins()[0];
         body.innerHTML = `<div id="wsc-askfull"></div>
-            <p class="el-muted" style="margin-top:12px">${liveConns().length ? `For a deep read of ${esc(c.name)}’s own Meta data (every post, day and ad), open <a class="ws-link" href="client-assistant.html?client=${encodeURIComponent(c.id)}">Edge Meta AI</a>, the chat their owner has in the portal. ` : ''}${owner ? `The owner (${esc(owner.email)}) has Edge Meta AI in their portal.` : 'Invite the owner under Access &amp; sharing and they get Edge Meta AI in their portal.'}</p>`;
+            <p class="el-muted" style="margin-top:12px">${liveConns().length ? `For a deep read of ${esc(c.name)}’s own Meta data (every post, day and ad), open <a class="ws-link" href="client-assistant.html?client=${encodeURIComponent(c.id)}">Edge Meta AI</a>, the chat their owner has in the portal. ` : ''}${owner ? `The owner (${esc(owner.email)}) has Edge Meta AI in their portal.` : 'Invite the owner under Access &amp; sharing and they get Edge Meta AI in their portal.'}${liveConns().length ? ` <a class="ws-link" href="creators.html?client=${encodeURIComponent(c.id)}">Creator posts</a>: collabs and tagged posts about ${esc(c.name)}, which Edge Meta AI can answer about.` : ''}</p>`;
         UI.askBox($('wsc-askfull'), { clientId: c.id, clientName: c.name, initial: pendingAsk });
         pendingAsk = null;
     }
