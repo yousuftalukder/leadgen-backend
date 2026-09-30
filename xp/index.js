@@ -81,6 +81,8 @@ async function provisionClient(clientId) {
   const { data: c } = await supabase.from('clients').select('id, name, archived, timezone').eq('id', clientId).maybeSingle();
   if (!c) return { ok: false, error: 'Client not found.' };
   const { data: conns } = await supabase.from('meta_connections').select('*').eq('client_id', clientId).order('created_at', { ascending: false });
+  // EdgeLead (phase 45): no connection, no warehouse row. A business that disconnected is not re-created here.
+  if (!(conns || []).some((x) => x.status === 'active' && x.page_token_enc)) return { ok: true, clientId: c.id, connections: 0, assets: 0 };
   await q(supabase.from('xp_clients').upsert({
     id: c.id, client_name: c.name || 'Client', timezone: c.timezone || cfg.defaultClientTz,
     is_active: !c.archived, token_status: 'ACTIVE'
@@ -119,8 +121,37 @@ async function provisionClient(clientId) {
   return { ok: true, clientId: c.id, connections, assets };
 }
 
+/**
+ * EdgeLead (phase 45): delete what the assistant read for a business — all of it, or only what came
+ * from some of its EdgeLead connections. The database function does the work, because settled rows
+ * are guarded and only it may lift the guard. Returns its counts, or { error } when it is missing.
+ */
+async function purge(clientId, elConnectionIds = null) {
+  const { data, error } = await supabase.rpc('el_xp_purge', { p_client: clientId, p_el_connections: elConnectionIds && elConnectionIds.length ? elConnectionIds : null });
+  if (error) return { error: error.message };
+  return data || {};
+}
+
+/**
+ * Copies whose EdgeLead connection is gone — deleted with its client, or before phase 45 — are purged
+ * on the next pass, so nothing keeps reading Meta for a connection nobody holds any more.
+ */
+async function purgeOrphans() {
+  const [{ data: xc }, { data: live }] = await Promise.all([
+    supabase.from('xp_meta_connections').select('client_id, el_connection_id').not('el_connection_id', 'is', null),
+    supabase.from('meta_connections').select('id')
+  ]);
+  const alive = new Set((live || []).map((r) => r.id));
+  const byClient = new Map();
+  for (const r of xc || []) if (!alive.has(r.el_connection_id)) byClient.set(r.client_id, [...(byClient.get(r.client_id) || []), r.el_connection_id]);
+  let purged = 0;
+  for (const [clientId, ids] of byClient) { const r = await purge(clientId, ids); if (!r.error) purged += 1; else console.error('[xp] purge', clientId, r.error); }
+  return purged;
+}
+
 /** Every EdgeLead client with an active Meta connection. Run at boot and before each cron pass. */
 async function provisionAll() {
+  await purgeOrphans().catch((e) => console.error('[xp] purgeOrphans', e.message));
   const { data } = await supabase.from('meta_connections').select('client_id').eq('status', 'active');
   const ids = [...new Set((data || []).map((r) => r.client_id).filter(Boolean))];
   const out = { clients: ids.length, assets: 0, failed: 0 };
@@ -302,9 +333,15 @@ function mount(app, d) {
     const { conversationId } = req.params;
     if (!CONV_ID_RE.test(conversationId)) return res.status(404).json({ error: 'Conversation not found.' });
     try {
-      const rows = await q(supabase.from('xp_ai_conversations').update({ deleted_at: new Date().toISOString() })
+      // EdgeLead (phase 45): deleting a chat erases it — the title, every question and answer, and the
+      // data behind each answer. What stays is one bare row per message (when, and the tokens it cost),
+      // because the daily question limit and the cost figures count them; deleting a chat must not
+      // reset the limit. Those bare rows go with the rest after CHAT_RETENTION_DAYS.
+      const rows = await q(supabase.from('xp_ai_conversations').update({ deleted_at: new Date().toISOString(), title: null })
         .eq('id', conversationId).eq('client_id', a.clientId).is('deleted_at', null).select('id'), 'delete conv');
       if (!rows.length) return res.status(404).json({ error: 'Conversation not found.' });
+      await q(supabase.from('xp_ai_messages').update({ content: null, tool_calls: null, tool_results: null })
+        .eq('conversation_id', conversationId).select('id'), 'erase messages');
       res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -360,7 +397,17 @@ function mount(app, d) {
   });
 }
 
+/** EdgeLead (phase 45): chats not touched for CHAT_RETENTION_DAYS (default 365) are deleted, daily. */
+const CHAT_RETENTION_DAYS = parseInt(process.env.CHAT_RETENTION_DAYS || '365', 10);
+async function purgeOldChats(now = Date.now()) {
+  const cutoff = new Date(now - CHAT_RETENTION_DAYS * 86400000).toISOString();
+  const { data, error } = await supabase.from('xp_ai_conversations').delete().lt('updated_at', cutoff).select('id');
+  if (error) throw new Error(error.message);
+  return (data || []).length;
+}
+
 function start() {
+  setInterval(() => purgeOldChats().then((n) => { if (n) console.log('[xp] old chats deleted', n); }).catch((e) => console.error('[xp] purgeOldChats', e.message)), 86400000).unref?.();
   if (!cfg.cron.enabled) return { enabled: false };
   setTimeout(() => provisionAll().then((r) => console.log('[xp] provisioned', JSON.stringify(r))).catch((e) => console.error('[xp] provision', e.message)), 20000).unref?.();
   cron.schedule(cfg.cron.schedule, () => runCron('internal-cron').then((r) => console.log('[xp cron]', JSON.stringify(r).slice(0, 500))).catch((e) => console.error('[xp cron]', e.message)), { timezone: cfg.cron.tz });
@@ -368,4 +415,4 @@ function start() {
   return { enabled: true, schedule: cfg.cron.schedule };
 }
 
-module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg };
+module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats };

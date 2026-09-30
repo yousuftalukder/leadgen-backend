@@ -145,7 +145,7 @@ class Query {
             return this._shape(out);
         }
         if (this.op === 'update') { const m = this._matched(); m.forEach(r => Object.assign(r, this.patch)); return this._shape(m); }
-        if (this.op === 'delete') { const gone = new Set(this._matched()); DB[this.t] = T.filter(r => !gone.has(r)); return { data: null, error: null }; }
+        if (this.op === 'delete') { const gone = new Set(this._matched()); DB[this.t] = T.filter(r => !gone.has(r)); return { data: [...gone], error: null }; }   // the deleted rows, as .delete().select() returns them
         let m = this._matched();
         for (const [c, asc] of this.ord.slice().reverse()) {
             m.sort((a, b) => ((a[c] > b[c]) - (a[c] < b[c])) * (asc ? 1 : -1));
@@ -178,7 +178,8 @@ const fakeSupabase = {
         })
     },
     from: t => new Query(t),
-    rpc: () => Promise.resolve({ data: true, error: null }),
+    // Database functions a test scripts (phase 45: el_xp_purge); anything else answers true, as before.
+    rpc: (name, args) => Promise.resolve(RPC[name] ? RPC[name](args) : { data: true, error: null }),
     auth: {
         getUser: async token => TOKENS[token] ? { data: { user: TOKENS[token] }, error: null } : { data: null, error: { message: 'bad token' } },
         // The admin API the provisioning routes call. A created user gets a
@@ -230,6 +231,7 @@ const MAIL = { sent: [], fail: null };
 // is kept, so scope is proven by what reached the model.
 // ---------------------------------------------------------------------------
 const XP = { script: [], requests: [] };
+const RPC = {};
 const APIFY = { actors: {}, calls: [], datasets: {} };
 const stubs = {
     nodemailer: {
@@ -2311,7 +2313,10 @@ test('the client\'s threads are its own: listed, opened with the panels rebuilt,
     assert.ok(!after.body.conversations.some(c => c.id === state.xpConv), 'a deleted thread must not be listed');
     const gone = await call('GET', `/api/xp/chat/${state.C}/conversations/${state.xpConv}`, { token: 't-client' });
     assert.strictEqual(gone.statusCode, 404);
-    assert.ok(tbl('xp_ai_messages').some(m => m.conversation_id === state.xpConv), 'the rows stay: usage and cost figures count them');
+    const left = tbl('xp_ai_messages').filter(m => m.conversation_id === state.xpConv);
+    assert.ok(left.length, 'the bare rows stay: the daily limit and cost figures count them');
+    assert.ok(left.every(m => m.content == null && m.tool_calls == null && m.tool_results == null), 'a deleted chat kept its words or its data');
+    assert.strictEqual(tbl('xp_ai_conversations').find(c => c.id === state.xpConv).title, null, 'a deleted chat kept its title');
 });
 
 section('\nthe walls hold around the Owner Assistant');
@@ -3331,6 +3336,96 @@ test('"own keys only" holds for AI too: no shared pool, no server key, and it sa
     const staff = await call('GET', '/api/admin/key-pools', { token: 't-emp' });
     assert.strictEqual(staff.statusCode, 403);
     await call('PATCH', `/api/admin/users/${EMP.id}`, { token: 't-admin', body: { byoKeyOnly: false } });
+});
+
+section('\nphase 45 — disconnecting Meta deletes what was read from it, the assistant\'s copy included');
+// The fake stands in for el_xp_purge the way the SQL defines it: every xp_ row for the business, or only
+// the rows of the named connections' assets while another connection remains.
+const PURGED = [];
+RPC.el_xp_purge = ({ p_client, p_el_connections }) => {
+    PURGED.push({ client: p_client, connections: p_el_connections });
+    const conns = tbl('xp_meta_connections').filter(c => c.client_id === p_client && (!p_el_connections || p_el_connections.includes(c.el_connection_id)));
+    const full = !p_el_connections || !tbl('xp_meta_connections').some(c => c.client_id === p_client && !conns.includes(c));
+    const assets = tbl('xp_meta_assets').filter(a => a.client_id === p_client && (full || conns.some(c => c.id === a.connection_id))).map(a => a.id);
+    const drop = (name, pred) => { const rows = tbl(name); for (let i = rows.length - 1; i >= 0; i--) if (pred(rows[i])) rows.splice(i, 1); };
+    for (const name of ['xp_meta_posts', 'xp_post_metric_snapshots', 'xp_account_metric_snapshots', 'xp_account_metric_observations', 'xp_audience_snapshots', 'xp_post_comments', 'xp_sync_runs'])
+        drop(name, r => assets.includes(r.asset_id) || (full && r.client_id === p_client));
+    drop('xp_meta_assets', r => assets.includes(r.id));
+    drop('xp_meta_connections', r => conns.includes(r));
+    if (full) {
+        const chats = tbl('xp_ai_conversations').filter(c => c.client_id === p_client).map(c => c.id);
+        drop('xp_ai_messages', m => chats.includes(m.conversation_id));
+        drop('xp_ai_conversations', c => c.client_id === p_client);
+        drop('xp_clients', c => c.id === p_client);
+    }
+    return { data: { full, assets: assets.length, connections: conns.length }, error: null };
+};
+function seedWarehouse(clientId, elConnId, platformId) {
+    if (!tbl('xp_clients').some(c => c.id === clientId)) tbl('xp_clients').push({ id: clientId, client_name: 'Biz', is_active: true });
+    const xc = { id: crypto.randomUUID(), client_id: clientId, el_connection_id: elConnId, meta_user_id: 'fb-' + platformId };
+    tbl('xp_meta_connections').push(xc);
+    const asset = { id: crypto.randomUUID(), client_id: clientId, connection_id: xc.id, platform: 'FB', asset_id: platformId, status: 'ACTIVE' };
+    tbl('xp_meta_assets').push(asset);
+    tbl('xp_meta_posts').push({ id: crypto.randomUUID(), client_id: clientId, asset_id: asset.id, caption: 'Weekend special' });
+    tbl('xp_post_comments').push({ id: crypto.randomUUID(), client_id: clientId, asset_id: asset.id, author_name: 'nadia.r', message: 'Looks great' });
+    tbl('xp_account_metric_snapshots').push({ id: crypto.randomUUID(), client_id: clientId, asset_id: asset.id, reach: 900, is_final: true });
+    return asset;
+}
+test('Disconnect removes the connection, its owner reports and everything the assistant kept; the next read skips the business', async () => {
+    const client = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Disconnect Diner', igHandle: 'disconnectdiner' } });
+    assert.strictEqual(client.statusCode, 201, JSON.stringify(client.body));
+    const C = client.body.client.id;
+    const conn = { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, page_id: '5501', page_name: 'Disconnect Diner', status: 'active', page_token_enc: 'tok', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(conn);
+    tbl('reports').push({ id: crypto.randomUUID(), user_id: EMP.id, client_id: C, platform: 'meta', report_type: 'meta_monthly', meta_connection_id: conn.id, created_at: new Date().toISOString() });
+    seedWarehouse(C, conn.id, '5501');
+    tbl('xp_ai_conversations').push({ id: crypto.randomUUID(), client_id: C, title: 'Reach this week', updated_at: new Date().toISOString() });
+    const stranger = await call('DELETE', `/api/meta/connections/${conn.id}`, { token: 't-emp2' });
+    assert.strictEqual(stranger.statusCode, 404, 'someone else disconnected it');
+    const r = await call('DELETE', `/api/meta/connections/${conn.id}`, { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual([r.body.deleted.reports, r.body.deleted.assistant], [1, true]);
+    assert.deepStrictEqual(PURGED.pop(), { client: C, connections: null }, 'the last connection did not purge the whole business');
+    for (const name of ['xp_clients', 'xp_meta_connections', 'xp_meta_assets', 'xp_meta_posts', 'xp_post_comments', 'xp_account_metric_snapshots', 'xp_ai_conversations'])
+        assert.ok(!tbl(name).some(x => (x.client_id || x.id) === C), name + ' kept a row after Disconnect');
+    assert.ok(!tbl('reports').some(x => x.meta_connection_id === conn.id), 'the owner report survived Disconnect');
+    await xp.provisionAll();
+    assert.ok(!tbl('xp_clients').some(x => x.id === C), 'the next read re-created the business');
+});
+test('one Page of two: only that Page\'s copy goes; Meta\'s deletion request purges the assistant too', async () => {
+    const C = state.C;
+    const a = { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, page_id: '6601', page_name: 'Page A', fb_user_id: 'fbu-66', status: 'active', created_at: new Date().toISOString() };
+    const b = { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, page_id: '6602', page_name: 'Page B', fb_user_id: 'fbu-77', status: 'active', created_at: new Date().toISOString() };
+    tbl('meta_connections').push(a, b);
+    const assetA = seedWarehouse(C, a.id, '6601'), assetB = seedWarehouse(C, b.id, '6602');
+    const out = await S.metaDeleteUserData('fbu-66');
+    assert.strictEqual(out.connections, 1);
+    assert.deepStrictEqual(PURGED.pop(), { client: C, connections: [a.id] }, 'a partial deletion purged the whole business');
+    assert.ok(!tbl('xp_meta_assets').some(x => x.id === assetA.id) && !tbl('xp_post_comments').some(x => x.asset_id === assetA.id), 'Page A\'s copy survived');
+    assert.ok(tbl('xp_meta_assets').some(x => x.id === assetB.id) && tbl('xp_meta_posts').some(x => x.asset_id === assetB.id), 'Page B\'s copy was deleted with A\'s');
+    // A connection deleted some other way (its client deleted, or before phase 45) is found on the next pass.
+    tbl('meta_connections').splice(tbl('meta_connections').findIndex(x => x.id === b.id), 1);
+    await xp.purgeOrphans();
+    assert.ok(!tbl('xp_meta_assets').some(x => x.id === assetB.id), 'an orphaned copy kept being read');
+});
+test('chats are deleted after 12 months unused; nothing newer is touched', async () => {
+    const old = { id: crypto.randomUUID(), client_id: state.C, title: 'Last year', updated_at: new Date(Date.now() - 400 * 86400000).toISOString() };
+    const fresh = { id: crypto.randomUUID(), client_id: state.C, title: 'This week', updated_at: new Date().toISOString() };
+    tbl('xp_ai_conversations').push(old, fresh);
+    const n = await xp.purgeOldChats();
+    assert.ok(n >= 1);
+    assert.ok(!tbl('xp_ai_conversations').some(c => c.id === old.id), 'a chat older than 12 months survived');
+    assert.ok(tbl('xp_ai_conversations').some(c => c.id === fresh.id), 'a recent chat was deleted');
+});
+test('the login asks for comment access, and production never falls back to a key in the source', async () => {
+    const m = await call('GET', '/api/meta/status', { token: 't-admin' });
+    assert.strictEqual(m.statusCode, 200, JSON.stringify(m.body));
+    for (const s of ['pages_read_user_content', 'instagram_manage_comments', 'read_insights']) assert.ok(m.body.scopes.includes(s), 'missing scope ' + s);
+    const { execFileSync } = require('child_process');
+    const run = (env) => { try { return execFileSync(process.execPath, ['-e', "require('./xp/security').encrypt('EAAtoken'); console.log('sealed')"], { cwd: path.join(__dirname, '..'), env: { PATH: process.env.PATH, ...env }, encoding: 'utf8', stdio: 'pipe' }).trim(); } catch (e) { return String(e.stderr || e.message); } };
+    assert.ok(/APP_ENCRYPTION_KEY is not set/.test(run({ RENDER: 'true' })), 'production sealed a token with the built-in key');
+    assert.strictEqual(run({ RENDER: 'true', APP_ENCRYPTION_KEY: 'a'.repeat(64) }), 'sealed');
+    assert.strictEqual(run({}), 'sealed', 'local development lost its fallback');
 });
 
 (async () => {
