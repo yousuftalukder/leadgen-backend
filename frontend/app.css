@@ -1626,6 +1626,9 @@ body.el-drawer-open { overflow: hidden; }
 .el-logo-mark { width: auto; height: 34px; flex: none; }
 .el-sidebar .el-logo-mark { height: 36px; }
 .el-sidebar .el-logo { font-size: 1.42rem; gap: 12px; }
+.el-logo-text { display: inline-flex; flex-direction: column; line-height: 1.05; }
+/* "Workspace" under the wordmark, on the team's rail only; owners see EdgeLead alone. */
+.el-logo-sub { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent-solid); margin-top: 3px; -webkit-text-fill-color: currentColor; }
 .el-topbar .el-logo-mark { height: 28px; }
 .el-topbar .el-logo { font-size: 1.2rem; }
 .el-install-ico img { width: auto; height: 26px; display: block; }
