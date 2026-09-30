@@ -16,7 +16,9 @@ module.exports = {
   supabaseUrl: env('SUPABASE_URL', 'http://stub'),
   supabaseKey: env('SUPABASE_SERVICE_ROLE_KEY', env('SUPABASE_KEY', 'stub')),       // service_role, server-side only
 
-  encryptionKey: env('XP_ENCRYPTION_KEY', env('APP_ENCRYPTION_KEY', 'development_fallback_secret_key_32bytes_min')),
+  // EdgeLead (phase 45): in production there is no built-in fallback key. Without a real key the
+  // assistant refuses to seal a token rather than sealing it with a key anyone can read in the source.
+  encryptionKey: env('XP_ENCRYPTION_KEY', env('APP_ENCRYPTION_KEY', (isProd || process.env.RENDER) ? null : 'development_fallback_secret_key_32bytes_min')),
   adminApiKey: env('XP_ADMIN_API_KEY', 'edgelead-has-its-own-admin-sessions'),
   clientSessionSecret: env('XP_SESSION_SECRET', env('APP_ENCRYPTION_KEY', 'dev_client_session_secret_change_me')),
   clientSessionTtlMs: 12 * 60 * 60 * 1000,

@@ -13,13 +13,15 @@
 const crypto = require('crypto');
 const cfg = require('./config');
 
-const KEY = crypto.createHash('sha256').update(cfg.encryptionKey).digest();
+const KEY = cfg.encryptionKey ? crypto.createHash('sha256').update(cfg.encryptionKey).digest() : null;
+const needKey = () => { if (!KEY) throw new Error('APP_ENCRYPTION_KEY is not set on the server, so Meta tokens cannot be stored or read. Set it on Render and redeploy.'); };
 
 const HEX = /^[0-9a-f]+$/i;
 // Meta user/page/system-user tokens: long, URL-safe, no colons. EAA... is the common prefix.
 const META_TOKEN_RE = /^[A-Za-z0-9_\-.|]{40,}$/;
 
 function encrypt(text) {
+  needKey();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
   const enc = Buffer.concat([cipher.update(String(text), 'utf8'), cipher.final()]);
@@ -50,6 +52,7 @@ function readToken(blob, label = 'token') {
     throw e;
   }
 
+  if (format === 'GCM' || format === 'CBC_LEGACY') needKey();
   if (format === 'GCM') {
     const [ivHex, tagHex, encHex] = s.split(':');
     try {

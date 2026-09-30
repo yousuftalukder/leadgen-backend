@@ -208,7 +208,15 @@ const ENC_KEY_OLD = (() => {
 
 function isEncrypted(v) { return typeof v === 'string' && v.startsWith(ENC_PREFIX); }
 
+// Phase 45: in production a missing key no longer means plaintext. Storing a secret then fails with
+// a message that says what to set, and the boot check below raises the alarm before anyone tries.
+const ENC_REQUIRED = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
 function encryptSecret(plain) {
+    if (plain && !ENC_KEY && ENC_REQUIRED && !isEncrypted(plain)) {
+        const e = new Error('APP_ENCRYPTION_KEY is not set on the server, so this secret cannot be stored safely. Set it on Render (openssl rand -hex 32) and redeploy.');
+        e.statusCode = 503; e.code = 'encryption_key_missing';
+        throw e;
+    }
     if (!plain || !ENC_KEY || isEncrypted(plain)) return plain;
     const iv = crypto.randomBytes(12);
     const c = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
@@ -13359,7 +13367,9 @@ const META_APP_ID        = (process.env.META_APP_ID || '').trim();
 const META_APP_SECRET    = (process.env.META_APP_SECRET || '').trim();
 const META_GRAPH_VERSION = (process.env.META_GRAPH_VERSION || 'v24.0').trim();
 const META_SCOPES        = (process.env.META_SCOPES ||
-    'pages_show_list,pages_read_engagement,read_insights,instagram_basic,instagram_manage_insights,business_management')
+    // Phase 45: comments are read too (pages_read_user_content, instagram_manage_comments), so the
+    // Owner Assistant's comment digest works. Owners connected before this reconnect once to grant them.
+    'pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments,business_management')
     .split(',').map(s => s.trim()).filter(Boolean);
 const FRONTEND_URL       = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
 const BACKEND_URL_ENV    = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
@@ -13568,21 +13578,38 @@ function metaParseSignedRequest(signedRequest, secret) {
 
 /** Everything held for one Facebook user, gone. Returns what was removed. */
 async function metaDeleteUserData(fbUserId) {
-    const { data: conns } = await supabase.from('meta_connections').select('id').eq('fb_user_id', String(fbUserId));
-    const ids = (conns || []).map(c => c.id);
-    let reports = 0;
-    if (ids.length) {
-        // Owner-side reports are built from this person's insights and are
-        // theirs to withdraw. Scraped reports are not touched: they were
-        // built from public data and name no Facebook user.
-        const { count } = await supabase.from('reports').select('id', { count: 'exact', head: true })
-            .eq('platform', 'meta').in('meta_connection_id', ids);
-        reports = count || 0;
-        await supabase.from('reports').delete().eq('platform', 'meta').in('meta_connection_id', ids);
-        // media and snapshots cascade from the connection
-        await supabase.from('meta_connections').delete().in('id', ids);
+    const { data: conns } = await supabase.from('meta_connections').select('id, client_id').eq('fb_user_id', String(fbUserId));
+    return metaForget(conns || []);
+}
+
+/**
+ * Forget Meta connections completely (phase 45). Used by Disconnect and by
+ * Meta's data-deletion request, so the two can never drift apart again:
+ *   1. the owner reports built from them (scraped reports are not touched:
+ *      they were built from public data and name no Facebook user);
+ *   2. the connections, and the media, snapshots and daily numbers that
+ *      cascade from them;
+ *   3. the Owner Assistant's copy: tokens, posts, readings, audience,
+ *      comments, ads — and, when the business has no Meta connection left,
+ *      its chats and its row, so the twice-daily read stops for it.
+ * Step 3 goes through the database function from schema-phase45.sql; if it
+ * is missing the rest still happens and the result says so.
+ */
+async function metaForget(conns) {
+    const ids = conns.map(c => c.id);
+    if (!ids.length) return { connections: 0, reports: 0, assistant: null };
+    const { count } = await supabase.from('reports').select('id', { count: 'exact', head: true })
+        .eq('platform', 'meta').in('meta_connection_id', ids);
+    await supabase.from('reports').delete().eq('platform', 'meta').in('meta_connection_id', ids);
+    await supabase.from('meta_connections').delete().in('id', ids);
+    const assistant = {};
+    for (const clientId of [...new Set(conns.map(c => c.client_id).filter(Boolean))]) {
+        const { data: left } = await supabase.from('meta_connections').select('id').eq('client_id', clientId).limit(1);
+        const r = await xp.purge(clientId, left && left.length ? conns.filter(c => c.client_id === clientId).map(c => c.id) : null).catch(e => ({ error: e.message }));
+        if (r.error) logger.error('xp_purge_failed', { clientId, message: r.error });
+        assistant[clientId] = r;
     }
-    return { connections: ids.length, reports };
+    return { connections: ids.length, reports: count || 0, assistant };
 }
 
 app.post('/api/meta/data-deletion', publicLimit, async (req, res) => {
@@ -13742,9 +13769,13 @@ app.get('/api/meta/inbox', async (req, res) => {
 app.delete('/api/meta/connections/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
-        const { error } = await supabase.from('meta_connections').delete().eq('id', req.params.id).eq('user_id', ctx.user.id);
-        if (error) throw error;
-        res.json({ success: true });
+        if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Connection not found.' });
+        const { data: conn } = await supabase.from('meta_connections').select('id, client_id').eq('id', req.params.id).eq('user_id', ctx.user.id).maybeSingle();
+        if (!conn) return res.status(404).json({ error: 'Connection not found.' });
+        // Everything read from Meta for it goes, the Owner Assistant's copy included (phase 45).
+        const out = await metaForget([conn]);
+        const failed = Object.values(out.assistant || {}).some(r => r && r.error);
+        res.json({ success: true, deleted: { reports: out.reports, assistant: !failed }, ...(failed ? { warning: 'The connection is removed. The assistant’s copy could not be deleted yet; it is retried on the next scheduled read.' } : {}) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -21024,7 +21055,9 @@ function preflight() {
     }
     if (!process.env.SUPABASE_URL) problems.push('SUPABASE_URL is not set');
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY is not set');
-    if (!ENC_KEY) problems.push('APP_ENCRYPTION_KEY is not set — Apify tokens will be stored in plaintext');
+    if (!ENC_KEY) problems.push(ENC_REQUIRED
+        ? 'APP_ENCRYPTION_KEY is not set — connecting Meta and saving Apify or AI keys will be refused until it is'
+        : 'APP_ENCRYPTION_KEY is not set — secrets are stored in plaintext (allowed only outside production)');
     if (!geminiAvailable()) problems.push('No Gemini key anywhere (env or pool) — reports will ship without their narrative layer');
     if (!(process.env.META_APP_ID && process.env.META_APP_SECRET)) problems.push('META_APP_ID / META_APP_SECRET not set — Meta owner-data connections are disabled');
     if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
@@ -21236,7 +21269,7 @@ module.exports = {
     assistantScope, assistantAnswer,
     // phase 36
     cpScheduleDates, cpParseSlot, contentPlanMonth,
-    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed,
+    keyPoolSummary, geminiCandidates, geminiReportKey, geminiCallDetailed, metaForget, metaDeleteUserData,
     csType, csParseCsv, csImportRows, csRank, csToolsFor, csPageText, csSiteLinks, csBaseTopics, csBusiness,
     classifyTaggedPost, reviewAggregate, reviewPlace, igHandleFromUrl, reviewNameMatch, reviewDoc, safePublicFetch, reviewPrivateIp, reviewEstimate,
     __setReviewLookup: fn => { _reviewLookup = fn; },

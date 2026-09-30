@@ -48,10 +48,15 @@
         <li><b>Your Meta data, only if you connect it.</b> If you connect a Facebook Page and its
             Instagram professional account, EdgeLead reads owner-side insights that Meta makes
             available to the account holder: reach, views, saves, shares, profile visits, follower
-            demographics, and your own posts' performance. It uses the permissions
-            <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>read_insights</code>,
-            <code>instagram_basic</code>, <code>instagram_manage_insights</code> and
-            <code>business_management</code>. It never posts, messages, edits, or touches ads.</li>
+            demographics (as age, gender, city and country totals, never individual followers), your
+            own posts and their captions, and the comments on your posts from the last 30 days,
+            including each commenter's public username. It is read twice a day. It uses the permissions
+            <code>pages_show_list</code>, <code>pages_read_engagement</code>, <code>pages_read_user_content</code>,
+            <code>read_insights</code>, <code>instagram_basic</code>, <code>instagram_manage_insights</code>,
+            <code>instagram_manage_comments</code> and <code>business_management</code>. It only reads:
+            it never posts, replies, hides or deletes a comment, messages anyone, or touches ads.</li>
+        <li><b>Questions you ask Edge Meta AI.</b> Your questions and its answers are kept, with the
+            figures each answer was based on, so you can reopen a conversation.</li>
         <li><b>Usage inside the product.</b> Which reports were run, when, and roughly what they
             cost, so allowances and budgets can be enforced.</li>
     </ul>
@@ -59,8 +64,11 @@
     <h2>What we do with it</h2>
     <p>Build the reports, plans and lists you ask for; write the narrative parts of those reports
        with an AI model (Google Gemini), which is sent the report's figures and never your
-       credentials; and show your own data back to you and to the people you have chosen to share a
-       client with.</p>
+       credentials; answer your questions in Edge Meta AI, for which Gemini is sent your question, the
+       recent conversation and the figures it looks up from your own account (when you ask about
+       comments, that includes the comments and the commenters' usernames); and show your own data
+       back to you and to the people you have chosen to share a client with. Gemini is never sent
+       access tokens or another business's data.</p>
     <p><b>We do not sell personal data.</b> Lead lists you build stay in your account.</p>
 
     <h2>Where it lives, and for how long</h2>
@@ -72,11 +80,16 @@
             by you reconnecting.</li>
         <li>Reports, lists and client records are kept until you delete them or your account is
             deleted.</li>
+        <li>Data read from your Meta account is kept while the account stays connected, and deleted
+            when you disconnect it.</li>
+        <li>Edge Meta AI conversations are deleted when you delete them, and automatically 12 months
+            after they were last used.</li>
     </ul>
 
     <h2>Deleting your data</h2>
     <p>You can disconnect a Meta account at any time from the Clients page; that deletes the tokens
-       and everything read from Meta for it. If you remove EdgeLead from your Facebook settings,
+       and everything read from Meta for it, including the posts, comments, audience figures and
+       Edge Meta AI conversations kept for that business. If you remove EdgeLead from your Facebook settings,
        Meta tells us and the same deletion happens automatically — see
        <a href="data-deletion.html">Delete your data</a> for the details and for checking the status
        of a request. For anything else, ask your account administrator or contact us below.</p>
