@@ -1624,6 +1624,8 @@ body.el-drawer-open { overflow: hidden; }
     background: none; -webkit-text-fill-color: currentColor; color: var(--text-primary); letter-spacing: -0.01em; font-weight: 800; }
 .el-sidebar a.el-logo { display: inline-flex; }
 .el-logo-mark { width: auto; height: 34px; flex: none; }
-.el-sidebar .el-logo-mark { height: 30px; }
-.el-topbar .el-logo-mark { height: 24px; }
+.el-sidebar .el-logo-mark { height: 36px; }
+.el-sidebar .el-logo { font-size: 1.42rem; gap: 12px; }
+.el-topbar .el-logo-mark { height: 28px; }
+.el-topbar .el-logo { font-size: 1.2rem; }
 .el-install-ico img { width: auto; height: 26px; display: block; }
