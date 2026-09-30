@@ -88,6 +88,19 @@
     .status-active { color: var(--success); font-weight: 700; }
     .status-bad { color: var(--danger); font-weight: 700; }
     .note { font-size: 0.82rem; margin-top: 14px; min-height: 1.1em; }
+    .pool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+    .pool-col { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+    .pool-col h3 { margin: 0 0 10px; font-size: 0.95rem; color: #fff; }
+    .pool-tier { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 4px 10px; padding: 9px 0; border-top: 1px solid var(--card-border); font-size: 0.84rem; }
+    .pool-tier:first-of-type { border-top: 0; }
+    .pool-tier b.n { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 0.72rem; background: var(--accent-dim); color: var(--accent-solid); }
+    .pool-tier .t { color: #fff; font-weight: 700; }
+    .pool-tier .d { grid-column: 2; color: var(--text-muted); font-size: 0.78rem; line-height: 1.5; }
+    .pool-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; margin: 2px 4px 2px 0; border: 1px solid var(--card-border); color: var(--text-secondary); }
+    .pool-chip.ok { color: var(--success); border-color: rgba(63,191,143,0.35); }
+    .pool-chip.warn { color: var(--warn); border-color: rgba(251,191,36,0.35); }
+    .pool-chip.bad { color: var(--danger); border-color: rgba(248,113,113,0.35); }
+    .pool-who td small { display: block; color: var(--text-muted); font-size: 0.72rem; }
     .primary-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
     .primary-chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
         padding: 13px 17px; font-size: 0.82rem; }
@@ -100,7 +113,7 @@
 
     <div class="segment-bar">
         <button class="segment-btn active" type="button" data-tab="users">People</button>
-        <button class="segment-btn" type="button" data-tab="keys">Apify keys</button>
+        <button class="segment-btn" type="button" data-tab="keys">Keys (Apify &amp; AI)</button>
         <button class="segment-btn" type="button" data-tab="plans">Trial &amp; plans</button>
         <button class="segment-btn" type="button" data-tab="health">Spend &amp; health</button>
     </div>
@@ -167,6 +180,16 @@
     <!-- ================= KEYS ================= -->
     <section id="tab-keys" class="hidden">
         <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div>
+                    <h2 class="card-title">Key pools at a glance</h2>
+                    <p class="card-subtitle" style="margin:0;">Every key the server can use, in the order it tries them, and what is usable right now.</p>
+                </div>
+                <button class="btn-secondary" type="button" id="reload-pools">Refresh</button>
+            </div>
+            <div id="pools" class="empty" style="margin-top:14px;">Loading…</div>
+        </div>
+        <div class="card">
             <h2 class="card-title">Shared primary keys</h2>
             <p class="card-subtitle">Each engine has one primary key that is tried first and never deleted. Everything
                 below it is failover: if the primary is out of credit, runs fall through to the pool.</p>
@@ -223,7 +246,7 @@
             <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px;">
                 <div>
                     <h2 class="card-title">Gemini key pool</h2>
-                    <p class="card-subtitle" style="margin:0;">Every narrative, draft and content plan draws from here. Order per call: the user's own key → this pool (least recently used) → the server env key. A 429 puts a key on a 90 s cooldown; the call moves on immediately. Model chain is shown below — a 404 on one model falls through to the next.</p>
+                    <p class="card-subtitle" style="margin:0;">Every report, plan, draft, Ask AI and Edge Meta AI draws from here. Order per call: the user's own key → this pool (least recently used) → the server env key. A 429 puts a key on a 90 s cooldown; the call moves on immediately. Model chain is shown below — a 404 on one model falls through to the next.</p>
                 </div>
                 <button class="btn-secondary" type="button" id="reload-gemini">Refresh</button>
             </div>
@@ -405,7 +428,7 @@
             document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             ['users', 'keys', 'plans', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
-            if (btn.dataset.tab === 'keys') { loadKeys(); loadGemini(); }
+            if (btn.dataset.tab === 'keys') { loadPools(); loadKeys(); loadGemini(); }
             if (btn.dataset.tab === 'plans') loadPlans();
             if (btn.dataset.tab === 'health') loadMetrics();
         });
@@ -687,7 +710,7 @@
                             ${u.is_active ? '' : '<span class="tag tag-off">disabled</span>'}
                             ${isMe ? '<span class="tag tag-admin">you</span>' : ''}
                             <div class="meta">${esc(u.full_name || '—')} · joined ${dateStr(u.created_at)} ·
-                                ${engines.length ? esc(engines.join(', ')) : 'no engine access'}${u.byo_key_only ? ' · own Apify key only' : ''}</div>
+                                ${engines.length ? esc(engines.join(', ')) : 'no engine access'}${u.byo_key_only ? ' · own keys only (Apify and AI)' : ''}</div>
                             ${u.role === 'client' ? `<div class="meta">${expiryLine(u)}</div>` : ''}
                         </div>
                         <span class="user-open">Edit</span>
@@ -713,8 +736,8 @@
                         <div>
                             <label>Apify credit</label>
                             <select data-byo>
-                                <option value="false" ${!u.byo_key_only ? 'selected' : ''}>Own key first, then shared</option>
-                                <option value="true" ${u.byo_key_only ? 'selected' : ''}>Own key only (never shared)</option>
+                                <option value="false" ${!u.byo_key_only ? 'selected' : ''}>Own keys first, then shared</option>
+                                <option value="true" ${u.byo_key_only ? 'selected' : ''}>Own keys only — Apify and AI (never shared)</option>
                             </select>
                             <div class="meta" style="margin-top:6px;">Own key only means their runs pause instead of falling back onto company credit.</div>
                         </div>
@@ -1001,6 +1024,48 @@
                         !['t', 'level', 'event'].includes(k)))).slice(0, 220))}</div>`).join('')
             : 'Nothing logged. That is the good outcome.';
     }
+
+    async function loadPools() {
+        const box = $('pools');
+        let d;
+        try { d = await EL.api('/api/admin/key-pools'); } catch (err) { box.textContent = err.message; return; }
+        box.className = '';
+        const chip = (text, tone) => `<span class="pool-chip ${tone || ''}">${esc(text)}</span>`;
+        const states = (c, order) => order.filter(k => c[k]).map(k => chip(`${c[k]} ${k}`, k === 'active' ? 'ok' : k === 'cooldown' ? 'warn' : 'bad')).join('') || chip('none');
+        const tier = (n, title, detail) => `<div class="pool-tier"><b class="n">${n}</b><span class="t">${title}</span><span class="d">${detail}</span></div>`;
+        const a = d.apify, g = d.gemini;
+        const withOwnA = d.people.filter(p => p.apify.keys).length, withOwnG = d.people.filter(p => p.gemini.keys).length;
+        const tone = v => /^own/.test(v) ? 'ok' : /^nothing/.test(v) ? 'bad' : '';
+        box.innerHTML = `<div class="pool-grid">
+            <div class="pool-col"><h3>Apify (scraping)</h3>
+                ${tier(1, 'Own keys', `${withOwnA} of ${d.people.length} staff have one · ${states(a.personal, ['active', 'out of credit', 'exhausted', 'invalid'])}`)}
+                ${tier(2, 'Company primary, per engine', a.primaries.map(p => chip(p.label + (p.configured ? (p.usable ? '' : ' · out of credit') : ' · not set'), p.usable ? 'ok' : p.configured ? 'warn' : 'bad')).join(''))}
+                ${tier(3, 'Shared pool', `${a.shared.total} key(s) · ${states(a.shared, ['active', 'out of credit', 'exhausted', 'invalid'])}`)}
+                ${tier(4, 'Server key (Render setting)', a.env ? chip('set', 'ok') : chip('not set'))}
+            </div>
+            <div class="pool-col"><h3>Gemini (AI)</h3>
+                ${tier(1, 'Own keys', `${withOwnG} of ${d.people.length} staff have one · ${states(g.personal, ['active', 'cooldown', 'invalid'])}`)}
+                ${tier(2, 'Shared pool', `${g.shared.total} key(s) · ${states(g.shared, ['active', 'cooldown', 'invalid'])} <br>Least recently used first; a rate-limited key rests 90 s.`)}
+                ${tier(3, 'Server key (Render setting)', g.env ? chip('set', 'ok') : chip('not set'))}
+                <p class="card-subtitle" style="margin:8px 0 0;font-size:0.76rem;">Used by every report, plan, draft, Ask AI and Edge Meta AI.</p>
+            </div>
+        </div>
+        <h3 style="margin:18px 0 8px;font-size:0.95rem;color:#fff;">Who draws from what</h3>
+        <div class="table-wrap"><table class="pool-who"><thead><tr><th>Person</th><th>Keys rule</th><th>Own Apify</th><th>Next scraping run</th><th>Own AI</th><th>Next AI call</th></tr></thead><tbody>
+            ${d.people.map(p => {
+                const next = Object.entries(p.apify.next);
+                const same = next.every(([, v]) => v === next[0][1]);
+                return `<tr><td>${esc(p.name)}<small>${esc(p.role)}</small></td>
+                    <td>${p.ownKeysOnly ? chip('own keys only', 'warn') : chip('own first, then shared')}</td>
+                    <td>${p.apify.active}/${p.apify.keys}</td>
+                    <td>${same ? chip(next[0][1], tone(next[0][1])) : next.map(([e, v]) => `<small>${esc((a.primaries.find(x => x.engine === e) || {}).label || e)}: ${esc(v)}</small>`).join('')}</td>
+                    <td>${p.gemini.active}/${p.gemini.keys}</td>
+                    <td>${chip(p.gemini.next, tone(p.gemini.next))}</td></tr>`;
+            }).join('')}
+        </tbody></table></div>
+        <p class="card-subtitle" style="margin-top:8px;">Staff add their own keys with the Apify key and AI key buttons in the sidebar. A personal key is only used for that person. Set "Own keys only" on the People tab.</p>`;
+    }
+    $('reload-pools').addEventListener('click', loadPools);
 
     async function loadGemini() {
         const box = $('gemini-list');

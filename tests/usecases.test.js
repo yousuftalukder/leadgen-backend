@@ -262,13 +262,15 @@ const stubs = {
     '@supabase/supabase-js': { createClient: () => fakeSupabase },
     dotenv: { config() {} },
     '@google/genai': { GoogleGenAI: class {
-        constructor() {
+        constructor(opts) {
+            const key = opts && opts.apiKey;
             this.models = {
                 generateContentStream: async (req) => {
-                    XP.requests.push(req);
+                    XP.requests.push({ ...req, _key: key });
                     let next = XP.script.shift();
                     if (!next) throw new Error('the test scripted no reply for this turn');
                     if (typeof next === 'function') next = next(req);
+                    if (next && next.throw) throw new Error(next.throw);
                     const chunks = [].concat(next).map((c, i, all) => ({
                         candidates: [{ content: { role: 'model', parts: c.parts }, finishReason: i === all.length - 1 ? 'STOP' : undefined }],
                         usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20 }
@@ -428,26 +430,32 @@ async function call(method, p, { token, body, query } = {}) {
         redirect(u) { this.statusCode = 302; this.headers.location = u; this.sent = true; }
     };
     let matched = false;
+    const steps = [];
     for (const r of ROUTES) {
+        let params = null;
         if (r.m === 'USE') {
             const prefix = r.p.replace(/\/+$/, '');
             if (prefix && p !== prefix && !p.startsWith(prefix + '/')) continue;
         } else {
             if (r.m !== method) continue;
-            const params = matchPath(r.p, p);
+            params = matchPath(r.p, p);
             if (!params) continue;
-            req.params = params;
             matched = true;
         }
-        for (const fn of r.h) {
-            if (fn.length === 4) continue;      // an error handler; nothing has thrown
-            if (res.sent) return res;
-            let next = false;
-            await fn(req, res, () => { next = true; });
-            if (!next) return res;
-        }
+        for (const fn of r.h) if (fn.length !== 4) steps.push({ fn, params });   // error handlers: nothing has thrown
     }
-    if (!matched && !res.sent) throw new Error(`no route ${method} ${p}`);
+    if (!matched) throw new Error(`no route ${method} ${p}`);
+    // Like Express, the rest of the chain runs INSIDE next(): a middleware that
+    // wraps next() in a context (the per-request user, phase 44) wraps the route.
+    const go = async (i) => {
+        if (i >= steps.length || res.sent) return;
+        const s = steps[i];
+        if (s.params) req.params = s.params;
+        let downstream = null;
+        await s.fn(req, res, () => { downstream = go(i + 1); return downstream; });
+        if (downstream) await downstream;
+    };
+    await go(0);
     return res;
 }
 
@@ -3255,6 +3263,74 @@ test('a pick needs the team\'s own note before it is final; final picks go on th
     assert.strictEqual(del.statusCode, 409, 'a pick the owner already approved was deleted');
     const delDraft = await call('DELETE', `/api/content-picks/${story.body.pick.id}`, { token: 't-emp' });
     assert.strictEqual(delDraft.statusCode, 200);
+});
+
+section('\nphase 44 — key pools: own keys first, own keys only, and one view of them all');
+test('the overview sorts keys into the tiers they are tried in, and says what each person would draw from', () => {
+    const now = Date.now();
+    const d = S.keyPoolSummary({
+        people: [{ id: 'u1', full_name: 'Nadia', role: 'user', byo_key_only: false }, { id: 'u2', full_name: 'Sam', role: 'user', byo_key_only: true }, { id: 'u3', email: 'rafi@x.test', role: 'admin' }],
+        apify: [{ id: 'a1', owner_user_id: 'u1', engine: 'any', status: 'active', remainingUsd: 2 }, { id: 'a2', owner_user_id: null, engine: 'leadgen', status: 'active', remainingUsd: 0 },
+                { id: 'a3', owner_user_id: null, engine: 'any', status: 'invalid', remainingUsd: 5 }],
+        primaries: { leadgen: { configured: true, creditUsd: 5, spentUsd: 5 }, report: { configured: true, creditUsd: 5, spentUsd: 1 } },
+        gemini: [{ id: 'g1', owner_user_id: null, status: 'active' }, { id: 'g2', owner_user_id: null, status: 'cooldown', cooldown_until: new Date(now + 60000).toISOString() },
+                 { id: 'g3', owner_user_id: 'u2', status: 'invalid' }],
+        envApify: false, envGemini: true, now
+    });
+    assert.deepStrictEqual([d.apify.shared.total, d.apify.shared['out of credit'], d.apify.shared.invalid], [3 - 1, 1, 1]);
+    assert.deepStrictEqual([d.gemini.shared.active, d.gemini.shared.cooldown, d.gemini.personal.invalid], [1, 1, 1]);
+    const [nadia, sam, rafi] = d.people;
+    assert.strictEqual(nadia.apify.next.leadgen, 'own key');
+    assert.strictEqual(sam.apify.next.leadgen, 'nothing (own key only)');
+    assert.strictEqual(sam.gemini.next, 'nothing (own key only)', 'an own-keys-only person was sent to the shared pool');
+    assert.strictEqual(rafi.apify.next.leadgen, 'nothing', 'a spent primary and a spent pool key still counted');
+    assert.strictEqual(rafi.apify.next.report, 'company primary');
+    assert.strictEqual(rafi.gemini.next, 'shared pool');
+    assert.strictEqual(rafi.name, 'rafi');
+});
+test('a staff member\'s own AI key comes first — Edge Meta AI included — and a rate-limited key hands over mid-answer', async () => {
+    const own = await call('POST', '/api/gemini-keys', { token: 't-emp', body: { key: 'AIzaEMPOWNkeyAAAAAAAAAAAAAAAAAA', label: 'mine' } });
+    assert.strictEqual(own.statusCode, 201, JSON.stringify(own.body));
+    const pool = await call('POST', '/api/gemini-keys', { token: 't-admin', body: { key: 'AIzaSHAREDpoolBBBBBBBBBBBBBBBBB', label: 'pool', global: true } });
+    assert.strictEqual(pool.statusCode, 201, JSON.stringify(pool.body));
+    state.empKey = own.body.key.id;
+    const c = await S.geminiCandidates(EMP.id);
+    assert.deepStrictEqual(c.map(x => x.source), ['personal', 'pool', 'env']);
+    // The chat is called with no user id; the request's own context says who is asking.
+    XP.script = [{ parts: [{ text: 'On your key.' }] }];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-emp', body: { clientId: state.C, message: 'How is reach this week?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(XP.requests[0]._key, 'AIzaEMPOWNkeyAAAAAAAAAAAAAAAAAA', 'Edge Meta AI did not use the person\'s own key: ' + XP.requests[0]._key);
+    XP.script = [{ throw: '429 RESOURCE_EXHAUSTED: quota' }, { parts: [{ text: 'On the pool.' }] }];
+    XP.requests.length = 0;
+    const r2 = await call('POST', '/api/xp/chat', { token: 't-emp', body: { clientId: state.C, message: 'And views?', conversationId: r.body.conversationId } });
+    assert.strictEqual(r2.statusCode, 200, JSON.stringify(r2.body));
+    assert.strictEqual(r2.body.reply, 'On the pool.');
+    assert.deepStrictEqual(XP.requests.map(x => x._key), ['AIzaEMPOWNkeyAAAAAAAAAAAAAAAAAA', 'AIzaSHAREDpoolBBBBBBBBBBBBBBBBB']);
+    await new Promise(r3 => setTimeout(r3, 10));
+    assert.strictEqual(tbl('gemini_keys').find(k => k.id === state.empKey).status, 'cooldown', 'the rate-limited key was not rested');
+});
+test('"own keys only" holds for AI too: no shared pool, no server key, and it says why', async () => {
+    const set = await call('PATCH', `/api/admin/users/${EMP.id}`, { token: 't-admin', body: { byoKeyOnly: true } });
+    assert.strictEqual(set.statusCode, 200, JSON.stringify(set.body));
+    const resting = await S.geminiCandidates(EMP.id);
+    assert.strictEqual(resting.length, 0, 'an own-keys-only person reached shared keys: ' + resting.map(x => x.source).join(','));
+    assert.ok(resting.byoMissing);
+    const r = await S.geminiCallDetailed('{"q":1}', { userId: EMP.id, tag: 'test' });
+    assert.deepStrictEqual([r.ok, r.reason], [false, 'no_own_key']);
+    assert.ok(/own AI key only/.test(S.aiReasonText('no_own_key')));
+    await call('POST', `/api/gemini-keys/${state.empKey}/reset`, { token: 't-admin' });
+    assert.deepStrictEqual((await S.geminiCandidates(EMP.id)).map(x => x.source), ['personal'], 'a reset key was still resting');
+    const view = await call('GET', '/api/admin/key-pools', { token: 't-admin' });
+    assert.strictEqual(view.statusCode, 200, JSON.stringify(view.body));
+    const me = view.body.people.find(p => p.id === EMP.id);
+    assert.deepStrictEqual([me.ownKeysOnly, me.gemini.keys, me.gemini.next], [true, 1, 'own key']);
+    assert.ok(view.body.gemini.shared.total >= 1 && view.body.gemini.env === true);
+    assert.ok(!JSON.stringify(view.body).includes('AIza'), 'the overview carried a key');
+    const staff = await call('GET', '/api/admin/key-pools', { token: 't-emp' });
+    assert.strictEqual(staff.statusCode, 403);
+    await call('PATCH', `/api/admin/users/${EMP.id}`, { token: 't-admin', body: { byoKeyOnly: false } });
 });
 
 (async () => {

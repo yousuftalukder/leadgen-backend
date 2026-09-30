@@ -866,10 +866,50 @@ async function answer(opts) {
   }
 }
 
+// EdgeLead (phase 44): the keys come from the host's Gemini pool when it gives one — the person's own
+// key, then the shared pool, then the server key — and a turn that hits a rate limit or a refused key
+// moves to the next key. Without a pool it is the one GEMINI_API_KEY, as before.
+let keySource = null;
+function setKeySource(src) { keySource = src && typeof src.list === 'function' ? src : null; }
+const keyTrouble = (e) => {
+  const m = String((e && (e.status || e.code)) || '') + ' ' + String((e && e.message) || '');
+  if (/\b429\b|RESOURCE_EXHAUSTED|quota|rate limit/i.test(m)) return 'cooldown';
+  if (/API key not valid|API_KEY_INVALID|PERMISSION_DENIED|\b403\b|\b401\b/i.test(m)) return 'invalid';
+  return null;
+};
+async function chatKeys() {
+  if (keySource) {
+    const list = await keySource.list();
+    if (list && list.length) return list;
+    if (list && list.byoMissing) throw new Error('This account uses its own AI key only, and has no working Gemini key.');
+  }
+  return cfg.gemini.apiKey ? [{ id: null, key: cfg.gemini.apiKey, source: 'env' }] : [];
+}
+
 async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal }) {
-  if (!cfg.gemini.apiKey) throw new Error('GEMINI_API_KEY is not configured.');
+  const keys = await chatKeys();
+  if (!keys.length) throw new Error('GEMINI_API_KEY is not configured.');
   const { GoogleGenAI } = require('@google/genai');
-  const ai = new GoogleGenAI({ apiKey: cfg.gemini.apiKey });
+  let ki = 0;
+  let ai = new GoogleGenAI({ apiKey: keys[0].key });
+  const report = (k, outcome, detail) => { if (keySource && keySource.report && k && k.id) Promise.resolve(keySource.report(k.id, outcome, detail)).catch(() => {}); };
+  // One model turn on the current key; a key problem before any text was shown moves to the next key.
+  const turnOn = async (cts, conf, onDelta) => {
+    for (;;) {
+      let shown = false;
+      try {
+        const t = await streamTurn(ai, cts, conf, (d) => { shown = true; if (onDelta) onDelta(d); });
+        report(keys[ki], 'ok');
+        return t;
+      } catch (e) {
+        const trouble = keyTrouble(e);
+        if (!trouble || shown || ki >= keys.length - 1 || (abortSignal && abortSignal.aborted)) throw e;
+        report(keys[ki], trouble, e.message);
+        ki += 1;
+        ai = new GoogleGenAI({ apiKey: keys[ki].key });
+      }
+    }
+  };
   const emit = (ev) => { try { if (onEvent) onEvent(ev); } catch (e) { console.warn('[chat] onEvent:', e.message); } };
 
   // The three opening reads do not depend on each other. In series they were ~0.5 s of the wait.
@@ -910,7 +950,7 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
     // Text is streamed to the caller as it arrives. If this turn turns out to be a tool call the
     // model normally emits no text at all; the rare preamble before a call stays on screen, which
     // is harmless ("Let me check September...").
-    const turn = await streamTurn(ai, contents, config, gate.push);
+    const turn = await turnOn(contents, config, gate.push);
     addUsage(turn.usage);
     const calls = turn.calls;
 
@@ -955,7 +995,7 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   // answer from what it already has rather than discard a dozen live queries.
   if (text === OUT_OF_ROUNDS) {
     try {
-      const forced = await streamTurn(ai,
+      const forced = await turnOn(
         [...contents, { role: 'user', parts: [{ text: 'Answer now from the data you already have. Do not call any more tools.' }] }],
         { ...config, toolConfig: { functionCallingConfig: { mode: 'NONE' } } },
         gate.push);
@@ -982,4 +1022,4 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model: cfg.gemini.model, usage: spent };
 }
 
-module.exports = { fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
