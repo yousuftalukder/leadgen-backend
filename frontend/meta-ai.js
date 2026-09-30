@@ -212,7 +212,7 @@
                  ${isOwner ? 'Reconnect once and everything carries on from where it stopped.' : 'Reconnect from the client’s Meta tab.'} Until then, answers use the numbers read before.</p>
                  ${connectBtn('Reconnect with Facebook')}</div>` : '';
         return `<div id="welcome" class="rise oa-welcome">
-            <div class="mark">⚡</div>
+            <div class="mark"><img src="icons/logo-mark-lg.png?v=1" alt=""></div>
             <h2>What would you like to know?</h2>
             <p>Ask about your Instagram and Facebook: this month, last month, a single post or a single day. Every answer comes from your own numbers.</p>
             ${banner}
@@ -263,7 +263,7 @@
     const userMsgHtml = (m) => `<div class="rise oa-user"><div class="user-bubble">${escHtml(m)}</div></div>`;
     const assistantShellHtml = (id) => `
         <div id="${id}" class="rise oa-turn">
-            <div class="oa-avatar oa-thinking" data-avatar aria-hidden="true">⚡</div>
+            <div class="oa-avatar oa-thinking" data-avatar aria-hidden="true"><img src="icons/logo-mark-lg.png?v=1" alt=""></div>
             <div class="oa-body">
                 <div data-status><span data-status-text class="shimmer-text">Thinking…</span></div>
                 <div data-body class="answer"></div>

@@ -15,7 +15,7 @@
 const VERSION = 'el-shell-v4';   // v4: Edge Meta AI as its own app (ai/), the chat in meta-ai.js
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
     'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
-    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1'];
+    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();

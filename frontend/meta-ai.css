@@ -169,3 +169,7 @@ body.el-has-plan .oa-side { top: 132px; }
 .oa-app-link { text-decoration: none; font-size: 0.76rem; white-space: nowrap; }
 .composer textarea { min-height: 0; }       /* app.css gives every textarea 90px; the composer grows as you type */
 .oa-connect .btn-primary { margin-top: 4px; }
+/* the gold Edge mark stands for the assistant (phase 47), not an emoji */
+.oa-welcome .mark img { height: 64px; width: auto; display: block; margin: 0 auto; filter: drop-shadow(0 8px 22px rgba(217,181,108,0.25)); }
+.oa-avatar img { height: 20px; width: auto; display: block; }
+.composer textarea:focus { box-shadow: none; border: 0; }   /* the composer draws the focus ring, not the field */
