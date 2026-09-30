@@ -1617,3 +1617,12 @@ body.el-drawer-open { overflow: hidden; }
 .el-btn.el-needs { position: relative; border-color: rgba(217,181,108,0.6); }
 .el-btn.el-needs::after { content: ''; position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-solid); box-shadow: 0 0 8px var(--accent-solid); }
 @media (prefers-reduced-motion: no-preference) { .el-keynudge-dot { animation: el-pulse 1.6s infinite; } }
+
+/* ---- the Edge mark beside the wordmark ------------------------------------------ */
+/* The mark's navy vanishes on the dark shell, so it sits on a small white tile, like the app icon. */
+.el-logo, .su-logo, .wl-logo { display: inline-flex; align-items: center; gap: 10px; }
+.el-sidebar a.el-logo { display: inline-flex; }
+.el-logo-mark { width: auto; height: 32px; padding: 3px 4px; background: #fff; border-radius: 8px; flex: none; box-sizing: content-box; }
+.el-sidebar .el-logo-mark { height: 26px; }
+.el-topbar .el-logo-mark { height: 22px; border-radius: 6px; }
+.el-install-ico img { width: auto; height: 26px; display: block; }
