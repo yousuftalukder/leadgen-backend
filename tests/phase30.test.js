@@ -30,7 +30,7 @@ const chain = () => {
 const stubs = {
     express: Object.assign(() => ({
         set() {}, use() {}, get() {}, post() {}, patch() {}, delete() {}, put() {}, listen() {}
-    }), { json: () => (_, __, n) => n && n(), static: () => () => {} }),
+    }), { json: () => (_, __, n) => n && n(), raw: () => (_, __, n) => n && n(), static: () => () => {} }),
     cors: () => () => {},
     'apify-client': { ApifyClient: class {} },
     '@supabase/supabase-js': { createClient: () => ({ from: chain, rpc: chain, auth: { getUser: async () => ({ data: null, error: new Error('stub') }) } }) },
@@ -197,7 +197,9 @@ test('its page resolves the site through one base, and boots as the app', () => 
     assert.ok(fs.existsSync(path.join(FRONT, 'icons', 'ai-apple-touch-icon.png')));
     assert.ok(/EL\.init\(\{[^}]*app: 'ai'/.test(h), 'EL.init in app mode');
     assert.ok(/MetaAI\.start\(me, \{ app: true \}\)/.test(h));
-    assert.ok(/signInWithPassword/.test(h), 'it signs in on its own screen, never leaving the app');
+    assert.ok(/\/api\/public\/owner-code/.test(h) && /verifyOtp/.test(h), 'it signs in on its own screen, by emailed code, never leaving the app');
+    assert.ok(!/signInWithPassword/.test(h), 'phase 49: no passwords');
+    assert.ok(/owner-hub\.js/.test(h) && /OwnerHub\.mount/.test(h), 'the agency\'s work is in the app');
     assert.ok(/<script src="meta-ai\.js">/.test(h) && /href="meta-ai\.css"/.test(h));
     for (const m of h.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) new Function(m[1]);
 });
@@ -212,6 +214,8 @@ test('the chat is one piece of code, in EdgeLead and in the app', () => {
     const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
     assert.ok(/if \(me\.role === 'client' && !app\)/.test(h), 'the owner pages\' redirect leaves the app alone');
     assert.ok(/window\.location\.href = EL\._app \? 'ai\/' : 'index\.html'/.test(h), 'signing out of the app lands on its own sign-in');
+    assert.ok(/window\.location\.replace\('ai\/' \+ location\.search\)/.test(h), 'phase 49: an owner on any dashboard page goes to the app');
+    assert.ok(/OWNER_EMBEDS = \['client-leads\.html', 'client-community\.html'\]/.test(h), 'only the shared tools open for owners, inside the app');
 });
 test('the worker keeps the app offline too, and Netlify serves its manifest right', () => {
     const src = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');

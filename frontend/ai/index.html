@@ -50,6 +50,8 @@
     .ai-err { min-height: 18px; font-size: 0.84rem; color: var(--danger); margin: 0; }
     .ai-err.is-good { color: var(--success); }
     .ai-link { background: none; border: 0; padding: 0; color: var(--text-muted); font: inherit; font-size: 0.84rem; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    .ai-code { font-family: 'JetBrains Mono', monospace; font-size: 1.6rem !important; letter-spacing: 0.4em; text-align: center; }
+    .ai-links { display: flex; justify-content: space-between; gap: 10px; }
     .ai-fine { font-size: 0.76rem; color: var(--text-muted); margin-top: 22px; line-height: 1.55; }
 
     /* ---- the app: one screen, the chat scrolls inside it ---- */
@@ -89,15 +91,20 @@
     <div class="ai-card">
         <img src="icons/ai-192.png?v=1" alt="">
         <h1>Edge Meta <span class="a">AI</span></h1>
-        <p>Your Instagram and Facebook, answered from your own numbers. Sign in with the login your agency sent you.</p>
+        <p id="ai-lead">Your Instagram and Facebook, your agency’s work and your reports, in one chat. Sign in with the email your agency invited.</p>
+        <!-- Step 1: the email. Step 2: the 6-digit code it receives. No password, ever. -->
         <form class="ai-form" id="ai-form" novalidate>
-            <div><label for="ai-email">Email</label><input id="ai-email" type="email" autocomplete="username" inputmode="email" required></div>
-            <div><label for="ai-pass">Password</label><input id="ai-pass" type="password" autocomplete="current-password" required></div>
+            <div><label for="ai-email">Email</label><input id="ai-email" type="email" autocomplete="email" inputmode="email" required></div>
             <p class="ai-err" id="ai-err" role="alert"></p>
-            <button class="btn-primary" type="submit" id="ai-go">Sign in</button>
-            <div style="text-align:center"><button class="ai-link" type="button" id="ai-forgot">Forgot your password?</button></div>
+            <button class="btn-primary" type="submit" id="ai-go">Email me a code</button>
         </form>
-        <p class="ai-fine">No login yet? Ask your agency to invite you. Your numbers are read only from your own accounts, and only you and your agency see them.</p>
+        <form class="ai-form" id="ai-code-form" novalidate hidden>
+            <div><label for="ai-code">6-digit code</label><input id="ai-code" class="ai-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" required></div>
+            <p class="ai-err" id="ai-err2" role="alert"></p>
+            <button class="btn-primary" type="submit" id="ai-go2">Sign in</button>
+            <div class="ai-links"><button class="ai-link" type="button" id="ai-resend">Send a new code</button><button class="ai-link" type="button" id="ai-other">Use another email</button></div>
+        </form>
+        <p class="ai-fine">No password to remember: each sign-in is a code sent to your email, and the app stays signed in after that. No login yet? Ask your agency to invite you.</p>
     </div>
 </div>
 
@@ -129,6 +136,7 @@
                 <span class="oa-state" id="oa-state"></span>
                 <button class="icon-btn ai-more" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu" aria-label="More">⋯</button>
             </div>
+            <div id="ai-hub" class="hub-host"></div>
             <div id="ai-nudge"></div>
             <div id="chat-scroll" class="oa-scroll"><div id="chat-box" class="oa-box"></div></div>
             <button type="button" id="to-bottom" class="oa-to-bottom hidden" aria-label="Jump to the latest">↓</button>
@@ -146,7 +154,8 @@
         <button type="button" role="menuitem" data-action="conv-delete" class="danger">Delete</button>
     </div>
     <div id="ai-menu" role="menu" aria-label="More" class="oa-menu ai-menu hidden">
-        <a role="menuitem" href="client.html" style="display:block;padding:9px 11px;color:var(--text-primary);text-decoration:none;font-size:0.84rem;border-radius:8px">Open EdgeLead</a>
+        <button type="button" role="menuitem" data-hub-open="todos">Your to-dos</button>
+        <button type="button" role="menuitem" data-hub-open="reports">Your reports</button>
         <button type="button" role="menuitem" data-signout>Sign out</button>
     </div>
 </div>
@@ -156,7 +165,9 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script id="chartjs" src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" defer></script>
+<script src="report-view.js"></script>
 <script src="meta-ai.js"></script>
+<script src="owner-hub.js"></script>
 <script>
 (async function () {
     'use strict';
@@ -167,34 +178,62 @@
     const { data } = await sb.auth.getSession();
     if (data.session) boot(); else signIn();
 
+    async function post(path, body) {
+        const r = await fetch(EL.backendUrl() + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { const e = new Error(d.error || 'That did not work. Try again.'); e.code = d.code; throw e; }
+        return d;
+    }
+
     function signIn() {
         $('ai-signin').hidden = false;
-        const err = $('ai-err');
+        const q = new URLSearchParams(location.search);
+        if (q.get('email')) $('ai-email').value = q.get('email');
+        const err = $('ai-err'), err2 = $('ai-err2');
+        const say = (el, text, good) => { el.className = 'ai-err' + (good ? ' is-good' : ''); el.textContent = text || ''; };
+        let email = '', resendAt = 0;
+        const sendCode = async () => {
+            const r = await post('/api/public/owner-code', { email });
+            resendAt = Date.now() + 45000;
+            return r;
+        };
         $('ai-form').addEventListener('submit', async e => {
             e.preventDefault();
-            const email = $('ai-email').value.trim(), password = $('ai-pass').value;
-            if (!email || !password) { err.className = 'ai-err'; err.textContent = 'Enter your email and password.'; return; }
-            const go = $('ai-go'); go.disabled = true; go.textContent = 'Signing in…'; err.textContent = '';
+            email = $('ai-email').value.trim().toLowerCase();
+            if (!/^\S+@\S+\.\S+$/.test(email)) { say(err, 'Enter the email your agency invited.'); return; }
+            const go = $('ai-go'); go.disabled = true; go.textContent = 'Sending…'; say(err, '');
             try {
-                const { error } = await sb.auth.signInWithPassword({ email, password });
+                const r = await sendCode();
+                $('ai-form').hidden = true; $('ai-code-form').hidden = false;
+                $('ai-lead').textContent = `We emailed a 6-digit code to ${email}. It works for 10 minutes.`;
+                say(err2, r.note && /If that email/.test(r.note) ? 'No code? Check spam, and that this is the email your agency invited.' : '', false);
+                setTimeout(() => $('ai-code').focus(), 50);
+            } catch (x) { say(err, x.message); }
+            finally { go.disabled = false; go.textContent = 'Email me a code'; }
+        });
+        $('ai-code').addEventListener('input', () => {
+            $('ai-code').value = $('ai-code').value.replace(/\D/g, '').slice(0, 6);
+            if ($('ai-code').value.length === 6) $('ai-code-form').requestSubmit();
+        });
+        $('ai-code-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            const code = $('ai-code').value;
+            if (code.length !== 6) { say(err2, 'The code has 6 digits.'); return; }
+            const go = $('ai-go2'); go.disabled = true; go.textContent = 'Signing in…'; say(err2, '');
+            try {
+                const r = await post('/api/public/owner-verify', { email, code });
+                const { error } = await sb.auth.verifyOtp({ token_hash: r.tokenHash, type: r.type || 'magiclink' });
                 if (error) throw error;
                 $('ai-signin').hidden = true;
+                history.replaceState(null, '', location.pathname);
                 boot();
-            } catch (x) {
-                err.className = 'ai-err';
-                err.textContent = /invalid/i.test(x.message || '') ? 'That email and password do not match.' : (x.message || 'Could not sign in.');
-                go.disabled = false; go.textContent = 'Sign in';
-            }
+            } catch (x) { say(err2, x.message); $('ai-code').value = ''; $('ai-code').focus(); go.disabled = false; go.textContent = 'Sign in'; }
         });
-        $('ai-forgot').addEventListener('click', async () => {
-            const email = $('ai-email').value.trim();
-            if (!email) { err.className = 'ai-err'; err.textContent = 'Enter your email above, then tap this again.'; return; }
-            try {
-                // welcome.html is where a password is chosen, for an invite and a reset alike.
-                await sb.auth.resetPasswordForEmail(email, { redirectTo: new URL('welcome.html', document.baseURI).href });
-                err.className = 'ai-err is-good'; err.textContent = 'If that email has a login, a link to choose a new password is on its way.';
-            } catch (x) { err.className = 'ai-err'; err.textContent = x.message || 'Could not send the link.'; }
+        $('ai-resend').addEventListener('click', async () => {
+            if (Date.now() < resendAt) { say(err2, `Wait ${Math.ceil((resendAt - Date.now()) / 1000)} seconds, then ask again.`); return; }
+            try { await sendCode(); say(err2, 'A new code is on its way.', true); } catch (x) { say(err2, x.message); }
         });
+        $('ai-other').addEventListener('click', () => { $('ai-code-form').hidden = true; $('ai-form').hidden = false; $('ai-lead').textContent = 'Sign in with the email your agency invited.'; $('ai-email').focus(); });
     }
 
     async function boot() {
@@ -212,6 +251,9 @@
         document.addEventListener('click', e => { if (!e.target.closest('#ai-menu')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); } });
 
         MetaAI.start(me, { app: true });
+        // Everything the agency shares with the owner, beside the chat (phase 49).
+        OwnerHub.mount(me, $('ai-hub'));
+        document.querySelectorAll('[data-hub-open]').forEach(b => b.addEventListener('click', () => { menu.classList.add('hidden'); OwnerHub.open(b.dataset.hubOpen); }));
     }
 })();
 </script>

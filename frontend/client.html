@@ -206,6 +206,19 @@
     const todayIso = () => new Date().toISOString().slice(0, 10);
     const shortDay = iso => new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 
+    // A description is text with pictures in it as ![image](media:<id>) (phase 48); the server sends signed links.
+    function notesHtml(text, media) {
+        const out = []; let last = 0; const src = String(text || '').slice(0, 4000);
+        for (const m of src.matchAll(/!\[[^\]]{0,80}\]\(media:([0-9a-f-]{36})\)/gi)) {
+            out.push(esc(src.slice(last, m.index)).replace(/\n/g, '<br>'));
+            const url = media[m[1].toLowerCase()];
+            out.push(url ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="Picture" loading="lazy" style="display:block;max-width:100%;max-height:220px;border-radius:8px;margin:6px 0"></a>` : '');
+            last = m.index + m[0].length;
+        }
+        out.push(esc(src.slice(last)).replace(/\n/g, '<br>'));
+        return out.join('');
+    }
+
     async function loadTasks() {
         const host = $('cl-tasks');
         let d;
@@ -228,7 +241,7 @@
                 ${mine.length ? `<div class="ws-rows">${mine.map(t => `<div class="ws-row"><div class="ws-grow">
                     <button class="ws-check" type="button" role="checkbox" aria-checked="${t.status === 'done'}" data-tick="${esc(t.id)}"><span class="box">${EL.icon('check')}</span><span class="ws-t">${esc(t.title)}</span></button>
                     ${meta(t) ? `<div class="ws-m cl-indent">${meta(t)}</div>` : ''}
-                    ${t.notes ? `<div class="ws-m cl-indent">${esc(t.notes.slice(0, 400))}</div>` : ''}</div></div>`).join('')}</div>`
+                    ${t.notes ? `<div class="ws-m cl-indent">${notesHtml(t.notes, d.media || {})}</div>` : ''}</div></div>`).join('')}</div>`
                 : '<p class="el-muted">Nothing is waiting on you. When your agency needs something from you, it shows up here.</p>'}
             </section>
             <section class="ws-card"><div class="ws-card-h"><h2>What we are working on</h2><span class="el-muted ws-num">${ours.length} open</span></div>

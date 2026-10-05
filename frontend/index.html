@@ -284,7 +284,7 @@
                         headers: { Authorization: 'Bearer ' + s.session.access_token }
                     });
                     if (r.ok && (await r.json()).role === 'client') {
-                        window.location.href = 'client.html';
+                        window.location.href = 'ai/';            // owners live in Edge Meta AI (phase 49)
                         return;
                     }
                 } catch { /* fall through to the normal boot */ }

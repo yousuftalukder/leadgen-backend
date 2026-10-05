@@ -177,7 +177,7 @@
             try {
                 const { data } = await sb.auth.getSession();
                 const r = await fetch(EL.backendUrl() + '/api/me', { headers: { Authorization: 'Bearer ' + data.session.access_token } });
-                if (r.ok && (await r.json()).role === 'client') dest = 'client.html';
+                if (r.ok && (await r.json()).role === 'client') dest = 'ai/';
             } catch { /* the workspace will route them */ }
             window.location.href = dest;
         } catch (err) {
