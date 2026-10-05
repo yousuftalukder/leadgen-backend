@@ -204,7 +204,7 @@ const fakeSupabase = {
             deleteUser: async () => ({ data: {}, error: null }),
             // A one-time sign-in link, as Supabase makes it: nothing is sent.
             generateLink: async ({ type, email, options }) => ({
-                data: { properties: { action_link: `https://stub.supabase.co/auth/v1/verify?token=once-${encodeURIComponent(email)}&type=${type}&redirect_to=${encodeURIComponent((options && options.redirectTo) || '')}` } },
+                data: { properties: { hashed_token: `hash-${type}-${email}`, action_link: `https://stub.supabase.co/auth/v1/verify?token=once-${encodeURIComponent(email)}&type=${type}&redirect_to=${encodeURIComponent((options && options.redirectTo) || '')}` } },
                 error: null
             })
         }
@@ -2351,7 +2351,8 @@ test('a client asking is answered by XpulseAI\'s Owner Assistant, scoped to its 
     const decls = req.config.tools[0].functionDeclarations.map(d => d.name);
     assert.ok(decls.includes('get_period_summary') && decls.includes('get_daily_series') && decls.includes('get_coverage'), decls.join(','));
     assert.ok(!decls.includes('get_ad_performance'), 'the ads tool is offered only when ads are asked about');
-    assert.strictEqual(decls.length, 17, 'XpulseAI\'s tools, less the two gated ones: ' + decls.join(','));
+    assert.ok(decls.includes('get_agency_work'), 'phase 49: the agency\'s work is a tool');
+    assert.strictEqual(decls.length, 18, 'XpulseAI\'s tools, less the two gated ones, plus the agency\'s work: ' + decls.join(','));
     const conv = tbl('xp_ai_conversations').find(c => c.id === r.body.conversationId);
     assert.ok(conv && conv.client_id === state.C, 'the thread is filed under the business');
     assert.deepStrictEqual(tbl('xp_ai_messages').filter(m => m.conversation_id === conv.id).map(m => m.role), ['user', 'assistant']);
@@ -2435,6 +2436,21 @@ test('the client\'s threads are its own: listed, opened with the panels rebuilt,
     assert.ok(left.length, 'the bare rows stay: the daily limit and cost figures count them');
     assert.ok(left.every(m => m.content == null && m.tool_calls == null && m.tool_results == null), 'a deleted chat kept its words or its data');
     assert.strictEqual(tbl('xp_ai_conversations').find(c => c.id === state.xpConv).title, null, 'a deleted chat kept its title');
+});
+
+test('phase 49: asked about the agency, the assistant reads only what is shared with the owner', async () => {
+    const chatMod = require(path.join(__dirname, '..', 'xp', 'ai', 'chat'));
+    const now = new Date().toISOString();
+    tbl('client_tasks').push(
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Shared: new menu photos', status: 'doing', priority: 'high', visible_to_client: true, assigned_to_client: false, notes: 'see ![image](media:11111111-2222-4333-8444-555555555555)', created_at: now, updated_at: now },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Your to-do: send the logo', status: 'todo', visible_to_client: true, assigned_to_client: true, created_at: now, updated_at: now },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'INTERNAL: chase the invoice', status: 'todo', visible_to_client: false, assigned_to_client: false, created_at: now, updated_at: now });
+    const out = await chatMod.TOOLS.get_agency_work.run({ id: state.C });
+    const titles = JSON.stringify(out);
+    assert.ok(/Shared: new menu photos/.test(titles) && /send the logo/.test(titles), titles);
+    assert.ok(!/INTERNAL/.test(titles), 'a task not shared with the owner reached the assistant');
+    assert.ok(out.your_todos.some(t => t.title === 'Your to-do: send the logo'));
+    assert.ok(out.agency_working_on.some(t => t.title === 'Shared: new menu photos' && t.state === 'in progress' && t.priority === 'high'));
 });
 
 section('\nthe walls hold around the Owner Assistant');
@@ -2566,8 +2582,9 @@ test('with no mail set up, the admin gets a one-time link to pass on, and the ow
     assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
     assert.strictEqual(r.body.created, true);
     assert.strictEqual(r.body.emailed, false);
-    assert.ok(/type=recovery/.test(r.body.link || ''), 'no link to pass on: ' + r.body.link);
-    assert.ok(/welcome\.html/.test(decodeURIComponent(r.body.link)) || !/redirect_to=http/.test(r.body.link), 'the link should land on the page that asks for a password');
+    // Phase 49: a one-tap sign-in straight into Edge Meta AI; no password is ever set.
+    assert.ok(/type=magiclink/.test(r.body.link || ''), 'no link to pass on: ' + r.body.link);
+    assert.ok(/\/ai\//.test(decodeURIComponent(r.body.link)) || !/redirect_to=http/.test(r.body.link), 'the link should land in the app');
     assert.strictEqual(MAIL.sent.length, 0);
     state.ownerT = r.body.owner.id;
     const row = tbl('app_users').find(u => u.id === state.ownerT);
@@ -2619,8 +2636,49 @@ test('inviting again links the same login and, with Gmail set up, sends the link
     assert.strictEqual(r.body.link, null, 'a sent link must not also come back to the page');
     const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
     assert.ok(m, 'no invite mail to the owner');
-    assert.ok(/Kite Surf School/.test(m.msg.subject) && /type=recovery/.test(m.msg.text), m.msg.subject + ' / ' + m.msg.text);
+    assert.ok(/Kite Surf School/.test(m.msg.subject) && /type=magiclink/.test(m.msg.text) && /code we email you/.test(m.msg.text), m.msg.subject + ' / ' + m.msg.text);
     assert.strictEqual(tbl('app_users').filter(u => u.email === 'owner@kitesurf.test').length, 1);
+    await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
+});
+test('phase 49: an owner signs in with an emailed code — invite-only, one use, five tries, no password', async () => {
+    const off = await call('POST', '/api/public/owner-code', { body: { email: 'owner@kitesurf.test' } });
+    assert.strictEqual(off.statusCode, 503, 'no mail, no codes: ' + JSON.stringify(off.body));
+    assert.strictEqual(off.body.code, 'mail_off');
+    await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'agency@gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency' } } });
+    MAIL.sent.length = 0;
+    // A stranger's address and a team member's get the same answer, and nothing is sent.
+    for (const email of ['nobody@nowhere.test', EMP.email]) {
+        const r = await call('POST', '/api/public/owner-code', { body: { email } });
+        assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+        assert.ok(/If that email has a login/.test(r.body.note));
+    }
+    assert.strictEqual(MAIL.sent.length, 0, 'a code went to someone who is not an invited owner');
+    const r = await call('POST', '/api/public/owner-code', { body: { email: 'Owner@KiteSurf.test' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
+    assert.ok(m, 'no code was emailed');
+    const code = (/(\d{6})/.exec(m.msg.subject) || [])[1];
+    assert.ok(code, m.msg.subject);
+    const row = tbl('owner_login_codes').find(x => x.email === 'owner@kitesurf.test');
+    assert.ok(row && !String(JSON.stringify(row)).includes(code), 'the code itself must never be stored');
+    const again = await call('POST', '/api/public/owner-code', { body: { email: 'owner@kitesurf.test' } });
+    assert.strictEqual(again.statusCode, 200);
+    assert.strictEqual(tbl('owner_login_codes').filter(x => x.email === 'owner@kitesurf.test').length, 1, 'a second code within 45 seconds');
+    const wrong = await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code: code === '000000' ? '111111' : '000000' } });
+    assert.strictEqual(wrong.statusCode, 400);
+    assert.strictEqual(row.attempts, 1, 'a wrong try is counted');
+    const ok = await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code } });
+    assert.strictEqual(ok.statusCode, 200, JSON.stringify(ok.body));
+    assert.strictEqual(ok.body.tokenHash, 'hash-magiclink-owner@kitesurf.test', 'a one-time token for that login, exchanged by the page for a session');
+    const reuse = await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code } });
+    assert.strictEqual(reuse.statusCode, 400, 'a code works once');
+    // Five wrong tries end a code, even the right one after them.
+    row.used_at = null; row.attempts = 5;
+    const late = await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code } });
+    assert.strictEqual(late.statusCode, 400);
+    // An expired code is refused.
+    row.attempts = 0; row.expires_at = new Date(Date.now() - 1000).toISOString();
+    assert.strictEqual((await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code } })).statusCode, 400);
     await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
 });
 test('a paid portal is an admin\'s to give', async () => {

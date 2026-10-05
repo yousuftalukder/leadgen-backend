@@ -13234,6 +13234,99 @@ app.patch('/api/client/tasks/:taskId', async (req, res) => {
 // one-time link lets the owner choose a password. The link is sent from the
 // agency's Gmail when mail is set up; otherwise the person who invited gets
 // it to pass on, because an invite that silently goes nowhere is worse.
+// ===========================================================================
+// PHASE 49 :: OWNERS SIGN IN TO EDGE META AI WITH AN EMAILED CODE
+//
+// No password: the owner types their email, a 6-digit code arrives, they type
+// it, and the app keeps them signed in. Invite-only: a code goes only to an
+// owner login the agency made (role client, active). Whether an address has a
+// login is never said — the answer is the same either way.
+//
+// The code proves the email; the session itself is Supabase's. The server
+// makes a one-time magic-link token for that login (admin API) and hands its
+// hash to the page, which exchanges it for a session with verifyOtp. Only a
+// hash of the code is kept; one use, ten minutes, five tries.
+// ===========================================================================
+const OWNER_CODE_TTL_MS = 10 * 60000;
+const OWNER_CODE_TRIES = 5;
+const OWNER_CODE_GAP_MS = 45000;          // one code per address per 45 s
+const OWNER_CODE_PER_HOUR = 6;
+const ownerCodeLimit = rateLimit({ windowMs: 60000, max: 10 });
+
+function ownerCodeHash(code, userId) {
+    const key = ENC_KEY || Buffer.from(String(process.env.SUPABASE_SERVICE_ROLE_KEY || 'edgelead'));
+    return crypto.createHmac('sha256', key).update(`${userId}:${code}`).digest('hex');
+}
+function ownerCodesMissing(err) {
+    return !!err && (err.code === '42P01' || err.code === 'PGRST205' || /owner_login_codes/i.test(String(err.message || '')));
+}
+
+app.post('/api/public/owner-code', ownerCodeLimit, async (req, res) => {
+    try {
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter the email your agency invited.' });
+        const generic = { sent: true, note: 'If that email has a login, a 6-digit code is on its way. It works for 10 minutes.' };
+        if (!(await mailSettings()).configured) {
+            return res.status(503).json({ error: 'Sign-in codes are not switched on yet. Ask your agency for a sign-in link.', code: 'mail_off' });
+        }
+        const { data: u } = await supabase.from('app_users').select('id, role, is_active').eq('email', email).maybeSingle();
+        if (!u || u.role !== 'client' || u.is_active === false) return res.json(generic);
+
+        const since = new Date(Date.now() - 3600000).toISOString();
+        const { data: recent, error: re } = await supabase.from('owner_login_codes').select('created_at').eq('email', email).gte('created_at', since).order('created_at', { ascending: false }).limit(20);
+        if (re) { if (ownerCodesMissing(re)) return res.status(503).json({ error: 'Sign-in codes need the phase-49 database update.', code: 'migration_required' }); throw re; }
+        if ((recent || []).length && Date.now() - Date.parse(recent[0].created_at) < OWNER_CODE_GAP_MS) return res.json(generic);
+        if ((recent || []).length >= OWNER_CODE_PER_HOUR) return res.status(429).json({ error: 'Too many codes for this email. Try again in an hour.' });
+
+        const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+        const now = Date.now();
+        const { error } = await supabase.from('owner_login_codes').insert([{
+            email, user_id: u.id, code_hash: ownerCodeHash(code, u.id),
+            expires_at: new Date(now + OWNER_CODE_TTL_MS).toISOString(), created_at: new Date(now).toISOString()
+        }]);
+        if (error) throw error;
+        const sent = await sendMail({
+            to: email,
+            subject: `${code} is your Edge Meta AI code`,
+            text: [`Your sign-in code for Edge Meta AI: ${code}`, '', 'It works once, for 10 minutes. If you did not ask for it, you can ignore this email.', '— EdgeLead'].join('\n')
+        });
+        if (!sent.ok) {
+            logger.warn('owner_code_mail_failed', { message: sent.error });
+            return res.status(502).json({ error: 'The code could not be emailed just now. Try again in a minute.' });
+        }
+        logger.info('owner_code_sent', { userId: u.id });
+        res.json(generic);
+    } catch (err) { sendErr(res, err); }
+});
+
+app.post('/api/public/owner-verify', ownerCodeLimit, async (req, res) => {
+    try {
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        const code = String(req.body?.code || '').replace(/\D/g, '');
+        const wrong = () => res.status(400).json({ error: 'That code is not right, or it has expired. Ask for a new one.' });
+        if (!EMAIL_RE.test(email) || code.length !== 6) return wrong();
+        const { data: rows, error } = await supabase.from('owner_login_codes').select('*').eq('email', email).is('used_at', null)
+            .gte('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).limit(1);
+        if (error) { if (ownerCodesMissing(error)) return res.status(503).json({ error: 'Sign-in codes need the phase-49 database update.', code: 'migration_required' }); throw error; }
+        const row = (rows || [])[0];
+        if (!row || row.attempts >= OWNER_CODE_TRIES) return wrong();
+        const want = Buffer.from(row.code_hash, 'hex'), got = Buffer.from(ownerCodeHash(code, row.user_id), 'hex');
+        if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) {
+            await supabase.from('owner_login_codes').update({ attempts: (row.attempts || 0) + 1 }).eq('id', row.id);
+            return wrong();
+        }
+        await supabase.from('owner_login_codes').update({ used_at: new Date().toISOString() }).eq('id', row.id);
+        const { data: u } = await supabase.from('app_users').select('id, role, is_active').eq('id', row.user_id).maybeSingle();
+        if (!u || u.role !== 'client' || u.is_active === false) return wrong();
+        const { data: gl, error: ge } = await supabase.auth.admin.generateLink({ type: 'magiclink', email });
+        if (ge) throw ge;
+        const tokenHash = gl?.properties?.hashed_token || null;
+        if (!tokenHash) throw new Error('No sign-in token came back.');
+        logger.info('owner_code_verified', { userId: u.id });
+        res.json({ tokenHash, type: 'magiclink' });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.post('/api/clients/:id/portal-invite', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -13325,8 +13418,10 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
         let link = null;
         if (created || mailReady) {
             try {
+                // Phase 49: owners live in Edge Meta AI, signed in by email code. The
+                // invite is a one-tap sign-in straight into the app; no password is ever set.
                 const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
-                    type: 'recovery', email, ...(base ? { options: { redirectTo: `${base}/welcome.html` } } : {})
+                    type: 'magiclink', email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
                 });
                 if (ge) throw ge;
                 link = gl?.properties?.action_link || gl?.action_link || null;
@@ -13339,15 +13434,16 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
         if (link) {
             const sent = await sendMail({
                 to: email,
-                subject: `Your ${c.name} portal on EdgeLead`,
+                subject: `Edge Meta AI for ${c.name}`,
                 text: [
                     `${name ? 'Hi ' + name.split(' ')[0] + ',' : 'Hello,'}`,
                     '',
-                    `Your agency has opened a portal for ${c.name}. It shows your reports, your numbers from Facebook and Instagram, and the to-dos your agency shares with you.`,
+                    `Your agency has set up Edge Meta AI for ${c.name}: ask about your Instagram and Facebook, see what your agency is working on, approve your planned posts and read your reports, all in one chat.`,
                     '',
-                    `Choose a password to get in: ${link}`,
+                    `Open it here (one tap signs you in): ${link}`,
                     '',
-                    'The link works once and expires. If it has expired, ask your agency to send a new one.',
+                    'On your phone, add it to your home screen from there and it opens like an app.',
+                    `Next time, open ${base ? base + '/ai/' : 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
                     '— EdgeLead'
                 ].join('\n')
             });
@@ -13362,8 +13458,8 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
             // Only for a login made just now, and only when it could not be sent.
             link: handBack ? link : null,
             note: emailed ? `Invite sent to ${email}.`
-                : handBack ? `Email is not set up${mailError ? ' (' + mailError + ')' : ''}, so send this link to the owner yourself. It works once and expires.`
-                : !created ? `${email} already has a login. Their portal now shows ${c.name}; they sign in with their own password.${mailReady ? ' The email could not be sent' + (mailError ? ' (' + mailError + ')' : '') + '.' : ''}`
+                : handBack ? `Email is not set up${mailError ? ' (' + mailError + ')' : ''}, so send this link to the owner yourself. One tap signs them in to Edge Meta AI; it works once and expires.`
+                : !created ? `${email} already has a login. Edge Meta AI now shows ${c.name}; they sign in with a code emailed to them.${mailReady ? ' The email could not be sent' + (mailError ? ' (' + mailError + ')' : '') + '.' : ''}`
                 : 'The login is ready, but a sign-in link could not be made. Try again in a minute.'
         });
     } catch (err) { sendErr(res, err); }
@@ -13734,7 +13830,8 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         const { data: st } = await supabase.from('meta_oauth_states').select('*').eq('state', String(state)).maybeSingle();
         await supabase.from('meta_oauth_states').delete().eq('state', String(state));
         if (!st || new Date(st.expires_at).getTime() < Date.now()) return back({ meta: 'error', message: 'Login link expired. Try again.' });
-        if ((await userRole(st.user_id).catch(() => null)) === 'client') landing = 'client.html';
+        // Phase 49: owners live in Edge Meta AI, so that is where Meta sends them back.
+        if ((await userRole(st.user_id).catch(() => null)) === 'client') landing = 'ai/';
 
         const shortTok = await graphGet('oauth/access_token', {
             client_id: META_APP_ID, client_secret: META_APP_SECRET,

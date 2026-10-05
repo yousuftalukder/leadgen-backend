@@ -197,6 +197,9 @@
      * Engine filtering still applies on top, so a client without a grant does
      * not see the tab either.
      */
+    /** Owner tools that open inside the Edge Meta AI app, as a sheet (phase 49). */
+    const OWNER_EMBEDS = ['client-leads.html', 'client-community.html'];
+
     const CLIENT_NAV = [
         { href: 'client.html',           icon: 'home',   label: 'Home',           engine: null },
         { href: 'client-assistant.html', icon: 'spark',  label: 'Edge Meta AI',   engine: null },
@@ -629,10 +632,13 @@
             // being shown a console built for somebody else. Engine grants
             // alone would not catch this: a trial holds the report grant, so
             // nothing would stop them opening the full audit workbench.
+            // Phase 49: a business owner lives in Edge Meta AI and nowhere else. Every
+            // dashboard page sends them there, carrying the query (a Meta login coming
+            // back, say). A shared tool opened inside the app (?embed=1) is the exception.
             if (me.role === 'client' && !app) {
-                const allowed = CLIENT_NAV.map(t => t.href);
-                if (!allowed.includes(currentPage(page))) {
-                    window.location.href = 'client.html';
+                const sharedTool = EL.isEmbedded() && OWNER_EMBEDS.includes(currentPage(page));
+                if (!sharedTool) {
+                    window.location.replace('ai/' + location.search);
                     return new Promise(() => {});
                 }
             }

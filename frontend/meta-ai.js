@@ -179,6 +179,7 @@
         set(last ? `Updated ${ago(last)} · ${whenNext(s)}` : whenNext(s), 'ok');
     }
     const STARTERS = [
+        ['What are you working on for us?', 'Your agency’s work, what is planned and what waits for you'],
         ['How are we doing this month so far?', 'Views, reach and followers, Instagram first, against the same days last month'],
         ['Which post did best last month?', 'Ranked by views, with the figures that back it'],
         ['When should we post?', 'By day and hour, from your own history'],
@@ -196,7 +197,7 @@
                    (every day, every post, every follower) and answers only from them. It takes one login with Facebook;
                    after that everything updates by itself.</p>
                 ${connectBtn('Connect with Facebook')}
-                <p class="oa-fine">Read only: nothing is posted and no messages are read. You can disconnect at any time, and what was read is then deleted.</p>
+                <p class="oa-fine">Read only: nothing is posted and no messages are read. You can disconnect at any time, and what was read is then deleted.${appMode ? ' Your agency’s work, your to-dos, planned posts and reports are already in the row at the top.' : ''}</p>
             </div></div>`;
         }
         if (phase === 'reading' || (s && s.running && !hasData(s))) {

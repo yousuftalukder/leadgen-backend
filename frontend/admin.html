@@ -1125,7 +1125,7 @@
         const dw = EL.drawer({
             title: 'Invite the owner', sub: esc(r.name),
             body: `<div class="ws-form">
-                <p class="el-muted" style="margin:0">They get a link to choose a password. Their login opens ${esc(r.name)} only: their reports, their numbers and Edge Meta AI. Never your costs, keys or other clients.</p>
+                <p class="el-muted" style="margin:0">They get a one-tap link into Edge Meta AI, and after that sign in with a code emailed to them — no password. They see ${esc(r.name)} only: their numbers, your work for them, their posts to approve and their reports. Never your costs, keys or other clients.</p>
                 <div class="ws-form two"><div><label for="mi-email">Owner’s email</label><input id="mi-email" type="email" placeholder="owner@business.com"></div><div><label for="mi-name">Their name</label><input id="mi-name" placeholder="Optional"></div></div>
                 <div id="mi-out"></div></div>`,
             foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="mi-go">Invite</button>`
@@ -1140,7 +1140,7 @@
                 const app = new URL('ai/', location.href).href;
                 out.innerHTML = res.link
                     ? `<p class="ws-note is-good"><b>Send this link to the owner.</b> ${esc(res.note || '')}</p><p><code style="overflow-wrap:anywhere">${esc(res.link)}</code></p>
-                       <p class="el-muted">After they choose a password, Edge Meta AI on its own opens at <code>${esc(app)}</code>. They can add it to the home screen as an app.</p>`
+                       <p class="el-muted">The link opens Edge Meta AI at <code>${esc(app)}</code>. They add it to the home screen from there; next time they sign in with an emailed code.</p>`
                     : `<p class="ws-note is-good">${esc(res.note || 'Invite sent.')}</p>`;
                 q('#mi-go').disabled = true;
                 loadMeta();

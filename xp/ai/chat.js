@@ -371,6 +371,13 @@ const TOOLS = {
     run: (c, a) => influencers.forOwner(c.id, { start: a.start || null, end: a.end || null, tz: c.timezone || 'America/New_York' })
   },
 
+  // ---- EdgeLead (phase 49): the agency's work for this business -----------
+  get_agency_work: {
+    description: 'What the owner\'s agency is doing for them: the tasks shared with the owner (status, priority, due date, whether it is the owner\'s own to-do), the planned posts and which wait for the owner\'s OK, and the latest reports. Call this for any question about the agency, the work, what is planned, what is waiting on the owner, approvals, or reports — never for performance numbers.',
+    parameters: { type: 'OBJECT', properties: {} },
+    run: (c) => agencyWork(c.id)
+  },
+
   // ---- horizons -----------------------------------------------------------
   get_coverage: {
     description: 'What is tracked, from when, to when, and where the gaps are — per asset and per metric. Call this when a question reaches before tracking began or when numbers look incomplete. A summary is already in your instructions; call this only for detail.',
@@ -382,6 +389,33 @@ const TOOLS = {
 // get_coverage is also called automatically once per turn and folded into the system prompt, so the
 // model never has to discover the horizons on its own initiative — the old prompt asked it to notice
 // that a number looked incomplete, which is not something a model can reliably do.
+/**
+ * EdgeLead (phase 49): only what the owner may already see — tasks marked for them, their planned
+ * posts, their reports. Internal notes, the team's names and anything not shared stay out.
+ */
+const REPORT_NAMES = { ig_report: 'Instagram audit', deep_audit: 'Competitor check-up', fb_report: 'Facebook Page report', fb_page: 'Facebook Page report',
+  meta_monthly: 'Monthly report', public_monthly: 'Monthly report', meta_insights: 'Owner numbers report', content_plan: 'Content plan', fb_community: 'Local demand report' };
+async function agencyWork(clientId) {
+  const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+  const [tasks, posts, reports] = await Promise.all([
+    supabase.from('client_tasks').select('*').eq('client_id', clientId).eq('visible_to_client', true).limit(200),
+    supabase.from('content_posts').select('planned_on, format, hook, status, posted_url').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
+    supabase.from('reports').select('report_type, snapshot_date, created_at').eq('client_id', clientId).order('created_at', { ascending: false }).limit(6)
+  ]);
+  const STATE = { todo: 'planned', doing: 'in progress', waiting: 'waiting on you', done: 'done' };
+  const recentDone = (t) => t.status === 'done' && t.completed_at && Date.now() - Date.parse(t.completed_at) < 30 * 86400000;
+  const rows = ((tasks && tasks.data) || []).filter((t) => t.status !== 'done' || recentDone(t));
+  const strip = (x) => String(x || '').replace(/!\[[^\]]*\]\(media:[^)]+\)/g, '[picture]').slice(0, 300);
+  return {
+    your_todos: rows.filter((t) => t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, due: t.due_date || null, priority: t.priority || 'medium', details: strip(t.notes) || null })),
+    agency_working_on: rows.filter((t) => !t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, state: STATE[t.status] || t.status, due: t.due_date || null, priority: t.priority || 'medium' })),
+    finished_last_30_days: rows.filter((t) => t.status === 'done').map((t) => ({ title: t.title, done_on: String(t.completed_at || '').slice(0, 10) })),
+    planned_posts: ((posts && posts.data) || []).map((p) => ({ on: p.planned_on, format: p.format || null, idea: p.hook || null, state: p.status === 'idea' ? 'waiting for your OK' : p.status, link: p.posted_url || null })),
+    latest_reports: ((reports && reports.data) || []).map((r) => ({ name: REPORT_NAMES[r.report_type] || 'Report', date: r.snapshot_date || String(r.created_at || '').slice(0, 10) })),
+    note: 'Approvals, ticking off to-dos and opening reports are done in the Updates panel at the top of the app.'
+  };
+}
+
 async function coverage(clientId) {
   const rows = await q(supabase.from('xp_v_data_coverage').select('asset_id,platform,name,status,account_data_from,account_data_to,account_days,post_data_from,post_data_to,post_days,posts_known,last_synced_at').eq('client_id', clientId), 'coverage');
   const health = await q(supabase.from('xp_v_sync_health').select('asset_id,missing_days_30,missing_dates').eq('client_id', clientId), 'health').catch(() => []);
@@ -467,6 +501,7 @@ RULES — non-negotiable:
 2. A null value means "not tracked", never zero. Say which it is and why, using the coverage above.
 3. Every figure carries its coverage. For account metrics the denominator is account.days_by_metric[<metric>] — the days that metric actually HAS A VALUE. Never use days_with_data or account_days_in_period for this: those count rows, and a row exists on days where the metric is null. If the denominator is below the period length, say so in the same breath: "469 views across 2 of the 10 days". If it is zero, the metric was not tracked in this period — say that instead of reporting a total. Never present a partial total as a period total.
 4. Every follower figure carries its basis: measured (read from Meta) or estimated (worked out from the days around it). Never present an estimate as a reading. "Estimated" is the only word for it.
+0. Questions about the agency — what it is working on, what is planned, what waits for the owner, planned posts, approvals, reports — are answered with get_agency_work, in plain words, and never with invented work. To approve a post, tick off a to-do or open a report, point the owner to the Updates panel at the top of the app.
 5. Undated questions about performance ("how is business", "how are we doing") mean THIS MONTH SO FAR: answer them with compare_periods against the same days last month, and name the period in a few words, e.g. "${d.monthName} so far (${d.mtdDays} days)". A period still running (is_running_period) is not final: end with ONE short note, e.g. "Still running, so these will change." Never two notes.
 6. INSTAGRAM FIRST, FACEBOOK SECOND. Always, in every answer covering both — even when Facebook's numbers are larger. Never merge the two platforms into one figure unless explicitly asked, and if you do, label it a combined total.
 7. SHAPE — short and to the point, like a person who knows the numbers, not a report.
