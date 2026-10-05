@@ -479,6 +479,22 @@ function coverageLines(cov) {
   }).join('\n') + (cov.ads ? `\n- Ads: ${cov.ads.connected ? `ad account connected${cov.ads.ad_figures_from ? `, ad figures from ${cov.ads.ad_figures_from}` : ', no ad spend recorded yet'}` : 'no ad account connected yet (matters only for questions about ad spend or return on ad spend; Facebook paid views are available)'}` : '');
 }
 
+/** EdgeLead (phase 50): the business has no Meta connected yet. It can still ask about its agency's work. */
+function agencyOnlyPrompt(client, tz) {
+  const d = resolvedDates(tz);
+  return `You are Edge Meta AI, the assistant for "${client.client_name}", talking to the business owner. Be direct, warm and brief. Speak to the owner as "you".
+Today is ${d.todayLong} in ${tz}.
+
+This business has NOT connected its Facebook Page and Instagram yet, so you have no numbers at all: no followers, reach, views, posts or ads.
+
+What you can do: answer questions about their agency's work — what it is working on, what is planned, what waits for the owner (their to-dos), their planned posts and which wait for their OK, and which reports they have. Call get_agency_work for any of these and answer only from it. Never invent work, dates or reports.
+
+RULES:
+1. For any question about performance or numbers, say plainly that you can answer it as soon as they connect Facebook and Instagram, which takes one login with Facebook from the button in the app. Never guess or give general benchmarks as if they were theirs.
+2. To approve a post, tick off a to-do, open a report or start a check-up, point them to the row of buttons at the top of the app.
+3. Keep it short: a few sentences or a short list.`;
+}
+
 function systemPrompt(client, tz, cov) {
   const d = resolvedDates(tz);
   return `You are Owner Assistant, powered by XPulse.inc, the analytics assistant for "${client.client_name}". Talk like a sharp human assistant who knows the numbers: direct, precise, no filler. Speak to the owner as "you" and about "your" posts, pages and followers.
@@ -963,8 +979,13 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   const contents = pushTurn(toContents(history), 'user', message);
   const adsQuestion = aboutAds(message, history);
   const influencerQuestion = aboutInfluencers(message, history);
-  const offered = declarations().filter((d) => (adsQuestion || d.name !== 'get_ad_performance') && (influencerQuestion || d.name !== 'get_influencer_posts'));
-  const config = modelConfig({ systemInstruction: systemPrompt(client, tz, cov), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
+  // EdgeLead (phase 50): no Meta connected — the agency's work is all there is to read, so it is the only tool offered.
+  const { data: liveAssets } = await supabase.from('xp_meta_assets').select('id').eq('client_id', clientId).in('status', ['ACTIVE', 'EXPIRED']).limit(1);
+  const metaLess = !(liveAssets && liveAssets.length);
+  const offered = metaLess
+    ? declarations().filter((d) => d.name === 'get_agency_work')
+    : declarations().filter((d) => (adsQuestion || d.name !== 'get_ad_performance') && (influencerQuestion || d.name !== 'get_influencer_posts'));
+  const config = modelConfig({ systemInstruction: metaLess ? agencyOnlyPrompt(client, tz) : systemPrompt(client, tz, cov), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
   const gate = adsNoteGate(!adsQuestion, (t) => emit({ type: 'delta', text: t }));
   const toolLog = [], toolResults = [];
   let text = '';
@@ -1057,4 +1078,4 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model: cfg.gemini.model, usage: spent };
 }
 
-module.exports = { setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { agencyOnlyPrompt, setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };

@@ -144,15 +144,25 @@
         if (xpStatus && (xpStatus.running || xpStatus.phase === 'reading')) pollTimer = setTimeout(loadStatus, 15000);
     }
     const hasData = (s) => !!(s && s.coverage && Array.isArray(s.coverage.assets) && s.coverage.assets.some(a => a.account_days > 0 || a.post_days > 0));
-    const readyToAsk = () => !xpStatus || hasData(xpStatus);
+    // Phase 50: the chat is always open. Without Meta (or before the first read lands) it answers about
+    // the agency's work, and says plainly that the numbers come once Meta is connected.
+    const readyToAsk = () => true;
     function setComposerOpen() {
-        const open = readyToAsk();
-        input.disabled = !open;
+        input.disabled = false;
+        const phase = xpStatus && xpStatus.phase;
+        const hint = $('composer-hint');
+        if (hint && !hint.classList.contains('warn')) hint.textContent = hintDefault();
         // Short, so it fits one line on a phone.
-        input.placeholder = open ? (appMode ? 'Ask about your numbers…' : 'Ask about your Instagram and Facebook…')
-            : xpStatus && xpStatus.phase === 'reading' ? 'Ready in a few minutes…' : 'Connect Meta first…';
+        input.placeholder = phase === 'not_connected' ? 'Ask about your agency’s work…'
+            : phase === 'reading' && !hasData(xpStatus) ? 'Ask away — numbers in a few minutes…'
+            : (appMode ? 'Ask about your numbers…' : 'Ask about your Instagram and Facebook…');
         updateSendState();
     }
+    const AGENCY_STARTERS = [
+        ['What are you working on for us?', 'Your agency’s work, as it stands'],
+        ['What do you need from me?', 'Your to-dos, and what waits for your OK'],
+        ['When is our next post?', 'The planned posts and where each one is']
+    ];
     function whenNext(s) {
         const sc = s && s.schedule;
         const m = sc && sc.enabled && /^(\d+)\s+([\d,]+)\s/.exec(sc.cron || '');
@@ -192,12 +202,16 @@
         const s = xpStatus;
         const phase = s && s.phase;
         if (phase === 'not_connected') {
-            return `<div id="welcome" class="rise"><div class="oa-connect">
-                <p><b>${isOwner ? 'Connect your Facebook Page and Instagram.' : 'This business has no Meta connected yet.'}</b> Edge Meta AI reads your own numbers
-                   (every day, every post, every follower) and answers only from them. It takes one login with Facebook;
-                   after that everything updates by itself.</p>
+            return `<div id="welcome" class="rise oa-welcome">
+            <div class="mark"><img src="icons/logo-mark-lg.png?v=1" alt=""></div>
+            <h2>What would you like to know?</h2>
+            <p>Ask about your agency’s work for you: what is being done, what is planned and what waits for you.</p>
+            <div class="starters">${AGENCY_STARTERS.map(([q, sub]) => `<button type="button" class="starter" data-q="${escHtml(q)}"><b>${escHtml(q)}</b><span>${escHtml(sub)}</span></button>`).join('')}</div>
+            <div class="oa-connect">
+                <p><b>${isOwner ? 'Add your numbers: connect your Facebook Page and Instagram.' : 'This business has no Meta connected yet.'}</b> Then Edge Meta AI also answers about
+                   your followers, reach and every post, from your own numbers. It takes one login with Facebook; after that everything updates by itself.</p>
                 ${connectBtn('Connect with Facebook')}
-                <p class="oa-fine">Read only: nothing is posted and no messages are read. You can disconnect at any time, and what was read is then deleted.${appMode ? ' Your agency’s work, your to-dos, planned posts and reports are already in the row at the top.' : ''}</p>
+                <p class="oa-fine">Read only: nothing is posted and no messages are read. You can disconnect at any time, and what was read is then deleted.</p>
             </div></div>`;
         }
         if (phase === 'reading' || (s && s.running && !hasData(s))) {
@@ -206,7 +220,9 @@
                 <div class="oa-pulse" aria-hidden="true"><i></i><i></i><i></i></div>
                 <p><b>Reading your numbers${names ? ' from ' + escHtml(names) : ''}.</b> The first time, Edge Meta AI reads the last 90 days
                    and every post. It usually takes a few minutes; you can leave and come back. This page opens up by itself when it is done.</p>
-            </div></div>`;
+            </div>
+            <p class="oa-fine" style="text-align:center">Meanwhile, ask about your agency’s work:</p>
+            <div class="starters">${AGENCY_STARTERS.map(([q, sub]) => `<button type="button" class="starter" data-q="${escHtml(q)}"><b>${escHtml(q)}</b><span>${escHtml(sub)}</span></button>`).join('')}</div></div>`;
         }
         const banner = phase === 'reconnect'
             ? `<div class="oa-connect" style="margin-top:0"><p><b>Meta stopped letting us read your numbers.</b> This happens when a password changes or access runs out.
@@ -252,10 +268,13 @@
         autoGrow();
         ask(text);
     }
-    const HINT_DEFAULT = 'Answers come from your own Instagram and Facebook data. The most recent days can still change.';
+    // Phase 50: without Meta the answers come from the agency's work, so the line says so.
+    const hintDefault = () => (xpStatus && xpStatus.phase === 'not_connected'
+        ? 'Answers come from what your agency shares with you. Connect Facebook and Instagram to ask about your numbers.'
+        : 'Answers come from your own Instagram and Facebook data. The most recent days can still change.');
     function setQuestionsLeft(n) {
         const hint = $('composer-hint');
-        if (typeof n !== 'number' || n > 10) { hint.textContent = HINT_DEFAULT; hint.classList.remove('warn'); return; }
+        if (typeof n !== 'number' || n > 10) { hint.textContent = hintDefault(); hint.classList.remove('warn'); return; }
         hint.textContent = n === 0 ? 'You have used today’s questions. The limit resets at midnight.' : `${n} question${n === 1 ? '' : 's'} left today.`;
         hint.classList.add('warn');
     }
