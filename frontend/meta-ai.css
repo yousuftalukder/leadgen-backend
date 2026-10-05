@@ -239,3 +239,17 @@ body.el-has-plan .oa-side { top: 132px; }
     .hub-back { display: inline-flex; }
     .hub-h > .icon-btn:last-child { display: none; }
 }
+/* phase 50: the check-up form inside the app */
+.hub-form { display: flex; flex-direction: column; gap: 8px; }
+.hub-form label { font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-top: 10px; }
+.hub-opt { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.hub-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 480px) { .hub-two { grid-template-columns: 1fr; } }
+.hub-tip { font-size: 0.78rem; color: var(--text-muted); line-height: 1.5; margin: 2px 0 0; }
+.hub-form .btn-primary { margin-top: 14px; }
+.hub-err { min-height: 18px; font-size: 0.86rem; color: var(--danger); margin: 6px 0 0; }
+.hub-err.is-quota { color: #fcd34d; }
+.hub-prog { margin-top: 8px; }
+.hub-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.09); overflow: hidden; }
+.hub-track i { display: block; height: 100%; width: 0; background: var(--accent-glow, var(--accent-solid)); transition: width .3s; }
+.hub-step { font-size: 0.82rem; color: var(--text-muted); margin-top: 8px; }

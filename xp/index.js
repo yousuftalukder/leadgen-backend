@@ -176,6 +176,23 @@ async function ensureProvisioned(clientId) {
   return !!(r.ok && r.assets);
 }
 
+/**
+ * EdgeLead (phase 50): the chat works before Meta is connected. Owners live in Edge Meta AI, so a
+ * business without Meta still asks about its agency's work, its posts and its reports. It gets a
+ * bare xp_clients row to hang its chats on, inactive, so the twice-daily read never tries it; the
+ * first Meta connection fills it in and switches it on (provisionClient).
+ */
+async function ensureChatClient(clientId) {
+  if (await ensureProvisioned(clientId)) return true;
+  const { data: c } = await supabase.from('clients').select('id, name, archived, timezone').eq('id', clientId).maybeSingle();
+  if (!c || c.archived) return false;
+  const { data: xc } = await supabase.from('xp_clients').select('id').eq('id', clientId).maybeSingle();
+  if (!xc) {
+    await q(supabase.from('xp_clients').insert({ id: c.id, client_name: c.name || 'Client', timezone: c.timezone || cfg.defaultClientTz, is_active: false, token_status: 'ACTIVE' }), 'xp chat client');
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------- access, EdgeLead's way
 /**
  * Which client this request is about. A client account is its own business
@@ -326,7 +343,7 @@ function mount(app, d) {
     const { message, conversationId } = req.body || {};
     const bad = chatMessageError(message);
     if (bad) return res.status(400).json({ error: bad });
-    if (!(await ensureProvisioned(a.clientId))) return res.status(409).json({ error: 'Connect a Facebook Page and Instagram account first — the assistant reads your own numbers.' });
+    if (!(await ensureChatClient(a.clientId))) return res.status(404).json({ error: 'That business could not be found.' });
     const gate = await chatLimitCheck(isAdmin(a.ctx), a.clientId);
     if (!gate.ok) return res.status(429).json({ error: gate.error, limit: gate.quota.limit, remaining: 0 });
     try {
@@ -344,7 +361,7 @@ function mount(app, d) {
     const { message, conversationId } = req.body || {};
     const bad = chatMessageError(message);
     if (bad) return res.status(400).json({ error: bad });
-    if (!(await ensureProvisioned(a.clientId))) return res.status(409).json({ error: 'Connect a Facebook Page and Instagram account first — the assistant reads your own numbers.' });
+    if (!(await ensureChatClient(a.clientId))) return res.status(404).json({ error: 'That business could not be found.' });
     const gate = await chatLimitCheck(isAdmin(a.ctx), a.clientId);
     if (!gate.ok) return res.status(429).json({ error: gate.error, limit: gate.quota.limit, remaining: 0 });
     res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -563,7 +580,8 @@ async function overview(now = Date.now()) {
     supabase.from('xp_sync_runs').select('id, client_id, asset_id, run_type, status, errors, started_at, finished_at').order('started_at', { ascending: false }).limit(400),
     supabase.from('xp_ai_conversations').select('client_id, updated_at').is('deleted_at', null).gte('updated_at', new Date(now - 30 * DAY_MS).toISOString())
   ]);
-  const ids = [...new Set([...(conns || []).map((c) => c.client_id), ...(xcs || []).map((c) => c.id)].filter(Boolean))];
+  // A chat-only business (phase 50: no Meta yet) has an xp_clients row but nothing to read: not listed here.
+  const ids = [...new Set([...(conns || []).map((c) => c.client_id), ...(assets || []).map((a) => a.client_id)].filter(Boolean))];
   const [{ data: clients }, { data: members }] = ids.length ? await Promise.all([
     supabase.from('clients').select('id, name, archived').in('id', ids),
     supabase.from('client_members').select('client_id, user_id, created_at').in('client_id', ids)
@@ -648,4 +666,4 @@ function start() {
   return { enabled: true, schedule: cfg.cron.schedule };
 }
 
-module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks };
+module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks, ensureChatClient };

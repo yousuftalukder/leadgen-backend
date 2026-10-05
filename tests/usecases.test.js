@@ -2466,12 +2466,13 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
 });
-test('a business with no Meta connection is told to connect first, and has nothing to read', async () => {
-    XP.script = [{ parts: [{ text: 'never reached' }] }];
+test('a business with no Meta connection is answered without numbers, and has nothing to read', async () => {
+    // Phase 50: the chat works before Meta, but only the agency's work is offered — never a numbers tool.
+    XP.script = [{ parts: [{ text: 'Connect Facebook and Instagram and I can answer that.' }] }];
+    XP.requests.length = 0;
     const r = await call('POST', '/api/xp/chat', { token: 't-emp', body: { message: 'How is my reach?', clientId: state.D } });
-    assert.strictEqual(r.statusCode, 409, JSON.stringify(r.body));
-    assert.ok(/Connect a Facebook Page/.test(r.body.error), r.body.error);
-    assert.strictEqual(XP.script.length, 1, 'the model must not be called');
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual(XP.requests[0].config.tools[0].functionDeclarations.map(d => d.name), ['get_agency_work']);
     XP.script.length = 0;
     const s = await call('POST', '/api/xp/sync', { token: 't-emp', body: { clientId: state.D } });
     assert.strictEqual(s.statusCode, 409, JSON.stringify(s.body));
@@ -2680,6 +2681,24 @@ test('phase 49: an owner signs in with an emailed code — invite-only, one use,
     row.attempts = 0; row.expires_at = new Date(Date.now() - 1000).toISOString();
     assert.strictEqual((await call('POST', '/api/public/owner-verify', { body: { email: 'owner@kitesurf.test', code } })).statusCode, 400);
     await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
+});
+test('phase 50: without Meta, the owner still chats — about the agency\'s work only, and nothing is read for them', async () => {
+    assert.ok(!tbl('meta_connections').some(c => c.client_id === state.T && c.status === 'active'), 'this business must have no Meta for the test');
+    XP.script = [{ parts: [{ text: 'Your agency is filming three Reels this week.' }] }];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-owner@kitesurf.test', body: { message: 'What are you working on for us?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.reply, 'Your agency is filming three Reels this week.');
+    const req = XP.requests[0];
+    const decls = req.config.tools[0].functionDeclarations.map(d => d.name);
+    assert.deepStrictEqual(decls, ['get_agency_work'], 'no Meta, no numbers tools: ' + decls.join(','));
+    assert.ok(/has NOT connected its Facebook Page and Instagram/.test(String(req.config.systemInstruction)), 'the no-Meta instructions');
+    const xc = tbl('xp_clients').find(x => x.id === state.T);
+    assert.ok(xc && xc.is_active === false, 'a bare, inactive row: the twice-daily read never tries it');
+    const ov = await call('GET', '/api/xp/admin/overview', { token: 't-admin' });
+    assert.ok(!ov.body.rows.some(x => x.clientId === state.T), 'a chat-only business is not listed among the Meta connections');
+    const st = await call('GET', '/api/xp/status', { token: 't-owner@kitesurf.test' });
+    assert.strictEqual(st.body.phase, 'not_connected');
 });
 test('a paid portal is an admin\'s to give', async () => {
     const e = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'shop@bloom.test', paidUntil: '2027-01-31' } });

@@ -97,6 +97,7 @@
             ${chip('work', 'Working on', working().length, false)}
             ${chip('reports', 'Reports', data.reports.length, false)}
             ${data.growth && data.growth.connected ? chip('numbers', 'Daily numbers', 0, false) : ''}
+            ${(me.engines || []).includes('report') ? chip('checkup', 'New check-up', 0, false) : ''}
             ${tools.map(([k, l]) => chip('tool-' + k, l, 0, false)).join('')}
         </div>`;
         host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => {
@@ -106,6 +107,7 @@
             else if (k === 'posts') openPosts();
             else if (k === 'reports') openReports();
             else if (k === 'numbers') openNumbers();
+            else if (k === 'checkup') openCheckup();
             else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
         }));
         const n = todos().length + waitingPosts().length;
@@ -255,6 +257,58 @@
             <p class="hub-empty">Ask Edge Meta AI about any of it: “why did reach drop on Tuesday?”</p>`;
     }
 
+    // ---- a new Instagram check-up (phase 50) --------------------------------------------
+    // The same run the owner Home page had: their account, and up to two businesses like
+    // theirs to compare with. It runs on the agency's account allowance; the report opens here.
+    const LAST_HANDLE = 'el-checkup-handle';
+    function openCheckup() {
+        const s = sheet('New check-up', 'How your Instagram is doing, and how you compare');
+        let last = '';
+        try { last = localStorage.getItem(LAST_HANDLE) || ''; } catch { /* private mode */ }
+        s.body.innerHTML = `<div class="hub-form">
+            <p class="hub-empty">A check-up reads your recent posts and scores them, and compares you with similar businesses. It takes a couple of minutes; you can keep chatting meanwhile.</p>
+            <label for="ck-h">Your Instagram handle</label><input id="ck-h" placeholder="harborcafe" autocomplete="off" spellcheck="false" value="${esc(last)}">
+            <label for="ck-r1">Two businesses like yours <span class="hub-opt">optional</span></label>
+            <div class="hub-two"><input id="ck-r1" placeholder="a competitor" autocomplete="off" spellcheck="false"><input id="ck-r2" placeholder="another one" autocomplete="off" spellcheck="false"></div>
+            <p class="hub-tip">Pick businesses about your size, ideally near you. Leave them blank and you still get your own report, without the comparison.</p>
+            <button class="btn-primary" type="button" id="ck-go">Run my check-up</button>
+            <p class="hub-err" id="ck-err" role="alert"></p>
+            <div class="hub-prog" id="ck-prog" hidden><div class="hub-track"><i></i></div><div class="hub-step">Starting…</div></div>
+        </div>`;
+        const $ = id => s.el.querySelector('#' + id);
+        const clean = v => String(v || '').replace('@', '').replace(/\/+$/, '').trim().toLowerCase();
+        const go = async () => {
+            const target = clean($('ck-h').value), r1 = clean($('ck-r1').value), r2 = clean($('ck-r2').value);
+            const err = $('ck-err'); err.textContent = ''; err.className = 'hub-err';
+            if (!target) { err.textContent = 'Enter your Instagram handle to get started.'; $('ck-h').focus(); return; }
+            try { localStorage.setItem(LAST_HANDLE, target); } catch { /* private mode */ }
+            const btn = $('ck-go'), prog = $('ck-prog');
+            const step = (pct, msg) => { prog.querySelector('i').style.width = (pct || 0) + '%'; prog.querySelector('.hub-step').textContent = msg || ''; };
+            const stop = () => { btn.disabled = false; btn.textContent = 'Run my check-up'; prog.hidden = true; };
+            btn.disabled = true; btn.textContent = 'Running…'; prog.hidden = false; step(2, 'Starting…');
+            try {
+                await EL.runJob('/api/generate-ig-report', { target, compareRivals: !!(r1 || r2), rival1: r1 || null, rival2: r2 || null }, {
+                    onProgress: j => step(j.progress, j.current_step),
+                    onFailed: j => { stop(); err.textContent = j.error || 'That check-up did not finish.'; },
+                    onDone: async j => {
+                        step(100, 'Done — opening your report');
+                        const id = j.result && (j.result.reportId || j.result.reportRef);
+                        await load().catch(() => {});
+                        if (id) openReport(id); else openReports();
+                    }
+                });
+            } catch (e) {
+                stop();
+                if (e.handled) return;
+                err.textContent = e.message;
+                if (e.quota) err.className = 'hub-err is-quota';      // an allowance reached is amber, not red
+            }
+        };
+        $('ck-go').addEventListener('click', go);
+        ['ck-h', 'ck-r1', 'ck-r2'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') go(); }));
+        setTimeout(() => $('ck-h').focus(), 60);
+    }
+
     // ---- a shared tool, inside the app ----------------------------------------------------
     function openTool(label, page) {
         const s = sheet(esc(label));
@@ -269,5 +323,5 @@
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup }[k] || (() => {}))() };
 })();
