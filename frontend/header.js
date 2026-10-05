@@ -1298,7 +1298,7 @@
         wrap.id = 'el-drawer';
         wrap.innerHTML = `
             <div class="el-drawer-scrim" data-dw-close></div>
-            <aside class="el-drawer${wide ? ' is-wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="el-dw-title">
+            <aside class="el-drawer${wide ? ' is-wide' : ''}${wide === 'xl' ? ' is-xl' : ''}" role="dialog" aria-modal="true" aria-labelledby="el-dw-title">
                 <header class="el-drawer-h">
                     <div class="el-drawer-t"><h2 id="el-dw-title">${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div>
                     <button class="el-iconbtn" type="button" data-dw-close aria-label="Close">${icon('x')}</button>

@@ -25,7 +25,7 @@ const chain = () => {
 const stubs = {
     express: Object.assign(() => ({
         set() {}, use() {}, get() {}, post() {}, patch() {}, delete() {}, put() {}, listen() {}
-    }), { json: () => (_, __, n) => n && n(), static: () => () => {} }),
+    }), { json: () => (_, __, n) => n && n(), raw: () => (_, __, n) => n && n(), static: () => () => {} }),
     cors: () => () => {},
     'apify-client': { ApifyClient: class {} },
     '@supabase/supabase-js': { createClient: () => ({ from: chain, rpc: chain, auth: { getUser: async () => ({ data: null, error: new Error('stub') }) } }) },

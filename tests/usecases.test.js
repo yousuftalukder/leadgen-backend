@@ -178,9 +178,12 @@ const STORAGE = { buckets: new Set(), files: {} };
 const fakeSupabase = {
     storage: {
         getBucket: async name => ({ data: STORAGE.buckets.has(name) ? { name } : null, error: null }),
-        createBucket: async name => { STORAGE.buckets.add(name); return { data: { name }, error: null }; },
+        createBucket: async (name, o) => { STORAGE.buckets.add(name); STORAGE.options = { ...(STORAGE.options || {}), [name]: o || {} }; return { data: { name }, error: null }; },
         from: bucket => ({
             upload: async (path, buf, o) => { STORAGE.files[`${bucket}/${path}`] = { bytes: buf.length, type: o && o.contentType }; return { data: { path }, error: null }; },
+            // Phase 48: the private task-media bucket hands out signed links, and loses files with their task.
+            createSignedUrls: async (paths, secs) => ({ data: paths.map(path => ({ path, signedUrl: STORAGE.files[`${bucket}/${path}`] ? `https://stub.supabase.co/storage/v1/object/sign/${bucket}/${path}?token=t&exp=${secs}` : null, error: null })), error: null }),
+            remove: async (paths) => { for (const path of paths) delete STORAGE.files[`${bucket}/${path}`]; return { data: paths, error: null }; },
             getPublicUrl: path => ({ data: { publicUrl: `https://stub.supabase.co/storage/v1/object/public/${bucket}/${path}` } })
         })
     },
@@ -252,7 +255,7 @@ const stubs = {
     },
     // The framework middleware are pass-throughs: the body is already an object,
     // there are no files to serve, and CORS is not what is under test.
-    express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), static: () => (_, __, n) => n && n() }),
+    express: Object.assign(() => appStub, { json: () => (_, __, n) => n && n(), raw: () => (_, __, n) => n && n(), static: () => (_, __, n) => n && n() }),
     cors: () => (_, __, n) => n && n(),
     // An Apify that answers from the test's script (phase 40). Actors are
     // functions of their input; every call is kept. A run finds a key only
@@ -1703,6 +1706,10 @@ section('\nthe content plan, with the model told to overspend');
 /** Stored posts for one Instagram handle, varied enough to produce cells. */
 function seedPosts(handle, spec) {
     const now = Date.now();
+    // Spread over the part of this month that has passed (UTC), so the posts stay in the
+    // current month on any day of it. One a day only worked after the 18th.
+    const d0 = new Date(now), monthStart = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), 1);
+    const step = Math.min(86400000, Math.max(60000, (now - monthStart) / (spec.length + 2)));
     spec.forEach((p, i) => tbl('posts').push({
         id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'instagram', handle,
         shortcode: `${handle.slice(0, 3)}${i}`, post_url: `https://instagram.com/p/${handle.slice(0, 3)}${i}`,
@@ -1712,7 +1719,7 @@ function seedPosts(handle, spec) {
         // One post a day, most recent first, so all of them fall in the current
         // month: the index is computed per handle per month, and a post that
         // drifts into last month is scored against a different median.
-        posted_at: new Date(now - (i + 1) * 86400000).toISOString(), scraped_at: new Date(now - 3600000).toISOString(),
+        posted_at: new Date(now - (i + 1) * step).toISOString(), scraped_at: new Date(now - 60000).toISOString(),
         hour_local: 9 + (i % 10), dow_local: i % 7, audio: null, first_comment: null, aspect_ratio: null, video_duration: p.type === 'reel' ? 14 : null
     }));
 }
@@ -2677,7 +2684,7 @@ test('the team and the owner talk on a shared task; the owner never sees the tea
     assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-owner@kitesurf.test', body: { body: 'Great!' } })).statusCode, 201);
     assert.strictEqual((await call('POST', `/api/tasks/${state.hiddenTask}/comments`, { token: 't-owner@kitesurf.test', body: { body: 'peek' } })).statusCode, 404);
     assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: '   ' } })).statusCode, 400);
-    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: 'x'.repeat(2001) } })).statusCode, 400);
+    assert.strictEqual((await call('POST', `/api/tasks/${state.clientTask}/comments`, { token: 't-emp', body: { body: 'x'.repeat(4001) } })).statusCode, 400);
     const o = await call('GET', `/api/tasks/${state.clientTask}/comments`, { token: 't-owner@kitesurf.test' });
     assert.strictEqual(o.statusCode, 200, JSON.stringify(o.body));
     assert.strictEqual(o.body.comments.length, 2);
@@ -2742,6 +2749,81 @@ test('a monthly report is filed only under a client the caller may edit', async 
     assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
     assert.ok(/edit access/.test(r.body.error), r.body.error);
     assert.strictEqual(tbl('jobs').length, before, 'a job was queued for a client the caller cannot edit');
+});
+
+section('\nphase 48: a task is an issue — key, priority, pictures in the description');
+const PNG_1PX = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
+test('a task has a priority, a key, and several labels of anyone\'s choosing', async () => {
+    const bad = await call('POST', `/api/clients/${state.C}/tasks`, { token: 't-admin', body: { title: 'Wrong priority', priority: 'urgent' } });
+    assert.strictEqual(bad.statusCode, 400, JSON.stringify(bad.body));
+    const r = await call('POST', `/api/clients/${state.C}/tasks`, { token: 't-admin', body: { title: 'Fix the link in bio', priority: 'high', labels: ['Profile', 'Quick win', 'quick WIN', 'Setup'] } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.body.task.priority, 'high');
+    assert.deepStrictEqual(r.body.task.labels, ['Profile', 'Quick win', 'Setup'], 'custom labels, without repeats');
+    state.t48 = r.body.task.id;
+    const row = tbl('client_tasks').find(t => t.id === state.t48);
+    row.task_number = 12;                                   // the database numbers it; the fake does not
+    const one = await call('GET', `/api/tasks/${state.t48}`, { token: 't-admin' });
+    assert.strictEqual(one.statusCode, 200, JSON.stringify(one.body));
+    assert.strictEqual(one.body.task.key, 'HC-12', 'Harbor Cafe → HC, as on a Jira board');
+    assert.strictEqual(one.body.task.reporter.email, ADMIN.email, 'who raised it');
+    assert.strictEqual(one.body.canEdit, true);
+    const upd = await call('PATCH', `/api/tasks/${state.t48}`, { token: 't-admin', body: { priority: 'lowest' } });
+    assert.strictEqual(upd.body.task.priority, 'lowest');
+    const board = await call('GET', `/api/clients/${state.C}/tasks`, { token: 't-admin' });
+    assert.strictEqual(board.body.tasks.find(t => t.id === state.t48).key, 'HC-12', 'the card carries the key');
+    const stranger = await call('GET', `/api/tasks/${state.t48}`, { token: 't-stranger' });
+    assert.strictEqual(stranger.statusCode, 404);
+    const owner = await call('GET', `/api/tasks/${state.t48}`, { token: 't-client' });
+    assert.strictEqual(owner.statusCode, 403, 'the staff view is not the owner\'s');
+});
+test('a pasted picture is checked, kept private, and shown only through a signed link', async () => {
+    const notImage = await call('POST', `/api/clients/${state.C}/task-media`, { token: 't-admin', body: Buffer.from('<script>alert(1)</script> padding padding') });
+    assert.strictEqual(notImage.statusCode, 400, 'the bytes decide what it is, not the header');
+    const stranger = await call('POST', `/api/clients/${state.C}/task-media`, { token: 't-stranger', body: PNG_1PX });
+    assert.strictEqual(stranger.statusCode, 404);
+    const up = await call('POST', `/api/clients/${state.C}/task-media`, { token: 't-admin', body: PNG_1PX });
+    assert.strictEqual(up.statusCode, 201, JSON.stringify(up.body));
+    assert.ok(/^!\[image\]\(media:[0-9a-f-]{36}\)$/.test(up.body.token), up.body.token);
+    assert.ok(/\/object\/sign\/task-media\//.test(up.body.url), 'a signed link, never a public one: ' + up.body.url);
+    assert.strictEqual(STORAGE.options['task-media'].public, false, 'the bucket is private');
+    const media = tbl('client_task_media').find(m => m.id === up.body.id);
+    assert.ok(media && media.client_id === state.C && media.task_id == null && media.content_type === 'image/png');
+    // Saving the description ties the picture to the task, and opening the task hands back a link.
+    const notes = `Before and after:\n${up.body.token}\nThe old link 404s.`;
+    const r = await call('PATCH', `/api/tasks/${state.t48}`, { token: 't-admin', body: { notes } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(media.task_id, state.t48);
+    const one = await call('GET', `/api/tasks/${state.t48}`, { token: 't-admin' });
+    assert.strictEqual(one.body.task.notes, notes);
+    assert.ok(one.body.media[up.body.id], 'the picture comes back as a link');
+    // Another client's task cannot adopt this client's picture.
+    const other = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Other Place' } });
+    const ot = await call('POST', `/api/clients/${other.body.client.id}/tasks`, { token: 't-admin', body: { title: 'Steal it', notes: up.body.token } });
+    assert.strictEqual(ot.statusCode, 201);
+    assert.strictEqual(media.task_id, state.t48, 'still this client\'s');
+    const theirs = await call('GET', `/api/tasks/${ot.body.task.id}`, { token: 't-admin' });
+    assert.deepStrictEqual(theirs.body.media, {}, 'and no link to it from the other client');
+});
+test('pictures in comments, and the owner sees the pictures of a task shown to them', async () => {
+    const up = await call('POST', `/api/clients/${state.C}/task-media`, { token: 't-admin', body: PNG_1PX });
+    const c = await call('POST', `/api/tasks/${state.t48}/comments`, { token: 't-admin', body: { body: `Here it is now ${up.body.token}` } });
+    assert.strictEqual(c.statusCode, 201, JSON.stringify(c.body));
+    const list = await call('GET', `/api/tasks/${state.t48}/comments`, { token: 't-admin' });
+    assert.ok(list.body.media[up.body.id], 'comment pictures come back as links');
+    await call('PATCH', `/api/tasks/${state.t48}`, { token: 't-admin', body: { visibleToClient: true } });
+    const own = await call('GET', '/api/client/tasks', { token: 't-client' });
+    const mine = own.body.tasks.find(t => t.id === state.t48);
+    assert.ok(mine, 'shown to the owner');
+    assert.strictEqual(mine.priority, 'lowest');
+    assert.ok(Object.keys(own.body.media || {}).length >= 1, 'with its pictures');
+});
+test('deleting a task deletes its pictures, files and all', async () => {
+    const paths = tbl('client_task_media').filter(m => m.task_id === state.t48).map(m => m.path);
+    assert.ok(paths.length >= 2);
+    const r = await call('DELETE', `/api/tasks/${state.t48}`, { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200);
+    for (const p of paths) assert.ok(!STORAGE.files[`task-media/${p}`], 'file left behind: ' + p);
 });
 
 section('\nphase 33: Ask AI answers an admin about any client');

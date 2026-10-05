@@ -12640,11 +12640,12 @@ app.delete('/api/clients/:id/members/:userId', async (req, res) => {
 // staff routes refuse client accounts rather than filter for them.
 // ===========================================================================
 const TASK_STATUSES = ['todo', 'doing', 'waiting', 'done'];
+const TASK_PRIORITIES = ['lowest', 'low', 'medium', 'high', 'highest'];   // phase 48
 const TASK_TITLE_MAX = 300;
-const TASK_NOTES_MAX = 4000;
-const TASK_LABELS_MAX = 6;
+const TASK_NOTES_MAX = 20000;           // phase 48: a description, pictures referenced in it
+const TASK_LABELS_MAX = 8;
 const TASK_CHECKLIST_MAX = 30;
-const TASK_COMMENT_MAX = 2000;
+const TASK_COMMENT_MAX = 4000;
 const TASK_DONE_SHOWN_DAYS = 14;          // "My tasks" keeps a fortnight of finished work in view
 const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -12656,6 +12657,17 @@ const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 function missingTable(err) {
     return !!err && (err.code === '42P01' || err.code === 'PGRST205'
         || /does not exist|could not find the table/i.test(String(err.message || '')));
+}
+/** Phase 48's columns (priority, task_number) or its media table are missing: the server is ahead of the SQL. */
+function missing48(err) {
+    return !!err && (err.code === 'PGRST204' || err.code === '42703' || err.code === 'PGRST205' || err.code === '42P01')
+        && /priority|task_number|client_task_media/i.test(String(err.message || ''));
+}
+function migration48(res) {
+    return res.status(503).json({
+        error: 'Task priority, keys and pictures need the phase-48 database update. Run sql/schema-phase48.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
 }
 function migrationNeeded(res) {
     return res.status(503).json({
@@ -12690,6 +12702,10 @@ function cleanTaskBody(b = {}, { create = false } = {}) {
     if (b.status !== undefined) {
         if (!TASK_STATUSES.includes(b.status)) throw taskFail(`Status must be one of: ${TASK_STATUSES.join(', ')}.`);
         out.status = b.status;
+    }
+    if (b.priority !== undefined) {
+        if (!TASK_PRIORITIES.includes(b.priority)) throw taskFail(`Priority must be one of: ${TASK_PRIORITIES.join(', ')}.`);
+        out.priority = b.priority;
     }
     if (b.dueDate !== undefined) {
         if (b.dueDate === null || b.dueDate === '') out.due_date = null;
@@ -12789,11 +12805,25 @@ async function taskCommentCounts(taskIds) {
     return out;
 }
 
+/**
+ * A task's key, as on a Jira board: the client's initials and the task's number (HC-12).
+ * The number runs across every client, so a key never repeats, even between businesses.
+ */
+function taskKeyPrefix(name) {
+    const words = String(name || '').replace(/[^A-Za-z0-9 ]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return 'T';
+    const p = words.length === 1 ? words[0].slice(0, 2) : words.slice(0, 3).map(w => w[0]).join('');
+    return p.toUpperCase();
+}
+const taskKey = (t, clientName) => (t && t.task_number ? `${taskKeyPrefix(clientName)}-${t.task_number}` : null);
+
 /** The staff view of a task. */
-function taskView(t, people = {}, comments = {}) {
+function taskView(t, people = {}, comments = {}, clientName = '') {
     const p = t.assignee_user_id ? people[t.assignee_user_id] : null;
     return {
         id: t.id, clientId: t.client_id, title: t.title, notes: t.notes || '',
+        key: taskKey(t, clientName), number: t.task_number || null,
+        priority: t.priority || 'medium',
         status: t.status, dueDate: t.due_date || null,
         labels: t.labels || [], checklist: t.checklist || [],
         assignee: t.assigned_to_client ? { kind: 'client' }
@@ -12810,7 +12840,7 @@ function taskView(t, people = {}, comments = {}) {
 /** The owner's view of a task: what it is and whether it is theirs. No ids of people, no internal notes on who made it. */
 function clientTaskView(t) {
     return {
-        id: t.id, title: t.title, notes: t.notes || '', status: t.status, dueDate: t.due_date || null,
+        id: t.id, title: t.title, notes: t.notes || '', status: t.status, dueDate: t.due_date || null, priority: t.priority || 'medium',
         yours: !!t.assigned_to_client, from: t.source_label || null,
         checklist: t.checklist || [], completedAt: t.completed_at || null, updatedAt: t.updated_at || t.created_at
     };
@@ -12872,7 +12902,7 @@ app.get('/api/clients/:id/tasks', async (req, res) => {
             canEdit: ['owner', 'admin', 'editor'].includes(c.access),
             statuses: TASK_STATUSES,
             people,
-            tasks: tasks.map(t => taskView(t, byId, counts))
+            tasks: tasks.map(t => taskView(t, byId, counts, c.name))
         });
     } catch (err) { sendErr(res, err); }
 });
@@ -12893,7 +12923,7 @@ app.post('/api/clients/:id/tasks', async (req, res) => {
             const { data: dup, error: de } = await supabase.from('client_tasks').select('*')
                 .eq('client_id', c.id).eq('source_id', src.source_id).eq('source_key', src.source_key).maybeSingle();
             if (de) { if (missingTable(de)) return migrationNeeded(res); throw de; }
-            if (dup) return res.json({ task: taskView(dup, await peopleById([dup.assignee_user_id])), existing: true });
+            if (dup) return res.json({ task: taskView(dup, await peopleById([dup.assignee_user_id]), {}, c.name), existing: true });
         }
 
         const status = body.status || 'todo';
@@ -12913,8 +12943,9 @@ app.post('/api/clients/:id/tasks', async (req, res) => {
         };
         if (row.assigned_to_client) row.visible_to_client = true;
         const { data, error } = await supabase.from('client_tasks').insert([row]).select().maybeSingle();
-        if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
-        res.status(201).json({ task: taskView(data, await peopleById([data.assignee_user_id])) });
+        if (error) { if (missing48(error)) return migration48(res); if (missingTable(error)) return migrationNeeded(res); throw error; }
+        await linkTaskMedia(data, [data.notes]);
+        res.status(201).json({ task: taskView(data, await peopleById([data.assignee_user_id]), {}, c.name) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -12938,8 +12969,9 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
         if (forClient) patch.visible_to_client = true;
 
         const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
-        if (error) throw error;
-        res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id])) });
+        if (error) { if (missing48(error)) return migration48(res); throw error; }
+        if (patch.notes !== undefined) await linkTaskMedia(data, [data.notes]);
+        res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id]), c.name) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -12951,6 +12983,7 @@ app.delete('/api/tasks/:taskId', async (req, res) => {
         if (t === TASK_MISSING) return migrationNeeded(res);
         const c = t ? await clientAccess(ctx.user.id, t.client_id, 'editor') : null;
         if (!t || !c) return res.status(404).json({ error: 'Task not found, or you cannot edit it.' });
+        await removeTaskMedia(t.id);                      // the pictures go with it, files and all
         const { error } = await supabase.from('client_tasks').delete().eq('id', t.id);
         if (error) throw error;
         res.json({ success: true });
@@ -12972,6 +13005,7 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
         for (const id of Object.keys(people)) roles[id] = await userRole(id);
         const forClient = ctx.profile?.role === 'client';
         res.json({
+            media: await taskMediaUrls(t.client_id, rows.map(r => r.body)),
             comments: rows.map(r => {
                 const p = people[r.author_user_id] || {};
                 const fromClient = roles[r.author_user_id] === 'client';
@@ -12998,8 +13032,133 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
             .insert([{ task_id: t.id, client_id: t.client_id, author_user_id: ctx.user.id, body, created_at: new Date().toISOString() }])
             .select().maybeSingle();
         if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+        await linkTaskMedia(t, [body]);
         await supabase.from('client_tasks').update({ updated_at: new Date().toISOString() }).eq('id', t.id);
         res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at } });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ---- phase 48: one task, opened; pictures in its description and comments ----
+//
+// A picture is uploaded the moment it is pasted (the task may not exist yet),
+// filed under the client, and referenced from the text as ![image](media:<id>).
+// Saving the task or the comment ties the referenced pictures to the task. The
+// bucket is private: the pages get signed links that last an hour, and only
+// from routes that already decided the caller may read the task.
+const TASK_MEDIA_BUCKET = process.env.TASK_MEDIA_BUCKET || 'task-media';
+const TASK_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
+const TASK_MEDIA_TTL_SECS = 3600;
+const TASK_MEDIA_RE = /!\[[^\]]{0,80}\]\(media:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)/gi;
+const TASK_MEDIA_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+let _taskBucket = null;
+
+async function ensureTaskBucket() {
+    if (!supabase.storage) return false;
+    if (!_taskBucket) {
+        _taskBucket = (async () => {
+            try {
+                const { data } = await supabase.storage.getBucket(TASK_MEDIA_BUCKET);
+                if (data) return true;
+                const { error } = await supabase.storage.createBucket(TASK_MEDIA_BUCKET, {
+                    public: false, fileSizeLimit: TASK_MEDIA_MAX_BYTES, allowedMimeTypes: Object.keys(TASK_MEDIA_TYPES)
+                });
+                if (error && !/exist/i.test(error.message || '')) throw error;
+                return true;
+            } catch (err) {
+                logger.warn('task_bucket_unavailable', { message: err.message });
+                _taskBucket = null;
+                return false;
+            }
+        })();
+    }
+    return _taskBucket;
+}
+
+/** What the bytes are, from the bytes: the header a browser sends is only a claim. */
+function sniffImage(buf) {
+    if (!buf || buf.length < 12) return null;
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+    if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+    if (buf.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';
+    return null;
+}
+
+const mediaIdsIn = texts => [...new Set(texts.filter(Boolean).flatMap(x => [...String(x).matchAll(TASK_MEDIA_RE)].map(m => m[1].toLowerCase())))];
+
+/** Signed links for the pictures these texts reference, this client's only. { id: url } */
+async function taskMediaUrls(clientId, texts) {
+    const ids = mediaIdsIn(texts);
+    if (!ids.length || !supabase.storage) return {};
+    const { data, error } = await supabase.from('client_task_media').select('id, path').eq('client_id', clientId).in('id', ids);
+    if (error || !(data || []).length) return {};
+    const { data: signed, error: se } = await supabase.storage.from(TASK_MEDIA_BUCKET).createSignedUrls(data.map(r => r.path), TASK_MEDIA_TTL_SECS);
+    if (se || !signed) return {};
+    const byPath = Object.fromEntries(signed.filter(x => x && x.signedUrl).map(x => [x.path, x.signedUrl]));
+    return Object.fromEntries(data.filter(r => byPath[r.path]).map(r => [r.id, byPath[r.path]]));
+}
+
+/** Tie the pictures a saved text references to its task. Pictures of another client are never adopted. */
+async function linkTaskMedia(task, texts) {
+    const ids = mediaIdsIn(texts);
+    if (!ids.length || !task) return;
+    const { error } = await supabase.from('client_task_media').update({ task_id: task.id })
+        .eq('client_id', task.client_id).is('task_id', null).in('id', ids);
+    if (error && !missing48(error)) logger.warn('task_media_link_failed', { message: error.message });
+}
+
+async function removeTaskMedia(taskId) {
+    const { data, error } = await supabase.from('client_task_media').select('path').eq('task_id', taskId);
+    if (error || !(data || []).length || !supabase.storage) return;
+    const { error: re } = await supabase.storage.from(TASK_MEDIA_BUCKET).remove(data.map(r => r.path));
+    if (re) logger.warn('task_media_remove_failed', { message: re.message });
+}
+
+/** Upload one picture for a client's tasks. The body is the image itself, not JSON. */
+app.post('/api/clients/:id/task-media',
+    express.raw({ type: Object.keys(TASK_MEDIA_TYPES), limit: TASK_MEDIA_MAX_BYTES }),
+    async (req, res) => {
+        try {
+            const ctx = await auth(req, res); if (!ctx) return;
+            if (!staffOnly(ctx, res)) return;
+            const c = await clientAccess(ctx.user.id, req.params.id, 'viewer');
+            if (!c) return res.status(404).json({ error: 'Client not found.' });
+            const buf = Buffer.isBuffer(req.body) ? req.body : null;
+            if (!buf || !buf.length) return res.status(400).json({ error: 'Send a picture: PNG, JPEG, WebP or GIF.' });
+            const type = sniffImage(buf);
+            if (!type) return res.status(400).json({ error: 'That is not a PNG, JPEG, WebP or GIF picture.' });
+            if (!(await ensureTaskBucket())) return res.status(503).json({ error: 'Picture storage is not available right now. Try again in a minute.' });
+            const id = crypto.randomUUID();
+            const path = `${c.id}/${id}.${TASK_MEDIA_TYPES[type]}`;
+            const { error: ue } = await supabase.storage.from(TASK_MEDIA_BUCKET).upload(path, buf, { contentType: type, upsert: false, cacheControl: '3600' });
+            if (ue) throw ue;
+            const { error } = await supabase.from('client_task_media').insert([{ id, client_id: c.id, path, content_type: type, bytes: buf.length, uploaded_by: ctx.user.id, created_at: new Date().toISOString() }]);
+            if (error) {
+                await supabase.storage.from(TASK_MEDIA_BUCKET).remove([path]).catch(() => {});
+                if (missing48(error)) return migration48(res);
+                throw error;
+            }
+            const urls = await taskMediaUrls(c.id, [`![image](media:${id})`]);
+            res.status(201).json({ id, token: `![image](media:${id})`, url: urls[id] || null });
+        } catch (err) {
+            if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That picture is over 5 MB. Use a smaller one.' });
+            sendErr(res, err);
+        }
+    });
+
+/** One task, opened: everything the board card has, plus who made it and signed links for its pictures. */
+app.get('/api/tasks/:taskId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const t = await loadTask(req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        const c = t ? await clientAccess(ctx.user.id, t.client_id, 'viewer') : null;
+        if (!t || !c) return res.status(404).json({ error: 'Task not found.' });
+        const people = await peopleById([t.assignee_user_id, t.created_by]);
+        const view = taskView(t, people, await taskCommentCounts([t.id]), c.name);
+        view.reporter = t.created_by && people[t.created_by] ? { id: t.created_by, name: people[t.created_by].name, email: people[t.created_by].email } : null;
+        res.json({ task: view, media: await taskMediaUrls(t.client_id, [t.notes]), canEdit: ['owner', 'admin', 'editor'].includes(c.access) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -13022,7 +13181,7 @@ app.get('/api/my-tasks', async (req, res) => {
         const tasks = rows.filter(t => clients.has(t.client_id))
             // Soonest first; no due date last; then oldest.
             .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || String(a.created_at).localeCompare(String(b.created_at)))
-            .map(t => ({ ...taskView(t, me, counts), client: { id: t.client_id, name: clients.get(t.client_id).name } }));
+            .map(t => ({ ...taskView(t, me, counts, clients.get(t.client_id).name), client: { id: t.client_id, name: clients.get(t.client_id).name } }));
         res.json({ tasks });
     } catch (err) { sendErr(res, err); }
 });
@@ -13036,14 +13195,14 @@ app.get('/api/client/tasks', async (req, res) => {
         const own = await ownClientFor(ctx);
         if (!own) return res.json({ business: null, tasks: [] });
         const { data, error } = await supabase.from('client_tasks')
-            .select('id, title, notes, status, due_date, assigned_to_client, visible_to_client, source_label, checklist, completed_at, updated_at, created_at')
+            .select('*')
             .eq('client_id', own.id).eq('visible_to_client', true).limit(500);
         if (error) { if (missingTable(error)) return res.json({ business: { id: own.id, name: own.name }, tasks: [] }); throw error; }
         const rows = (data || []).sort((a, b) =>
             (a.status === 'done') - (b.status === 'done')
             || (a.due_date || '9999').localeCompare(b.due_date || '9999')
             || String(a.created_at).localeCompare(String(b.created_at)));
-        res.json({ business: { id: own.id, name: own.name }, tasks: rows.map(clientTaskView) });
+        res.json({ business: { id: own.id, name: own.name }, tasks: rows.map(clientTaskView), media: await taskMediaUrls(own.id, rows.map(r => r.notes)) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -14896,7 +15055,9 @@ const MERGE_TABLES = [
     'content_plan_notes', 'competitor_sets', 'fb_group_sets', 'fb_page_sets', 'fb_suggestions',
     'fb_posts', 'fb_page_posts', 'posts', 'report_shares', 'schedules',
     // phase 32: a merged client keeps its board and the talk on it
-    'client_tasks', 'client_task_comments'
+    'client_tasks', 'client_task_comments',
+    // phase 48: the pictures in them (the files keep their path; the row says whose they are)
+    'client_task_media'
 ];
 
 app.post('/api/clients/:id/merge', async (req, res) => {

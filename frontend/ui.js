@@ -84,10 +84,11 @@
         const done = (t.checklist || []).filter(i => i.done).length;
         return `<div class="ws-card-k ${t.status === 'done' ? 'is-done' : ''}" draggable="${ctx.canEdit ? 'true' : 'false'}" data-task="${esc(t.id)}" role="button" tabindex="0" aria-label="${esc(t.title)}">
             <span class="kt">${esc(t.title)}</span>
+            ${String(t.notes || '').includes('](media:') ? `<span class="ksrc">${ic('doc')}Has pictures</span>` : ''}
             ${(t.labels || []).length || t.visibleToClient ? `<span class="ws-chips">${(t.labels || []).map(labelChip).join('')}${t.visibleToClient ? '<span class="ws-lbl" style="--c:var(--jade)">Client sees</span>' : ''}</span>` : ''}
             ${t.source && t.source.label ? `<span class="ksrc">${ic('link')}${esc(t.source.label)}</span>` : ''}
             <span class="kf">
-                <span class="ws-due ${late ? 'is-late' : ''}">${t.dueDate ? (late ? 'Overdue · ' : 'Due ') + day(t.dueDate) : 'No date'}</span>
+                <span style="display:inline-flex;gap:6px;align-items:center">${prioIcon(t.priority)}${t.key ? `<span class="tk-key is-sm">${esc(t.key)}</span>` : ''}<span class="ws-due ${late ? 'is-late' : ''}">${t.dueDate ? (late ? 'Overdue · ' : 'Due ') + day(t.dueDate) : 'No date'}</span></span>
                 <span style="display:inline-flex;gap:8px;align-items:center">
                     ${(t.checklist || []).length ? `<span class="ws-num">${done}/${t.checklist.length}</span>` : ''}
                     ${t.comments ? `<span class="ws-num" style="display:inline-flex;gap:3px;align-items:center">${ic('chat')}${t.comments}</span>` : ''}
@@ -182,113 +183,306 @@
         return state;
     }
 
+    // ---- phase 48: a task is an issue — key, priority, a description with pictures ----
+    const PRIORITY = [
+        ['highest', 'Highest', '#fb7185', '<path d="M6 14l6-6 6 6M6 9l6-6 6 6"/>'],
+        ['high', 'High', '#fb923c', '<path d="M6 15l6-6 6 6"/>'],
+        ['medium', 'Medium', '#f0d39a', '<path d="M6 10h12M6 14h12"/>'],
+        ['low', 'Low', '#60a5fa', '<path d="M6 9l6 6 6-6"/>'],
+        ['lowest', 'Lowest', '#94a3b8', '<path d="M6 10l6 6 6-6M6 15l6 6 6-6"/>']
+    ];
+    const PRIO = Object.fromEntries(PRIORITY.map(([k, n, c, d]) => [k, { name: n, color: c, path: d }]));
+    const prioIcon = k => { const p = PRIO[k] || PRIO.medium; return `<svg class="tk-prio" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${p.color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-label="${p.name} priority" role="img"><title>${p.name} priority</title>${p.path}</svg>`; };
+
+    // A description is plain text with pictures in it as ![image](media:<id>). Nothing
+    // else is ever turned into markup, so what one person types cannot run in another's page.
+    const MEDIA_TOKEN = /!\[[^\]]{0,80}\]\(media:([0-9a-f-]{36})\)/gi;
+    const linkify = html => html.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)"'])/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+    function richHtml(text, media = {}, { links = false } = {}) {
+        const out = []; let last = 0; const src = String(text || '');
+        const textPart = t => { const h = esc(t).replace(/\n/g, '<br>'); return links ? linkify(h) : h; };
+        for (const m of src.matchAll(MEDIA_TOKEN)) {
+            out.push(textPart(src.slice(last, m.index)));
+            const id = m[1].toLowerCase(), url = media[id];
+            out.push(url ? `<img class="tk-img" data-media="${esc(id)}" src="${esc(url)}" alt="Picture" loading="lazy">`
+                : `<span class="tk-img-missing" data-media="${esc(id)}" contenteditable="false">Picture</span>`);
+            last = m.index + m[0].length;
+        }
+        out.push(textPart(src.slice(last)));
+        return out.join('');
+    }
+    /** The editor's content back to text: line breaks, words and picture references, nothing else. */
+    function editorText(root) {
+        let out = '';
+        const BLOCK = /^(DIV|P|LI|H[1-6]|BLOCKQUOTE|PRE|TR)$/;
+        const walk = n => {
+            if (n.nodeType === 3) { out += n.nodeValue.replace(/ /g, ' '); return; }
+            if (n.nodeType !== 1) return;
+            if (n.dataset && n.dataset.media) { if (out && !out.endsWith('\n')) out += '\n'; out += `![image](media:${n.dataset.media})\n`; return; }
+            if (n.tagName === 'BR') { out += '\n'; return; }
+            const block = BLOCK.test(n.tagName);
+            if (block && out && !out.endsWith('\n')) out += '\n';
+            n.childNodes.forEach(walk);
+            if (block && out && !out.endsWith('\n')) out += '\n';
+        };
+        root.childNodes.forEach(walk);
+        return out.replace(/\n{3,}/g, '\n\n').trim();
+    }
     /**
-     * The task drawer. `task` null means a new one. `ctx` carries the client,
-     * who can be given work (people), whether the caller may edit, and what to
-     * do after a save. Comments are read when the drawer opens.
+     * Send one picture to the client's private task storage. Big photos are
+     * scaled down first (longest side 2000px), so a phone photo fits the 5 MB limit.
+     */
+    async function uploadTaskImage(clientId, file) {
+        let blob = file;
+        if (file.type !== 'image/gif' && (file.size > 1.5 * 1024 * 1024 || !/^image\/(png|jpeg|webp)$/.test(file.type))) {
+            try {
+                const bmp = await createImageBitmap(file);
+                const k = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+                const cv = document.createElement('canvas');
+                cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+                cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+                blob = await new Promise(r => cv.toBlob(r, file.type === 'image/png' && file.size < 4 * 1024 * 1024 ? 'image/png' : 'image/jpeg', 0.86));
+            } catch { blob = file; }
+        }
+        const res = await fetch(`${EL.backendUrl()}/api/clients/${encodeURIComponent(clientId)}/task-media`, {
+            method: 'POST', headers: { Authorization: `Bearer ${await EL.token()}`, 'Content-Type': blob.type || 'image/png' }, body: blob
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'The picture did not upload.');
+        return data;
+    }
+    /**
+     * Make a contenteditable box take pasted and dropped pictures (uploaded at
+     * once, shown where the cursor was) and paste everything else as plain text.
+     */
+    function pictureEditor(el, { clientId, media, onState }) {
+        let busy = 0;
+        const state = () => onState && onState(busy);
+        const insertAtCaret = node => {
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount && el.contains(sel.anchorNode)) {
+                const r = sel.getRangeAt(0); r.deleteContents(); r.insertNode(node);
+                r.setStartAfter(node); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+            } else el.appendChild(node);
+        };
+        const addFiles = async files => {
+            for (const f of files) {
+                if (!/^image\//.test(f.type)) continue;
+                const ph = document.createElement('span');
+                ph.className = 'tk-img-missing is-loading'; ph.contentEditable = 'false'; ph.textContent = 'Uploading picture…';
+                insertAtCaret(ph); insertAtCaret(document.createElement('br'));
+                busy += 1; state();
+                try {
+                    const r = await uploadTaskImage(clientId, f);
+                    media[r.id] = r.url;
+                    const img = document.createElement('img');
+                    img.className = 'tk-img'; img.dataset.media = r.id; img.src = r.url || ''; img.alt = 'Picture';
+                    ph.replaceWith(img);
+                } catch (err) { ph.remove(); EL.toast(err.message, 'bad'); }
+                finally { busy -= 1; state(); }
+            }
+        };
+        el.addEventListener('paste', e => {
+            const files = [...(e.clipboardData && e.clipboardData.files || [])].filter(f => /^image\//.test(f.type));
+            e.preventDefault();
+            if (files.length) { addFiles(files); return; }
+            const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+            if (text) document.execCommand('insertText', false, text);
+        });
+        el.addEventListener('dragover', e => { if ([...(e.dataTransfer && e.dataTransfer.items || [])].some(i => i.kind === 'file')) { e.preventDefault(); el.classList.add('is-drop'); } });
+        el.addEventListener('dragleave', () => el.classList.remove('is-drop'));
+        el.addEventListener('drop', e => {
+            const files = [...(e.dataTransfer && e.dataTransfer.files || [])].filter(f => /^image\//.test(f.type));
+            el.classList.remove('is-drop');
+            if (!files.length) return;
+            e.preventDefault(); el.focus(); addFiles(files);
+        });
+        return { addFiles, busy: () => busy, text: () => editorText(el) };
+    }
+    /** A picture opens at full size in its own tab. */
+    function wirePictures(host) {
+        host.addEventListener('click', e => {
+            const img = e.target.closest('img.tk-img');
+            if (!img || img.closest('[contenteditable="true"]')) return;
+            window.open(img.src, '_blank', 'noopener');
+        });
+        host.addEventListener('dblclick', e => { const img = e.target.closest('[contenteditable="true"] img.tk-img'); if (img) window.open(img.src, '_blank', 'noopener'); });
+    }
+
+    /**
+     * The task, opened (phase 48): a Jira-style issue. The left is the work —
+     * title, description with pictures, checklist, conversation. The right is
+     * the facts — status, priority, who, labels, due, whether the client sees
+     * it, who raised it and when. `task` null means a new one.
      */
     function openTask(task, ctx = {}) {
         const isNew = !task;
-        const t = task || { title: '', notes: '', status: ctx.status || 'todo', dueDate: null, labels: [], checklist: [], assignee: EL.me ? { kind: 'person', id: EL.me.id } : null, visibleToClient: false };
-        const canEdit = ctx.canEdit !== false;
+        let t = task || { title: '', notes: '', status: ctx.status || 'todo', priority: 'medium', dueDate: null, labels: [], checklist: [], assignee: EL.me ? { kind: 'person', id: EL.me.id } : null, visibleToClient: false };
+        let canEdit = ctx.canEdit !== false;
         const people = ctx.people || [];
-        const whoVal = t.assignee ? (t.assignee.kind === 'client' ? 'client' : t.assignee.id) : '';
-        const options = [['', 'Nobody yet'], ...people.map(p => [p.id, p.name || p.email]), ['client', `${ctx.clientName || 'The client'} (client)`]];
-        if (whoVal && !options.some(([v]) => v === whoVal)) options.push([whoVal, whoName(t, ctx)]);
-        let visible = !!t.visibleToClient;
-        let checklist = (t.checklist || []).map(i => ({ ...i }));
-        const dis = canEdit ? '' : 'disabled';
-
-        const d = EL.drawer({
-            title: isNew ? 'New task' : esc(t.title),
+        const media = {};
+        const d = EL.drawer({ wide: 'xl', title: isNew ? 'New task' : `${t.key ? `<span class="tk-key">${esc(t.key)}</span> ` : ''}${esc(t.title)}`,
             sub: `${esc(ctx.clientName || '')}${t.source && t.source.label ? ' · from ' + esc(t.source.label) : ''}`,
-            body: `
-                <div class="ws-form">
-                    <div><label for="tk-title">Task</label><input id="tk-title" value="${esc(t.title)}" placeholder="What needs doing?" maxlength="300" ${dis}></div>
-                    <div class="ws-form two">
-                        <div><label for="tk-status">Status</label><select id="tk-status" ${dis}>${STATUS.map(([k, n]) => `<option value="${k}" ${t.status === k ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
-                        <div><label for="tk-who">Assigned to</label><select id="tk-who" ${dis}>${options.map(([v, n]) => `<option value="${esc(v)}" ${v === whoVal ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
-                        <div><label for="tk-due">Due</label><input id="tk-due" type="date" value="${esc(t.dueDate || '')}" ${dis}></div>
-                        <div><label for="tk-label">Label</label><select id="tk-label" ${dis}><option value="">None</option>${LABELS.map(l => `<option ${(t.labels || [])[0] === l ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-                    </div>
-                    <div><label for="tk-notes">Notes</label><textarea id="tk-notes" rows="3" placeholder="Anything the person doing it needs to know" ${dis}>${esc(t.notes || '')}</textarea>
-                        <div class="ws-hint" id="tk-notes-hint">${visible ? 'The client sees these notes.' : 'Only your team sees these notes.'}</div></div>
-                    <div class="ws-switch"><div><div style="font-weight:700;color:var(--text-primary)">The client sees this task</div>
-                        <div class="ws-hint">Shows in the owner’s portal. A task assigned to the client always does.</div></div>
-                        <button class="ws-toggle" type="button" role="switch" id="tk-vis" aria-checked="${visible}" aria-label="The client sees this task" ${dis}></button></div>
-                </div>
-                <div><label>Checklist</label><div id="tk-check"></div>
-                    ${canEdit ? `<div style="display:flex;gap:8px;margin-top:6px"><input id="tk-check-new" placeholder="Add a step" maxlength="200"><button class="ws-btn is-sm" type="button" id="tk-check-add">Add</button></div>` : ''}</div>
-                ${isNew ? '' : `<div><label>Conversation</label><div id="tk-comments" style="display:flex;flex-direction:column;gap:10px"><p class="el-muted">Loading…</p></div>
-                    <form id="tk-cform" style="display:flex;gap:8px;margin-top:10px"><input id="tk-ctext" placeholder="Write a comment" maxlength="2000" aria-label="Comment"><button class="ws-btn is-sm" type="submit">Comment</button></form></div>`}
-                <div class="ws-note" id="tk-note"></div>`,
-            foot: canEdit ? `${isNew ? '' : `<button class="ws-btn is-danger is-sm" type="button" id="tk-del" style="margin-right:auto">Delete</button>`}
-                <button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button>
-                <button class="ws-btn is-gold" type="button" id="tk-save">${isNew ? 'Add task' : 'Save'}</button>` : ''
-        });
+            body: '<p class="el-muted">Opening…</p>' });
         const $ = id => d.el.querySelector('#' + id);
-        d.el.querySelectorAll('[data-dw-close]').forEach(b => b.addEventListener('click', () => EL.closeDrawer()));
 
-        const drawChecklist = () => {
-            $('tk-check').innerHTML = checklist.length ? checklist.map((i, n) => `<button class="ws-check" type="button" role="checkbox" aria-checked="${i.done}" data-i="${n}" ${dis}><span class="box">${i.done ? ic('check') : ''}</span><span>${esc(i.text)}</span></button>`).join('')
-                : '<p class="el-muted">No steps.</p>';
-            $('tk-check').querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { const i = checklist[+b.dataset.i]; i.done = !i.done; drawChecklist(); }));
-        };
-        drawChecklist();
-        if (canEdit) {
-            const add = () => { const v = $('tk-check-new').value.trim(); if (!v) return; checklist.push({ text: v, done: false }); $('tk-check-new').value = ''; drawChecklist(); };
-            $('tk-check-add').addEventListener('click', add);
-            $('tk-check-new').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
-            $('tk-vis').addEventListener('click', () => {
-                visible = !visible;
-                $('tk-vis').setAttribute('aria-checked', String(visible));
-                $('tk-notes-hint').textContent = visible ? 'The client sees these notes.' : 'Only your team sees these notes.';
-            });
-            $('tk-who').addEventListener('change', () => {
-                if ($('tk-who').value === 'client') { visible = true; $('tk-vis').setAttribute('aria-checked', 'true'); $('tk-notes-hint').textContent = 'The client sees these notes.'; }
-            });
-            $('tk-save').addEventListener('click', async () => {
-                const body = {
-                    title: $('tk-title').value, status: $('tk-status').value, assignee: $('tk-who').value || null,
-                    dueDate: $('tk-due').value || null, labels: $('tk-label').value ? [$('tk-label').value] : [],
-                    notes: $('tk-notes').value, checklist, visibleToClient: visible
-                };
-                if (!body.title.trim()) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = 'Give the task a name.'; $('tk-title').focus(); return; }
-                $('tk-save').disabled = true;
-                try {
-                    if (isNew) await EL.api(`/api/clients/${encodeURIComponent(ctx.clientId)}/tasks`, { method: 'POST', body: { ...body, ...(ctx.source ? { source: ctx.source } : {}) } });
-                    else await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body });
-                    EL.closeDrawer();
-                    EL.toast(isNew ? `Added to ${ctx.clientName || 'the client'}’s board.` : 'Saved. Everyone on this client sees the change.');
-                    if (ctx.onSaved) ctx.onSaved();
-                } catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; $('tk-save').disabled = false; }
-            });
-            if (!isNew) $('tk-del').addEventListener('click', async () => {
-                const b = $('tk-del');
-                if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Delete — press again'; return; }
-                try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); EL.closeDrawer(); EL.toast('Task deleted.'); if (ctx.onSaved) ctx.onSaved(); }
-                catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; }
-            });
-        }
+        const draw = () => {
+            const whoVal = t.assignee ? (t.assignee.kind === 'client' ? 'client' : t.assignee.id) : '';
+            const options = [['', 'Unassigned'], ...people.map(p => [p.id, p.name || p.email]), ['client', `${ctx.clientName || 'The client'} (client)`]];
+            if (whoVal && !options.some(([v]) => v === whoVal)) options.push([whoVal, whoName(t, ctx)]);
+            let visible = !!t.visibleToClient;
+            let labels = [...(t.labels || [])];
+            let checklist = (t.checklist || []).map(i => ({ ...i }));
+            const dis = canEdit ? '' : 'disabled';
+            d.body.innerHTML = `
+                <div class="tk-issue">
+                    <div class="tk-main">
+                        <input id="tk-title" class="tk-title-in" value="${esc(t.title)}" placeholder="What needs doing?" maxlength="300" aria-label="Task title" ${dis}>
+                        <section class="tk-sec"><h3>Description</h3>
+                            <div id="tk-desc" class="tk-editor ${canEdit ? '' : 'is-ro'}" ${canEdit ? 'contenteditable="true"' : ''} role="textbox" aria-multiline="true" aria-label="Description"
+                                data-placeholder="${canEdit ? 'Add a description. Paste or drop screenshots and photos right here.' : 'No description.'}">${richHtml(t.notes, media, { links: !canEdit })}</div>
+                            ${canEdit ? `<div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('plus')}Add picture<input type="file" id="tk-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
+                                <span class="ws-hint" id="tk-desc-hint">${visible ? 'The client sees this description.' : 'Only your team sees this description.'} Paste (Ctrl+V) or drop pictures in.</span></div>` : ''}
+                        </section>
+                        <section class="tk-sec"><h3>Checklist <span class="ws-num" id="tk-check-n"></span></h3>
+                            <div class="tk-bar"><i id="tk-check-bar"></i></div>
+                            <div id="tk-check"></div>
+                            ${canEdit ? `<div class="tk-addrow"><input id="tk-check-new" placeholder="Add a step" maxlength="200" aria-label="New checklist step"><button class="ws-btn is-sm" type="button" id="tk-check-add">Add</button></div>` : ''}
+                        </section>
+                        ${isNew ? '' : `<section class="tk-sec"><h3>Activity</h3>
+                            <div id="tk-comments" class="tk-comments"><p class="el-muted">Loading…</p></div>
+                            <div class="tk-compose">
+                                <div id="tk-cbox" class="tk-editor is-small" contenteditable="true" role="textbox" aria-label="Write a comment" data-placeholder="Write a comment. Pictures can be pasted here too."></div>
+                                <div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('plus')}Picture<input type="file" id="tk-cfile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
+                                    <button class="ws-btn is-sm is-gold" type="button" id="tk-csend">Comment</button></div>
+                            </div></section>`}
+                    </div>
+                    <aside class="tk-side">
+                        <div class="tk-field"><label for="tk-status">Status</label><select id="tk-status" class="tk-status is-${esc(t.status)}" ${dis}>${STATUS.map(([k, n]) => `<option value="${k}" ${t.status === k ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+                        <div class="tk-field"><label for="tk-prio">Priority</label><div class="tk-prio-wrap"><span id="tk-prio-ic">${prioIcon(t.priority)}</span><select id="tk-prio" ${dis}>${PRIORITY.map(([k, n]) => `<option value="${k}" ${(t.priority || 'medium') === k ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
+                        <div class="tk-field"><label for="tk-who">Assignee</label><select id="tk-who" ${dis}>${options.map(([v, n]) => `<option value="${esc(v)}" ${v === whoVal ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+                        <div class="tk-field"><label for="tk-label-new">Labels</label><div id="tk-labels" class="tk-labels"></div>
+                            ${canEdit ? `<input id="tk-label-new" list="tk-label-list" placeholder="Add a label" maxlength="24"><datalist id="tk-label-list">${LABELS.map(l => `<option value="${l}">`).join('')}</datalist>` : ''}</div>
+                        <div class="tk-field"><label for="tk-due">Due date</label><input id="tk-due" type="date" value="${esc(t.dueDate || '')}" ${dis}></div>
+                        <div class="tk-field tk-switch"><div><b>Client sees it</b><span class="ws-hint">On the owner’s side. Their own to-dos always are.</span></div>
+                            <button class="ws-toggle" type="button" role="switch" id="tk-vis" aria-checked="${visible}" aria-label="The client sees this task" ${dis}></button></div>
+                        ${isNew ? '' : `<dl class="tk-facts">
+                            ${t.key ? `<dt>Key</dt><dd>${esc(t.key)}</dd>` : ''}
+                            <dt>Reporter</dt><dd>${esc(t.reporter ? (t.reporter.name || t.reporter.email) : '—')}</dd>
+                            <dt>Created</dt><dd>${esc(day(t.createdAt))}</dd>
+                            <dt>Updated</dt><dd>${esc(ago(t.updatedAt))}</dd>
+                            ${t.completedAt ? `<dt>Done</dt><dd>${esc(day(t.completedAt))}</dd>` : ''}
+                            ${t.source && t.source.label ? `<dt>From</dt><dd>${esc(t.source.label)}</dd>` : ''}
+                        </dl>`}
+                    </aside>
+                </div>
+                <div class="ws-note" id="tk-note"></div>`;
+            if (d.foot) d.foot.remove();
+            if (canEdit) {
+                const f = document.createElement('footer');
+                f.className = 'el-drawer-f';
+                f.innerHTML = `${isNew ? '' : `<button class="ws-btn is-danger is-sm" type="button" id="tk-del" style="margin-right:auto">Delete</button>`}
+                    <button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button>
+                    <button class="ws-btn is-gold" type="button" id="tk-save">${isNew ? 'Create task' : 'Save'}</button>`;
+                d.body.after(f); d.foot = f;
+                f.querySelector('[data-dw-close]').addEventListener('click', () => EL.closeDrawer());
+            }
+            wirePictures(d.body);
 
-        if (!isNew) {
-            const drawComments = async () => {
-                try {
-                    const r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`);
-                    $('tk-comments').innerHTML = (r.comments || []).length ? r.comments.map(m => `
-                        <div class="ws-comment"><span class="el-avatar">${esc(initials(m.author.name || m.author.email))}</span>
-                            <div class="body"><div class="meta">${esc(m.author.kind === 'client' ? (m.author.name || 'Client') + ' · client' : (m.author.name || m.author.email || 'Team'))} · ${esc(ago(m.createdAt))}</div>${esc(m.body)}</div></div>`).join('')
-                        : '<p class="el-muted">No comments yet.</p>';
-                } catch (err) { $('tk-comments').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; }
+            const drawLabels = () => {
+                $('tk-labels').innerHTML = labels.length ? labels.map((l, i) => `<span class="ws-lbl" style="--c:${LABEL_COLOR[l] || 'var(--text-muted)'}">${esc(l)}${canEdit ? `<button type="button" class="tk-x" data-rm-label="${i}" aria-label="Remove ${esc(l)}">×</button>` : ''}</span>`).join('') : '<span class="el-muted">None</span>';
+                $('tk-labels').querySelectorAll('[data-rm-label]').forEach(b => b.addEventListener('click', () => { labels.splice(+b.dataset.rmLabel, 1); drawLabels(); }));
             };
-            drawComments();
-            $('tk-cform').addEventListener('submit', async e => {
-                e.preventDefault();
-                const v = $('tk-ctext').value.trim(); if (!v) return;
-                try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`, { method: 'POST', body: { body: v } }); $('tk-ctext').value = ''; drawComments(); if (ctx.onSaved) ctx.onSaved(); }
-                catch (err) { EL.toast(err.message, 'bad'); }
-            });
-        }
+            const drawChecklist = () => {
+                const n = checklist.filter(i => i.done).length;
+                $('tk-check-n').textContent = checklist.length ? `${n}/${checklist.length}` : '';
+                $('tk-check-bar').style.width = checklist.length ? `${Math.round(n / checklist.length * 100)}%` : '0';
+                $('tk-check').innerHTML = checklist.length ? checklist.map((i, k) => `<div class="tk-step"><button class="ws-check" type="button" role="checkbox" aria-checked="${i.done}" data-i="${k}" ${dis}><span class="box">${i.done ? ic('check') : ''}</span><span>${esc(i.text)}</span></button>${canEdit ? `<button type="button" class="tk-x" data-rm-step="${k}" aria-label="Remove step">×</button>` : ''}</div>`).join('')
+                    : '<p class="el-muted">No steps yet.</p>';
+                $('tk-check').querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { const i = checklist[+b.dataset.i]; i.done = !i.done; drawChecklist(); }));
+                $('tk-check').querySelectorAll('[data-rm-step]').forEach(b => b.addEventListener('click', () => { checklist.splice(+b.dataset.rmStep, 1); drawChecklist(); }));
+            };
+            drawLabels(); drawChecklist();
+
+            let desc = null;
+            if (canEdit) {
+                desc = pictureEditor($('tk-desc'), { clientId: ctx.clientId || t.clientId, media, onState: busy => { $('tk-save').disabled = busy > 0; $('tk-save').textContent = busy ? 'Uploading…' : (isNew ? 'Create task' : 'Save'); } });
+                $('tk-file').addEventListener('change', e => { $('tk-desc').focus(); desc.addFiles([...e.target.files]); e.target.value = ''; });
+                const addStep = () => { const v = $('tk-check-new').value.trim(); if (!v) return; checklist.push({ text: v, done: false }); $('tk-check-new').value = ''; drawChecklist(); };
+                $('tk-check-add').addEventListener('click', addStep);
+                $('tk-check-new').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addStep(); } });
+                const addLabel = () => { const v = $('tk-label-new').value.trim().slice(0, 24); if (!v) return; if (!labels.some(l => l.toLowerCase() === v.toLowerCase()) && labels.length < 8) labels.push(v); $('tk-label-new').value = ''; drawLabels(); };
+                $('tk-label-new').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addLabel(); } });
+                $('tk-label-new').addEventListener('change', addLabel);
+                $('tk-prio').addEventListener('change', () => { $('tk-prio-ic').innerHTML = prioIcon($('tk-prio').value); });
+                $('tk-status').addEventListener('change', () => { $('tk-status').className = `tk-status is-${$('tk-status').value}`; });
+                const setVis = v => { visible = v; $('tk-vis').setAttribute('aria-checked', String(v)); $('tk-desc-hint').firstChild.textContent = v ? 'The client sees this description. ' : 'Only your team sees this description. '; };
+                $('tk-vis').addEventListener('click', () => setVis(!visible));
+                $('tk-who').addEventListener('change', () => { if ($('tk-who').value === 'client') setVis(true); });
+
+                $('tk-save').addEventListener('click', async () => {
+                    if (desc.busy()) return;
+                    const body = {
+                        title: $('tk-title').value, status: $('tk-status').value, priority: $('tk-prio').value,
+                        assignee: $('tk-who').value || null, dueDate: $('tk-due').value || null,
+                        labels, notes: desc.text(), checklist, visibleToClient: visible
+                    };
+                    if (!body.title.trim()) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = 'Give the task a name.'; $('tk-title').focus(); return; }
+                    $('tk-save').disabled = true;
+                    try {
+                        let r;
+                        if (isNew) r = await EL.api(`/api/clients/${encodeURIComponent(ctx.clientId)}/tasks`, { method: 'POST', body: { ...body, ...(ctx.source ? { source: ctx.source } : {}) } });
+                        else r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body });
+                        EL.closeDrawer();
+                        const key = r && r.task && r.task.key;
+                        EL.toast(isNew ? `${key ? key + ' a' : 'A'}dded to ${ctx.clientName || 'the client'}’s board.` : 'Saved. Everyone on this client sees the change.');
+                        if (ctx.onSaved) ctx.onSaved();
+                    } catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; $('tk-save').disabled = false; }
+                });
+                if (!isNew) $('tk-del').addEventListener('click', async () => {
+                    const b = $('tk-del');
+                    if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Delete, with its pictures — press again'; return; }
+                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); EL.closeDrawer(); EL.toast('Task deleted.'); if (ctx.onSaved) ctx.onSaved(); }
+                    catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; }
+                });
+            }
+
+            if (!isNew) {
+                const cmedia = {};
+                const drawComments = async () => {
+                    try {
+                        const r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`);
+                        Object.assign(cmedia, r.media || {});
+                        $('tk-comments').innerHTML = (r.comments || []).length ? r.comments.map(m => `
+                            <div class="ws-comment"><span class="el-avatar">${esc(initials(m.author.name || m.author.email))}</span>
+                                <div class="body"><div class="meta">${esc(m.author.kind === 'client' ? (m.author.name || 'Client') + ' · client' : (m.author.name || m.author.email || 'Team'))} · ${esc(ago(m.createdAt))}</div><div class="tk-rich">${richHtml(m.body, cmedia, { links: true })}</div></div></div>`).join('')
+                            : '<p class="el-muted">No comments yet. Ask a question, share a screenshot, say what changed.</p>';
+                    } catch (err) { $('tk-comments').innerHTML = `<p class="el-muted">${esc(err.message)}</p>`; }
+                };
+                drawComments();
+                const cbox = pictureEditor($('tk-cbox'), { clientId: t.clientId || ctx.clientId, media: cmedia, onState: busy => { $('tk-csend').disabled = busy > 0; } });
+                $('tk-cfile').addEventListener('change', e => { $('tk-cbox').focus(); cbox.addFiles([...e.target.files]); e.target.value = ''; });
+                const send = async () => {
+                    const v = cbox.text(); if (!v || cbox.busy()) return;
+                    $('tk-csend').disabled = true;
+                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`, { method: 'POST', body: { body: v } }); $('tk-cbox').innerHTML = ''; drawComments(); if (ctx.onSaved) ctx.onSaved(); }
+                    catch (err) { EL.toast(err.message, 'bad'); }
+                    finally { $('tk-csend').disabled = false; }
+                };
+                $('tk-csend').addEventListener('click', send);
+                $('tk-cbox').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
+            }
+        };
+
+        if (isNew) { draw(); setTimeout(() => $('tk-title') && $('tk-title').focus(), 40); return d; }
+        // Open with the latest: someone else may have changed it since the board loaded, and the pictures need fresh links.
+        EL.api(`/api/tasks/${encodeURIComponent(t.id)}`).then(r => {
+            t = { ...t, ...r.task };
+            Object.assign(media, r.media || {});
+            if (r.canEdit === false) canEdit = false;
+            d.setTitle(`${t.key ? `<span class="tk-key">${esc(t.key)}</span> ` : ''}${esc(t.title)}`);
+            draw();
+        }).catch(() => draw());
         return d;
     }
 
@@ -564,6 +758,6 @@
     window.UI = {
         TYPE_LABEL, TYPE_PAGE, JOB_LABEL, jobName, jobState, sourceOf, srcChip, STATUS, STATUS_NAME, LABELS,
         initials, day, ago, today, isLate, labelChip,
-        board, openTask, taskRow, addClient, askBox, answerHtml
+        board, openTask, taskRow, addClient, askBox, answerHtml, richHtml, prioIcon
     };
 })();
