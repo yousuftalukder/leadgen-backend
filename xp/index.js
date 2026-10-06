@@ -757,4 +757,4 @@ function start() {
   return { enabled: true, schedule: cfg.cron.schedule };
 }
 
-module.exports = { cronSlots, lastSlot, claimSlot, tickSlot, mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks, ensureChatClient };
+module.exports = { runningIds: () => [...running.keys()], cronSlots, lastSlot, claimSlot, tickSlot, mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks, ensureChatClient };

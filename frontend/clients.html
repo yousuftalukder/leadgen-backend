@@ -8,10 +8,37 @@
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
-    /* clients.html — page-specific only. Shared rules live in app.css (ws-*). */
+    /* clients.html — the Clients hub (phase 56). Shared rules live in app.css (ws-*). */
     .conn { border: 1px solid rgba(63,191,143,0.35); background: rgba(63,191,143,0.06); border-radius: 10px; padding: 12px 14px; font-size: 0.86rem; color: var(--text-secondary); }
     .conn b { color: var(--text-primary); }
-    .cl-name { display: flex; gap: 10px; align-items: center; min-width: 200px; }
+    .cl-name { display: flex; gap: 10px; align-items: center; min-width: 190px; }
+    .hb-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--card-border); margin: 4px 0 16px; }
+    .hb-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-secondary); font: inherit; font-weight: 700; padding: 9px 14px; cursor: pointer; margin-bottom: -1px; }
+    .hb-tabs button[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--accent-solid); }
+    .hb-tabs .ws-num { margin-left: 6px; color: var(--text-muted); font-weight: 600; }
+    /* The stages, left to right in the order a client moves through them. */
+    .hb-stages { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .hb-stage { text-align: left; border: 1px solid var(--card-border); background: rgba(255,255,255,0.02); border-radius: 12px; padding: 11px 13px; cursor: pointer; color: var(--text-secondary); font: inherit; }
+    .hb-stage b { display: block; font-size: 1.5rem; line-height: 1.1; color: var(--text-primary); font-weight: 800; }
+    .hb-stage span { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em; }
+    .hb-stage small { display: block; font-size: 0.72rem; color: var(--text-muted); margin-top: 3px; }
+    .hb-stage[aria-pressed="true"] { border-color: var(--accent-solid); background: var(--accent-dim); }
+    .hb-stage[data-s="trial"] b { color: #f0d39a; } .hb-stage[data-s="invited"] b { color: var(--warn); } .hb-stage[data-s="active"] b { color: var(--jade); }
+    .hb-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .hb-bar input { max-width: 280px; }
+    .hb-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; white-space: nowrap; }
+    .hb-acts { display: flex; gap: 6px; align-items: center; justify-content: flex-end; white-space: nowrap; }
+    .hb-menu { position: absolute; z-index: 60; min-width: 210px; padding: 6px; border-radius: 12px; background: #0b1329; border: 1px solid rgba(217,181,108,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+    .hb-menu button { display: block; width: 100%; text-align: left; padding: 9px 11px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 0.86rem; border-radius: 8px; cursor: pointer; }
+    .hb-menu button:hover { background: rgba(255,255,255,0.06); }
+    .hb-menu hr { border: 0; border-top: 1px solid var(--card-border); margin: 5px 4px; }
+    .hb-new { position: relative; }
+    .hb-choice { display: block; width: 100%; text-align: left; border: 1px solid var(--card-border); background: rgba(255,255,255,0.02); border-radius: 12px; padding: 13px 14px; margin-bottom: 10px; color: var(--text-secondary); font: inherit; cursor: pointer; }
+    .hb-choice b { display: block; color: var(--text-primary); margin-bottom: 3px; }
+    .hb-choice:hover { border-color: var(--accent-solid); }
+    .hb-link { overflow-wrap: anywhere; font-size: 0.8rem; }
+    @media (max-width: 900px) { .hb-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 520px) { .hb-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
@@ -38,59 +65,304 @@
     const esc = v => EL.esc(v);
     const ic = n => EL.icon(n);
     const root = document.getElementById('cl');
-    let clients = [], filter = 'all', archived = false;
+    // The Clients hub (phase 56): every client by stage, its next step one click away,
+    // trials beside clients, every owner login in one list, and Meta reads from the row.
+    let clients = [], stage = q.get('stage') || 'all', tab = q.get('tab') === 'invites' ? 'invites' : 'clients', search = '';
+    const STAGES = [
+        ['all', 'All', 'Every live client'],
+        ['trial', 'Trial', 'Trying Edge Meta AI'],
+        ['onboarding', 'Onboarding', 'Not set up yet'],
+        ['invited', 'Invited', 'Owner not signed in'],
+        ['active', 'Active', 'Owner in, Meta on'],
+        ['archived', 'Archived', 'Closed']
+    ];
 
     async function load() {
-        const d = await EL.api('/api/clients' + (archived ? '?archived=1' : ''));
+        const d = await EL.api('/api/clients?archived=1');
         clients = d.clients || [];
         EL._clients = clients.filter(c => !c.archived);
         draw();
     }
 
-    function metaChip(c) {
-        if (c.meta && c.meta.connected) return '<span class="el-chip is-jade">Meta connected</span>';
-        if (c.meta && c.meta.pages) return '<span class="el-chip is-warn">Needs attention</span>';
-        return '<span class="el-chip">Not connected</span>';
+    const ago = iso => {
+        if (!iso) return '';
+        const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+        if (m < 2) return 'just now';
+        if (m < 60) return m + ' min ago';
+        const h = Math.round(m / 60);
+        if (h < 36) return h + ' h ago';
+        return UI.day(iso);
+    };
+    const canEdit = c => ['owner', 'admin', 'editor'].includes(c.access);
+    const canManage = c => ['owner', 'admin'].includes(c.access);
+
+    function stageChip(c) {
+        const st = c.stage || (c.archived ? 'archived' : 'onboarding');
+        if (st === 'trial') {
+            const t = c.trial || {};
+            return t.ended ? '<span class="el-chip is-warn">Trial ended</span>'
+                : `<span class="el-chip is-gold">Trial · ${t.daysLeft} day${t.daysLeft === 1 ? '' : 's'} left</span>`;
+        }
+        return { onboarding: '<span class="el-chip">Onboarding</span>', invited: '<span class="el-chip is-warn">Invited</span>',
+            active: '<span class="el-chip is-jade">Active</span>', archived: '<span class="el-chip">Archived</span>' }[st] || '';
     }
+    function ownerCell(c) {
+        const o = (c.owners || [])[0];
+        if (!o) return '<span class="el-muted">No owner login</span>';
+        const more = (c.owners || []).length > 1 ? ` +${c.owners.length - 1}` : '';
+        return `<div>${esc(o.name || o.email)}${more}</div><div class="hb-sub">${o.lastSeenAt ? 'Signed in ' + esc(ago(o.lastSeenAt)) : 'Never signed in'}</div>`;
+    }
+    function metaCell(c) {
+        const x = c.xp || {};
+        let chip;
+        if (c.meta && c.meta.connected) chip = x.needsReconnect ? '<span class="el-chip is-bad">Reconnect</span>' : '<span class="el-chip is-jade">Connected</span>';
+        else if (c.meta && c.meta.pages) chip = '<span class="el-chip is-warn">Needs attention</span>';
+        else return '<span class="el-chip">Not connected</span>';
+        const sub = x.reading ? 'Reading now…' : x.assets ? [x.lastReadAt ? 'Read ' + ago(x.lastReadAt) : 'Not read yet', x.historyRead ? 'history in' : 'history not read'].join(' · ') : 'Not read yet';
+        return `${chip}<div class="hb-sub">${esc(sub)}</div>`;
+    }
+    const visible = () => clients.filter(c => {
+        const st = c.stage || (c.archived ? 'archived' : 'onboarding');
+        if (stage === 'all' ? c.archived : st !== stage) return false;
+        if (!search) return true;
+        const hay = [c.name, c.niche, c.ig_handle, c.location, ...(c.owners || []).map(o => o.email)].join(' ').toLowerCase();
+        return hay.includes(search);
+    });
+    const count = k => k === 'all' ? clients.filter(c => !c.archived).length : clients.filter(c => (c.stage || (c.archived ? 'archived' : 'onboarding')) === k).length;
+    const ownerLogins = () => clients.flatMap(c => (c.owners || []).map(o => ({ ...o, client: c })));
 
     function draw() {
-        const live = clients.filter(c => archived || !c.archived);
-        const counts = {
-            all: live.length,
-            meta: live.filter(c => c.meta && c.meta.connected).length,
-            nometa: live.filter(c => !(c.meta && c.meta.connected)).length
-        };
-        const list = live.filter(c => filter === 'all' || (filter === 'meta' && c.meta && c.meta.connected) || (filter === 'nometa' && !(c.meta && c.meta.connected)));
-        const fb = (k, l) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}">${l} <span class="ws-num">${counts[k]}</span></button>`;
         root.innerHTML = `
             <div class="ws-head"><div><h1>Clients</h1>
-                <p class="ws-sub">Every report, lead, task, schedule and Meta connection is filed under a client. Add the client first, whether or not you can connect their Meta yet.</p></div>
-                <div class="ws-actions"><button class="ws-btn is-gold" type="button" id="cl-add">${ic('plus')}Add client</button></div></div>
-            ${me.role !== 'admin' ? '<p class="el-muted" style="margin:-6px 0 14px">You see the clients you own or were added to. An admin can add you to more.</p>' : ''}
+                <p class="ws-sub">Every business you work for, from first invite to active. Add a client you have signed, or start a trial for one that is deciding. Each row says what is next.</p></div>
+                <div class="ws-actions hb-new"><button class="ws-btn is-gold" type="button" id="hb-new" aria-haspopup="true">${ic('plus')}New</button></div></div>
+            ${me.role !== 'admin' ? '<p class="el-muted" style="margin:-6px 0 14px">You see the clients you lead or were added to. An admin can add you to more.</p>' : ''}
             <div id="inbox"></div>
-            <div class="ws-filters">${fb('all', 'All')}${fb('meta', 'Meta connected')}${fb('nometa', 'Meta not connected')}
-                <button type="button" id="cl-arch" aria-pressed="${archived}">Show archived</button></div>
-            ${list.length ? `<div class="ws-table-wrap"><table class="ws-table">
-                <thead><tr><th>Client</th><th>Where</th><th>Meta</th><th>Reports</th><th>Your access</th><th>Added</th></tr></thead>
-                <tbody>${list.map(c => `<tr class="is-link" data-go="${esc(c.id)}" tabindex="0">
-                    <td><div class="cl-name"><span class="el-avatar">${esc(UI.initials(c.name))}</span><div><div class="t">${esc(c.name)}${c.archived ? ' · archived' : ''}</div><div class="s">${esc([c.niche, c.ig_handle ? '@' + c.ig_handle : ''].filter(Boolean).join(' · ') || 'No details yet')}</div></div></div></td>
-                    <td class="ws-nowrap">${esc(c.location || '—')}</td>
-                    <td>${metaChip(c)}</td>
-                    <td class="ws-num">${c.reports ? c.reports.total : 0}</td>
-                    <td class="ws-nowrap">${esc({ owner: 'Account lead', admin: 'Admin', editor: 'Can edit', viewer: 'Can view' }[c.access] || c.access || '')}</td>
-                    <td class="ws-nowrap">${esc(UI.day(c.created_at))}</td></tr>`).join('')}</tbody></table></div>`
-            : `<div class="ws-empty">${ic('clients')}<h3>${clients.length ? 'No client matches that filter' : 'No clients yet'}</h3><p>${clients.length ? 'Try another filter.' : 'Add the first one. Only the name is needed; the rest can come later.'}</p>
-                ${clients.length ? '' : `<button class="ws-btn is-gold" type="button" data-add>${ic('plus')}Add client</button>`}</div>`}`;
-
-        root.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { filter = b.dataset.f; draw(); }));
-        root.querySelector('#cl-arch').addEventListener('click', () => { archived = !archived; load(); });
-        root.querySelectorAll('#cl-add, [data-add]').forEach(b => b.addEventListener('click', () => UI.addClient()));
-        root.querySelectorAll('[data-go]').forEach(r => {
-            const go = () => { location.href = 'workspace.html?client=' + encodeURIComponent(r.dataset.go); };
-            r.addEventListener('click', go);
-            r.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-        });
+            <div class="hb-tabs" role="tablist">
+                <button type="button" role="tab" data-tab="clients" aria-selected="${tab === 'clients'}">Clients<span class="ws-num">${count('all')}</span></button>
+                <button type="button" role="tab" data-tab="invites" aria-selected="${tab === 'invites'}">Owner logins<span class="ws-num">${ownerLogins().length}</span></button>
+            </div>
+            <div id="hb-body"></div>`;
+        root.querySelector('#hb-new').addEventListener('click', e => { e.stopPropagation(); newMenu(e.currentTarget); });
+        root.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; draw(); }));
+        if (tab === 'clients') drawClients(); else drawInvites();
         loadInbox();
+    }
+
+    function drawClients() {
+        const body = document.getElementById('hb-body');
+        const list = visible();
+        body.innerHTML = `
+            <div class="hb-stages">${STAGES.map(([k, l, sub]) => `<button type="button" class="hb-stage" data-s="${k}" aria-pressed="${stage === k}"><b>${count(k)}</b><span>${l}</span><small>${sub}</small></button>`).join('')}</div>
+            <div class="hb-bar"><input id="hb-q" type="search" placeholder="Search name, handle or owner email" value="${esc(search)}" aria-label="Search clients"></div>
+            ${list.length ? `<div class="ws-table-wrap"><table class="ws-table">
+                <thead><tr><th>Client</th><th>Stage</th><th>Owner</th><th>Meta &amp; data</th><th>Reports</th><th></th></tr></thead>
+                <tbody>${list.map(c => `<tr class="is-link" data-go="${esc(c.id)}" tabindex="0">
+                    <td><div class="cl-name"><span class="el-avatar">${esc(UI.initials(c.name))}</span><div><div class="t">${esc(c.name)}</div><div class="s">${esc([c.niche, c.ig_handle ? '@' + c.ig_handle : '', c.location].filter(Boolean).join(' · ') || 'No details yet')}</div></div></div></td>
+                    <td>${stageChip(c)}</td>
+                    <td>${ownerCell(c)}</td>
+                    <td>${metaCell(c)}</td>
+                    <td class="ws-num">${c.reports ? c.reports.total : 0}</td>
+                    <td><div class="hb-acts">${c.next && canEdit(c) ? `<button class="ws-btn is-sm${c.next.key === 'extend' || c.next.key === 'invite' ? ' is-gold' : ''}" type="button" data-next="${esc(c.id)}">${esc(c.next.label)}</button>` : ''}
+                        <button class="ws-btn is-sm is-quiet" type="button" data-more="${esc(c.id)}" aria-label="More for ${esc(c.name)}">⋯</button></div></td></tr>`).join('')}</tbody></table></div>`
+            : `<div class="ws-empty">${ic('clients')}<h3>${clients.length ? 'Nothing here' : 'No clients yet'}</h3><p>${clients.length ? 'No client is in this stage' + (search ? ' with that search' : '') + '.' : 'Add the first one, or start a trial for a business that is deciding.'}</p>
+                ${clients.length ? '' : `<button class="ws-btn is-gold" type="button" data-add>${ic('plus')}Add client</button>`}</div>`}`;
+        body.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => { stage = b.dataset.s; drawClients(); }));
+        const qi = body.querySelector('#hb-q');
+        qi.addEventListener('input', () => { search = qi.value.trim().toLowerCase(); const pos = qi.selectionStart; drawClients(); const n = document.getElementById('hb-q'); n.focus(); n.setSelectionRange(pos, pos); });
+        body.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => UI.addClient()));
+        body.querySelectorAll('[data-go]').forEach(r => {
+            const go = () => { location.href = 'workspace.html?client=' + encodeURIComponent(r.dataset.go); };
+            r.addEventListener('click', e => { if (!e.target.closest('button')) go(); });
+            r.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === r) go(); });
+        });
+        body.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', () => doNext(byId(b.dataset.next), b)));
+        body.querySelectorAll('[data-more]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); moreMenu(byId(b.dataset.more), b); }));
+    }
+
+    function drawInvites() {
+        const body = document.getElementById('hb-body');
+        const rows = ownerLogins().sort((a, b) => String(b.invitedAt || '').localeCompare(String(a.invitedAt || '')));
+        body.innerHTML = `<p class="el-muted" style="margin:0 0 12px">Every business owner's login to Edge Meta AI. An owner signs in with a code emailed to them; until your Gmail sender is set, send them a new sign-in link instead.</p>
+            ${rows.length ? `<div class="ws-table-wrap"><table class="ws-table">
+                <thead><tr><th>Owner</th><th>Business</th><th>Invited</th><th>Last signed in</th><th>Status</th><th></th></tr></thead>
+                <tbody>${rows.map(o => `<tr>
+                    <td><div>${esc(o.name || o.email)}</div>${o.name ? `<div class="hb-sub">${esc(o.email)}</div>` : ''}</td>
+                    <td><a class="ws-link" href="workspace.html?client=${encodeURIComponent(o.client.id)}&tab=access">${esc(o.client.name)}</a><div class="hb-sub">${stageChip(o.client)}</div></td>
+                    <td class="ws-nowrap">${esc(o.invitedAt ? UI.day(o.invitedAt) : '—')}</td>
+                    <td class="ws-nowrap">${esc(o.lastSeenAt ? ago(o.lastSeenAt) : 'Never')}</td>
+                    <td>${!o.active ? '<span class="el-chip is-bad">Switched off</span>' : o.lastSeenAt ? '<span class="el-chip is-jade">Uses the app</span>' : '<span class="el-chip is-warn">Not opened yet</span>'}</td>
+                    <td><div class="hb-acts">${canEdit(o.client) && !o.client.archived ? `<button class="ws-btn is-sm" type="button" data-link="${esc(o.client.id)}|${esc(o.id)}">New sign-in link</button>` : ''}
+                        ${canManage(o.client) ? `<button class="ws-btn is-sm is-quiet" type="button" data-revoke="${esc(o.client.id)}|${esc(o.id)}">Remove</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>`
+            : `<div class="ws-empty">${ic('clients')}<h3>No owner logins yet</h3><p>Invite a client's owner from its row on the Clients tab, or start a trial.</p></div>`}`;
+        body.querySelectorAll('[data-link]').forEach(b => b.addEventListener('click', () => { const [cid, uid] = b.dataset.link.split('|'); signInLink(byId(cid), uid); }));
+        body.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
+            if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Press again to remove'; return; }
+            const [cid, uid] = b.dataset.revoke.split('|');
+            try { await EL.api(`/api/clients/${cid}/members/${uid}`, { method: 'DELETE' }); EL.toast('Removed. That login no longer opens this business.'); load(); }
+            catch (err) { EL.toast(err.message, 'bad'); }
+        }));
+    }
+
+    const byId = id => clients.find(c => c.id === id);
+
+    // ---- menus -------------------------------------------------------------------
+    function popup(anchor, items) {
+        closeMenus();
+        const m = document.createElement('div');
+        m.className = 'hb-menu'; m.id = 'hb-menu'; m.setAttribute('role', 'menu');
+        m.innerHTML = items.map(it => it === '-' ? '<hr>' : `<button type="button" role="menuitem" data-k="${it[0]}">${it[1]}</button>`).join('');
+        document.body.appendChild(m);
+        const r = anchor.getBoundingClientRect();
+        const left = Math.max(8, Math.min(window.scrollX + r.right - m.offsetWidth, window.scrollX + document.documentElement.clientWidth - m.offsetWidth - 8));
+        m.style.left = left + 'px'; m.style.top = (window.scrollY + r.bottom + 6) + 'px';
+        return new Promise(res => {
+            m.querySelectorAll('[data-k]').forEach(b => b.addEventListener('click', () => { closeMenus(); res(b.dataset.k); }));
+        });
+    }
+    function closeMenus() { const m = document.getElementById('hb-menu'); if (m) m.remove(); }
+    document.addEventListener('click', e => { if (!e.target.closest('#hb-menu')) closeMenus(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenus(); });
+
+    async function newMenu(anchor) {
+        const k = await popup(anchor, [['client', '<b>Onboard a client</b><br><span class="el-muted">A business you have signed. Its owner’s login never runs out.</span>'],
+            ['trial', '<b>Start a trial</b><br><span class="el-muted">A business that is deciding. Edge Meta AI for a set number of days.</span>']]);
+        if (k === 'client') UI.addClient();
+        if (k === 'trial') startTrial();
+    }
+    async function moreMenu(c, anchor) {
+        const items = [['open', 'Open client']];
+        if (canEdit(c) && !c.archived) {
+            items.push('-');
+            if (c.meta && c.meta.connected) items.push(['read', 'Read Meta numbers now'], ['history', 'Read full history again']);
+            else items.push(['connect', 'Connect Meta']);
+            items.push('-', ['invite', (c.owners || []).length ? 'Invite another owner login' : 'Invite the owner']);
+            if ((c.owners || []).length) items.push(['link', 'New sign-in link']);
+            items.push('-');
+            if (c.trial) items.push(['extend', 'Extend trial'], ['convert', 'Make a client (end the trial)']);
+            else items.push(['start', 'Put on a trial']);
+        }
+        const k = await popup(anchor, items);
+        if (k) act(c, k, anchor);
+    }
+    function doNext(c, btn) {
+        if (!c || !c.next) return;
+        act(c, { invite: 'invite', resend: 'link', connect: 'connect', history: 'history', extend: 'extend' }[c.next.key], btn);
+    }
+
+    // ---- actions -----------------------------------------------------------------
+    async function act(c, k, btn) {
+        try {
+            if (k === 'open') location.href = 'workspace.html?client=' + encodeURIComponent(c.id);
+            else if (k === 'invite') inviteOwner(c);
+            else if (k === 'link') signInLink(c, (c.owners || [])[0] && c.owners[0].id);
+            else if (k === 'connect') { const m = await EL.api(`/api/meta/oauth/start?client_id=${encodeURIComponent(c.id)}`); location.href = m.url; }
+            else if (k === 'read' || k === 'history') {
+                if (btn) btn.disabled = true;
+                await EL.api('/api/xp/sync', { method: 'POST', body: { clientId: c.id, ...(k === 'history' ? { fullBackfill: true } : {}) } });
+                EL.toast(k === 'history' ? `Reading ${c.name}’s full Meta history. It takes a few minutes; this page shows it when done.` : `Reading ${c.name}’s latest Meta numbers.`);
+                setTimeout(load, 4000);
+            }
+            else if (k === 'extend' || k === 'start') trialDays(c, k);
+            else if (k === 'convert') {
+                await EL.api(`/api/clients/${c.id}/trial`, { method: 'POST', body: { action: 'convert' } });
+                EL.toast(`${c.name} is a client now. Its owner keeps Edge Meta AI with no end date.`);
+                load();
+            }
+        } catch (err) { if (btn) btn.disabled = false; if (!err.handled) EL.toast(err.message, 'bad'); }
+    }
+
+    function linkHtml(r) {
+        return r.link
+            ? `<p class="ws-note is-good"><b>Send this link to the owner.</b> ${esc(r.note || '')}</p><p class="hb-link"><code>${esc(r.link)}</code></p>
+               <button class="ws-btn is-sm" type="button" data-copy="${esc(r.link)}">Copy link</button>`
+            : `<p class="ws-note is-good">${esc(r.note || 'Done.')}</p>`;
+    }
+    function wireCopy(host) {
+        host.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
+            try { navigator.clipboard.writeText(b.dataset.copy).then(() => EL.toast('Copied.'), () => EL.toast('Select the link and copy it.', 'bad')); } catch { EL.toast('Select the link and copy it.', 'bad'); }
+        }));
+    }
+
+    function inviteOwner(c) {
+        const d = EL.drawer({ title: 'Invite the owner', sub: esc(c.name),
+            body: `<div class="ws-form">
+                <p class="el-muted" style="margin:0">They get a one-tap link into Edge Meta AI for ${esc(c.name)} only: their numbers, your work for them, posts to approve and their reports. ${c.trial ? 'It lasts as long as the trial.' : 'It never runs out while this is your client.'}</p>
+                <div class="ws-form two"><div><label for="iv-email">Owner’s email</label><input id="iv-email" type="email" placeholder="owner@business.com"></div><div><label for="iv-name">Their name</label><input id="iv-name" placeholder="Optional"></div></div>
+                <div id="iv-out"></div></div>`,
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="iv-go">Send invite</button>' });
+        const q1 = s => d.el.querySelector(s);
+        q1('#iv-go').addEventListener('click', async () => {
+            const out = q1('#iv-out'), email = q1('#iv-email').value.trim();
+            if (!email) { out.innerHTML = '<p class="ws-note is-bad">Enter the owner’s email.</p>'; return; }
+            q1('#iv-go').disabled = true; out.innerHTML = '<p class="ws-note">Inviting…</p>';
+            try {
+                const r = await EL.api(`/api/clients/${c.id}/portal-invite`, { method: 'POST', body: { email, name: q1('#iv-name').value.trim() || null } });
+                out.innerHTML = linkHtml(r); wireCopy(out); load();
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; q1('#iv-go').disabled = false; }
+        });
+    }
+
+    async function signInLink(c, userId) {
+        if (!c || !userId) return;
+        const d = EL.drawer({ title: 'New sign-in link', sub: esc(c.name), body: '<p class="ws-note">Making a link…</p>', foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button>' });
+        try {
+            const r = await EL.api(`/api/clients/${c.id}/owner-link`, { method: 'POST', body: { userId } });
+            d.body.innerHTML = linkHtml(r); wireCopy(d.body);
+        } catch (err) { d.body.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
+    }
+
+    function trialDays(c, k) {
+        const extending = k === 'extend';
+        const left = c.trial && !c.trial.ended ? ` ${c.trial.daysLeft} day${c.trial.daysLeft === 1 ? '' : 's'} left now.` : c.trial ? ' The trial has ended; this starts it again from today.' : '';
+        const d = EL.drawer({ title: extending ? 'Extend the trial' : 'Put on a trial', sub: esc(c.name),
+            body: `<div class="ws-form"><p class="el-muted" style="margin:0">${extending ? 'Adds days to the trial.' + left : 'The owner keeps Edge Meta AI until the trial ends, then the app says it has ended until you extend it or make them a client.'}</p>
+                <div><label for="td-days">${extending ? 'Add' : 'Length'}</label><select id="td-days"><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option></select></div>
+                <div id="td-out"></div></div>`,
+            foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="td-go">${extending ? 'Extend' : 'Start the trial'}</button>` });
+        d.el.querySelector('#td-go').addEventListener('click', async () => {
+            const out = d.el.querySelector('#td-out');
+            try {
+                const r = await EL.api(`/api/clients/${c.id}/trial`, { method: 'POST', body: { action: extending ? 'extend' : 'start', days: Number(d.el.querySelector('#td-days').value) } });
+                EL.closeDrawer();
+                EL.toast(`Trial runs until ${UI.day(r.client.trial_ends_at)}.`);
+                load();
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
+        });
+    }
+
+    function startTrial() {
+        const d = EL.drawer({ title: 'Start a trial', sub: 'Edge Meta AI for a business that is deciding',
+            body: `<div class="ws-form">
+                <div><label for="tr-name">Business name</label><input id="tr-name" placeholder="e.g. Harbor Dental Studio" maxlength="300"></div>
+                <div class="ws-form two"><div><label for="tr-niche">What they do</label><input id="tr-niche" placeholder="Optional, e.g. family dentist"></div><div><label for="tr-loc">Where</label><input id="tr-loc" placeholder="Optional"></div></div>
+                <div class="ws-form two"><div><label for="tr-email">Owner’s email</label><input id="tr-email" type="email" placeholder="owner@business.com"></div><div><label for="tr-oname">Their name</label><input id="tr-oname" placeholder="Optional"></div></div>
+                <div><label for="tr-days">Trial length</label><select id="tr-days"><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option></select>
+                    <div class="ws-hint">They get Edge Meta AI straight away. When it ends, the app says so until you extend it or make them a client. Nothing is deleted.</div></div>
+                <div id="tr-out"></div></div>`,
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="tr-go">Start the trial</button>' });
+        const q1 = s => d.el.querySelector(s);
+        q1('#tr-go').addEventListener('click', async () => {
+            const out = q1('#tr-out'), name = q1('#tr-name').value.trim(), email = q1('#tr-email').value.trim();
+            if (!name) { out.innerHTML = '<p class="ws-note is-bad">Add the business name.</p>'; q1('#tr-name').focus(); return; }
+            if (!email) { out.innerHTML = '<p class="ws-note is-bad">Add the owner’s email: the trial is their login.</p>'; q1('#tr-email').focus(); return; }
+            q1('#tr-go').disabled = true; out.innerHTML = '<p class="ws-note">Starting…</p>';
+            let client;
+            try {
+                client = (await EL.api('/api/clients', { method: 'POST', body: { name, niche: q1('#tr-niche').value.trim() || null, location: q1('#tr-loc').value.trim() || null, trialDays: Number(q1('#tr-days').value) } })).client;
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; q1('#tr-go').disabled = false; return; }
+            try {
+                const r = await EL.api(`/api/clients/${client.id}/portal-invite`, { method: 'POST', body: { email, name: q1('#tr-oname').value.trim() || null } });
+                out.innerHTML = `<p class="ws-note is-good"><b>${esc(name)}</b> is on a trial until ${esc(UI.day(client.trial_ends_at))}.</p>${linkHtml(r)}
+                    <p style="margin-top:12px"><a class="ws-btn is-sm" href="workspace.html?client=${encodeURIComponent(client.id)}">Open ${esc(name)}</a></p>`;
+                wireCopy(out);
+            } catch (err) {
+                out.innerHTML = `<p class="ws-note is-bad">The trial started, but the invite did not go: ${esc(err.message)} Invite the owner from its row.</p>`;
+            }
+            q1('#tr-go').remove();
+            EL._clients = null;
+            load();
+        });
     }
 
     // ---- pages you manage ------------------------------------------------------
@@ -141,6 +413,7 @@
 
     await load();
     if (q.get('add') === '1' || q.get('new')) UI.addClient();
+    if (q.get('trial') === '1') startTrial();
     if (q.get('meta') === 'ok') EL.toast(`Meta connected (${q.get('pages') || 1} Page${q.get('pages') === '1' ? '' : 's'}). File them below.`);
     if (q.get('meta') === 'error') EL.toast('Meta connection failed: ' + (q.get('message') || 'no reason given'), 'bad');
 })();

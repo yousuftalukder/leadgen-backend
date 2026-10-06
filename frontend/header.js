@@ -324,7 +324,13 @@
         },
 
         /** An owner login whose business the agency has closed: nothing here to show any more. (phase 52) */
-        blockNoBusiness() {
+        blockNoBusiness(trial = null) {
+            // Phase 56: a trial that ran out is said plainly, with its date.
+            if (trial && trial.endedAt) {
+                const day = new Date(trial.endedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+                block('Your trial has ended', `Your trial of Edge Meta AI for ${EL.escape(trial.name || 'your business')} ended on ${EL.escape(day)}. Nothing has been deleted: everything is here the moment your agency continues it. Contact your agency to carry on.`);
+                return;
+            }
             block('Your access has ended', 'Your agency has closed this business’s Edge Meta AI, or has not set one up for this login. Nothing you saw has been deleted. Contact your agency to open it again.');
         },
 
