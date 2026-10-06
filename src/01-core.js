@@ -713,6 +713,21 @@ function accountDenial(profile) {
  * moment a trial ends is the moment the business model needs the client to be
  * able to say "yes", and the door was locked from the inside.
  */
+/**
+ * When an owner login was last used (phase 56), so the Clients hub can tell an
+ * invite that was never opened from an owner who uses the app. At most once an
+ * hour per login, never awaited: a slow write must not slow a request.
+ */
+const _seenAt = new Map();
+function touchLastSeen(profile) {
+    if (!profile || profile.role !== 'client' || !profile.id) return;
+    const now = Date.now();
+    if (now - (_seenAt.get(profile.id) || 0) < 3600000) return;
+    _seenAt.set(profile.id, now);
+    Promise.resolve(supabase.from('app_users').update({ last_seen_at: new Date(now).toISOString() }).eq('id', profile.id))
+        .then(r => { if (r && r.error) _seenAt.delete(profile.id); }).catch(() => _seenAt.delete(profile.id));
+}
+
 async function auth(req, res, { allowLapsed = false } = {}) {
     const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
     if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
@@ -736,6 +751,7 @@ async function auth(req, res, { allowLapsed = false } = {}) {
     }
 
     const profile = await ensureProfile(data.user);
+    touchLastSeen(profile);
     // is_active is explicit on the fallback: accountState() reads it, and an
     // absent flag would otherwise read as suspended and lock out every caller
     // the moment ensureProfile has a bad minute.

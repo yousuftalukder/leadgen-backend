@@ -4137,6 +4137,70 @@ test('Gemini calls time out; the pages load pinned CDN builds; the service worke
     assert.ok(/NET_WAIT_MS/.test(sw) && /MAX_ENTRIES/.test(sw) && /u\.search = ''/.test(sw));
 });
 
+section('\nphase 56: the Clients hub — trials, stages, who signed in');
+test('a trial: the owner is in while it runs, told it ended after, and back the moment it is extended or converted', async () => {
+    MAIL.sent.length = 0;
+    const mk = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Sunset Yoga', trialDays: 14 } });
+    assert.strictEqual(mk.statusCode, 201, JSON.stringify(mk.body));
+    const Y = mk.body.client;
+    assert.ok(Y.trial_ends_at && Date.parse(Y.trial_ends_at) > Date.now() + 13 * 86400000, 'the trial was not set for 14 days');
+    assert.strictEqual((await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Bad', trialDays: 400 } })).statusCode, 400);
+    const inv = await call('POST', `/api/clients/${Y.id}/portal-invite`, { token: 't-emp', body: { email: 'ana@sunsetyoga.test' } });
+    assert.ok([200, 201].includes(inv.statusCode), JSON.stringify(inv.body));
+    const tok = 't-ana@sunsetyoga.test';
+    const during = await call('GET', '/api/me', { token: tok });
+    assert.strictEqual(during.body.business && during.body.business.id, Y.id, 'the owner could not open their trial');
+    // The trial runs out.
+    tbl('clients').find(c => c.id === Y.id).trial_ends_at = new Date(Date.now() - 60000).toISOString();
+    S.invalidateAuth();
+    const after = await call('GET', '/api/me', { token: tok });
+    assert.strictEqual(after.body.business, null, 'an ended trial still opened');
+    assert.ok(after.body.trial_ended && after.body.trial_ended.name === 'Sunset Yoga', 'the app is not told the trial ended: ' + JSON.stringify(after.body.trial_ended));
+    assert.strictEqual(tbl('clients').filter(c => c.owner_user_id === during.body.id).length, 0, 'a made-up business was created for an owner whose trial ended');
+    const g = await call('GET', '/api/client/growth', { token: tok });
+    assert.strictEqual(g.body.code, 'no_business');
+    // Staff still see and work on it.
+    assert.strictEqual((await call('GET', `/api/clients/${Y.id}`, { token: 't-emp' })).statusCode, 200);
+    const ext = await call('POST', `/api/clients/${Y.id}/trial`, { token: 't-emp', body: { action: 'extend', days: 7 } });
+    assert.strictEqual(ext.statusCode, 200, JSON.stringify(ext.body));
+    assert.ok(Date.parse(ext.body.client.trial_ends_at) > Date.now() + 6 * 86400000, 'an ended trial did not restart from today');
+    S.invalidateAuth();
+    assert.strictEqual((await call('GET', '/api/me', { token: tok })).body.business.id, Y.id, 'extending did not reopen the app');
+    const conv = await call('POST', `/api/clients/${Y.id}/trial`, { token: 't-emp', body: { action: 'convert' } });
+    assert.strictEqual(conv.statusCode, 200);
+    assert.strictEqual(conv.body.client.trial_ends_at, null);
+    assert.ok(conv.body.client.converted_at);
+    assert.strictEqual((await call('POST', `/api/clients/${Y.id}/trial`, { token: 't-emp', body: { action: 'convert' } })).statusCode, 400, 'a client was converted twice');
+    assert.strictEqual((await call('POST', `/api/clients/${Y.id}/trial`, { token: tok, body: { action: 'extend', days: 30 } })).statusCode, 403, 'an owner extended their own trial');
+    state.yoga = Y.id;
+});
+test('the hub: each client has one stage, its owners with when they last signed in, and the next step', async () => {
+    const r = await call('GET', '/api/clients', { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200);
+    const y = r.body.clients.find(c => c.id === state.yoga);
+    assert.ok(y && y.owners && y.owners.length === 1, 'the owner login is not listed: ' + JSON.stringify(y && y.owners));
+    assert.strictEqual(y.owners[0].email, 'ana@sunsetyoga.test');
+    assert.ok(y.owners[0].lastSeenAt, 'the owner signed in but the hub does not know');
+    assert.strictEqual(y.stage, 'onboarding', 'an owner who signed in, without Meta, is still onboarding: ' + y.stage);
+    assert.deepStrictEqual(y.next && y.next.key, 'connect');
+    assert.ok(y.xp && 'historyRead' in y.xp);
+    // A fresh trial with no owner yet.
+    const t = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Pop-up Market', trialDays: 7 } });
+    const r2 = await call('GET', '/api/clients', { token: 't-emp' });
+    const pm = r2.body.clients.find(c => c.id === t.body.client.id);
+    assert.strictEqual(pm.stage, 'trial');
+    assert.ok(pm.trial && pm.trial.daysLeft >= 6 && pm.trial.ended === false, JSON.stringify(pm.trial));
+    assert.strictEqual(pm.next.key, 'invite');
+    // An owner invited who never opened the link.
+    const n = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Quiet Bookshop' } });
+    await call('POST', `/api/clients/${n.body.client.id}/portal-invite`, { token: 't-emp', body: { email: 'quiet@bookshop.test' } });
+    const r3 = await call('GET', '/api/clients', { token: 't-emp' });
+    const qb = r3.body.clients.find(c => c.id === n.body.client.id);
+    assert.strictEqual(qb.stage, 'invited');
+    assert.strictEqual(qb.owners[0].lastSeenAt, null);
+    assert.strictEqual(qb.next.key, 'resend');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

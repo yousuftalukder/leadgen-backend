@@ -248,7 +248,7 @@
         const me = await EL.init({ engine: null, page: 'ai/index.html', app: 'ai' });
         if (me.role !== 'client') { $('ai-staff').hidden = false; return; }
         // An owner login whose business the agency has closed (phase 52): say so, nothing else.
-        if (me.agency_owner && !me.business) { EL.blockNoBusiness(); return; }
+        if (me.agency_owner && !me.business) { EL.blockNoBusiness(me.trial_ended); return; }
         $('ai-app').hidden = false;
 
         // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.

@@ -441,6 +441,8 @@ app.get('/api/me', async (req, res) => {
         body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
         // An owner login the agency made: no trial clock, and no business means access has ended.
         body.agency_owner = ctx.profile.agency_owner === true;
+        // Phase 56: why there is no business — a trial that ran out says so, with the date.
+        if (!own && body.agency_owner) body.trial_ended = await S.endedTrialFor(ctx.user.id).catch(() => null);
         body.activation_requested_at = ctx.profile.activation_requested_at || null;
         body.trial_ends_at = ctx.profile.trial_ends_at || null;
         body.paid_until    = ctx.profile.paid_until || null;

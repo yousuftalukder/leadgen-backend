@@ -9,6 +9,7 @@
 const S = require('./shared');
 const { AUTH_CACHE_MS, app, auth, invalidateAuth, logger, sendErr, supabase } = S;
 Object.assign(S, {
+    trialOpen, endedTrialFor, clientStages,
     userRole, clientAccess, findOwnClient, ownClientFor, requireOwnClient, resolveClientId,
     applyReportScope, canReadReport, cleanClientBody, clientsAccessible, clientArchived, markAgencyOwner,
     absorbEmptyOwnRecord
@@ -112,16 +113,32 @@ async function clientAccess(userId, clientId, need = 'viewer') {
 async function findOwnClient(uid) {
     const { data: owned } = await supabase.from('clients').select('*')
         .eq('owner_user_id', uid).eq('archived', false)
-        .order('created_at', { ascending: true }).limit(1);
-    if (owned && owned[0]) return owned[0];
+        .order('created_at', { ascending: true }).limit(5);
+    const ownLive = (owned || []).find(c => trialOpen(c));
+    if (ownLive) return ownLive;
 
     const { data: mem } = await supabase.from('client_members').select('client_id')
         .eq('user_id', uid).eq('role', 'editor');
     const ids = (mem || []).map(m => m.client_id);
     if (!ids.length) return null;
     const { data: cs } = await supabase.from('clients').select('*').in('id', ids).eq('archived', false)
-        .order('created_at', { ascending: true }).limit(1);
-    return (cs && cs[0]) || null;
+        .order('created_at', { ascending: true }).limit(20);
+    return (cs || []).find(c => trialOpen(c)) || null;
+}
+
+/** A client on a trial that has run out is closed to its owner until the agency extends or converts it (phase 56). */
+function trialOpen(c) {
+    // One argument on purpose: passed straight to Array.find, a second parameter would be the index.
+    return !(c && c.trial_ends_at && Date.parse(c.trial_ends_at) <= Date.now());
+}
+/** The business whose trial ended, for the owner's "your trial ended" screen. */
+async function endedTrialFor(uid) {
+    const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', uid).eq('role', 'editor');
+    const ids = (mem || []).map(m => m.client_id);
+    if (!ids.length) return null;
+    const { data: cs } = await supabase.from('clients').select('id, name, trial_ends_at, archived').in('id', ids).eq('archived', false);
+    const c = (cs || []).filter(x => !trialOpen(x)).sort((a, b) => String(b.trial_ends_at).localeCompare(String(a.trial_ends_at)))[0];
+    return c ? { name: c.name, endedAt: c.trial_ends_at } : null;
 }
 
 /**
@@ -319,11 +336,14 @@ app.get('/api/clients', async (req, res) => {
                 if (k.page_name && m.names.length < 3) m.names.push(k.page_name);
             }
         }
-        res.json({ clients: rows.map(c => ({
+        const withMeta = rows.map(c => ({
             ...c,
             reports: counts[c.id] || { total: 0, byType: {} },
             meta: meta[c.id] || { connected: false, pages: 0, active: 0, names: [] }
-        })) });
+        }));
+        // Phase 56: the hub's view of each client — stage, next step, owner logins, trial, Meta reads.
+        const stages = ids.length ? await clientStages(withMeta).catch(e => { logger.warn('client_stages_failed', { message: e.message }); return {}; }) : {};
+        res.json({ clients: withMeta.map(c => ({ ...c, ...(stages[c.id] || {}) })) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -335,6 +355,12 @@ app.post('/api/clients', async (req, res) => {
         if (!body.name) return res.status(400).json({ error: 'Client name is required.' });
         const row = { owner_user_id: ctx.user.id };
         for (const [k, v] of Object.entries(body)) if (v !== undefined) row[k] = v;
+        // Phase 56: a business can start as a trial of Edge Meta AI, for a set number of days.
+        if (req.body?.trialDays !== undefined && req.body?.trialDays !== null) {
+            const days = trialDaysOf(req.body.trialDays);
+            if (!days) return res.status(400).json({ error: 'A trial runs 1 to 90 days.' });
+            Object.assign(row, trialWindow(days));
+        }
         const { data, error } = await supabase.from('clients').insert([row]).select().maybeSingle();
         if (error) throw error;
         res.status(201).json({ client: { ...data, access: 'owner' } });
@@ -356,6 +382,99 @@ app.patch('/api/clients/:id', async (req, res) => {
         res.json({ client: { ...data, access: c.access } });
     } catch (err) { sendErr(res, err); }
 });
+
+// ---- trials (phase 56) -------------------------------------------------------
+// A trial is a business the agency lets try Edge Meta AI for a set time before
+// it signs. The owner is invited the same way as any client's; when the trial
+// ends the app tells them so and nothing else, until the team extends it or
+// converts the business into a client.
+const trialDaysOf = v => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 1 && n <= 90 ? n : null; };
+function trialWindow(days, from = Date.now()) {
+    return { trial_started_at: new Date(from).toISOString(), trial_ends_at: new Date(from + days * 86400000).toISOString(), converted_at: null };
+}
+
+app.post('/api/clients/:id/trial', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!S.staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const action = String(req.body?.action || '');
+        let patch;
+        if (action === 'start' || action === 'extend') {
+            const days = trialDaysOf(req.body?.days);
+            if (!days) return res.status(400).json({ error: 'A trial runs 1 to 90 days.' });
+            // Extending adds to whatever is left; an ended trial starts again from today.
+            const base = action === 'extend' && c.trial_ends_at && Date.parse(c.trial_ends_at) > Date.now() ? Date.parse(c.trial_ends_at) : Date.now();
+            patch = action === 'start' ? trialWindow(days)
+                : { trial_ends_at: new Date(base + days * 86400000).toISOString(), trial_started_at: c.trial_started_at || new Date().toISOString() };
+        } else if (action === 'convert') {
+            if (!c.trial_ends_at) return res.status(400).json({ error: 'This business is not on a trial.' });
+            patch = { trial_ends_at: null, converted_at: new Date().toISOString() };
+        } else return res.status(400).json({ error: 'Start, extend or convert.' });
+        patch.updated_at = new Date().toISOString();
+        const { data, error } = await supabase.from('clients').update(patch).eq('id', c.id).select().maybeSingle();
+        if (error) {
+            if (/trial_ends_at|converted_at|trial_started_at/.test(error.message || '')) return res.status(503).json({ error: 'Trials need the phase-56 database update. Run sql/schema-phase56.sql in the Supabase SQL editor.', code: 'migration_required' });
+            throw error;
+        }
+        logger.info('client_trial', { clientId: c.id, action, by: ctx.user.id, endsAt: data.trial_ends_at || null });
+        res.json({ client: { ...data, access: c.access } });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Where each client stands, for the Clients hub (phase 56): its owner logins
+ * and whether they ever signed in, its trial, how fresh Edge Meta AI's copy of
+ * its Meta numbers is — and from those, one stage and the one next step.
+ */
+async function clientStages(clients) {
+    const ids = clients.map(c => c.id);
+    const out = {};
+    if (!ids.length) return out;
+    const [{ data: mem }, { data: xc }, { data: assets }] = await Promise.all([
+        supabase.from('client_members').select('client_id, user_id, created_at').in('client_id', ids),
+        supabase.from('xp_clients').select('id, last_synced_at, is_active').in('id', ids),
+        supabase.from('xp_meta_assets').select('client_id, platform, last_full_backfill_at, last_synced_at, status').in('client_id', ids)
+    ]);
+    const userIds = [...new Set((mem || []).map(m => m.user_id))];
+    const { data: users } = userIds.length
+        ? await supabase.from('app_users').select('id, email, full_name, role, is_active, last_seen_at').in('id', userIds).eq('role', 'client')
+        : { data: [] };
+    const byUser = new Map((users || []).map(u => [u.id, u]));
+    const running = new Set(typeof S.xp?.runningIds === 'function' ? S.xp.runningIds() : []);
+    const now = Date.now();
+    for (const c of clients) {
+        const owners = (mem || []).filter(m => m.client_id === c.id && byUser.has(m.user_id)).map(m => {
+            const u = byUser.get(m.user_id);
+            return { id: u.id, email: u.email, name: u.full_name || null, invitedAt: m.created_at || null, lastSeenAt: u.last_seen_at || null, active: u.is_active !== false };
+        });
+        const x = (xc || []).find(r => r.id === c.id) || null;
+        const as = (assets || []).filter(a => a.client_id === c.id);
+        const xp = {
+            assets: as.length,
+            lastReadAt: x ? x.last_synced_at || null : null,
+            historyRead: as.length ? as.every(a => a.last_full_backfill_at) : false,
+            needsReconnect: as.length ? as.every(a => a.status === 'EXPIRED') : false,
+            reading: running.has(c.id)
+        };
+        const trial = c.trial_ends_at ? { startedAt: c.trial_started_at || null, endsAt: c.trial_ends_at, ended: Date.parse(c.trial_ends_at) <= now,
+            daysLeft: Math.max(0, Math.ceil((Date.parse(c.trial_ends_at) - now) / 86400000)) } : null;
+        const signedIn = owners.some(o => o.lastSeenAt);
+        const metaOn = !!(c.meta && c.meta.connected);
+        const stage = c.archived ? 'archived' : trial ? 'trial' : (!owners.length ? 'onboarding' : !signedIn ? 'invited' : metaOn ? 'active' : 'onboarding');
+        let next = null;
+        if (c.archived) next = null;
+        else if (trial && trial.ended) next = { key: 'extend', label: 'Extend trial' };
+        else if (!owners.length) next = { key: 'invite', label: 'Invite owner' };
+        else if (!signedIn) next = { key: 'resend', label: 'New sign-in link' };
+        else if (!metaOn) next = { key: 'connect', label: 'Connect Meta' };
+        else if (xp.needsReconnect) next = { key: 'connect', label: 'Reconnect Meta' };
+        else if (xp.assets && !xp.historyRead && !xp.reading) next = { key: 'history', label: 'Read full history' };
+        out[c.id] = { stage, next, owners, trial, xp };
+    }
+    return out;
+}
 
 /**
  * What archiving a client stops, and unarchiving starts again (phase 53).

@@ -30,7 +30,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
   numbered order. They share one namespace, `src/shared.js` (`S`): a part
   unpacks what it needs from earlier parts at its top and reads anything from
   a later part as `S.name` when it runs. A new top-level name used by another
-  part must be added to `S` where it is defined.
+  part must be added to `S` where it is defined: a function in the
+  `Object.assign(S, …)` at the top of its part, a `const` with `S.name = name;`
+  straight after its declaration (it does not exist yet at the top).
 
 - `npm run check` and `npm test` before every push; CI runs the same on every PR.
 - Each phase gets a `docs/DEPLOY-PHASEN.md` saying what to run and what changed.
