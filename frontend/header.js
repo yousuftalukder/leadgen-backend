@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * Drop this on any page:
  *
- *   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+ *   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
  *   <script src="header.js"></script>
  *   <script>
  *     EL.init({ engine: 'report', page: 'ig-competitors.html' }).then(me => { ... });
@@ -826,8 +826,16 @@
         // died" — and there was no way to tell which from the screen. The
         // reason is kept so the picker can say which one happened.
         _clientsErr: null,
-        async clients(force = false) {
-            if (EL._clients && !force) return EL._clients;
+        _clientsP: null,
+        clients(force = false) {
+            if (EL._clients && !force) return Promise.resolve(EL._clients);
+            // One request however many callers ask at once (phase 54): the rail, the picker and the
+            // page all used to fetch the same list in parallel on every load.
+            if (EL._clientsP) return EL._clientsP;
+            EL._clientsP = EL._loadClients().finally(() => { EL._clientsP = null; });
+            return EL._clientsP;
+        },
+        async _loadClients() {
             EL._clientsErr = null;
             try {
                 // never scope this list to the selected client — it IS the list of clients
