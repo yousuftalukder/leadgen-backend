@@ -9,7 +9,7 @@
 const S = require('./shared');
 const { AUTH_CACHE_MS, app, auth, invalidateAuth, logger, sendErr, supabase } = S;
 Object.assign(S, {
-    trialOpen, endedTrialFor, clientStages,
+    trialOpen, endedTrialFor, clientStages, noBusinessBody,
     userRole, clientAccess, findOwnClient, ownClientFor, requireOwnClient, resolveClientId,
     applyReportScope, canReadReport, cleanClientBody, clientsAccessible, clientArchived, markAgencyOwner,
     absorbEmptyOwnRecord
@@ -133,8 +133,11 @@ function trialOpen(c) {
 }
 /** The business whose trial ended, for the owner's "your trial ended" screen. */
 async function endedTrialFor(uid) {
-    const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', uid).eq('role', 'editor');
-    const ids = (mem || []).map(m => m.client_id);
+    const [{ data: mem }, { data: own }] = await Promise.all([
+        supabase.from('client_members').select('client_id').eq('user_id', uid).eq('role', 'editor'),
+        supabase.from('clients').select('id').eq('owner_user_id', uid)
+    ]);
+    const ids = [...new Set([...(mem || []).map(m => m.client_id), ...(own || []).map(c => c.id)])];
     if (!ids.length) return null;
     const { data: cs } = await supabase.from('clients').select('id, name, trial_ends_at, archived').in('id', ids).eq('archived', false);
     const c = (cs || []).filter(x => !trialOpen(x)).sort((a, b) => String(b.trial_ends_at).localeCompare(String(a.trial_ends_at)))[0];
@@ -154,6 +157,10 @@ async function ownClientFor(ctx) {
     const found = await findOwnClient(uid);
     if (found) return found;
     if (ctx.profile?.agency_owner === true) return null;
+    // A login that already has a business which is archived or whose trial ended gets no fresh one
+    // (phase 57): that was a way round both. Only a login with no business at all is given one.
+    const { count: had } = await supabase.from('clients').select('id', { count: 'exact', head: true }).eq('owner_user_id', uid);
+    if (had) return null;
 
     const email = ctx.user.email || ctx.profile?.email || '';
     const name = String(ctx.profile?.full_name || '').trim() || email.split('@')[0] || 'My business';
@@ -173,8 +180,16 @@ async function ownClientFor(ctx) {
 async function requireOwnClient(ctx, res) {
     const own = await ownClientFor(ctx);
     if (own) return own;
-    res.status(403).json({ error: 'Your agency has not set up a business for this login, or it has been closed. Contact your agency.', code: 'no_business' });
+    res.status(403).json(await noBusinessBody(ctx.user.id));
     return null;
+}
+
+/** The refusal an owner with no live business gets, saying when it is a trial that ended (phase 57). */
+async function noBusinessBody(uid) {
+    const trial = await endedTrialFor(uid).catch(() => null);
+    return trial
+        ? { error: `Your trial of Edge Meta AI for ${trial.name} has ended. Contact your agency to carry on.`, code: 'no_business', trial }
+        : { error: 'Your agency has not set up a business for this login, or it has been closed. Contact your agency.', code: 'no_business' };
 }
 
 /**
@@ -197,7 +212,8 @@ async function resolveClientId(req, ctx) {
     if (ctx.profile?.role === 'client') {
         const own = await ownClientFor(ctx);
         if (own) return own.id;
-        const e = new Error('Your agency has not set up a business for this login, or it has been closed. Contact your agency.');
+        const b = await noBusinessBody(ctx.user.id);
+        const e = new Error(b.error);
         e.statusCode = 403; e.code = 'no_business';
         throw e;
     }
@@ -362,7 +378,10 @@ app.post('/api/clients', async (req, res) => {
             Object.assign(row, trialWindow(days));
         }
         const { data, error } = await supabase.from('clients').insert([row]).select().maybeSingle();
-        if (error) throw error;
+        if (error) {
+            if (row.trial_ends_at && /trial_ends_at|trial_started_at|converted_at/.test(error.message || '')) return res.status(503).json({ error: 'Trials need the phase-56 database update. Run sql/schema-phase56.sql in the Supabase SQL editor.', code: 'migration_required' });
+            throw error;
+        }
         res.status(201).json({ client: { ...data, access: 'owner' } });
     } catch (err) { sendErr(res, err); }
 });
@@ -401,6 +420,7 @@ app.post('/api/clients/:id/trial', async (req, res) => {
         if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
         const action = String(req.body?.action || '');
         let patch;
+        if (action === 'extend' && !c.trial_ends_at) return res.status(400).json({ error: 'This business is not on a trial. Put it on one instead.' });
         if (action === 'start' || action === 'extend') {
             const days = trialDaysOf(req.body?.days);
             if (!days) return res.status(400).json({ error: 'A trial runs 1 to 90 days.' });
@@ -437,7 +457,8 @@ async function clientStages(clients) {
         supabase.from('xp_clients').select('id, last_synced_at, is_active').in('id', ids),
         supabase.from('xp_meta_assets').select('client_id, platform, last_full_backfill_at, last_synced_at, status').in('client_id', ids)
     ]);
-    const userIds = [...new Set((mem || []).map(m => m.user_id))];
+    // A self-serve business's own login is its owner too (phase 57), not only invited members.
+    const userIds = [...new Set([...(mem || []).map(m => m.user_id), ...clients.map(c => c.owner_user_id).filter(Boolean)])];
     const { data: users } = userIds.length
         ? await supabase.from('app_users').select('id, email, full_name, role, is_active, last_seen_at').in('id', userIds).eq('role', 'client')
         : { data: [] };
@@ -445,12 +466,16 @@ async function clientStages(clients) {
     const running = new Set(typeof S.xp?.runningIds === 'function' ? S.xp.runningIds() : []);
     const now = Date.now();
     for (const c of clients) {
-        const owners = (mem || []).filter(m => m.client_id === c.id && byUser.has(m.user_id)).map(m => {
+        const links = [...(mem || []).filter(m => m.client_id === c.id), ...(byUser.has(c.owner_user_id) ? [{ user_id: c.owner_user_id, created_at: c.created_at }] : [])];
+        const seen = new Set();
+        const owners = links.filter(m => byUser.has(m.user_id) && !seen.has(m.user_id) && seen.add(m.user_id)).map(m => {
             const u = byUser.get(m.user_id);
             return { id: u.id, email: u.email, name: u.full_name || null, invitedAt: m.created_at || null, lastSeenAt: u.last_seen_at || null, active: u.is_active !== false };
         });
         const x = (xc || []).find(r => r.id === c.id) || null;
-        const as = (assets || []).filter(a => a.client_id === c.id);
+        // Only assets that are read or need a new login count (phase 57): removed or paused ones never
+        // backfill, and left the next step on "Read full history" for good.
+        const as = (assets || []).filter(a => a.client_id === c.id && (a.status === 'ACTIVE' || a.status === 'EXPIRED'));
         const xp = {
             assets: as.length,
             lastReadAt: x ? x.last_synced_at || null : null,
@@ -461,7 +486,9 @@ async function clientStages(clients) {
         const trial = c.trial_ends_at ? { startedAt: c.trial_started_at || null, endsAt: c.trial_ends_at, ended: Date.parse(c.trial_ends_at) <= now,
             daysLeft: Math.max(0, Math.ceil((Date.parse(c.trial_ends_at) - now) / 86400000)) } : null;
         const signedIn = owners.some(o => o.lastSeenAt);
-        const metaOn = !!(c.meta && c.meta.connected);
+        // A connection whose login expired is still connected, it needs renewing (phase 57).
+        const metaOn = !!(c.meta && (c.meta.connected || c.meta.pages));
+        if (c.meta && !c.meta.connected && c.meta.pages) xp.needsReconnect = true;
         const stage = c.archived ? 'archived' : trial ? 'trial' : (!owners.length ? 'onboarding' : !signedIn ? 'invited' : metaOn ? 'active' : 'onboarding');
         let next = null;
         if (c.archived) next = null;
@@ -493,7 +520,14 @@ async function clientArchived(clientId, archived) {
             .eq('client_id', clientId).eq('paused', true).eq('last_status', 'archived');
         if (error) logger.warn('unarchive_schedules_failed', { clientId, message: error.message });
     }
-    const { error: xe } = await supabase.from('xp_clients').update({ is_active: !archived }).eq('id', clientId);
+    // Unarchiving re-activates the assistant's reads only where there is Meta to read (phase 57): a
+    // chat-only row (no connection) failed on every scheduled read once switched on.
+    let activate = !archived;
+    if (activate) {
+        const { data: conns } = await supabase.from('meta_connections').select('id').eq('client_id', clientId).eq('status', 'active').limit(1);
+        activate = !!(conns && conns.length);
+    }
+    const { error: xe } = await supabase.from('xp_clients').update({ is_active: activate }).eq('id', clientId);
     if (xe && !S.missingTable(xe)) logger.warn('archive_xp_failed', { clientId, message: xe.message });
     logger.info(archived ? 'client_archived' : 'client_unarchived', { clientId });
 }
@@ -502,8 +536,14 @@ app.delete('/api/clients/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
-        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        if (!c) return res.status(404).json({ error: 'Client not found, or you’re not its account lead or an admin.' });
         // Reports are kept (client_id set null by the FK). Only the workspace goes.
+        // Phase 57: and what was running for it stops. Edge Meta AI's copy of its Meta numbers has no
+        // link to this row, so without this it kept reading a deleted business twice a day.
+        await clientArchived(c.id, true).catch(() => {});
+        const p = await S.xp.purge(c.id).catch(e => ({ error: e.message }));
+        if (p && p.error) logger.warn('client_delete_xp_purge_failed', { clientId: c.id, message: p.error });
+        await supabase.from('xp_clients').delete().eq('id', c.id).then(() => {}, () => {});
         const { error } = await supabase.from('clients').delete().eq('id', c.id);
         if (error) throw error;
         res.json({ success: true });
@@ -546,7 +586,7 @@ app.get('/api/clients/:id/timeline', async (req, res) => {
             .select('id, type, engine, status, progress, credits_estimate, created_at, finished_at, error, result_report_id')
             .eq('client_id', c.id).order('created_at', { ascending: false }).limit(50);
         const { data: sugg } = await supabase.from('fb_suggestions')
-            .select('id, group_name, format, predicted_band, posted_at, verified_band, created_at')
+            .select('id, group_name, format, predicted_band, posted_at, verified_at, actual_index, created_at')
             .eq('client_id', c.id).order('created_at', { ascending: false }).limit(50);
         res.json({ client: c, reports: reports || [], jobs: jobs || [], suggestions: sugg || [] });
     } catch (err) { sendErr(res, err); }
@@ -556,19 +596,21 @@ app.post('/api/clients/:id/members', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
-        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        if (!c) return res.status(404).json({ error: 'Client not found, or you’re not its account lead or an admin.' });
         const email = String(req.body.email || '').trim().toLowerCase();
         const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
         if (!email) return res.status(400).json({ error: 'Email is required.' });
         const { data: u } = await supabase.from('app_users').select('id, email, role').eq('email', email).maybeSingle();
-        if (!u) return res.status(404).json({ error: 'No EdgeLead account with that email. They need to sign up first.' });
-        if (u.id === c.owner_user_id) return res.status(400).json({ error: 'That is the owner.' });
+        // Phase 57: a teammate is someone on the team. "Sign up first" sent people to the trial signup,
+        // which makes a business-owner login, and adding that here quietly made them an owner.
+        if (!u) return res.status(404).json({ error: 'Nobody on the team has that email. An admin adds teammates in Team & settings → People; then add them here.' });
+        if (u.role === 'client') return res.status(400).json({ error: 'That email is a business owner’s login, not a teammate. To give a business owner Edge Meta AI, use Invite the owner.' });
+        if (u.id === c.owner_user_id) return res.status(400).json({ error: 'They are already this client’s account lead.' });
         const { error } = await supabase.from('client_members')
             .upsert([{ client_id: c.id, user_id: u.id, role, added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
         if (error) throw error;
 
         const absorbed = role === 'editor' ? await absorbEmptyOwnRecord(u.id, c.id) : null;
-        if (role === 'editor' && u.role === 'client') await markAgencyOwner(u.id);
         res.json({ success: true, member: { user_id: u.id, email: u.email, role }, absorbed });
     } catch (err) { sendErr(res, err); }
 });
@@ -618,7 +660,7 @@ app.delete('/api/clients/:id/members/:userId', async (req, res) => {
         const ctx = await auth(req, res); if (!ctx) return;
         const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
         const self = req.params.userId === ctx.user.id;
-        if (!c && !self) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        if (!c && !self) return res.status(404).json({ error: 'Client not found, or you’re not its account lead or an admin.' });
         const { error } = await supabase.from('client_members').delete()
             .eq('client_id', req.params.id).eq('user_id', req.params.userId);
         if (error) throw error;

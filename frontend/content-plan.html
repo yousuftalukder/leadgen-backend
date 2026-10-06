@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Edgelead — Content Plan</title>
+<title>Content plan — EdgeLead</title>
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
@@ -147,7 +147,7 @@
 
 </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="content-calendar.js"></script>
 <script src="content-strategy.js"></script>
@@ -208,7 +208,7 @@
     renderCounts();
 
     const cur = EL.currentClient();
-    $('client-hint').textContent = cur ? `Will be saved under client "${cur.name}".` : 'No client selected in the header — the plan is saved to your own vault only.';
+    $('client-hint').textContent = cur ? `Will be saved under client "${cur.name}".` : 'Choose the client this plan is for in the bar above. Every plan is filed under a client.';
     if (cur?.ig_handle && !$('target').value) $('target').value = '@' + cur.ig_handle;
 
     // ---- sources -----------------------------------------------------------
@@ -314,7 +314,7 @@
         const stale = fr ? [fr.target, ...(fr.rivals || [])].filter(x => x && x.stale) : [];
         $('plan-warn').innerHTML = (p.warnings || []).map(w => `<div class="warn">${esc(w)}</div>`).join('')
             + (stale.length && !(p.warnings || []).some(w => /older than/.test(w)) ? `<div class="warn">Stored data is older than ${fr.staleAfterDays} days for ${stale.map(x => esc(x.name)).join(', ')}.</div>` : '');
-        EL.reportActions('report-actions', { reportId: rep.id });
+        EL.reportActions('report-actions', { reportId: rep.id, schedulable: false });   // a plan is not re-run on a clock (phase 57)
         // The plan's posts on dates, for the owner to approve (phase 42).
         if (rep.id && window.CPCal) CPCal.mount(pane('calendar'), rep.id, { onCount: n => { $('cal-n').textContent = n ? '· ' + n : ''; } });
 

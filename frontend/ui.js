@@ -352,7 +352,7 @@
                         ${isNew ? '' : `<section class="tk-sec"><h3>Activity</h3>
                             <div id="tk-comments" class="tk-comments"><p class="el-muted">Loading…</p></div>
                             <div class="tk-compose">
-                                <div id="tk-cbox" class="tk-editor is-small" contenteditable="true" role="textbox" aria-label="Write a comment" data-placeholder="Write a comment. Pictures can be pasted here too."></div>
+                                <div id="tk-cbox" class="tk-editor is-small" contenteditable="true" role="textbox" aria-label="Write a comment" data-placeholder="${t.visibleToClient ? 'The client reads the comments on this task. Write to them and the team here; pictures can be pasted too.' : 'Write a comment. Only your team sees it. Pictures can be pasted here too.'}"></div>
                                 <div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('plus')}Picture<input type="file" id="tk-cfile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
                                     <button class="ws-btn is-sm is-gold" type="button" id="tk-csend">Comment</button></div>
                             </div></section>`}
@@ -549,7 +549,7 @@
                     ['later', 'Later', 'It stays on this client’s setup list.']].map(([k, t, s]) =>
                     `<button type="button" class="ws-option" data-meta="${k}" aria-pressed="${draft.meta === k}"><span class="radio"></span><span><b>${t}</b><span>${s}</span></span></button>`).join('')}</div>`;
             if (step === 4) body += `<div class="ws-form">
-                <div><label for="ac-team">Teammates on this client</label><input id="ac-team" value="${esc(draft.teamText || '')}" placeholder="colleague@agency.com, another@agency.com"><div class="ws-hint">They can open this client, see its board and start work under it. You are its owner.</div></div>
+                <div><label for="ac-team">Teammates on this client</label><input id="ac-team" value="${esc(draft.teamText || '')}" placeholder="colleague@agency.com, another@agency.com"><div class="ws-hint">They can open this client, see its board and start work under it. You’re its account lead.</div></div>
                 <div class="ws-form two">
                     <div><label for="ac-owner">Business owner’s email, for Edge Meta AI</label><input id="ac-owner" type="email" value="${esc(draft.owner)}" placeholder="Optional"></div>
                     <div><label for="ac-owner-name">Owner’s name</label><input id="ac-owner-name" value="${esc(draft.ownerName)}" placeholder="Optional"></div>
@@ -608,7 +608,11 @@
             }
             EL._clients = null;
             EL.rememberClient(client.id);
+            // Kept before Facebook takes over the page (phase 57): the owner's one-time link and any
+            // problems used to be lost when "Connect now" redirected first.
+            if (invite && invite.link) sessionStorage.setItem('el-invite-' + client.id, JSON.stringify(invite));
             if (draft.meta === 'now') {
+                if (problems.length) sessionStorage.setItem('el-added-problems-' + client.id, JSON.stringify(problems));
                 try { const m = await EL.api(`/api/meta/oauth/start?client_id=${client.id}`); window.location.href = m.url; return; }
                 catch (err) { problems.push('Meta: ' + err.message); }
             }
@@ -616,7 +620,6 @@
             if (opts.onCreated) opts.onCreated(client, { problems, invite });
             else {
                 const q = new URLSearchParams({ client: client.id, added: '1' });
-                if (invite && invite.link) sessionStorage.setItem('el-invite-' + client.id, JSON.stringify(invite));
                 if (problems.length) sessionStorage.setItem('el-added-problems-' + client.id, JSON.stringify(problems));
                 window.location.href = 'workspace.html?' + q.toString();
             }

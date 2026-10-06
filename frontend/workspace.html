@@ -62,7 +62,7 @@
     </div>
 </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="ui.js"></script>
 <script>
@@ -124,7 +124,7 @@
         const meta = liveConns().length ? `<span class="el-chip is-jade">Meta connected</span>`
             : conns.length ? `<span class="el-chip is-warn">Meta needs attention</span>` : `<span class="el-chip">Meta not connected</span>`;
         const portal = portalLogins().length ? `<span class="el-chip is-jade">Owner has Edge Meta AI</span>` : '';
-        const access = { owner: 'You own this client', admin: 'Admin access', editor: 'You can edit', viewer: 'View only' }[c.access] || '';
+        const access = { owner: 'You’re the account lead', admin: 'Admin access', editor: 'You can edit', viewer: 'View only' }[c.access] || '';
         const st = setup();
         const doneN = st.filter(s => s.done).length;
         const openTasks = tasks && tasks.tasks ? tasks.tasks.filter(t => t.status !== 'done').length : null;
@@ -183,7 +183,13 @@
         try { invite = JSON.parse(sessionStorage.getItem('el-invite-' + c.id) || 'null'); sessionStorage.removeItem('el-invite-' + c.id); } catch { invite = null; }
         if (problems && problems.length) parts.push(`<div>Some of it did not go through: ${problems.map(esc).join('; ')}. Fix it under Settings or Access &amp; sharing.</div>`);
         if (invite) parts.push(inviteHtml(invite));
-        if (q.get('meta') === 'ok') parts.push(`<div><b>Meta connected</b> (${esc(q.get('pages') || '1')} Page${q.get('pages') === '1' ? '' : 's'}). Numbers are read twice a day; the first read starts within the hour.</div>`);
+        if (q.get('meta') === 'ok') {
+            // Phase 57: only this client's own Page is filed here; the login's other Pages wait on the Clients page.
+            const filed = q.get('filed'), unfiled = Number(q.get('unfiled') || 0);
+            parts.push(filed === '0'
+                ? `<div><b>Facebook connected, but no Page was filed under ${esc(c.name)}.</b> The login manages ${esc(q.get('pages') || 'several')} Pages and none is clearly this client's. File the right one on the <a class="ws-link" href="clients.html">Clients page</a> (Pages you manage, not filed yet).</div>`
+                : `<div><b>Meta connected.</b> Edge Meta AI has started reading the numbers; it takes a few minutes.${unfiled ? ` ${unfiled} other Page${unfiled === 1 ? '' : 's'} this login manages ${unfiled === 1 ? 'waits' : 'wait'} on the <a class="ws-link" href="clients.html">Clients page</a> to be filed under the right client.` : ''}</div>`);
+        }
         if (q.get('meta') === 'error') parts.push(`<div><b>Meta connection failed:</b> ${esc(q.get('message') || 'no reason given')}.</div>`);
         host.innerHTML = parts.length ? `<div class="wsc-banner">${parts.join('')}</div>` : '';
         host.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));

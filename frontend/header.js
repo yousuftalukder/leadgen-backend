@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * Drop this on any page:
  *
- *   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+ *   <script src="vendor/supabase-js-2.116.0.js"></script>
  *   <script src="header.js"></script>
  *   <script>
  *     EL.init({ engine: 'report', page: 'ig-competitors.html' }).then(me => { ... });
@@ -251,7 +251,9 @@
             if (!isPublic) headers['Authorization'] = `Bearer ${await EL.token()}`;
 
             let body = opts.body;
-            const cid = EL.clientId();
+            // { scoped: false } for the lists that cover every client (phase 57): the picked client used to
+            // ride along on every GET, so Pipeline, Home and Schedules showed only the last client opened.
+            const cid = opts.scoped === false ? null : EL.clientId();
             if (body && typeof body !== 'string') {
                 if (cid && body.clientId === undefined && body.client_id === undefined) body = { ...body, clientId: cid };
                 headers['Content-Type'] = 'application/json';
@@ -261,7 +263,8 @@
             if (method === 'GET' && cid && !isPublic && !/[?&]client_id=/.test(path)) {
                 url += (path.includes('?') ? '&' : '?') + 'client_id=' + encodeURIComponent(cid);
             }
-            const res = await fetch(url, { ...opts, method, headers, body });
+            const { scoped: _scoped, ...fetchOpts } = opts;
+            const res = await fetch(url, { ...fetchOpts, method, headers, body });
 
             let data = null;
             try { data = await res.json(); } catch { /* empty body */ }
@@ -317,7 +320,7 @@
                 return fail(data.error || 'Account disabled.', { code: data.code });
             }
             if (status === 403 && data && data.code === 'no_business') {
-                EL.blockNoBusiness();
+                EL.blockNoBusiness(data.trial || null);
                 return fail(data.error, { code: data.code });
             }
             return null;
@@ -328,10 +331,10 @@
             // Phase 56: a trial that ran out is said plainly, with its date.
             if (trial && trial.endedAt) {
                 const day = new Date(trial.endedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-                block('Your trial has ended', `Your trial of Edge Meta AI for ${EL.escape(trial.name || 'your business')} ended on ${EL.escape(day)}. Nothing has been deleted: everything is here the moment your agency continues it. Contact your agency to carry on.`);
+                block('Your trial has ended', `Your trial of Edge Meta AI for ${EL.escape(trial.name || 'your business')} ended on ${EL.escape(day)}. Nothing has been deleted: everything is here the moment your agency continues it. Contact your agency to carry on.`, { contact: true });
                 return;
             }
-            block('Your access has ended', 'Your agency has closed this business’s Edge Meta AI, or has not set one up for this login. Nothing you saw has been deleted. Contact your agency to open it again.');
+            block('Your access has ended', 'Your agency has closed this business’s Edge Meta AI, or has not set one up for this login. Nothing you saw has been deleted. Contact your agency to open it again.', { contact: true });
         },
 
         /** Remaining Apify credit across every key this user can draw from. */
@@ -585,7 +588,9 @@
             // (phase 47); someone on the team who opened the app goes to EdgeLead's login. A
             // shared tool open inside the app takes the whole app with it, not just its frame.
             const owner = !EL.me || EL.me.role === 'client';
-            const dest = new URL((EL._app || EL.isEmbedded()) && owner ? 'ai/' : 'index.html', location.href).href;
+            // Against the page's base, not its address (phase 57): inside the app (base ../) the address
+            // is /ai/, and 'ai/' from there was /ai/ai/, a page that does not exist.
+            const dest = new URL((EL._app || EL.isEmbedded()) && owner ? 'ai/' : 'index.html', document.baseURI).href;
             let win = window;
             if (EL.isEmbedded() && owner) { try { if (window.top.location.origin === location.origin) win = window.top; } catch { /* another origin */ } }
             win.location.href = dest;
@@ -709,8 +714,9 @@
                 return new Promise(() => {});
             }
             if (engine && !isAdmin && !(me.engines || []).includes(engine)) {
-                block('No access to this engine',
-                    `Your account is not granted the ${engine} engine. An administrator can enable it from the admin page.`);
+                const TOOL = { leadgen: 'Leads', report: 'Instagram audits', fb_community: 'Facebook groups', fb_page: 'Facebook Pages', content_plan: 'Content plan', meta_owned: 'Meta numbers' };
+                block('This tool isn’t switched on for you',
+                    `Your account can’t use ${EL.escape(TOOL[engine] || engine)} yet. Ask an admin to switch it on in Team &amp; settings → People.`);
                 return new Promise(() => {});
             }
             return me;
@@ -955,29 +961,6 @@
             EL._renderWorkFor(list, cur);
         },
 
-        /**
-         * Legacy in-page picker (phase 9). Kept for pages that still call it;
-         * it mirrors the header picker rather than fighting it.
-         */
-        async clientSelector(mount, opts = {}) {
-            const host = typeof mount === 'string' ? document.getElementById(mount) : mount;
-            if (!host) return null;
-            const list = await EL.clients();
-            const current = EL.clientId();
-            host.className = 'el-client-picker ' + (host.className || '');
-            host.innerHTML = `
-                <label>${opts.label || 'Client'}</label>
-                <select class="el-client-select">
-                    <option value="">No client (just me)</option>
-                    ${list.map(c => `<option value="${c.id}" ${c.id === current ? 'selected' : ''}>${EL.esc(c.name)}${c.access && c.access !== 'owner' ? ' · shared' : ''}</option>`).join('')}
-                </select>
-                <a href="clients.html" class="el-client-manage">Manage</a>`;
-            host.querySelector('select').addEventListener('change', e => {
-                EL.setClientId(e.target.value || null);
-                if (opts.onChange) opts.onChange(e.target.value || null);
-            });
-            return host;
-        },
         esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
 
         // ---------------------------------------------------------------
@@ -1006,7 +989,7 @@
         //   EL.reportActions('report-actions', { reportId, jobId })
         // Idempotent per mount; hidden in share mode.
         // ---------------------------------------------------------------
-        async reportActions(mount, { reportId, jobId } = {}) {
+        async reportActions(mount, { reportId, jobId, schedulable = true } = {}) {
             if (EL.isShared()) return null;
             const host = typeof mount === 'string' ? document.getElementById(mount) : mount;
             if (!host || !reportId) return null;
@@ -1014,7 +997,7 @@
             host.innerHTML = `
                 <button class="el-btn el-mini" type="button" data-act="owner" hidden></button>
                 <button class="el-btn el-mini" type="button" data-act="share">🔗 Share link</button>
-                <button class="el-btn el-mini" type="button" data-act="schedule">⏱ Repeat on a schedule</button>
+                ${schedulable ? '<button class="el-btn el-mini" type="button" data-act="schedule">⏱ Repeat on a schedule</button>' : ''}
                 <span class="el-note" data-role="note"></span>
                 <div class="el-share-list" data-role="shares"></div>`;
             const note = host.querySelector('[data-role="note"]');
@@ -1072,7 +1055,7 @@
                 try { await navigator.clipboard.writeText(url); } catch {}
                 renderShares();
             }));
-            host.querySelector('[data-act="schedule"]').addEventListener('click', () => openScheduleModal({ reportId, jobId }, (s) => {
+            if (schedulable) host.querySelector('[data-act="schedule"]').addEventListener('click', () => openScheduleModal({ reportId, jobId }, (s) => {
                 note.style.color = '#10b981';
                 note.textContent = `Scheduled. Next run ${new Date(s.next_run_at).toLocaleString()} — manage it on the Schedules page.`;
             }));
@@ -1237,6 +1220,7 @@
                     <button class="el-btn el-mini" type="button" id="el-key-btn" title="The Apify key your runs spend">Apify key</button>
                     <button class="el-btn el-mini" type="button" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>
                 </div>` : ''}
+                <a class="el-btn el-mini el-signout" href="welcome.html?change=1" style="text-align:center;text-decoration:none">Change password</a>
                 <button class="el-btn el-mini el-signout" type="button" id="el-out">Sign out</button>
             </div>`;
 
@@ -1297,7 +1281,7 @@
             // before the phase-40 SQL, and for anyone without the lead tools.
             const me = EL.me || {};
             if (me.role === 'admin' || (me.engines || []).includes('leadgen')) {
-                EL.api('/api/leads/pipeline?assigned=me&open=1').then(d => {
+                EL.api('/api/leads/pipeline?assigned=me&open=1&client_id=all', { scoped: false }).then(d => {
                     setCount('followups', d.dueNow || 0, d.dueNow ? `${d.dueNow} follow-up${d.dueNow === 1 ? '' : 's'} due` : '', (d.dueNow || 0) > 0);
                 }).catch(() => {});
             }
@@ -1417,7 +1401,8 @@
         t.innerHTML = `${icon(kind === 'bad' ? 'alert' : 'check')}<span>${EL.esc(message)}</span>`;
         t.hidden = false;
         clearTimeout(_toastTimer);
-        _toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+        // Long enough to read (phase 57): 3.2 s for a short line, up to 9 s for a long one.
+        _toastTimer = setTimeout(() => { t.hidden = true; }, Math.min(9000, Math.max(3200, String(message || '').length * 60)));
     }
 
     /**
@@ -1513,6 +1498,8 @@
         let dismissed = 0;
         try { dismissed = Number(localStorage.getItem(A.key) || 0); } catch { /* private mode */ }
         if (dismissed && Date.now() - dismissed < 14 * 86400000) return;
+        // On a computer with a mouse the home-screen pitch does not apply (phase 57).
+        if (matchMedia('(pointer: fine)').matches && !matchMedia('(pointer: coarse)').matches) return;
 
         const host = document.querySelector(A.mount) || document.querySelector('.el-page') || document.body;
         const card = document.createElement('div');
@@ -1566,7 +1553,7 @@
         scrim.innerHTML = `
             <div class="el-modal" role="dialog" aria-modal="true" aria-labelledby="el-install-title">
                 <h3 id="el-install-title">Add ${A.name} to your home screen</h3>
-                <p>Three taps. It then opens full screen, like an app, and stays signed in.</p>
+                <p>Three taps. It then opens full screen, like an app. The first time, sign in once inside it: with a code, or by pasting the link your agency sent.</p>
                 <ol class="el-install-steps">${steps.map(t => `<li>${t}</li>`).join('')}</ol>
                 <div class="el-modal-actions">
                     <button class="el-btn el-btn-go" type="button" id="el-install-ok">Got it</button>
@@ -2031,21 +2018,30 @@
         if (el) el.remove();
     }
 
-    function block(title, message) {
+    function block(title, message, { contact = false } = {}) {
         document.querySelectorAll('.el-page').forEach(el => el.remove());
         document.querySelectorAll('.el-blocked:not([data-expired])').forEach(el => el.remove());
         blockFrame();
         const card = document.createElement('div');
         card.className = 'el-blocked';
         card.innerHTML = `<h2>${title}</h2><p>${message}</p>
-            <div class="el-job-actions"><button class="el-btn" type="button" onclick="location.reload()">Reload</button>${outButton()}</div>`;
+            <div class="el-job-actions"><button class="el-btn" type="button" onclick="location.reload()">Reload</button>${outButton()}</div>
+            ${contact ? '<div class="el-block-contact"></div>' : ''}`;
         document.body.appendChild(card);
         wireOut(card);
+        // "Contact your agency" with a way to do it (phase 57): the address and how to pay, as the admin set them.
+        if (contact) EL.contact().then(c => {
+            const host = card.querySelector('.el-block-contact');
+            if (host && (c.email || SUPPORT_EMAIL)) host.innerHTML = contactSlotHtml({ email: c.email || SUPPORT_EMAIL, paymentOptions: [] }, { lead: 'Your agency' });
+        }).catch(() => {});
     }
     /** A full-screen refusal must scroll and must offer a way out, in the app too (phase 52). */
     function blockFrame() {
         document.body.style.overflow = 'auto';
         document.querySelectorAll('.ai-gate').forEach(g => { g.hidden = true; });
+        // Nothing may sit on top of a refusal (phase 57): an open Updates sheet, a menu or a drawer hid it.
+        document.querySelectorAll('#hub-sheet, #conv-menu, #ai-menu, .hb-menu, .el-drawer-wrap').forEach(el => el.remove());
+        document.body.classList.remove('hub-open', 'el-drawer-open');
     }
     const outButton = () => (EL.supabase && !EL.isShared()) ? '<button class="el-btn" type="button" data-el-out>Sign out</button>' : '';
     const wireOut = card => card.querySelectorAll('[data-el-out]').forEach(b => b.addEventListener('click', () => EL.signOut()));

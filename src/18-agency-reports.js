@@ -1090,7 +1090,9 @@ async function publicMonthData(client, month) {
     const pageId = ((fbRep || [])[0] && fbRep[0].report_json && fbRep[0].report_json.target && fbRep[0].report_json.target.pageId) || null;
 
     const ig = async b => !handle ? [] : pmDedupe((await supabase.from('posts')
-        .select('shortcode, post_url, post_type, caption, likes, comments, views, thumbnail_url, posted_at, performance_index, scraped_at, handle')
+        // Phase 57: the posts table has no index column (only the Facebook tables have one); asking for it
+        // failed the whole query, and every monthly report went out with no Instagram posts at all.
+        .select('shortcode, post_url, post_type, caption, likes, comments, views, thumbnail_url, posted_at, scraped_at, handle')
         .eq('client_id', client.id).eq('platform', 'instagram').eq('handle', handle)
         .gte('posted_at', b.from).lt('posted_at', b.to).order('scraped_at', { ascending: false }).limit(PUBLIC_MONTH_MAX_POSTS)).data, 'shortcode');
     const fb = async b => !pageId ? [] : pmDedupe((await supabase.from('fb_page_posts')

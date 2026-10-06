@@ -1595,6 +1595,7 @@ app.get('/api/leads/pipeline', async (req, res) => {
         if (PIPE_STAGES[kind]) q = q.eq('kind', kind);
         const cid = String(req.query.client_id || req.query.clientId || '');
         if (cid === 'agency') q = q.is('client_id', null);
+        else if (cid === 'all') { /* every brand and the agency's own (phase 57) */ }
         else if (S.UUID_RE.test(cid)) {
             if (!(await S.clientAccess(ctx.user.id, cid, 'viewer'))) return res.status(404).json({ error: 'Client not found.' });
             q = q.eq('client_id', cid);
@@ -1612,6 +1613,14 @@ app.get('/api/leads/pipeline', async (req, res) => {
         res.json({ rows, stages: PIPE_STAGES, dueNow: rows.filter(r => r.due && r.assignedTo === ctx.user.id).length });
     } catch (err) { sendErr(res, err); }
 });
+
+/** A pipeline lead goes to someone on the team who can open its client (phase 57), never an owner login. */
+async function pipeAssigneeOk(userId, clientId) {
+    if ((await S.userRole(userId)) === 'client') return false;
+    const { data: u } = await supabase.from('app_users').select('id, is_active').eq('id', userId).maybeSingle();
+    if (!u || u.is_active === false) return false;
+    return clientId ? !!(await S.clientAccess(userId, clientId, 'viewer')) : true;
+}
 
 /**
  * Put leads in the pipeline, for a client brand or for the agency. One lead
@@ -1633,6 +1642,7 @@ app.post('/api/leads/pipeline', async (req, res) => {
             clientId = c.id;
         }
         const assignedTo = b.assignedTo === null ? null : (S.UUID_RE.test(String(b.assignedTo || '')) ? String(b.assignedTo) : ctx.user.id);
+        if (assignedTo && !(await pipeAssigneeOk(assignedTo, clientId))) return res.status(400).json({ error: 'Choose someone on the team who can open that client.' });
         const followUpOn = /^\d{4}-\d{2}-\d{2}$/.test(String(b.followUpOn || '')) ? b.followUpOn : null;
         const { data: leads } = await supabase.from('leads').select('*').in('id', ids);
         const added = [], already = [], skipped = [];
@@ -1701,7 +1711,7 @@ app.patch('/api/leads/pipeline/:id', async (req, res) => {
         }
         if (b.assignedTo !== undefined) {
             const to = b.assignedTo === null ? null : (S.UUID_RE.test(String(b.assignedTo)) ? String(b.assignedTo) : undefined);
-            if (to === undefined) return res.status(400).json({ error: 'Choose someone on the team.' });
+            if (to === undefined || (to && !(await pipeAssigneeOk(to, p.client_id)))) return res.status(400).json({ error: 'Choose someone on the team who can open that client.' });
             if (to !== p.assigned_to) {
                 patch.assigned_to = to;
                 const { data: u } = to ? await supabase.from('app_users').select('email, full_name').eq('id', to).maybeSingle() : { data: null };

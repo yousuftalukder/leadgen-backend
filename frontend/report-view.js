@@ -188,7 +188,7 @@
                 : `<ol class="rp-steps">${recs.map(r => `<li><span class="t">${esc(r.action)}</span>${tasks ? `<span class="no-print" data-cell="${esc(r.key)}">${cell(r)}</span>` : ''}</li>`).join('')}</ol>`;
             out.push(sec('What we recommend',
                 detailed ? 'In order of priority. Expected results are estimates, not promises.' : 'For next month.',
-                body + (tasks && tasks.canEdit ? '<p class="rp-src no-print">Adding one puts it on the client’s task board. One marked “You” becomes the client’s to-do in their portal.</p>' : '')));
+                body + (tasks && tasks.canEdit ? '<p class="rp-src no-print">Adding one puts it on the client’s task board. One marked “You” becomes the owner’s to-do in their Edge Meta AI app.</p>' : '')));
         }
 
         // What was planned and how it did (phase 42): built on the server, drawn with the document blocks.

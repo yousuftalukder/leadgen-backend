@@ -166,6 +166,9 @@ app.post('/api/job/:id/resume', spendLimit, async (req, res) => {
                 error: `"${job.type}" jobs cannot be resumed. Start a new run instead.`
             });
         }
+        const allowed = await S.jobStillAllowed(job);
+        if (!allowed.ok) return res.status(409).json({ error: allowed.why.replace(/^Not resumed: /, 'This run cannot be resumed: ') });
+        job.input = allowed.input;
 
         // Confirm there is now a key that can actually pay, so the user gets an
         // immediate answer instead of watching the job pause again.
@@ -418,6 +421,8 @@ app.get('/api/reports-history', async (req, res) => {
 app.get('/api/report/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'report'); if (!ctx) return;
+        // Phase 57: the raw report row (costs, internal notes, who ran it) is the team's; owners read /api/client/report.
+        if (!S.staffOnly(ctx, res)) return;
         const { data } = await supabase.from('reports')
             .select('*').eq('id', req.params.id).maybeSingle();
         if (!data || !(await S.canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });

@@ -38,7 +38,7 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+<script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="leads-ui.js"></script>
 <script>
@@ -89,12 +89,12 @@
     async function load() {
         const p = new URLSearchParams();
         const f = $('pl-for').value;
-        if (f) p.set('client_id', f);
+        p.set('client_id', f || 'all');           // explicit, so no remembered client narrows it (phase 57)
         if ($('pl-who').value) p.set('assigned', $('pl-who').value);
         try {
             const [d, other] = await Promise.all([
-                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + kind),
-                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + (kind === 'influencer' ? 'business' : 'influencer') + '&open=1')
+                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + kind, { scoped: false }),
+                EL.api('/api/leads/pipeline?' + p.toString() + '&kind=' + (kind === 'influencer' ? 'business' : 'influencer') + '&open=1', { scoped: false })
             ]);
             rows = d.rows || []; stages = d.stages || {};
             $('pl-n-' + kind).textContent = rows.filter(r => !r.closed).length;

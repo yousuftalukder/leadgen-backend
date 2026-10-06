@@ -676,7 +676,8 @@ app.post('/api/public/owner-code', ownerCodeLimit, async (req, res) => {
         const { data: u } = await supabase.from('app_users').select('id, role, is_active').eq('email', email).maybeSingle();
         if (!u || u.role !== 'client' || u.is_active === false) return res.json(generic);
         // Phase 52: a login whose business the agency has closed gets no code (same answer as anyone).
-        if (!(await findOwnClient(u.id))) return res.json(generic);
+        // An owner whose trial ended still gets a code (phase 57): signing in is how they learn it ended.
+        if (!(await findOwnClient(u.id)) && !(await S.endedTrialFor(u.id).catch(() => null))) return res.json(generic);
 
         const since = new Date(Date.now() - 3600000).toISOString();
         const { data: recent, error: re } = await supabase.from('owner_login_codes').select('created_at').eq('email', email).gte('created_at', since).order('created_at', { ascending: false }).limit(20);
@@ -740,6 +741,24 @@ app.post('/api/public/owner-verify', ownerCodeLimit, async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+const OWNER_INVITE_ENGINES = ['meta_owned', 'report'];
+
+/**
+ * A one-tap sign-in link for an owner (phase 57). It points at the app itself, /ai/#th=<token>, and
+ * the app trades the token for a session. Supabase's own link signed the owner in wherever it was
+ * opened, which on an iPhone is Safari, never the app on the home screen; this one can also be pasted
+ * into the installed app. Without a known site address, Supabase's link is used as before.
+ */
+async function ownerSignInLink(email, base) {
+    const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
+        type: 'magiclink', email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
+    });
+    if (ge) throw ge;
+    const hashed = gl?.properties?.hashed_token || null;
+    if (base && hashed) return `${base}/ai/#th=${encodeURIComponent(hashed)}`;
+    return gl?.properties?.action_link || gl?.action_link || null;
+}
+
 app.post('/api/clients/:id/portal-invite', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -785,7 +804,10 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
             if (paidUntil) Object.assign(row, { paid_until: paidUntil + 'T23:59:59Z', plan_label: oneLine(req.body.planLabel, 60) || null, activated_by: ctx.user.id, activated_at: start.toISOString() });
             const { error: ue } = await supabase.from('app_users').upsert(row);
             if (ue) throw ue;
-            for (const e of TRIAL_ENGINES) {
+            // Phase 57: an invited owner gets their Meta numbers and the check-up. The shared tools (Find
+            // customers, Local demand) run on the agency's Apify credit, so the team switches those on per
+            // owner (Team & settings → People), rather than every invite getting them.
+            for (const e of OWNER_INVITE_ENGINES) {
                 await supabase.from('user_engine_access')
                     .upsert({ user_id: row.id, engine: e, granted_by: ctx.user.id }, { onConflict: 'user_id,engine' });
             }
@@ -802,7 +824,8 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
             const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', u.id).eq('role', 'editor');
             const elsewhere = (mem || []).map(m => m.client_id).filter(id => id !== c.id);
             const { data: others } = elsewhere.length ? await supabase.from('clients').select('id, archived').in('id', elsewhere) : { data: [] };
-            const { data: owns } = await supabase.from('clients').select('id').eq('owner_user_id', u.id).eq('archived', false);
+            // This business itself never counts as "another" (phase 57): a self-serve owner's own record refused its own invite.
+            const { data: owns } = await supabase.from('clients').select('id').eq('owner_user_id', u.id).eq('archived', false).neq('id', c.id);
             let ownsWork = false;
             for (const o of (owns || [])) {
                 const [{ count: r }, { count: j }, { count: m }] = await Promise.all([
@@ -836,11 +859,7 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
             try {
                 // Phase 49: owners live in Edge Meta AI, signed in by email code. The
                 // invite is a one-tap sign-in straight into the app; no password is ever set.
-                const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
-                    type: 'magiclink', email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
-                });
-                if (ge) throw ge;
-                link = gl?.properties?.action_link || gl?.action_link || null;
+                link = await ownerSignInLink(email, base);
             } catch (e) {
                 logger.warn('portal_invite_link_failed', { clientId: c.id, message: e.message });
             }
@@ -897,16 +916,19 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
         const userId = String(req.body?.userId || '');
         if (!UUID_RE.test(userId)) return res.status(400).json({ error: 'Choose the owner login.' });
         const { data: u } = await supabase.from('app_users').select('id, email, role, is_active').eq('id', userId).maybeSingle();
-        const own = u && u.role === 'client' ? await findOwnClient(u.id) : null;
-        if (!u || u.role !== 'client' || !own || own.id !== c.id) return res.status(404).json({ error: 'That login is not this business’s owner login.' });
+        // On this business by membership (phase 57), not by "the business the app opens": an owner whose
+        // trial ended has no business the app opens, and the button said they were not its owner.
+        let onIt = false;
+        if (u && u.role === 'client') {
+            const { data: m } = await supabase.from('client_members').select('user_id').eq('client_id', c.id).eq('user_id', u.id).maybeSingle();
+            onIt = !!m || c.owner_user_id === u.id;
+        }
+        if (!u || u.role !== 'client' || !onIt) return res.status(404).json({ error: 'That login is not this business’s owner login.' });
+        if (c.trial_ends_at && Date.parse(c.trial_ends_at) <= Date.now()) return res.status(400).json({ error: 'This business’s trial has ended, so a link would only show that. Extend the trial first, or make them a client.' });
         if (u.is_active === false) return res.status(400).json({ error: 'That login is switched off. An admin can switch it back on first.' });
 
         const base = appUrl();
-        const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
-            type: 'magiclink', email: u.email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
-        });
-        if (ge) throw ge;
-        const link = gl?.properties?.action_link || gl?.action_link || null;
+        const link = await ownerSignInLink(u.email, base);
         if (!link) return res.status(502).json({ error: 'A sign-in link could not be made. Try again in a minute.' });
 
         let emailed = false;

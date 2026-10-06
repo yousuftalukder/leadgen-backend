@@ -256,8 +256,12 @@ async function kickoff(clientId, triggeredBy = 'connect', { force = false } = {}
   if (running.has(clientId)) return { started: false, reason: 'running' };
   const last = kicks.get(clientId) || 0;
   if (!force && Date.now() - last < KICK_COOLDOWN_MS) return { started: false, reason: 'cooldown' };
+  // EdgeLead (phase 57): an archived business is not read, and an attempt with nothing to read is
+  // remembered too, so opening the app does not redo the setup queries on every visit.
+  const { data: c } = await supabase.from('clients').select('archived').eq('id', clientId).maybeSingle();
+  if (!c || c.archived) { kicks.set(clientId, Date.now()); return { started: false, reason: 'archived' }; }
   const p = await provisionClient(clientId);
-  if (!p.ok || !p.assets) return { started: false, reason: p.ok ? 'no_assets' : 'error', error: p.error };
+  if (!p.ok || !p.assets) { kicks.set(clientId, Date.now()); return { started: false, reason: p.ok ? 'no_assets' : 'error', error: p.error }; }
   kicks.set(clientId, Date.now());
   try {
     startSync(clientId, { runType: 'BACKFILL', triggeredBy }, () => (hooks.ads ? Promise.resolve(hooks.ads({ triggeredBy })).catch(() => null) : null));
@@ -337,7 +341,15 @@ function mount(app, d) {
   async function chatContext(req, res, wanted, need = 'viewer') {
     const ctx = await auth(req, res); if (!ctx) return null;
     const clientId = await clientFor(req, ctx, wanted, need);
-    if (!clientId) { res.status(ctx.profile && ctx.profile.role === 'client' ? 404 : 403).json({ error: 'No access to that client.' }); return null; }
+    if (!clientId) {
+      // EdgeLead (phase 57): an owner whose business closed or whose trial ended is told so, the same
+      // way every other owner route says it, so the app shows that screen instead of a chat error.
+      if (ctx.profile && ctx.profile.role === 'client' && !(await deps.ownClientFor(ctx).catch(() => null))) {
+        res.status(403).json(deps.noBusinessBody ? await deps.noBusinessBody(ctx.user.id) : { error: 'No business for this login.', code: 'no_business' });
+        return null;
+      }
+      res.status(ctx.profile && ctx.profile.role === 'client' ? 404 : 403).json({ error: 'No access to that client.' }); return null;
+    }
     // Phase 52: whose chats these are. An owner and the team each keep their own.
     const who = { userId: ctx.user.id, staff: !(ctx.profile && ctx.profile.role === 'client') };
     return { ctx, clientId, who };
@@ -521,6 +533,11 @@ function mount(app, d) {
       if (!s.running && (s.phase === 'reading' || s.phase === 'not_connected')) {
         const k = await kickoff(a.clientId, 'status').catch(() => ({ started: false }));
         if (k.started) s = await status(a.clientId);
+      }
+      // EdgeLead (phase 57): an owner is not shown the model, the sync's raw errors or its schedule internals.
+      if (a.ctx.profile && a.ctx.profile.role === 'client') {
+        const { model, ...rest } = s;
+        s = { ...rest, runs: (rest.runs || []).map(({ errors, ...r }) => r) };
       }
       res.json(s);
     } catch (e) { res.status(500).json({ error: e.message }); }

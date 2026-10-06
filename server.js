@@ -128,6 +128,7 @@ if (require.main === module) {
 S.BOOTED = true;
 
 module.exports = {
+    jobStillAllowed: S.jobStillAllowed,   // phase 57
     app, start, JOB_WORKERS, __geminiTest: (prompt, userId) => geminiCallDetailed(prompt, { userId, tag: 'test' }), cpFeature, cpScore, cpBand, geminiRank, graphInsights, clientAccess,
     // secrets
     encryptSecret, decryptSecret, isEncrypted, maskSecret, tokenHash,

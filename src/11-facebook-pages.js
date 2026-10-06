@@ -1492,6 +1492,8 @@ app.get('/api/fb/page-reports', async (req, res) => {
 app.get('/api/fb/page-report/:id', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'fb_page'); if (!ctx) return;
+        // Phase 57: the raw report row (costs, internal notes, who ran it) is the team's; owners read /api/client/report.
+        if (!S.staffOnly(ctx, res)) return;
         const { data } = await supabase.from('reports').select('*')
             .eq('id', req.params.id).maybeSingle();
         if (!data || !(await S.canReadReport(ctx, data))) return res.status(404).json({ error: 'Report not found' });

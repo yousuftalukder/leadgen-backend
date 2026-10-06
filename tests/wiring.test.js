@@ -484,10 +484,13 @@ console.log('\nreachability: everything the server enforces must be reachable by
     // two, so onboarding a client meant making them an employee first and
     // changing it afterwards. "Assignable somewhere" would have passed that.
     const createSelect = (/<select id="nu-role">([\s\S]*?)<\/select>/.exec(admin) || [])[1] || '';
-    check('every account role can be chosen when CREATING an account, not only when editing one',
+    // Phase 57: every TEAM role can be chosen when creating; a business owner's login is never made here
+    // (it had no business and got a made-up one). Owners are invited from their client.
+    check('every team role can be chosen when CREATING an account, and a business owner login cannot',
         createSelect
-            ? roles.filter(r => !new RegExp(`value="${r}"`).test(createSelect))
+            ? roles.filter(r => r !== 'client' && !new RegExp(`value="${r}"`).test(createSelect))
                 .map(r => `the create form cannot make a '${r}' account — it can only be set by editing afterwards`)
+                .concat(/value="client"/.test(createSelect) ? ['the create form can make a business owner login with no business'] : [])
             : ['the create form\'s role select could not be found — this check has gone stale']);
     ok(`roles assignable: ${roles.join(', ')}`);
 

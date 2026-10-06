@@ -46,7 +46,7 @@
     // One sheet at a time, with a way back (phase 52): a task opened from the to-do list
     // goes back to the list, not out of Updates. The phone's own back button does the
     // same instead of leaving the app — one history entry stands for every open sheet.
-    let current = null, stack = [], inHistory = false;
+    let current = null, stack = [], inHistory = false, opener = null;
     function sheet(title, sub = '', reopen = null) {
         const open = !!document.getElementById('hub-sheet');
         if (open && current) stack.push(current);
@@ -62,8 +62,12 @@
                     <button class="icon-btn" type="button" data-hub-close aria-label="Close">✕</button></header>
                 <div class="hub-b"></div>
             </section>`;
+        wrap.classList.toggle('has-back', stack.length > 0 || open);
         document.body.appendChild(wrap);
         document.body.classList.add('hub-open');
+        if (!open) opener = document.activeElement;
+        // Focus goes into the sheet, and back to what opened it on close (phase 57).
+        setTimeout(() => { const t = wrap.querySelector('#hub-t'); if (t) { t.tabIndex = -1; t.focus(); } }, 30);
         wrap.querySelectorAll('[data-hub-close]').forEach(b => b.addEventListener('click', close));
         wrap.querySelector('[data-hub-back]').addEventListener('click', back);
         document.removeEventListener('keydown', escClose);
@@ -72,7 +76,8 @@
         setTimeout(() => wrap.classList.add('is-in'), 10);
         return { el: wrap, body: wrap.querySelector('.hub-b'), title: t => { wrap.querySelector('#hub-t').innerHTML = t; } };
     }
-    function escClose(e) { if (e.key === 'Escape') back(); }
+    // Escape steps back, except while typing something not yet sent (phase 57): that lost the draft.
+    function escClose(e) { if (e.key === 'Escape' && !(e.target && /TEXTAREA|INPUT/.test(e.target.tagName) && e.target.value)) back(); }
     function remove() {
         const w = document.getElementById('hub-sheet');
         if (w) w.remove();
@@ -90,6 +95,8 @@
         remove();
         current = null; stack = [];
         document.body.classList.remove('hub-open');
+        if (opener && opener.focus && document.contains(opener)) opener.focus();
+        opener = null;
         document.removeEventListener('keydown', escClose);
         if (inHistory) { inHistory = false; try { if (history.state && history.state.hub) history.back(); } catch { /* sandboxed */ } }
     }
@@ -104,14 +111,19 @@
     });
 
     // ---- loading -----------------------------------------------------------------
+    let loadedAt = 0, loadFailed = false;
     async function load() {
+        let fails = 0;
+        const soft = (p, fallback) => p.catch(err => { if (!err.handled) fails += 1; return fallback; });
         const [t, c, r, g] = await Promise.all([
-            EL.api('/api/client/tasks').catch(() => ({ tasks: [] })),
-            EL.api('/api/client/content').catch(() => ({ posts: [] })),
-            EL.api('/api/client/reports').catch(() => ({ reports: [] })),
-            EL.api('/api/client/growth').catch(() => null)
+            soft(EL.api('/api/client/tasks'), { tasks: [] }),
+            soft(EL.api('/api/client/content'), { posts: [] }),
+            soft(EL.api('/api/client/reports'), { reports: [] }),
+            soft(EL.api('/api/client/growth'), null)
         ]);
-        data = { tasks: t.tasks || [], media: t.media || {}, posts: c.posts || [], reports: r.reports || [], growth: g };
+        // All four failing is no connection, not "nothing waiting on you" (phase 57).
+        loadFailed = fails === 4;
+        if (!loadFailed) { data = { tasks: t.tasks || [], media: t.media || {}, posts: c.posts || [], reports: r.reports || [], growth: g }; loadedAt = Date.now(); }
         draw();
     }
     const recentDone = t => t.status === 'done' && t.completedAt && Date.now() - Date.parse(t.completedAt) < 30 * 86400000;
@@ -133,9 +145,11 @@
             ${data.growth && data.growth.connected ? chip('numbers', 'Daily numbers', 0, false) : ''}
             ${(me.engines || []).includes('report') ? chip('checkup', 'New check-up', 0, false) : ''}
             ${tools.map(([k, l]) => chip('tool-' + k, l, 0, false)).join('')}
+            ${loadFailed ? '<button type="button" class="hub-chip is-hot" data-hub="retry">Couldn’t load your updates · Retry</button>' : ''}
         </div>`;
         host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => {
             const k = b.dataset.hub;
+            if (k === 'retry') { load().catch(() => {}); return; }
             if (k === 'todos') openTodos();
             else if (k === 'work') openWork();
             else if (k === 'posts') openPosts();
@@ -188,6 +202,11 @@
     }
     function openTask(t) {
         if (!t) return;
+        // Picture links last an hour (phase 57): one left open longer fetches fresh ones on opening a task.
+        if (Date.now() - loadedAt > 45 * 60000) { load().then(() => { if (document.getElementById('hub-sheet')) openTaskNow(data.tasks.find(x => x.id === t.id) || t); }).catch(() => {}); }
+        openTaskNow(t);
+    }
+    function openTaskNow(t) {
         const s = sheet(esc(t.title), t.yours ? 'Your to-do' : esc(STATE[t.status] || ''), () => openTask(data.tasks.find(x => x.id === t.id) || t));
         const steps = t.checklist || [];
         s.body.innerHTML = `
@@ -210,8 +229,12 @@
             e.preventDefault();
             const ta = s.el.querySelector('#hub-ctext'), v = ta.value.trim();
             if (!v) return;
+            const send = e.target.querySelector('button[type=submit]');
+            if (send.disabled) return;
+            send.disabled = true;          // one tap, one message (phase 57)
             try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`, { method: 'POST', body: { body: v } }); ta.value = ''; drawComments(); }
             catch (err) { if (!err.handled) EL.toast(err.message, 'bad'); }
+            finally { send.disabled = false; }
         });
     }
 
@@ -244,6 +267,8 @@
             s.body.querySelectorAll('[data-post]').forEach(c => {
                 c.querySelectorAll('[data-do]').forEach(b => b.addEventListener('click', () => {
                     if (b.dataset.do === 'changes') { const f = c.querySelector('.cp-change'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('textarea').focus(); return; }
+                    // Skipping takes the post off the list for good, so it is asked twice (phase 57).
+                    if (b.dataset.do === 'skip' && b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Skip it — tap again'; return; }
                     b.disabled = true; decide(c.dataset.post, b.dataset.do);
                 }));
                 const f = c.querySelector('.cp-change');
@@ -295,6 +320,8 @@
     // The same run the owner Home page had: their account, and up to two businesses like
     // theirs to compare with. It runs on the agency's account allowance; the report opens here.
     const LAST_HANDLE = 'el-checkup-handle';
+    // The run's own step names are the team's ("Building benchmark"); the owner reads these (phase 57).
+    const plainStep = pct => pct < 30 ? 'Reading your posts…' : pct < 60 ? 'Looking at businesses like yours…' : pct < 90 ? 'Writing what we found…' : 'Almost done…';
     function openCheckup() {
         const s = sheet('New check-up', 'How your Instagram is doing, and how you compare', openCheckup);
         let last = '';
@@ -303,7 +330,7 @@
             <p class="hub-empty">A check-up reads your recent posts and scores them, and compares you with similar businesses. It takes a couple of minutes; you can keep chatting meanwhile.</p>
             <label for="ck-h">Your Instagram handle</label><input id="ck-h" placeholder="harborcafe" autocomplete="off" spellcheck="false" value="${esc(last)}">
             <label for="ck-r1">Two businesses like yours <span class="hub-opt">optional</span></label>
-            <div class="hub-two"><input id="ck-r1" placeholder="a competitor" autocomplete="off" spellcheck="false"><input id="ck-r2" placeholder="another one" autocomplete="off" spellcheck="false"></div>
+            <div class="hub-two"><input id="ck-r1" placeholder="a competitor" autocomplete="off" spellcheck="false"><input id="ck-r2" placeholder="another one" aria-label="Second business to compare with" autocomplete="off" spellcheck="false"></div>
             <p class="hub-tip">Pick businesses about your size, ideally near you. Leave them blank and you still get your own report, without the comparison.</p>
             <button class="btn-primary" type="button" id="ck-go">Run my check-up</button>
             <p class="hub-err" id="ck-err" role="alert"></p>
@@ -322,8 +349,8 @@
             btn.disabled = true; btn.textContent = 'Running…'; prog.hidden = false; step(2, 'Starting…');
             try {
                 await EL.runJob('/api/generate-ig-report', { target, compareRivals: !!(r1 || r2), rival1: r1 || null, rival2: r2 || null }, {
-                    onProgress: j => step(j.progress, j.current_step),
-                    onFailed: j => { stop(); err.textContent = j.error || 'That check-up did not finish.'; if (!s.el.isConnected) EL.toast('Your check-up did not finish. Try again from Updates.', 'bad'); },
+                    onProgress: j => step(j.progress, plainStep(j.progress)),
+                    onFailed: j => { stop(); err.textContent = 'That check-up did not finish. Check the handle is right and public, then try again.'; if (!s.el.isConnected) EL.toast('Your check-up did not finish. Try again from Updates.', 'bad'); },
                     // Stopped with its work saved (credit ran out, a restart): the agency resumes it, not the owner.
                     onPaused: () => { stop(); err.className = 'hub-err is-quota'; err.textContent = 'Your check-up paused partway. Your agency can finish it from their side; nothing is lost.'; if (!s.el.isConnected) EL.toast('Your check-up paused partway. Your agency can finish it.', 'bad'); },
                     onDone: async j => {

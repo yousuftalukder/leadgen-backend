@@ -168,6 +168,7 @@ const ASSISTANT_TOOLS = {
             let q = supabase.from('reports')
                 .select('id, snapshot_date, target_handle, report_json, ai_json')
                 .eq('report_type', 'meta_monthly').or(s.reportScope);
+            q = ownerShared(s, q);
             const m = String(a.month || '');
             if (/^\d{4}-(0[1-9]|1[0-2])$/.test(m)) q = q.eq('snapshot_date', `${m}-01`);
             const { data } = await q.order('snapshot_date', { ascending: false }).limit(1);
@@ -213,9 +214,9 @@ const ASSISTANT_TOOLS = {
             parameters: { type: 'OBJECT', properties: {} }
         },
         run: async (s) => {
-            const { data } = await supabase.from('reports')
+            const { data } = await ownerShared(s, supabase.from('reports')
                 .select('id, report_type, target_handle, snapshot_date, created_at, grade, score')
-                .or(s.reportScope).order('created_at', { ascending: false }).limit(20);
+                .or(s.reportScope)).order('created_at', { ascending: false }).limit(20);
             return (data || []).map(r => ({
                 id: r.id, type: r.report_type, handle: r.target_handle,
                 date: r.snapshot_date || (r.created_at || '').slice(0, 10),
@@ -239,6 +240,8 @@ const ASSISTANT_TOOLS = {
             if (data.user_id !== s.userId && !(data.client_id && s.clientIds.includes(data.client_id))) {
                 return { error: 'not found' };
             }
+            // Phase 57: an owner reads only what the team shared with them, on their own business.
+            if (s.audience === 'owner' && !(data.visible_to_client === true && data.client_id === s.clientId)) return { error: 'not found' };
             // The monthly document is for reading; get_monthly_report already
             // gives the model the month's numbers, so it is not sent twice.
             const { month, doc, ...view } = clientReportView(data);
@@ -266,9 +269,9 @@ const ASSISTANT_TOOLS = {
             parameters: { type: 'OBJECT', properties: {} }
         },
         run: async (s) => {
-            const { data } = await supabase.from('reports')
+            const { data } = await ownerShared(s, supabase.from('reports')
                 .select('snapshot_date, created_at, score, grade, engagement_rate, followers_snapshot, posts_per_week, cohort_avg_er')
-                .or(s.reportScope).in('report_type', ['ig_report', 'deep_audit'])
+                .or(s.reportScope)).in('report_type', ['ig_report', 'deep_audit'])
                 .order('created_at', { ascending: true }).limit(24);
             return (data || []).map(r => ({
                 date: r.snapshot_date || (r.created_at || '').slice(0, 10),
@@ -561,6 +564,9 @@ function assistantSystemPrompt(scope) {
     ].filter(Boolean).join('\n');
 }
 
+/** Phase 57: an owner's report lookups see only what the team shared with them (phase 51's rule, here too). */
+function ownerShared(s, q) { return s.audience === 'owner' ? q.eq('visible_to_client', true) : q; }
+
 /** Everything a tool needs to stay inside one account, resolved once. */
 /**
  * What one assistant conversation is allowed to see.
@@ -585,7 +591,9 @@ async function assistantScope(userId, clientId = null, role = null) {
             .order('created_at', { ascending: false }).limit(1)
     ]);
 
-    const clientIds = [...new Set([
+    // An owner is their one live business (phase 57): not every membership, archived ones included.
+    const ownerBiz = role === 'client' ? await S.findOwnClient(userId).catch(() => null) : null;
+    const clientIds = role === 'client' ? (ownerBiz ? [ownerBiz.id] : []) : [...new Set([
         ...(memberships || []).map(m => m.client_id),
         ...(owned || []).map(c => c.id)
     ])].filter(Boolean);
@@ -612,7 +620,9 @@ async function assistantScope(userId, clientId = null, role = null) {
     const { data: conns } = await cq.limit(10);
     const connectionIds = (conns || []).filter(c => c.status === 'active').map(c => c.id);
 
-    const ors = scoped
+    const ors = role === 'client'
+        ? [`client_id.eq.${scoped || '00000000-0000-0000-0000-000000000000'}`]
+        : scoped
         ? [`client_id.eq.${scoped}`]
         : [`user_id.eq.${userId}`, ...(clientIds.length ? [`client_id.in.(${clientIds.join(',')})`] : [])];
 
@@ -836,7 +846,10 @@ app.get('/api/client/reports', async (req, res) => {
             supabase.from('client_members').select('client_id').eq('user_id', ctx.user.id),
             supabase.from('clients').select('id').eq('owner_user_id', ctx.user.id)
         ]);
-        const clientIds = [...new Set([
+        // Phase 57: an owner's list is their one live business, as opening a report is; archived or
+        // ended-trial businesses listed reports that then would not open.
+        const live = ctx.profile?.role === 'client' ? await S.findOwnClient(ctx.user.id).catch(() => null) : null;
+        const clientIds = ctx.profile?.role === 'client' ? (live ? [live.id] : []) : [...new Set([
             ...(memberships || []).map(m => m.client_id),
             ...(owned || []).map(c => c.id)
         ])].filter(Boolean);

@@ -78,7 +78,7 @@ setInterval(() => loadGeminiPool(true).catch(() => {}), 300000).unref?.();
 // behind EdgeLead's own auth and client access. They must be registered
 // BEFORE the catch-all below: Express runs in registration order, and the
 // first deploy mounted them after it, so every /api/xp request was a 404.
-xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, decrypt: decryptSecret, rateLimit, bearerId, logger,
+xp.mount(app, { auth, requireAdmin, clientAccess, ownClientFor, noBusinessBody: S.noBusinessBody, decrypt: decryptSecret, rateLimit, bearerId, logger,
     // Edge Meta AI draws from the same keys as everything else: the person's own, then the pool, then the server key.
     geminiKeys: { list: () => geminiCandidates(ELS.getStore()?.userId || null), report: geminiReportKey },
     // Creator posts (phase 46) run on EdgeLead's Apify keys: the person's own first when staff start a

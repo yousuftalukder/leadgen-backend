@@ -30,7 +30,7 @@
         if (!posts.length) {
             host.innerHTML = `<div class="cp-empty">
                 <p>Put this plan’s briefs on dates. Each one keeps its own best day where it names one; the rest are spread over four weeks.
-                ${d.hasClient ? 'The owner then approves, asks for changes or skips each post from their portal, and an approved post goes onto the task board.' : 'File the plan under a client for the owner to approve the posts.'}</p>
+                ${d.hasClient ? (d.hasOwner === false ? 'The owner approves each post in their Edge Meta AI app, but this client has no owner login yet: <a class="ws-link" href="workspace.html?client=' + encodeURIComponent(d.clientId || '') + '&tab=access">invite the owner</a>, or the posts wait here.' : 'The owner then approves, asks for changes or skips each post in their Edge Meta AI app, and an approved post goes onto the task board.') : 'File the plan under a client for the owner to approve the posts.'}</p>
                 <div class="ld-actions"><label for="cp-start" class="cp-inl">Start on</label><input id="cp-start" type="date" value="${tomorrow}">
                 <button class="ws-btn is-gold is-sm" type="button" id="cp-go">Put on the calendar</button><span class="ws-note" id="cp-go-note"></span></div></div>`;
             host.querySelector('#cp-go').addEventListener('click', async () => {
@@ -71,7 +71,7 @@
                 ${p.ownerNote ? `<div class="ws-note is-bad">The owner asked: ${esc(p.ownerNote)}</div>` : ''}
                 <section class="ld-sec"><h3 class="ld-h">Status</h3>
                     <div class="ld-stages">${statuses.map(([k, n]) => `<button type="button" class="ld-st${k === p.status ? ' is-on' : ''}" data-st="${k}">${esc(n)}</button>`).join('')}</div>
-                    <p class="ws-hint">“Waiting for approval” shows in the owner’s portal. Approving (or marking made or posted) puts it on the client’s task board.</p>
+                    <p class="ws-hint">“Waiting for approval” shows in the owner’s Edge Meta AI app. Approving (or marking made or posted) puts it on the client’s task board.</p>
                 </section>
                 <div class="ws-form two">
                     <div><label for="cpd-date">Date</label><input id="cpd-date" type="date" value="${esc(p.plannedOn)}"></div>

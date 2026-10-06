@@ -22,7 +22,7 @@
 <body>
 <main class="el-page" id="hm"><div class="ws-empty"><p>Loading…</p></div></main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="ui.js"></script>
 <script>
@@ -37,8 +37,8 @@
 
     const [clients, my, jobs] = await Promise.all([
         EL.clients(true),
-        EL.api('/api/my-tasks').catch(err => ({ tasks: [], error: err })),
-        EL.api('/api/jobs').catch(() => ({ jobs: [] }))
+        EL.api('/api/my-tasks', { scoped: false }).catch(err => ({ tasks: [], error: err })),
+        EL.api('/api/jobs', { scoped: false }).catch(() => ({ jobs: [] }))
     ]);
     const live = clients.filter(c => !c.archived);
     const tasks = my.tasks || [];
@@ -51,15 +51,18 @@
     for (const c of live) {
         if (c.meta && c.meta.pages && !c.meta.connected) attention.push({ sev: 'is-warn', t: `${c.name}: Meta needs attention`, m: 'Its connection stopped working. Reconnect it from the client’s Meta tab.', href: `workspace.html?client=${c.id}&tab=meta`, label: 'Reconnect' });
     }
-    for (const j of running.filter(j => j.status === 'paused_no_credit' || j.status === 'interrupted')) attention.push({ sev: 'is-warn', t: `Paused: ${UI.jobName(j.type)}`, m: j.status === 'paused_no_credit' ? 'Out of Apify credit. Top up or add a key, then resume.' : 'Stopped before it finished. It can be resumed.', href: 'schedules.html', label: 'See it' });
-    if (me.role === 'admin' && me.pendingActivations) attention.push({ sev: 'is-gold', t: `${me.pendingActivations} client${me.pendingActivations === 1 ? '' : 's'} asked to continue`, m: 'Their trial is ending or has ended. Activate them from the admin page.', href: 'admin.html', label: 'Open' });
+    // Resumed right here (phase 57): the link used to go to Schedules, which lists schedules, not runs.
+    for (const j of running.filter(j => j.status === 'paused_no_credit' || j.status === 'interrupted')) attention.push({ sev: 'is-warn', t: `Paused: ${UI.jobName(j.type)}`, m: j.status === 'paused_no_credit' ? 'Out of Apify credit. Top up or add a key, then resume.' : 'Stopped before it finished. Resuming reuses what was already done.', resume: j.id });
+    // Business trials (phase 56) ending within three days, or ended.
+    for (const c of live.filter(c => c.trial && (c.trial.ended || c.trial.daysLeft <= 3))) attention.push({ sev: c.trial.ended ? 'is-bad' : 'is-warn', t: c.trial.ended ? `${c.name}: trial ended` : `${c.name}: trial ends in ${c.trial.daysLeft} day${c.trial.daysLeft === 1 ? '' : 's'}`, m: 'Extend it, or make them a client, from the Clients page.', href: 'clients.html?stage=trial', label: 'Open' });
+    if (me.role === 'admin' && me.pendingActivations) attention.push({ sev: 'is-gold', t: `${me.pendingActivations} self-serve sign-up${me.pendingActivations === 1 ? '' : 's'} asked to continue`, m: 'Their free trial is ending or has ended. Activate them in Team & settings → Self-serve sign-ups.', href: 'admin.html', label: 'Open' });
     const unsetup = live.filter(c => !(c.meta && c.meta.connected) && !(c.reports && c.reports.total));
     if (unsetup.length) attention.push({ sev: 'is-gold', t: `${unsetup.length} client${unsetup.length === 1 ? ' has' : 's have'} nothing filed yet`, m: unsetup.slice(0, 3).map(c => c.name).join(', ') + (unsetup.length > 3 ? '…' : '') + ' — no report and no Meta.', href: `workspace.html?client=${unsetup[0].id}`, label: 'Start' });
 
     const hour = new Date().getHours();
     const hello = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
     const name = (me.full_name || (me.email || '').split('@')[0] || '').split(/[\s._-]/)[0];
-    const recentReports = await EL.api('/api/reports-history?limit=6').then(r => r.reports || []).catch(() => []);
+    const recentReports = await EL.api('/api/reports-history?limit=6', { scoped: false }).then(r => r.reports || []).catch(() => []);
 
     root.innerHTML = `
         <div class="ws-head"><div><h1>${hello}${name ? ', ' + esc(name.charAt(0).toUpperCase() + name.slice(1)) : ''}</h1>
@@ -68,7 +71,7 @@
         <div class="ws-grid g2">
             <section class="ws-card"><div class="ws-card-h"><h2>Needs attention</h2><span class="el-muted ws-num">${attention.length}</span></div>
                 ${attention.length ? `<div class="ws-rows">${attention.map(a => `<div class="ws-row ${a.task ? 'is-link' : ''}" ${a.task ? `data-task="${esc(a.task)}" role="button" tabindex="0"` : ''}><span class="ws-sev ${a.sev}"></span>
-                    <div class="ws-grow"><div class="ws-t">${esc(a.t)}</div><div class="ws-m">${esc(a.m)}</div></div>${a.href ? `<a class="ws-btn is-sm" href="${esc(a.href)}">${esc(a.label)}</a>` : ''}</div>`).join('')}</div>`
+                    <div class="ws-grow"><div class="ws-t">${esc(a.t)}</div><div class="ws-m">${esc(a.m)}</div></div>${a.href ? `<a class="ws-btn is-sm" href="${esc(a.href)}">${esc(a.label)}</a>` : ''}${a.resume ? `<button class="ws-btn is-sm" type="button" data-resume="${esc(a.resume)}">Resume</button>` : ''}</div>`).join('')}</div>`
                 : '<p class="el-muted">Nothing is waiting on you. Nice.</p>'}
             </section>
             <section class="ws-card"><div class="ws-card-h"><h2>Your tasks</h2><a class="ws-link" href="my-tasks.html">All ${ic('arrow')}</a></div>
@@ -84,7 +87,8 @@
                 <span class="top"><span class="el-avatar">${esc(UI.initials(c.name))}</span><span style="min-width:0"><span class="nm">${esc(c.name)}</span><span class="ind">${esc(c.niche || c.location || 'No details yet')}</span></span></span>
                 <span class="ws-chips">${c.meta && c.meta.connected ? '<span class="el-chip is-jade">Meta connected</span>' : '<span class="el-chip">No Meta</span>'}<span class="el-chip">${c.reports ? c.reports.total : 0} reports</span></span>
             </a>`).join('')}</div>`
-            : `<div class="ws-empty"><h3>No clients yet</h3><p>Add the first client: only the name is needed.</p><button class="ws-btn is-gold" type="button" data-add>${ic('plus')}Add client</button></div>`}
+            : me.role === 'admin' ? `<div class="ws-empty"><h3>No clients yet</h3><p>Add the first client: only the name is needed.</p><button class="ws-btn is-gold" type="button" data-add>${ic('plus')}Add client</button></div>`
+            : `<div class="ws-empty"><h3>You’re not on any client yet</h3><p>An admin adds you from a client’s Access tab. You can also add a client of your own.</p><button class="ws-btn" type="button" data-add>${ic('plus')}Add client</button></div>`}
         </section>
         ${recentReports.length ? `<section class="ws-card"><div class="ws-card-h"><h2>Your latest reports</h2></div>
             <div class="ws-rows">${recentReports.map(r => {
@@ -97,6 +101,11 @@
 
     document.getElementById('hm-new').addEventListener('click', () => EL.newWork(null));
     root.querySelectorAll('#hm-add, [data-add]').forEach(b => b.addEventListener('click', () => UI.addClient()));
+    root.querySelectorAll('[data-resume]').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true; b.textContent = 'Resuming…';
+        try { await EL.resumeJob(b.dataset.resume); EL.toast('Resumed. It carries on from where it stopped.'); setTimeout(() => location.reload(), 1200); }
+        catch (err) { b.disabled = false; b.textContent = 'Resume'; if (!err.handled) EL.toast(err.message, 'bad'); }
+    }));
     root.querySelectorAll('[data-task]').forEach(el => {
         const open1 = async () => {
             const t = tasks.find(x => x.id === el.dataset.task); if (!t) return;

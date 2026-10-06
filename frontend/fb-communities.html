@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Edgelead — FB Communities</title>
+<title>Facebook communities — EdgeLead</title>
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
@@ -29,13 +29,10 @@
         <div class="ex-body">
 
             <div class="ex-note info" style="margin-top:0;">
-                <b>The big picture.</b> Edgelead is one app with two halves. The Instagram half (Lead Finder,
-                Performance Audit, Competitor Intel) works on accounts. The Facebook half is these four pages, and they
-                all run on one engine called <code>fb_community</code> — an admin has to grant you that engine and you
-                have to save an Apify token for it, or every Facebook page will just return "access denied".
-                Everything on the Facebook side is about <b>groups only</b>, and <b>public groups only</b>. A private
-                group is skipped on purpose, because reading it would need a logged-in session and this tool will not
-                do that.
+                <b>What these pages cover.</b> The Facebook group tools (Communities, Community audit, Demand feed, Post
+                advisor) read <b>public groups only</b>; a private group is skipped on purpose, because reading it would need a
+                logged-in session. They need the Facebook groups tool switched on for you (Team &amp; settings → People) and an
+                Apify key. Facebook <i>Pages</i> have their own report: <a href="fb-report.html">Facebook Page report</a>.
             </div>
 
             <h3>The idea</h3>
@@ -254,7 +251,7 @@
 
 </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script>
 (async function () {
