@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check frontend/header.js",
+    "check": "node --check server.js && node --check frontend/header.js && node -e \"for (const f of require('fs').readdirSync('src')) require('child_process').execFileSync(process.execPath, ['--check', 'src/' + f], { stdio: 'inherit' })\"",
     "test": "node scripts/run-tests.js",
     "live-checks": "node scripts/live-checks.js",
     "audit": "node tests/wiring.test.js"

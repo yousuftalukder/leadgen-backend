@@ -24,7 +24,7 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
       - name: Syntax
-        run: node --check server.js && node --check frontend/header.js
+        run: npm run check
       - name: Suite
         run: npm test
       - name: Wiring audit
