@@ -266,32 +266,15 @@
             let data = null;
             try { data = await res.json(); } catch { /* empty body */ }
 
-            if (res.status === 401 && !isPublic) { EL.signOut(); throw new Error('Session expired. Sign in again.'); }
-            // 402 covers two different things. A lapsed account is terminal and
-            // gets the whole screen. A hit allowance is not — the account is
-            // fine, this one action is not available — so it is thrown for the
-            // page to show in place, and blockExpired stays out of the way.
+            if (!isPublic) {
+                const terminal = EL.refused(res.status, data);
+                if (terminal) throw terminal;
+            }
+            // A hit allowance is a 402 too, but not a terminal one: the account is
+            // fine, this one action is not available, so the page shows it in place.
             if (res.status === 402 && !isPublic) {
-                const lapsed = !data || data.state === 'expired' || data.code === 'account_expired';
-                if (lapsed) {
-                    blockExpired(data);
-                    const err = new Error((data && data.error) || 'Your access has ended.');
-                    err.status = 402; err.data = data; err.handled = true;
-                    throw err;
-                }
                 const err = new Error((data && data.error) || 'That is not available on your plan.');
                 err.status = 402; err.data = data; err.quota = true;
-                throw err;
-            }
-            // A disabled account is terminal, like a lapsed one, and gets the
-            // whole screen. Without this it fell through to the generic error
-            // and EL.init labelled it "Backend unreachable" — the right message
-            // under the wrong heading, which reads as our fault, not theirs.
-            if (res.status === 403 && data && data.code === 'account_suspended' && !isPublic) {
-                renderShell(null, null);
-                block('Account disabled', data.error || 'This account has been disabled. Contact your administrator.');
-                const err = new Error(data.error || 'Account disabled.');
-                err.status = 403; err.data = data; err.code = data.code; err.handled = true;
                 throw err;
             }
             if (!res.ok) {
@@ -305,6 +288,44 @@
                 throw err;
             }
             return data;
+        },
+
+        /**
+         * The refusals that end the session's use of the page, whoever made the
+         * request (EL.api, or a page's own fetch such as the chat's stream): a
+         * lost session, a lapsed or disabled account, an owner whose business is
+         * gone (phase 52). Puts the right screen up and returns the error to
+         * throw; null for anything a page handles itself.
+         *
+         * 402 covers two different things. A lapsed account is terminal and
+         * gets the whole screen. A hit allowance is not, so it returns null here.
+         */
+        refused(status, data) {
+            const fail = (msg, extra) => Object.assign(new Error(msg), { status, data, handled: true }, extra || {});
+            if (status === 401) { EL.signOut(); return fail('Session expired. Sign in again.'); }
+            if (status === 402 && (!data || data.state === 'expired' || data.code === 'account_expired')) {
+                blockExpired(data);
+                return fail((data && data.error) || 'Your access has ended.');
+            }
+            // A disabled account is terminal, like a lapsed one, and gets the
+            // whole screen. Without this it fell through to the generic error
+            // and EL.init labelled it "Backend unreachable" — the right message
+            // under the wrong heading, which reads as our fault, not theirs.
+            if (status === 403 && data && data.code === 'account_suspended') {
+                if (!EL._app && !EL.isEmbedded()) renderShell(null, null);
+                block('Account disabled', EL.escape(data.error || 'This account has been disabled. Contact your administrator.'));
+                return fail(data.error || 'Account disabled.', { code: data.code });
+            }
+            if (status === 403 && data && data.code === 'no_business') {
+                EL.blockNoBusiness();
+                return fail(data.error, { code: data.code });
+            }
+            return null;
+        },
+
+        /** An owner login whose business the agency has closed: nothing here to show any more. (phase 52) */
+        blockNoBusiness() {
+            block('Your access has ended', 'Your agency has closed this business’s Edge Meta AI, or has not set one up for this login. Nothing you saw has been deleted. Contact your agency to open it again.');
         },
 
         /** Remaining Apify credit across every key this user can draw from. */
@@ -441,6 +462,8 @@
 
         _renderJobBanner(job, mount, rePoll) {
             EL._clearJobBanner(mount);
+            // Keys, credit and resuming are the agency's (phase 52): an owner's page says it in its own words (onPaused).
+            if (EL.me && EL.me.role === 'client') return;
             const host = (typeof mount === 'string' ? document.getElementById(mount) : mount) || document.body;
 
             const done = (job.completed_units || []).length;
@@ -552,8 +575,14 @@
         async signOut() {
             if (EL.isShared()) return;
             try { await EL.supabase.auth.signOut(); } catch {}
-            // The Edge Meta AI app signs in on its own page, so it signs out to it too. (phase 47)
-            window.location.href = EL._app ? 'ai/' : 'index.html';
+            // The Edge Meta AI app signs in on its own page, so an owner signs out to it too
+            // (phase 47); someone on the team who opened the app goes to EdgeLead's login. A
+            // shared tool open inside the app takes the whole app with it, not just its frame.
+            const owner = !EL.me || EL.me.role === 'client';
+            const dest = new URL((EL._app || EL.isEmbedded()) && owner ? 'ai/' : 'index.html', location.href).href;
+            let win = window;
+            if (EL.isEmbedded() && owner) { try { if (window.top.location.origin === location.origin) win = window.top; } catch { /* another origin */ } }
+            win.location.href = dest;
         },
 
         /**
@@ -615,8 +644,8 @@
                 // already put the right screen up. Stacking "backend
                 // unreachable" on top of it would be wrong and alarming.
                 if (err.handled) return new Promise(() => {});
-                renderShell(page, null);
-                block('Backend unreachable', `The API did not answer: ${err.message}. Check that the service is awake, then reload.`);
+                if (!app && !EL.isEmbedded()) renderShell(page, null);
+                block('Backend unreachable', `The API did not answer: ${EL.escape(err.message)}. Check that the service is awake, then reload.`);
                 return new Promise(() => {});
             }
             EL.me = me;
@@ -1990,12 +2019,22 @@
 
     function block(title, message) {
         document.querySelectorAll('.el-page').forEach(el => el.remove());
+        document.querySelectorAll('.el-blocked:not([data-expired])').forEach(el => el.remove());
+        blockFrame();
         const card = document.createElement('div');
         card.className = 'el-blocked';
         card.innerHTML = `<h2>${title}</h2><p>${message}</p>
-            <button class="el-btn" type="button" onclick="location.reload()">Reload</button>`;
+            <div class="el-job-actions"><button class="el-btn" type="button" onclick="location.reload()">Reload</button>${outButton()}</div>`;
         document.body.appendChild(card);
+        wireOut(card);
     }
+    /** A full-screen refusal must scroll and must offer a way out, in the app too (phase 52). */
+    function blockFrame() {
+        document.body.style.overflow = 'auto';
+        document.querySelectorAll('.ai-gate').forEach(g => { g.hidden = true; });
+    }
+    const outButton = () => (EL.supabase && !EL.isShared()) ? '<button class="el-btn" type="button" data-el-out>Sign out</button>' : '';
+    const wireOut = card => card.querySelectorAll('[data-el-out]').forEach(b => b.addEventListener('click', () => EL.signOut()));
 
     /**
      * A lapsed account is not an error, it is a state with a next step. This is
@@ -2008,6 +2047,7 @@
     function blockExpired(data) {
         if (document.querySelector('.el-blocked[data-expired]')) return;
         document.querySelectorAll('.el-page').forEach(el => el.remove());
+        blockFrame();
 
         const ended = data && data.ended_at ? new Date(data.ended_at) : null;
         const when  = ended && !isNaN(ended.getTime()) ? ended.toLocaleDateString() : null;
@@ -2026,9 +2066,11 @@
                     ? `<span class="el-note">You asked to continue on ${EL.escape(new Date(data.activation_requested_at).toLocaleDateString())}. The team has it.</span>`
                     : `<button class="el-btn el-btn-go" type="button" id="el-req-continue">Ask to continue</button>`}
                 <button class="el-btn" type="button" onclick="location.reload()">Reload</button>
+                ${outButton()}
             </div>
             <div id="el-expired-contact"></div>`;
         document.body.appendChild(card);
+        wireOut(card);
 
         // What the admin set, or the build-time address as a fallback. Filled
         // after the card is up so a slow answer never delays the screen.

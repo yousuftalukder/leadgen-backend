@@ -631,6 +631,9 @@ function accountState(profile) {
     if (profile.is_active !== true)  return 'suspended';
     if (profile.role === 'admin')    return 'admin';
     if (profile.role !== 'client')   return 'employee';
+    // Phase 52: a login the agency made for a business owner never runs out. The agency is the
+    // customer; the owner reaches the app for as long as the agency keeps their business on.
+    if (profile.agency_owner === true) return 'paid';
 
     const now = Date.now();
     const paid  = profile.paid_until    ? Date.parse(profile.paid_until)    : 0;
@@ -5734,6 +5737,8 @@ app.get('/api/me', async (req, res) => {
     if (ctx.profile.role === 'client') {
         const own = await ownClientFor(ctx).catch(() => null);
         body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
+        // An owner login the agency made: no trial clock, and no business means access has ended.
+        body.agency_owner = ctx.profile.agency_owner === true;
         body.activation_requested_at = ctx.profile.activation_requested_at || null;
         body.trial_ends_at = ctx.profile.trial_ends_at || null;
         body.paid_until    = ctx.profile.paid_until || null;
@@ -12385,23 +12390,38 @@ async function clientAccess(userId, clientId, need = 'viewer') {
 
 /** Read clientId from a request body, validate it, or throw 403. */
 /**
- * The client record a client-role account IS. Owned first; failing that a
- * record an agency has made them an editor of; failing that, created — an
- * account that signs up to see how its business is doing is a business.
+ * The live business a client-role login belongs to, or null: owned first,
+ * failing that one the agency made them an editor of. Archived records do not
+ * count — an owner whose business the agency has closed has no business here.
  */
-async function ownClientFor(ctx) {
-    const uid = ctx.user.id;
+async function findOwnClient(uid) {
     const { data: owned } = await supabase.from('clients').select('*')
         .eq('owner_user_id', uid).eq('archived', false)
         .order('created_at', { ascending: true }).limit(1);
     if (owned && owned[0]) return owned[0];
 
     const { data: mem } = await supabase.from('client_members').select('client_id')
-        .eq('user_id', uid).eq('role', 'editor').limit(1);
-    if (mem && mem[0]) {
-        const { data: c } = await supabase.from('clients').select('*').eq('id', mem[0].client_id).maybeSingle();
-        if (c && !c.archived) return c;
-    }
+        .eq('user_id', uid).eq('role', 'editor');
+    const ids = (mem || []).map(m => m.client_id);
+    if (!ids.length) return null;
+    const { data: cs } = await supabase.from('clients').select('*').in('id', ids).eq('archived', false)
+        .order('created_at', { ascending: true }).limit(1);
+    return (cs && cs[0]) || null;
+}
+
+/**
+ * The client record a client-role account IS. A self-serve signup with no
+ * record yet gets one made — an account that signs up to see how its business
+ * is doing is a business. An owner login the agency made never does (phase
+ * 52): when the agency archives or removes their business, the login has no
+ * business, and the app says their access has ended instead of quietly
+ * opening an empty "My business" for them.
+ */
+async function ownClientFor(ctx) {
+    const uid = ctx.user.id;
+    const found = await findOwnClient(uid);
+    if (found) return found;
+    if (ctx.profile?.agency_owner === true) return null;
 
     const email = ctx.user.email || ctx.profile?.email || '';
     const name = String(ctx.profile?.full_name || '').trim() || email.split('@')[0] || 'My business';
@@ -12415,6 +12435,14 @@ async function ownClientFor(ctx) {
         notes: 'Created automatically when this account signed up. Rename it to the business name.'
     }]).select().maybeSingle();
     return created || null;
+}
+
+/** An owner's business, or a 403 the app shows as "your access has ended". Null means the response is sent. */
+async function requireOwnClient(ctx, res) {
+    const own = await ownClientFor(ctx);
+    if (own) return own;
+    res.status(403).json({ error: 'Your agency has not set up a business for this login, or it has been closed. Contact your agency.', code: 'no_business' });
+    return null;
 }
 
 /**
@@ -12434,7 +12462,13 @@ async function resolveClientId(req, ctx) {
     const raw = req.body?.clientId || req.body?.client_id || req.query?.client_id || null;
     // An owner's work is always filed under their own business, whatever id the browser sent along
     // (a client picked on this device by someone on the team, say).
-    if (ctx.profile?.role === 'client') return (await ownClientFor(ctx))?.id || null;
+    if (ctx.profile?.role === 'client') {
+        const own = await ownClientFor(ctx);
+        if (own) return own.id;
+        const e = new Error('Your agency has not set up a business for this login, or it has been closed. Contact your agency.');
+        e.statusCode = 403; e.code = 'no_business';
+        throw e;
+    }
     if (!raw) {
         const e = new Error('Choose a client first. Every run is filed under a business, and this one has nowhere to go.');
         e.statusCode = 400;
@@ -12637,7 +12671,7 @@ app.post('/api/clients/:id/members', async (req, res) => {
         const email = String(req.body.email || '').trim().toLowerCase();
         const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
         if (!email) return res.status(400).json({ error: 'Email is required.' });
-        const { data: u } = await supabase.from('app_users').select('id, email').eq('email', email).maybeSingle();
+        const { data: u } = await supabase.from('app_users').select('id, email, role').eq('email', email).maybeSingle();
         if (!u) return res.status(404).json({ error: 'No EdgeLead account with that email. They need to sign up first.' });
         if (u.id === c.owner_user_id) return res.status(400).json({ error: 'That is the owner.' });
         const { error } = await supabase.from('client_members')
@@ -12645,9 +12679,22 @@ app.post('/api/clients/:id/members', async (req, res) => {
         if (error) throw error;
 
         const absorbed = role === 'editor' ? await absorbEmptyOwnRecord(u.id, c.id) : null;
+        if (role === 'editor' && u.role === 'client') await markAgencyOwner(u.id);
         res.json({ success: true, member: { user_id: u.id, email: u.email, role }, absorbed });
     } catch (err) { sendErr(res, err); }
 });
+
+/**
+ * An owner login the agency has put on one of its businesses (phase 52): it
+ * never expires, and it never gets a business made up for it. Before the
+ * phase-52 SQL the column is missing; the login then keeps its trial dates,
+ * which is what happened before, so that is only logged.
+ */
+async function markAgencyOwner(userId) {
+    const { error } = await supabase.from('app_users').update({ agency_owner: true }).eq('id', userId).eq('role', 'client');
+    if (error) logger.warn('agency_owner_mark_failed', { userId, message: error.message });
+    invalidateAuth(userId);
+}
 
 /**
  * A client-role account already owns a business record of its own, made at
@@ -13336,6 +13383,8 @@ app.post('/api/public/owner-code', ownerCodeLimit, async (req, res) => {
         }
         const { data: u } = await supabase.from('app_users').select('id, role, is_active').eq('email', email).maybeSingle();
         if (!u || u.role !== 'client' || u.is_active === false) return res.json(generic);
+        // Phase 52: a login whose business the agency has closed gets no code (same answer as anyone).
+        if (!(await findOwnClient(u.id))) return res.json(generic);
 
         const since = new Date(Date.now() - 3600000).toISOString();
         const { data: recent, error: re } = await supabase.from('owner_login_codes').select('created_at').eq('email', email).gte('created_at', since).order('created_at', { ascending: false }).limit(20);
@@ -13478,6 +13527,7 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
             .upsert([{ client_id: c.id, user_id: u.id, role: 'editor', added_by: ctx.user.id }], { onConflict: 'client_id,user_id' });
         if (me) throw me;
         const absorbed = await absorbEmptyOwnRecord(u.id, c.id);
+        await markAgencyOwner(u.id);
 
         // The way in. 'recovery' works for a login that exists and lands on
         // the page that asks for a password. For a login made just now the
@@ -13533,6 +13583,58 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
                 : handBack ? `Email is not set up${mailError ? ' (' + mailError + ')' : ''}, so send this link to the owner yourself. One tap signs them in to Edge Meta AI; it works once and expires.`
                 : !created ? `${email} already has a login. Edge Meta AI now shows ${c.name}; they sign in with a code emailed to them.${mailReady ? ' The email could not be sent' + (mailError ? ' (' + mailError + ')' : '') + '.' : ''}`
                 : 'The login is ready, but a sign-in link could not be made. Try again in a minute.'
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * A fresh one-tap sign-in link for an owner who is already on this business
+ * (phase 52). The invite link works once and expires; until the agency's Gmail
+ * is set up there is no code either, so without this an owner who lost the
+ * first link had no way back in. Only for a login whose business is this one:
+ * the person asking already sees everything that login can.
+ */
+app.post('/api/clients/:id/owner-link', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        const userId = String(req.body?.userId || '');
+        if (!UUID_RE.test(userId)) return res.status(400).json({ error: 'Choose the owner login.' });
+        const { data: u } = await supabase.from('app_users').select('id, email, role, is_active').eq('id', userId).maybeSingle();
+        const own = u && u.role === 'client' ? await findOwnClient(u.id) : null;
+        if (!u || u.role !== 'client' || !own || own.id !== c.id) return res.status(404).json({ error: 'That login is not this business’s owner login.' });
+        if (u.is_active === false) return res.status(400).json({ error: 'That login is switched off. An admin can switch it back on first.' });
+
+        const base = appUrl();
+        const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
+            type: 'magiclink', email: u.email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
+        });
+        if (ge) throw ge;
+        const link = gl?.properties?.action_link || gl?.action_link || null;
+        if (!link) return res.status(502).json({ error: 'A sign-in link could not be made. Try again in a minute.' });
+
+        let emailed = false;
+        if ((await mailSettings()).configured) {
+            const sent = await sendMail({
+                to: u.email,
+                subject: `Your Edge Meta AI sign-in link for ${c.name}`,
+                text: [
+                    'Hello,', '',
+                    `Here is a new link into Edge Meta AI for ${c.name}. One tap signs you in: ${link}`, '',
+                    'It works once and expires within the hour. Next time you can also sign in with a code we email you.',
+                    '— EdgeLead'
+                ].join('\n')
+            });
+            emailed = !!sent.ok;
+        }
+        logger.info('owner_link', { clientId: c.id, ownerId: u.id, by: ctx.user.id, emailed });
+        res.json({
+            success: true, emailed,
+            link: emailed ? null : link,
+            note: emailed ? `A new sign-in link was emailed to ${u.email}.`
+                : `Send this link to ${u.email} yourself. One tap signs them in to Edge Meta AI; it works once and expires within the hour.`
         });
     } catch (err) { sendErr(res, err); }
 });
@@ -13866,7 +13968,10 @@ app.get('/api/meta/oauth/start', async (req, res) => {
         // A client account connects its own business; it is never asked which (phase 30), and an id
         // the browser sent along is ignored rather than refused (phase 51).
         let clientId = null;
-        if (ctx.profile?.role === 'client') clientId = (await ownClientFor(ctx)).id;
+        if (ctx.profile?.role === 'client') {
+            const own = await requireOwnClient(ctx, res); if (!own) return;
+            clientId = own.id;
+        }
         else if (req.query.client_id) {
             clientId = (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null;
             if (!clientId) return res.status(403).json({ error: 'No edit access to that client.' });
@@ -14456,7 +14561,7 @@ app.get('/api/client/growth', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         if (ctx.profile.role !== 'client') return res.status(400).json({ error: 'This is the client view. Staff read growth from /api/meta/growth with a client.' });
-        const own = await ownClientFor(ctx);
+        const own = await requireOwnClient(ctx, res); if (!own) return;
         const { data } = await supabase.from('meta_connections').select('*').eq('client_id', own.id).order('created_at', { ascending: false });
         res.json({ business: { id: own.id, name: own.name }, ...(await growthPayload(data || [])) });
     } catch (err) { sendErr(res, err); }
@@ -14488,7 +14593,7 @@ app.post('/api/meta/daily-sync', rateLimit({ windowMs: 60000, max: 4, key: beare
         const ctx = await auth(req, res); if (!ctx) return;
         let conn = null;
         if (ctx.profile.role === 'client') {
-            const own = await ownClientFor(ctx);
+            const own = await requireOwnClient(ctx, res); if (!own) return;
             const { data } = await supabase.from('meta_connections').select('*').eq('client_id', own.id).eq('status', 'active');
             conn = primaryConnection(data || []);
         } else {

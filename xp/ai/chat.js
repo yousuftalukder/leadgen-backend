@@ -768,13 +768,26 @@ function pushTurn(out, role, text) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function loadConversation(clientId, conversationId, firstMessage) {
+/**
+ * EdgeLead (phase 52): a chat is its author's. The owner and the agency's team ask about the same
+ * business, but neither sees the other's chats. Chats from before phase 52 have no author; the team
+ * keeps them and an owner never sees them. `who` is { userId, staff }.
+ */
+function convVisible(conv, who) {
+  if (!who || !who.userId) return true;                     // no person given: the old, shared behaviour
+  if (conv.user_id) return conv.user_id === who.userId;
+  return !!who.staff;
+}
+async function loadConversation(clientId, conversationId, firstMessage, who) {
   // Anything that is not a conversation id starts a new conversation instead of failing the query.
   if (typeof conversationId === 'string' && UUID_RE.test(conversationId)) {
-    const conv = await q(supabase.from('xp_ai_conversations').select('id,client_id,deleted_at').eq('id', conversationId).maybeSingle(), 'conv');
-    if (conv && conv.client_id === clientId && !conv.deleted_at) return { id: conv.id, client_id: conv.client_id };   // a deleted chat is never continued
+    const conv = await q(supabase.from('xp_ai_conversations').select('id,client_id,deleted_at,user_id').eq('id', conversationId).maybeSingle(), 'conv');
+    // a deleted chat is never continued, and nobody continues someone else's
+    if (conv && conv.client_id === clientId && !conv.deleted_at && convVisible(conv, who)) return { id: conv.id, client_id: conv.client_id };
   }
-  return q(supabase.from('xp_ai_conversations').insert({ client_id: clientId, title: (firstMessage || 'Conversation').slice(0, 80) }).select('id,client_id').single(), 'new conv');
+  const row = { client_id: clientId, title: (firstMessage || 'Conversation').slice(0, 80) };
+  if (who && who.userId) row.user_id = who.userId;
+  return q(supabase.from('xp_ai_conversations').insert(row).select('id,client_id').single(), 'new conv');
 }
 
 // ---------------------------------------------------------------- v2.8: ads stay in ads answers
@@ -938,7 +951,7 @@ async function chatKeys() {
   return cfg.gemini.apiKey ? [{ id: null, key: cfg.gemini.apiKey, source: 'env' }] : [];
 }
 
-async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal }) {
+async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal, who }) {
   const keys = await chatKeys();
   if (!keys.length) throw new Error('GEMINI_API_KEY is not configured.');
   const { GoogleGenAI } = require('@google/genai');
@@ -967,7 +980,7 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   // The three opening reads do not depend on each other. In series they were ~0.5 s of the wait.
   const [client, conv, cov] = await Promise.all([
     q(supabase.from('xp_clients').select('id,client_name,timezone').eq('id', clientId).single(), 'client'),
-    loadConversation(clientId, conversationId, message),
+    loadConversation(clientId, conversationId, message, who),
     coverage(clientId).catch((e) => { console.error('[chat] coverage failed:', e.message); return null; })
   ]);
   const tz = client.timezone || 'America/New_York';
@@ -1079,4 +1092,4 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model: cfg.gemini.model, usage: spent };
 }
 
-module.exports = { agencyOnlyPrompt, setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { convVisible, agencyOnlyPrompt, setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };

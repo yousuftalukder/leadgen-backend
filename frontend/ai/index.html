@@ -49,6 +49,7 @@
     .ai-form .btn-primary { width: 100%; margin-top: 4px; }
     .ai-err { min-height: 18px; font-size: 0.84rem; color: var(--danger); margin: 0; }
     .ai-err.is-good { color: var(--success); }
+    .ai-err.is-muted { color: var(--text-muted); }
     .ai-link { background: none; border: 0; padding: 0; color: var(--text-muted); font: inherit; font-size: 0.84rem; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
     .ai-code { font-family: 'JetBrains Mono', monospace; font-size: 1.6rem !important; letter-spacing: 0.4em; text-align: center; }
     .ai-links { display: flex; justify-content: space-between; gap: 10px; }
@@ -174,9 +175,15 @@
     const $ = id => document.getElementById(id);
     document.querySelectorAll('[data-signout]').forEach(b => b.addEventListener('click', () => { EL._app = 'ai'; EL.signOut(); }));
 
+    // An invite link that has expired or was used already comes back as
+    // #error_code=otp_expired instead of a session (phase 52). Read it before the
+    // client consumes the hash, and say so on the sign-in screen.
+    const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const linkError = hash.get('error_code') || hash.get('error');
     const sb = EL.authClient();
     const { data } = await sb.auth.getSession();
-    if (data.session) boot(); else signIn();
+    if (linkError) history.replaceState(null, '', location.pathname + location.search);
+    if (data.session) boot(); else signIn(linkError);
 
     async function post(path, body) {
         const r = await fetch(EL.backendUrl() + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -185,12 +192,13 @@
         return d;
     }
 
-    function signIn() {
+    function signIn(linkError) {
         $('ai-signin').hidden = false;
         const q = new URLSearchParams(location.search);
         if (q.get('email')) $('ai-email').value = q.get('email');
         const err = $('ai-err'), err2 = $('ai-err2');
-        const say = (el, text, good) => { el.className = 'ai-err' + (good ? ' is-good' : ''); el.textContent = text || ''; };
+        const say = (el, text, tone) => { el.className = 'ai-err' + (tone ? ' is-' + tone : ''); el.textContent = text || ''; };
+        if (linkError) say(err, 'That sign-in link has expired or was already used. Sign in with a code below, or ask your agency for a new link.');
         let email = '', resendAt = 0;
         const sendCode = async () => {
             const r = await post('/api/public/owner-code', { email });
@@ -206,7 +214,7 @@
                 const r = await sendCode();
                 $('ai-form').hidden = true; $('ai-code-form').hidden = false;
                 $('ai-lead').textContent = `We emailed a 6-digit code to ${email}. It works for 10 minutes.`;
-                say(err2, r.note && /If that email/.test(r.note) ? 'No code? Check spam, and that this is the email your agency invited.' : '', false);
+                say(err2, r.note && /If that email/.test(r.note) ? 'No code? Check spam, and that this is the email your agency invited.' : '', 'muted');
                 setTimeout(() => $('ai-code').focus(), 50);
             } catch (x) { say(err, x.message); }
             finally { go.disabled = false; go.textContent = 'Email me a code'; }
@@ -231,7 +239,7 @@
         });
         $('ai-resend').addEventListener('click', async () => {
             if (Date.now() < resendAt) { say(err2, `Wait ${Math.ceil((resendAt - Date.now()) / 1000)} seconds, then ask again.`); return; }
-            try { await sendCode(); say(err2, 'A new code is on its way.', true); } catch (x) { say(err2, x.message); }
+            try { await sendCode(); say(err2, 'A new code is on its way.', 'good'); } catch (x) { say(err2, x.message); }
         });
         $('ai-other').addEventListener('click', () => { $('ai-code-form').hidden = true; $('ai-form').hidden = false; $('ai-lead').textContent = 'Sign in with the email your agency invited.'; $('ai-email').focus(); });
     }
@@ -239,6 +247,8 @@
     async function boot() {
         const me = await EL.init({ engine: null, page: 'ai/index.html', app: 'ai' });
         if (me.role !== 'client') { $('ai-staff').hidden = false; return; }
+        // An owner login whose business the agency has closed (phase 52): say so, nothing else.
+        if (me.agency_owner && !me.business) { EL.blockNoBusiness(); return; }
         $('ai-app').hidden = false;
 
         // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.

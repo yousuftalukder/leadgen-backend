@@ -28,6 +28,7 @@ const assert = require('assert');
 const Module = require('module');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 
 // ===========================================================================
 // AN IN-MEMORY POSTGREST
@@ -3862,6 +3863,116 @@ test('/api/me tells a staff member which of their own keys are missing; owners a
     assert.strictEqual(emp.body.ownKeys.apify, true, 'a saved personal Apify key was not seen');
     assert.strictEqual((await call('GET', '/api/me', { token: 't-client' })).body.ownKeys, undefined, 'an owner was asked for keys');
     assert.strictEqual((await call('GET', '/api/me', { token: 't-admin' })).body.ownKeys, undefined, 'an admin was asked for personal keys');
+});
+
+section('\nphase 52: the owner app, finished');
+test('an owner login the agency made never runs out, and a self-serve one still does', async () => {
+    const row = tbl('app_users').find(u => u.email === 'owner@kitesurf.test');
+    assert.strictEqual(row.agency_owner, true, 'the invite did not mark the login as the agency\'s owner login');
+    const past = new Date(Date.now() - 86400000).toISOString();
+    row.trial_ends_at = past; row.paid_until = null;
+    S.invalidateAuth && S.invalidateAuth();
+    const me = await call('GET', '/api/me', { token: 't-owner@kitesurf.test' });
+    assert.strictEqual(me.statusCode, 200, 'an agency owner login was locked out when its trial date passed: ' + JSON.stringify(me.body));
+    assert.strictEqual(me.body.agency_owner, true);
+    assert.strictEqual(S.accountState({ role: 'client', is_active: true, agency_owner: true, trial_ends_at: past }), 'paid');
+    assert.strictEqual(S.accountState({ role: 'client', is_active: true, trial_ends_at: past }), 'expired', 'a self-serve trial must still end');
+    assert.strictEqual(S.accountState({ role: 'client', is_active: false, agency_owner: true }), 'suspended', 'switching a login off must still win');
+    const sql = fs.readFileSync(path.join(__dirname, '..', 'sql', 'schema-phase52.sql'), 'utf8');
+    assert.ok(/when u\.agency_owner is true\s+then 'paid'/.test(sql), 'the SQL account state must agree with the server');
+});
+test('staff make a new sign-in link for the owner on their business, and only for that login', async () => {
+    const ownerId = tbl('app_users').find(u => u.email === 'owner@kitesurf.test').id;
+    await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { configured: false, from: '', appPassword: '' } } });
+    const off = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-admin', body: { userId: ownerId } });
+    if (!off.body.emailed) {
+        // Without Gmail the link comes back to pass on — the owner's way back in when their first link expired.
+        assert.ok(/type=magiclink/.test(off.body.link || ''), 'no link to pass on: ' + JSON.stringify(off.body));
+    }
+    const set = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'agency@gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency' } } });
+    assert.strictEqual(set.statusCode, 200, JSON.stringify(set.body));
+    MAIL.sent.length = 0;
+    const r = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-admin', body: { userId: ownerId } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    // With Gmail set up the link goes to the owner's inbox, not back to the page.
+    assert.strictEqual(r.body.emailed, true);
+    assert.strictEqual(r.body.link, null);
+    const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
+    assert.ok(m && /type=magiclink/.test(m.msg.text), 'no link was mailed');
+    const other = await call('POST', `/api/clients/${state.D}/owner-link`, { token: 't-admin', body: { userId: ownerId } });
+    assert.strictEqual(other.statusCode, 404, 'a link was made for a login that is not this business\'s owner');
+    const team = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-admin', body: { userId: EMP.id } });
+    assert.strictEqual(team.statusCode, 404, 'a sign-in link was made for someone on the team');
+    const owner = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-owner@kitesurf.test', body: { userId: ownerId } });
+    assert.ok(owner.statusCode === 403 || owner.statusCode === 404, 'an owner made a sign-in link: ' + owner.statusCode);
+});
+test('when the agency closes the business, the owner\'s access ends: no made-up business, no code, a clear refusal', async () => {
+    const before = tbl('clients').length;
+    const T = tbl('clients').find(c => c.id === state.T);
+    T.archived = true;
+    try {
+        S.invalidateAuth && S.invalidateAuth();
+        const me = await call('GET', '/api/me', { token: 't-owner@kitesurf.test' });
+        assert.strictEqual(me.statusCode, 200, JSON.stringify(me.body));
+        assert.strictEqual(me.body.business, null, 'the owner still sees a business');
+        assert.strictEqual(tbl('clients').length, before, 'an empty "My business" was made for an agency owner login');
+        const g = await call('GET', '/api/client/growth', { token: 't-owner@kitesurf.test' });
+        assert.strictEqual(g.statusCode, 403, JSON.stringify(g.body));
+        assert.strictEqual(g.body.code, 'no_business');
+        const run = await call('POST', '/api/generate-ig-report', { token: 't-owner@kitesurf.test', body: { target: 'kitesurf' } });
+        assert.strictEqual(run.statusCode, 403, 'work started for an owner with no business: ' + JSON.stringify(run.body));
+        assert.strictEqual(run.body.code, 'no_business');
+        MAIL.sent.length = 0;
+        const code = await call('POST', '/api/public/owner-code', { body: { email: 'owner@kitesurf.test' }, ip: '10.52.0.1' });
+        assert.strictEqual(code.statusCode, 200);
+        assert.ok(!MAIL.sent.some(x => x.msg.to === 'owner@kitesurf.test'), 'a sign-in code went to an owner whose business is closed');
+        // A self-serve signup with no record still gets one, as before.
+        const SELF = person('self@serve.test'); TOKENS['t-self'] = SELF;
+        const self = await call('GET', '/api/me', { token: 't-self' });
+        assert.ok(self.body.business && self.body.business.id, 'a self-serve signup lost its own business');
+    } finally { T.archived = false; S.invalidateAuth && S.invalidateAuth(); }
+});
+test('each person keeps their own chats: the owner never sees the team\'s, the team keeps the old shared ones', async () => {
+    const now = Date.now();
+    const mk = (user_id, title, i) => ({ id: crypto.randomUUID(), client_id: state.C, user_id, title, created_at: new Date(now - i * 1000).toISOString(), updated_at: new Date(now - i * 1000).toISOString() });
+    const team = mk(EMP.id, 'Team: pricing ideas', 1), legacy = mk(null, 'Before phase 52', 2), mine = mk(CLIENT.id, 'Owner: reach', 3);
+    tbl('xp_ai_conversations').push(team, legacy, mine);
+    const o = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-client' });
+    assert.strictEqual(o.statusCode, 200, JSON.stringify(o.body));
+    const oIds = o.body.conversations.map(c => c.id);
+    assert.ok(oIds.includes(mine.id), 'the owner lost their own chat');
+    assert.ok(!oIds.includes(team.id) && !oIds.includes(legacy.id), 'the owner sees the team\'s chats');
+    const e = await call('GET', `/api/xp/chat/${state.C}/conversations`, { token: 't-emp', query: { client_id: state.C } });
+    const eIds = e.body.conversations.map(c => c.id);
+    assert.ok(eIds.includes(team.id) && eIds.includes(legacy.id), 'the team lost its chats');
+    assert.ok(!eIds.includes(mine.id), 'the team sees the owner\'s chats');
+    assert.strictEqual((await call('GET', `/api/xp/chat/${state.C}/conversations/${team.id}`, { token: 't-client' })).statusCode, 404);
+    assert.strictEqual((await call('PATCH', `/api/xp/chat/${state.C}/conversations/${mine.id}`, { token: 't-emp', body: { title: 'Mine now' } })).statusCode, 404);
+    assert.strictEqual((await call('DELETE', `/api/xp/chat/${state.C}/conversations/${legacy.id}`, { token: 't-client' })).statusCode, 404);
+    assert.strictEqual(tbl('xp_ai_conversations').find(c => c.id === mine.id).title, 'Owner: reach');
+    // A question in someone else's chat starts a new chat of the asker's own.
+    XP.script = [{ parts: [{ text: 'Reach was best on Tuesday.' }] }];
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Which day had the most reach?', conversationId: team.id } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.notStrictEqual(r.body.conversationId, team.id, 'the owner continued the team\'s chat');
+    assert.strictEqual(tbl('xp_ai_conversations').find(c => c.id === r.body.conversationId).user_id, CLIENT.id);
+});
+test('the owner app: refusals take the whole screen with a way out, the menus sit above the drawer, the shell precaches', () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
+    assert.ok(/code === 'no_business'/.test(h) && /blockNoBusiness/.test(h), 'no access-ended screen');
+    assert.ok(/data-el-out/.test(h), 'a refusal screen has no Sign out');
+    assert.ok(/if \(!app && !EL\.isEmbedded\(\)\) renderShell\(page, null\)/.test(h), 'the staff sidebar is drawn around the app\'s error screen');
+    const ai = fs.readFileSync(path.join(FRONT, 'ai', 'index.html'), 'utf8');
+    assert.ok(/error_code/.test(ai), 'an expired invite link is not explained in the app');
+    assert.ok(/me\.agency_owner && !me\.business/.test(ai));
+    const chat = fs.readFileSync(path.join(FRONT, 'meta-ai.js'), 'utf8');
+    assert.ok(/EL\.refused\(res\.status, data\)/.test(chat), 'the chat\'s own requests do not handle a lost session');
+    const css = fs.readFileSync(path.join(FRONT, 'meta-ai.css'), 'utf8');
+    assert.ok(/\.oa-menu \{ position: fixed; z-index: 80;/.test(css), 'a chat\'s menu opens under the drawer');
+    const sw = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
+    const shell = JSON.parse(sw.match(/const SHELL = (\[[\s\S]*?\]);/)[1].replace(/'/g, '"'));
+    assert.strictEqual(new Set(shell).size, shell.length, 'a duplicate in the shell list makes the whole precache fail');
 });
 
 (async () => {

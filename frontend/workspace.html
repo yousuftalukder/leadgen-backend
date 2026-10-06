@@ -599,10 +599,10 @@
                 <section class="ws-card"><div class="ws-card-h"><h2>Owner portal</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
                     <p class="el-muted">The business owner’s login to Edge Meta AI, for ${esc(c.name)} only: their numbers, the tasks you share with them, their planned posts to approve and their reports, all in one chat app. They sign in with a code emailed to them; no password. Never your costs, keys or other clients.</p>
                     ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
-                        ${isOwner() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.email)}">Send a new link</button><button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
+                        ${isOwner() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button><button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
                     ${isOwner() ? `<div class="ws-form">
                         <div class="ws-form two"><div><label for="o-email">Owner’s email</label><input id="o-email" type="email" placeholder="owner@business.com"></div><div><label for="o-name">Their name</label><input id="o-name" placeholder="Optional"></div></div>
-                        ${isAdmin ? `<div class="ws-form two"><div><label for="o-paid">Paid until</label><input id="o-paid" type="date"><div class="ws-hint">Optional. Empty starts the usual free trial.</div></div><div><label for="o-plan">Plan name</label><input id="o-plan" placeholder="Optional, e.g. Growth"></div></div>` : ''}
+                        <div class="ws-hint">An owner login never runs out. It works for as long as ${esc(c.name)} is one of your clients.</div>
                         <div><button class="ws-btn is-gold" type="button" id="o-invite">${ic('plus')}${owners.length ? 'Invite another login' : 'Invite the owner'}</button></div></div>` : ''}
                     <div id="o-result"></div>
                 </section>
@@ -644,11 +644,19 @@
         if (inv) inv.addEventListener('click', () => {
             const email = $('o-email').value.trim();
             if (!email) { $('o-result').innerHTML = '<p class="ws-note is-bad">Enter the owner’s email.</p>'; return; }
-            const extra = { name: $('o-name').value.trim() || null };
-            if ($('o-paid') && $('o-paid').value) { extra.paidUntil = $('o-paid').value; extra.planLabel = $('o-plan').value.trim() || null; }
-            invite(email, extra);
+            invite(email, { name: $('o-name').value.trim() || null });
         });
-        body.querySelectorAll('[data-resend]').forEach(b => b.addEventListener('click', () => invite(b.dataset.resend)));
+        // A fresh one-tap link for an owner already on this business: the first one works once and expires.
+        body.querySelectorAll('[data-resend]').forEach(b => b.addEventListener('click', async () => {
+            const out = $('o-result');
+            b.disabled = true; out.innerHTML = '<p class="ws-note">Making a link…</p>';
+            try {
+                const r = await EL.api(`/api/clients/${id}/owner-link`, { method: 'POST', body: { userId: b.dataset.resend } });
+                out.innerHTML = `<div class="wsc-banner">${inviteHtml(r)}</div>`;
+                out.querySelectorAll('[data-copy]').forEach(x => x.addEventListener('click', () => copy(x.dataset.copy)));
+            } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
+            b.disabled = false;
+        }));
         body.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
         body.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
             try { await EL.api(`/api/share/${b.dataset.revoke}`, { method: 'DELETE' }); EL.toast('Link turned off. Anyone opening it now sees nothing.'); tabAccess(body); }
