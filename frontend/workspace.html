@@ -115,7 +115,7 @@
             { t: 'Business details', done: !!(c.niche && c.location), tab: 'settings', label: 'Add what they do and where' },
             { t: 'Connect Meta', done: liveConns().length > 0, tab: 'meta', label: 'Connect' },
             { t: 'First report', done: reports === null ? true : reports > 0, work: true, label: 'Start one' },
-            { t: 'Owner portal', done: portalLogins().length > 0, tab: 'access', label: 'Invite the owner' }
+            { t: 'Owner’s Edge Meta AI', done: portalLogins().length > 0, tab: 'access', label: 'Invite the owner' }
         ];
     }
 
@@ -123,7 +123,7 @@
         const conns = detail.metaConnections || [];
         const meta = liveConns().length ? `<span class="el-chip is-jade">Meta connected</span>`
             : conns.length ? `<span class="el-chip is-warn">Meta needs attention</span>` : `<span class="el-chip">Meta not connected</span>`;
-        const portal = portalLogins().length ? `<span class="el-chip is-jade">Owner has a portal login</span>` : '';
+        const portal = portalLogins().length ? `<span class="el-chip is-jade">Owner has Edge Meta AI</span>` : '';
         const access = { owner: 'You own this client', admin: 'Admin access', editor: 'You can edit', viewer: 'View only' }[c.access] || '';
         const st = setup();
         const doneN = st.filter(s => s.done).length;
@@ -550,7 +550,7 @@
     function tabAsk(body) {
         const owner = portalLogins()[0];
         body.innerHTML = `<div id="wsc-askfull"></div>
-            <p class="el-muted" style="margin-top:12px">${liveConns().length ? `For a deep read of ${esc(c.name)}’s own Meta data (every post, day and ad), open <a class="ws-link" href="client-assistant.html?client=${encodeURIComponent(c.id)}">Edge Meta AI</a>, the chat their owner has in the portal. ` : ''}${owner ? `The owner (${esc(owner.email)}) has Edge Meta AI in their portal.` : 'Invite the owner under Access &amp; sharing and they get Edge Meta AI in their portal.'}${liveConns().length ? ` <a class="ws-link" href="creators.html?client=${encodeURIComponent(c.id)}">Creator posts</a>: collabs and tagged posts about ${esc(c.name)}, which Edge Meta AI can answer about.` : ''}</p>`;
+            <p class="el-muted" style="margin-top:12px">${liveConns().length ? `For a deep read of ${esc(c.name)}’s own Meta data (every post, day and ad), open <a class="ws-link" href="client-assistant.html?client=${encodeURIComponent(c.id)}">Edge Meta AI</a>, the same chat the business owner has in their app. ` : ''}${owner ? `The business owner (${esc(owner.email)}) uses Edge Meta AI too.` : 'Invite the business owner under Access &amp; sharing and they get Edge Meta AI on their phone.'}${liveConns().length ? ` <a class="ws-link" href="creators.html?client=${encodeURIComponent(c.id)}">Creator posts</a>: collabs and tagged posts about ${esc(c.name)}, which Edge Meta AI can answer about.` : ''}</p>`;
         UI.askBox($('wsc-askfull'), { clientId: c.id, clientName: c.name, initial: pendingAsk });
         pendingAsk = null;
     }
@@ -588,19 +588,19 @@
             <div class="ws-grid g2e">
                 <section class="ws-card"><div class="ws-card-h"><h2>Team on this client</h2></div>
                     <div class="ws-rows">${team().map(m => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(m.email))}</span><div class="ws-grow"><div class="ws-t">${esc(m.name || m.email)}</div><div class="ws-m">${esc(m.email)}</div></div>
-                        <span class="el-chip ${m.role === 'owner' ? 'is-gold' : ''}">${m.role === 'owner' ? 'Owner' : m.role === 'editor' ? 'Can edit' : 'Can view'}</span>
+                        <span class="el-chip ${m.role === 'owner' ? 'is-gold' : ''}">${m.role === 'owner' ? 'Account lead' : m.role === 'editor' ? 'Can edit' : 'Can view'}</span>
                         ${m.role !== 'owner' && (isOwner() || m.user_id === me.id) ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(m.user_id)}">${m.user_id === me.id ? 'Leave' : 'Remove'}</button>` : ''}</div>`).join('')}</div>
                     ${isOwner() ? `<div class="ws-form"><div class="ws-form two"><div><label for="t-email">Add a teammate by email</label><input id="t-email" type="email" placeholder="colleague@agency.com"></div>
                         <div><label for="t-role">They can</label><select id="t-role"><option value="editor">Edit and start work</option><option value="viewer">Only view</option></select></div></div>
-                        <div><button class="ws-btn" type="button" id="t-add">${ic('plus')}Add to this client</button></div></div>` : '<p class="el-muted">Only the client’s owner or an admin adds people.</p>'}
+                        <div><button class="ws-btn" type="button" id="t-add">${ic('plus')}Add to this client</button></div></div>` : '<p class="el-muted">Only the account lead or an admin adds people.</p>'}
                     <div class="ws-note" id="t-note"></div>
                     <p class="el-muted">Admins can open every client. Everyone else sees the clients they are added to.</p>
                 </section>
-                <section class="ws-card"><div class="ws-card-h"><h2>Owner portal</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
+                <section class="ws-card"><div class="ws-card-h"><h2>Business owner’s app</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
                     <p class="el-muted">The business owner’s login to Edge Meta AI, for ${esc(c.name)} only: their numbers, the tasks you share with them, their planned posts to approve and their reports, all in one chat app. They sign in with a code emailed to them; no password. Never your costs, keys or other clients.</p>
                     ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
-                        ${isOwner() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button><button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
-                    ${isOwner() ? `<div class="ws-form">
+                        ${canEdit() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button>` : ''}${isOwner() ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
+                    ${canEdit() ? `<div class="ws-form">
                         <div class="ws-form two"><div><label for="o-email">Owner’s email</label><input id="o-email" type="email" placeholder="owner@business.com"></div><div><label for="o-name">Their name</label><input id="o-name" placeholder="Optional"></div></div>
                         <div class="ws-hint">An owner login never runs out. It works for as long as ${esc(c.name)} is one of your clients.</div>
                         <div><button class="ws-btn is-gold" type="button" id="o-invite">${ic('plus')}${owners.length ? 'Invite another login' : 'Invite the owner'}</button></div></div>` : ''}
