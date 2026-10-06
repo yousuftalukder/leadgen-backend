@@ -35,6 +35,8 @@
 <body>
 
 <main class="el-page">
+    <header class="ws-head"><div><h1>Competitor intel</h1>
+        <p class="ws-sub">Benchmark an Instagram account against up to 10 rivals, scored on the same engagement, virality and posting maths.</p></div></header>
 
     <div class="segment-bar el-owner-only">
         <button class="segment-btn active" type="button" data-tab="builder">Run a benchmark</button>
@@ -178,7 +180,8 @@
         $('rivals').appendChild(row);
         estimate();
     }
-    // Declared before the first addRival() (phase 57): it calls estimate(), which reads this.
+    // Declared before the first addRival() (phases 57, 58): it calls estimate(), which reads these.
+    let estTimer = null;
     const rivalHandles = () => Array.from($('rivals').querySelectorAll('input'))
         .map(i => i.value.replace('@', '').trim().toLowerCase()).filter(Boolean);
     $('add-rival').addEventListener('click', () => addRival());
@@ -213,7 +216,6 @@
     }
 
     // ---------- estimate ----------
-    let estTimer = null;
     async function estimate() {
         const accounts = rivalHandles().length + 1;
         const posts = Math.max(5, Math.min(100, parseInt($('posts').value || '30', 10)));

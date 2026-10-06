@@ -1691,3 +1691,27 @@ body.el-drawer-open { overflow: hidden; }
 a:not([class]) { color: var(--accent-solid); }
 a:not([class]):hover { color: #f0d39a; }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--jade, #3fbf8f); }
+
+/* ===========================================================================
+   Phase 58: the tool pages in the workspace layout.
+   The older pages (Facebook tools, Instagram audit and competitors, leads,
+   pipeline, reviews, content plan, creators, schedules, Team & settings) keep
+   their markup and behaviour; inside the staff shell they now read like the
+   newer ones: a page header on the background, underline tabs, flat cards with
+   section-sized titles, and primary buttons sized to their label.
+   =========================================================================== */
+body.el-has-sidebar .card { padding: 20px; border-radius: var(--r-md); box-shadow: none; backdrop-filter: none; margin-bottom: 16px; }
+body.el-has-sidebar .card::before { display: none; }
+body.el-has-sidebar .card-title { font-size: 1.05rem; letter-spacing: -0.01em; margin-bottom: 6px; }
+body.el-has-sidebar .card-subtitle { font-size: 0.86rem; margin-bottom: 16px; max-width: 80ch; }
+body.el-has-sidebar .segment-bar { display: flex; flex-wrap: nowrap; gap: 4px; width: auto; max-width: 100%; overflow-x: auto; scrollbar-width: none;
+    background: none; border: 0; border-bottom: 1px solid var(--card-border); border-radius: 0; padding: 0; margin: 4px 0 18px; }
+body.el-has-sidebar .segment-bar::-webkit-scrollbar { display: none; }
+body.el-has-sidebar .segment-btn { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; box-shadow: none; margin-bottom: -1px;
+    color: var(--text-secondary); padding: 10px 14px; font-size: 0.9rem; font-weight: 700; white-space: nowrap; }
+body.el-has-sidebar .segment-btn:hover:not(.active) { background: none; color: var(--text-primary); }
+body.el-has-sidebar .segment-btn.active { background: none; box-shadow: none; color: #f0d39a; border-bottom-color: var(--accent-solid); font-weight: 800; }
+body.el-has-sidebar .btn-primary { width: auto; min-width: 180px; padding: 12px 22px; font-size: 0.95rem; margin-top: 20px; }
+body.el-has-sidebar .explainer { border-radius: var(--r-md); backdrop-filter: none; margin-bottom: 16px; }
+body.el-has-sidebar .explainer > summary { padding: 14px 20px; }
+@media (max-width: 560px) { body.el-has-sidebar .btn-primary { width: 100%; } }

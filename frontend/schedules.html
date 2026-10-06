@@ -22,20 +22,20 @@
     .note { font-size: .82rem; margin-top: 10px; min-height: 1.2em; font-weight: 600; color: var(--text-muted); }
     .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
     .filters label { font-size: .8rem; color: var(--text-muted); display: flex; gap: 6px; align-items: center; }
+    #scope { display: flex; align-items: center; gap: 8px; }
+    #scope label { margin: 0; display: inline; }
+    #scope select { margin: 0; }
     @media (max-width: 760px) { .s-row { grid-template-columns: 1fr; } .s-row .acts { justify-content: flex-start; } }
 </style>
 </head>
 <body>
 
 <main class="el-page">
-<div class="card">
-    <h2 class="card-title">Scheduled runs</h2>
-    <p class="card-subtitle" style="margin-bottom:0">
-        A schedule re-runs a report you already ran — same accounts, same settings, same client — every week or month.
+    <header class="ws-head"><div><h1>Scheduled runs</h1>
+        <p class="ws-sub">A schedule re-runs a report you already ran — same accounts, same settings, same client — every week or month.
         Each run spends Apify credit like a manual one, files under the same client, and pauses the same way if credit runs out.
-        Create one from any finished report with <b>Repeat on a schedule</b>. Times are UTC.
-    </p>
-</div>
+        Create one from any finished report with <b>Repeat on a schedule</b>. Times are UTC.</p></div></header>
+
 
 <div class="card">
     <div class="filters">

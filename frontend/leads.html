@@ -95,11 +95,12 @@
 
 <div class="el-page">
 
-    <div class="card">
-        <h2 class="card-title">Lead list</h2>
-        <p class="card-subtitle">Every lead anyone here has collected — every campaign, every client, both platforms —
+        <header class="ws-head"><div><h1>Lead list</h1>
+        <p class="ws-sub">Every lead anyone here has collected — every campaign, every client, both platforms —
             in one list, one row per business, filed by industry and location. The Lead Finder and the Facebook search
-            add to it; this is where you read it.</p>
+            add to it; this is where you read it.</p></div></header>
+
+<div class="card">
         <div class="ll-stats" id="ll-stats"></div>
         <p class="ll-note" id="ll-stats-note"></p>
     </div>
@@ -441,8 +442,8 @@
             tile('Total', s.total, 'leads collected') +
             tile('Reachable', s.reachable, pc(s.reachable, s.total)) +
             tile('With email', s.withEmail, pc(s.withEmail, s.total)) +
-            tile('Instagram', s.byPlatform.instagram, pc(s.byPlatform.instagram, s.total)) +
-            tile('Facebook', s.byPlatform.facebook, pc(s.byPlatform.facebook, s.total));
+            tile('Instagram', (s.byPlatform || {}).instagram, pc((s.byPlatform || {}).instagram, s.total)) +
+            tile('Facebook', (s.byPlatform || {}).facebook, pc((s.byPlatform || {}).facebook, s.total));
 
         const reach = '“Reachable” means at least one of email, phone or WhatsApp is present — it is what decides whether a lead can actually be contacted.';
         $('ll-stats-note').textContent = s.client
