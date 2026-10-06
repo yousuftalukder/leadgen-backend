@@ -29,6 +29,9 @@ const Module = require('module');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+/** server.js and its parts in src/ (phase 55), in load order, as one text. */
+const serverSource = () => [path.join(__dirname, '..', 'server.js'), ...fs.readdirSync(path.join(__dirname, '..', 'src')).filter(f => f.endsWith('.js')).sort().map(f => path.join(__dirname, '..', 'src', f))]
+    .map(f => fs.readFileSync(f, 'utf8')).join('\n');
 
 // ===========================================================================
 // AN IN-MEMORY POSTGREST
@@ -4064,7 +4067,7 @@ test('an editor on the team invites the business owner, and the screens call the
     const ws = fs.readFileSync(path.join(FRONT, 'workspace.html'), 'utf8');
     assert.ok(/'Account lead'/.test(ws) && !/<h2>Owner portal<\/h2>/.test(ws), 'the two meanings of "Owner" are still mixed');
     assert.ok(/\$\{canEdit\(\) \? `<div class="ws-form">\s*<div class="ws-form two"><div><label for="o-email">/.test(ws), 'editors are not offered the invite');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const src = serverSource();
     const route = src.slice(src.indexOf("app.post('/api/clients/:id/portal-invite'"), src.indexOf("app.post('/api/clients/:id/portal-invite'") + 900);
     assert.ok(/clientAccess\(ctx\.user\.id, req\.params\.id, 'editor'\)/.test(route), 'the invite still needs the account lead');
 });
@@ -4112,14 +4115,15 @@ test('the twice-daily read is a slot: run once by whoever claims it first, and c
     assert.deepStrictEqual(both.filter(Boolean).length, 1, 'two instances both claimed one slot: ' + JSON.stringify(both));
 });
 test('a shutting-down server parks only its own jobs, never another instance\'s', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    const shut = src.slice(src.indexOf('async function gracefulShutdown'), src.indexOf("if (require.main === module)"));
+    const src = serverSource();
+    const at = src.indexOf('async function gracefulShutdown');
+    const shut = src.slice(at, src.indexOf('\n}\n', at));
     assert.ok(/\.in\('id', mine\)/.test(shut), 'shutdown still parks every running job in the table');
     assert.ok(S.LOCAL_JOBS instanceof Set);
     assert.ok(/LOCAL_JOBS\.add\(String\(jobId\)\)/.test(src) && /LOCAL_JOBS\.delete\(String\(jobId\)\)/.test(src));
 });
 test('Gemini calls time out; the pages load pinned CDN builds; the service worker answers a slow network from its cache', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const src = serverSource();
     assert.ok((src.match(/signal: AbortSignal\.timeout\(GEMINI_TIMEOUT_MS\)/g) || []).length >= 2, 'a Gemini call can still hang for ever');
     const FRONT = path.join(__dirname, '..', 'frontend');
     const pages = fs.readdirSync(FRONT).filter(f => f.endsWith('.html')).map(f => path.join(FRONT, f)).concat([path.join(FRONT, 'ai', 'index.html')]);
