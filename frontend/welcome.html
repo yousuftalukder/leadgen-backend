@@ -45,7 +45,7 @@
 
 <section class="card wl-card hidden" id="wl-form">
     <h2 class="card-title">Choose your password</h2>
-    <p class="card-subtitle">Your agency opened a portal for your business. Pick a password to finish, then sign in with <span class="wl-who" id="wl-email"></span> from now on.</p>
+    <p class="card-subtitle">Choose a new password, then sign in with <span class="wl-who" id="wl-email"></span> from now on.</p>
 
     <label for="wl-pass">Password</label>
     <input type="password" id="wl-pass" placeholder="••••••••••" autocomplete="new-password">
@@ -56,18 +56,18 @@
     <input type="password" id="wl-pass2" placeholder="••••••••••" autocomplete="new-password">
     <div class="wl-hint" id="wl-pass2-hint"></div>
 
-    <button class="btn-primary" id="wl-go" style="margin-top:20px;">Save password and open my portal</button>
+    <button class="btn-primary" id="wl-go" style="margin-top:20px;">Save password</button>
     <div class="wl-error" id="wl-error"></div>
 </section>
 
 <section class="card wl-card hidden" id="wl-expired">
     <h2 class="card-title">This link has expired</h2>
-    <p class="card-subtitle">Links like this work once and for a limited time. Ask your agency to send a new one, or sign in if you already chose a password.</p>
+    <p class="card-subtitle">Links like this work once and for a limited time. Ask for a new one from the sign-in page (Forgot your password?), or sign in if you already chose a password.</p>
     <div class="wl-foot"><a href="index.html">Go to sign in</a></div>
     <p class="card-subtitle" style="margin-top:14px">Business owner? Your agency’s app is Edge Meta AI: <a href="ai/">open it</a> and sign in with a code sent to your email.</p>
 </section>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script>
 (function () {
@@ -165,7 +165,7 @@
         if (pw !== pw2) { $('wl-error').textContent = 'The two passwords do not match.'; return; }
         btn.disabled = true; btn.textContent = 'Checking…';
         if (!(await checkBreached(pw))) {
-            btn.disabled = false; btn.textContent = 'Save password and open my portal';
+            btn.disabled = false; btn.textContent = 'Save password';
             $('wl-error').textContent = 'That password has appeared in a known data breach. Please pick another.';
             return;
         }
@@ -185,7 +185,7 @@
             const expired = /expired|invalid|session/i.test(err && err.message || '');
             if (expired) { show('wl-expired'); return; }
             $('wl-error').textContent = (err && err.message) || 'Could not save the password. Try again.';
-            btn.disabled = false; btn.textContent = 'Save password and open my portal';
+            btn.disabled = false; btn.textContent = 'Save password';
         }
     }
     $('wl-go').addEventListener('click', save);

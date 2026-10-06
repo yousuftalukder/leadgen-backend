@@ -192,14 +192,14 @@ tr.is-top td { background: rgba(217,181,108,0.09); }
         background: rgba(99,102,241,0.12); padding: 2px 6px; border-radius: 5px; }
 .ex-hr { height: 1px; background: var(--card-border); border: none; margin: 26px 0; }
 .ex-steps { counter-reset: exstep; list-style: none; margin: 0 0 12px; }
-.ex-steps > li { counter-increment: exstep; position: relative; padding-left: 40px; margin-bottom: 12px;
+.ex-body .ex-steps > li, .ex-steps > li { counter-increment: exstep; position: relative; padding-left: 40px; margin-bottom: 12px;
         font-size: 0.88rem; color: var(--text-primary); line-height: 1.7; font-weight: 500; }
 .ex-steps > li::before { content: counter(exstep); position: absolute; left: 0; top: 1px; width: 26px; height: 26px;
-        border-radius: 8px; background: var(--accent-glow); color: #fff; font-size: 0.78rem; font-weight: 800;
+        border-radius: 8px; background: var(--accent-glow); color: #06140f; font-size: 0.78rem; font-weight: 800;
         display: flex; align-items: center; justify-content: center; }
 .ex-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 4px 0 14px; }
 .ex-tile { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 15px 17px; }
-.ex-tile b { display: block; color: #fff; font-size: 0.86rem; font-weight: 800; margin-bottom: 5px; }
+.ex-tile > b { display: block; color: #fff; font-size: 0.86rem; font-weight: 800; margin-bottom: 5px; }
 .ex-tile span { display: block; color: var(--text-muted); font-size: 0.8rem; line-height: 1.65; }
 .ex-table { width: 100%; border-collapse: collapse; font-size: 0.83rem; margin: 6px 0 14px; }
 .ex-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); font-weight: 800;
@@ -954,6 +954,8 @@ body.el-drawer-open { overflow: hidden; }
 .ws-note.is-bad { color: var(--danger); } .ws-note.is-good { color: var(--jade); }
 .ws-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--card-border); overflow-x: auto; scrollbar-width: none; margin-bottom: 18px; }
 .ws-tabs::-webkit-scrollbar { display: none; }
+/* Phase 57: on a phone the last tabs fade out at the edge, so it is clear the row scrolls. */
+@media (max-width: 760px) { .ws-tabs { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); padding-right: 28px; } }
 .ws-tabs a { color: var(--text-secondary); padding: 10px 12px; border-bottom: 2px solid transparent; white-space: nowrap;
     font-weight: 600; font-size: 0.9rem; text-decoration: none; display: inline-flex; gap: 6px; align-items: center; }
 .ws-tabs a:hover { color: var(--text-primary); }
@@ -1684,3 +1686,8 @@ body.el-drawer-open { overflow: hidden; }
 .tk-facts dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 .tk-key { font-family: 'JetBrains Mono', monospace; font-size: 0.78em; font-weight: 600; color: var(--text-muted); letter-spacing: 0.02em; }
 .tk-key.is-sm { font-size: 0.68rem; }
+
+/* Phase 57: links and checkboxes with no rule of their own follow the theme, not the browser's blue. */
+a:not([class]) { color: var(--accent-solid); }
+a:not([class]):hover { color: #f0d39a; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--jade, #3fbf8f); }

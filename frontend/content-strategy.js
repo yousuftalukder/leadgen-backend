@@ -28,7 +28,7 @@
     // =======================================================================
     async function mountPlan(host, clientId, opts = {}) {
         if (!host) return;
-        if (!clientId) { host.innerHTML = '<div class="cs-empty">Choose a client in the header. A plan is always for one business.</div>'; return; }
+        if (!clientId) { host.innerHTML = '<div class="cs-empty">Choose a client in the bar above. A plan is always for one business.</div>'; return; }
         let month = opts.month || new Date().toISOString().slice(0, 7);
         let S = null;
         const base = `/api/content-strategy/${encodeURIComponent(clientId)}`;

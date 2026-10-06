@@ -12,10 +12,10 @@
  *   - Offline fallback: the last good copy of the page, else the dashboard
  *     (or, inside the Edge Meta AI app, the chat).
  */
-const VERSION = 'el-shell-v7';   // v7: phase 54 (a slow network shows the cached copy; entries by path, capped)
+const VERSION = 'el-shell-v8';   // v8: phase 57 (the sign-in library served from the site and kept offline)
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
     'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
-    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js'];
+    'ai/', 'ai/manifest.webmanifest', 'vendor/supabase-js-2.116.0.js', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();

@@ -121,6 +121,10 @@ async function scheduleNoteOutcome(scheduleId, { status, reportId = null, error 
         if (reportId) patch.last_report_id = reportId;
         if (error) patch.last_error = String(error).slice(0, 500);
         else if (status === 'done') patch.last_error = null;
+        // A run that settles after its client was archived keeps the archive marker (phase 57):
+        // unarchiving resumes only schedules marked 'archived', and this one would be left paused.
+        const { data: row } = await supabase.from('schedules').select('last_status').eq('id', scheduleId).maybeSingle();
+        if (row && row.last_status === 'archived') delete patch.last_status;
         await supabase.from('schedules').update(patch).eq('id', scheduleId);
     } catch (e) { logger.warn('schedule_note_failed', { scheduleId, message: e.message }); }
 }
@@ -155,6 +159,11 @@ async function fireSchedule(s, { manual = false } = {}) {
         if (!access) {
             await supabase.from('schedules').update({ last_status: 'skipped', last_error: 'Owner lost edit access to the client.', paused: true }).eq('id', s.id);
             return { ok: false, reason: 'no_client' };
+        }
+        // An archived client runs nothing (phase 57), however the schedule was started.
+        if (access.archived) {
+            await supabase.from('schedules').update({ last_status: 'archived', paused: true, updated_at: new Date().toISOString() }).eq('id', s.id);
+            return { ok: false, reason: 'archived' };
         }
     }
 

@@ -173,7 +173,8 @@ async function loadGeminiPool(force = false) {
     } catch (err) {
         // Table missing (migration not run) or transient. Env key still works.
         if (!/relation .* does not exist/i.test(err.message || '')) logger.warn('gemini_pool_load_failed', { message: err.message });
-        _geminiPool.rows = [];
+        // A missing table means no pool; a passing failure keeps the pool already loaded (phase 57).
+        if (/relation .* does not exist|PGRST205/i.test(err.message || '') || !_geminiPool.rows) _geminiPool.rows = [];
     }
     _geminiPool.t = Date.now();
     return _geminiPool.rows;

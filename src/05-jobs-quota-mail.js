@@ -12,6 +12,7 @@ const {
     JOB_STALE_MINUTES, MAX_ACTIVE_JOBS, METRICS, accountState, alertOnce, decryptSecret, logger, supabase
 } = S;
 Object.assign(S, {
+    jobStillAllowed,
     quotaPeriod, invalidateQuotaCaps, contactSettings, cleanPaymentOption, mailSettings, sendMail,
     mailStatus, appUrl, mailActivationRequested, mailActivated, mailNewTrial, trialDaysSetting,
     effectiveCap, quotaError, takeLeadQuota, refundLeadQuota, createJob, assertJobSlot, claimJob,
@@ -859,16 +860,41 @@ setInterval(() => {
     if (_autoResumeTries.size > 500) _autoResumeTries.clear();
 }, 86400000).unref?.();
 
+/**
+ * May this job still run (phase 57)? Resuming used to skip every check a new run gets: a disabled
+ * account, a client the person no longer edits, an archived or deleted client (whose report insert
+ * then failed after Apify was paid). The job's client_id is the current one (a merge moves it), so
+ * the run is filed there rather than under the archived record its input still names.
+ */
+async function jobStillAllowed(job) {
+    const { data: u } = await supabase.from('app_users').select('is_active').eq('id', job.user_id).maybeSingle();
+    if (!u || u.is_active === false) return { ok: false, why: 'Not resumed: the account that started it is switched off.' };
+    const input = { ...(job.input || {}) };
+    const cid = job.client_id || input.clientId || null;
+    if (cid) {
+        const c = await S.clientAccess(job.user_id, cid, 'editor');
+        if (!c) return { ok: false, why: 'Not resumed: its client was deleted, or the person who started it can no longer edit it.' };
+        if (c.archived) return { ok: false, why: 'Not resumed: its client is archived.' };
+        if (input.clientId) input.clientId = c.id;
+    }
+    return { ok: true, input };
+}
+
 async function sweepStaleJobs() {
     const cutoff = new Date(Date.now() - JOB_STALE_MINUTES * 60000).toISOString();
     try {
         const { data } = await supabase.from('jobs')
-            .select('id, type, user_id, input, completed_units')
+            .select('id, type, user_id, input, completed_units, client_id')
             .in('status', ['running', 'queued'])
             .lt('updated_at', cutoff);
 
         const resumed = [];
         for (const j of (data || [])) {
+            // Claim it first (phase 57): a job that finished between the read and here is left alone,
+            // instead of being marked interrupted, resumed, and writing its report a second time.
+            const { data: won } = await supabase.from('jobs').update({ status: 'interrupted', updated_at: new Date().toISOString() })
+                .eq('id', j.id).in('status', ['running', 'queued']).select('id');
+            if (!(won || []).length) continue;
             const n = Array.isArray(j.completed_units) ? j.completed_units.length : 0;
             // Every job type is registered as of phase 6, so canResume is now
             // true for all of them. The check stays because a job row written
@@ -900,8 +926,10 @@ async function sweepStaleJobs() {
                     continue;
                 }
                 try {
+                    const ok = await jobStillAllowed(j);
+                    if (!ok.ok) { await updateJob(j.id, {}, ok.why); continue; }
                     const factory = JOB_WORKERS[j.type];
-                    runJob(j.id, factory(j.user_id, j.input || {}, j.id), { resume: true });
+                    runJob(j.id, factory(j.user_id, ok.input, j.id), { resume: true });
                     resumed.push(j.id);
                 } catch (e) {
                     logger.error('auto_resume_failed', { jobId: j.id, message: e.message });

@@ -939,6 +939,15 @@ async function syncPostFromTask(task, before) {
     }
 }
 
+/** Whether a client has a business owner's login to approve its posts (phase 57): without one, posts wait for good. */
+async function hasOwnerLogin(clientId) {
+    const { data: mem } = await supabase.from('client_members').select('user_id').eq('client_id', clientId);
+    const ids = (mem || []).map(m => m.user_id);
+    if (!ids.length) return false;
+    const { data: u } = await supabase.from('app_users').select('id').in('id', ids).eq('role', 'client').limit(1);
+    return !!(u && u.length);
+}
+
 /** Approving a post puts "make it" on the team's board, once. */
 async function contentPostTask(p, byUserId) {
     if (!p.client_id || p.task_id) return p.task_id || null;
@@ -1053,7 +1062,7 @@ app.get('/api/content-plan/:id/calendar', async (req, res) => {
         const plan = await planForCalendar(ctx, req.params.id);
         if (!plan) return res.status(404).json({ error: 'Plan not found' });
         const { data } = await supabase.from('content_posts').select('*').eq('report_id', plan.id).order('planned_on', { ascending: true });
-        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: !!plan.client_id });
+        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: !!plan.client_id, clientId: plan.client_id || null, hasOwner: plan.client_id ? await hasOwnerLogin(plan.client_id) : null });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -1103,7 +1112,9 @@ app.patch('/api/content-posts/:id', async (req, res) => {
         const b = req.body || {};
         const patch = {};
         if (b.plannedOn !== undefined) {
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.plannedOn))) return res.status(400).json({ error: 'The date is not valid.' });
+            const d = String(b.plannedOn);
+            // A real calendar day (phase 57): 2026-13-45 matched the pattern, failed in the database, and was reported saved.
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) !== d) return res.status(400).json({ error: 'The date is not valid.' });
             patch.planned_on = b.plannedOn;
         }
         if (b.time !== undefined) patch.planned_time = /^\d{2}:\d{2}$/.test(String(b.time || '')) ? b.time : null;
@@ -1111,7 +1122,8 @@ app.patch('/api/content-posts/:id', async (req, res) => {
         if (b.caption !== undefined) patch.caption = b.caption ? String(b.caption).slice(0, 4000) : null;
         if (Object.keys(patch).length) {
             patch.updated_at = new Date().toISOString();
-            await supabase.from('content_posts').update(patch).eq('id', p.id);
+            const { error: upErr } = await supabase.from('content_posts').update(patch).eq('id', p.id);
+            if (upErr) throw upErr;
             Object.assign(p, patch);
         }
         let row = p;
@@ -2065,6 +2077,6 @@ app.get('/api/content-strategy/:clientId/calendar', async (req, res) => {
         const [y, mo] = m.split('-').map(Number);
         const { data } = await supabase.from('content_posts').select('*').eq('client_id', client.id)
             .gte('planned_on', `${m}-01`).lt('planned_on', new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 10)).order('planned_on', { ascending: true });
-        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: true });
+        res.json({ posts: (data || []).map(contentPostView), statuses: CP_POST_STATUS, hasClient: true, clientId: client.id, hasOwner: await hasOwnerLogin(client.id) });
     } catch (err) { sendErr(res, err); }
 });

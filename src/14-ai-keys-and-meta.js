@@ -353,7 +353,9 @@ app.get('/api/meta/status', async (req, res) => {
 app.get('/api/meta/oauth/start', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
-        if (!metaConfigured()) return res.status(503).json({ error: 'META_APP_ID / META_APP_SECRET are not set on the server.' });
+        if (!metaConfigured()) return res.status(503).json({ error: ctx.profile?.role === 'client'
+            ? 'Connecting Facebook is not switched on yet. Your agency is setting it up; try again later.'
+            : 'Meta is not set up yet: add META_APP_ID and META_APP_SECRET on Render (see the Meta app guide).' });
         // A client account connects its own business; it is never asked which (phase 30), and an id
         // the browser sent along is ignored rather than refused (phase 51).
         let clientId = null;
@@ -388,7 +390,14 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
     // Staff land on the Clients page; a client account lands on its own
     // dashboard, which is the only page it can open anyway.
     let landing = 'clients.html';
-    const back = (q) => {
+    // Phase 57: an owner reads plain words, not the setup detail the team needs.
+    const forOwner = q => (landing === 'ai/' && q.meta === 'error')
+        ? { ...q, message: /no Pages/i.test(q.message || '')
+            ? 'Facebook did not give us your Page. Try again and tick your Page in the Facebook window, or ask your agency.'
+            : /expired/i.test(q.message || '') ? q.message : 'Facebook did not connect. Try again, or ask your agency.' }
+        : q;
+    const back = (q0) => {
+        const q = forOwner(q0);
         const base = FRONTEND_URL ? `${FRONTEND_URL}/${landing}` : `/${landing}`;
         res.redirect(`${base}?${new URLSearchParams(q).toString()}`);
     };
@@ -428,10 +437,45 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
             fields: 'id,name,access_token,instagram_business_account{id,username}', limit: 100
         }, userToken);
 
-        let saved = 0;
-        for (const p of (pages.data || [])) {
+        // Which client each Page goes under (phase 57). Facebook returns every Page the login manages,
+        // not only this client's: filing them all here moved other clients' Pages (and Edge Meta AI's
+        // copy of their numbers) under this one. Now a Page another live client already holds stays
+        // with it; this client gets its own Page (the one it names, or the only new one); any other
+        // new Page waits, unfiled, on the Clients page for someone to file.
+        const list = pages.data || [];
+        const pageIds = list.map(p => String(p.id));
+        const { data: held } = pageIds.length
+            ? await supabase.from('meta_connections').select('page_id, client_id').in('page_id', pageIds).not('client_id', 'is', null)
+            : { data: [] };
+        const holderIds = [...new Set((held || []).map(h => h.client_id))];
+        const { data: liveHolders } = holderIds.length ? await supabase.from('clients').select('id').in('id', holderIds).eq('archived', false) : { data: [] };
+        const liveSet = new Set((liveHolders || []).map(c => c.id));
+        const holder = {};
+        for (const h of (held || [])) if (liveSet.has(h.client_id) && !holder[h.page_id]) holder[h.page_id] = h.client_id;
+        const mine = new Set();
+        if (st.client_id) {
+            const { data: cl } = await supabase.from('clients').select('name, fb_page, fb_page_id, ig_handle').eq('id', st.client_id).maybeSingle();
+            const free = list.filter(p => !holder[String(p.id)] || holder[String(p.id)] === st.client_id);
+            free.filter(p => holder[String(p.id)] === st.client_id).forEach(p => mine.add(String(p.id)));
+            const fresh = free.filter(p => !holder[String(p.id)]);
+            const norm = v => String(v || '').toLowerCase().replace(/^@/, '').replace(/[^a-z0-9]/g, '');
+            const named = fresh.filter(p => cl && (
+                (cl.fb_page_id && String(cl.fb_page_id) === String(p.id))
+                || (cl.ig_handle && norm(cl.ig_handle) === norm(p.instagram_business_account?.username))
+                || (cl.fb_page && norm(cl.fb_page).includes(norm(p.name)) && norm(p.name).length > 3)
+                || (cl.name && norm(cl.name) === norm(p.name))));
+            if (named.length) named.forEach(p => mine.add(String(p.id)));
+            else if (fresh.length === 1 && !mine.size) mine.add(String(fresh[0].id));
+        }
+        const filedTo = pid => holder[pid] && holder[pid] !== st.client_id ? holder[pid] : (mine.has(pid) ? st.client_id : (holder[pid] || null));
+
+        let saved = 0, unfiled = 0;
+        for (const p of list) {
+            const pid = String(p.id);
+            const target = filedTo(pid);
+            if (!target) unfiled += 1;
             const row = {
-                user_id: st.user_id, client_id: st.client_id,
+                user_id: st.user_id, client_id: target,
                 page_id: String(p.id), page_name: p.name || null,
                 page_token_enc: encryptSecret(p.access_token),
                 ig_user_id: p.instagram_business_account?.id || null,
@@ -451,8 +495,8 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         // never offered them one.
         if (!saved) return back({ meta: 'error', message: 'Login worked but Meta returned no Pages. Either no Page was ticked in the dialog, or this Facebook account has no role on the EdgeLead Meta app yet — while the app is in Development Mode only Admins, Developers and Testers get Pages back.' });
         // Phase 47: the business is read now, not at the next 09:00 or 21:00, and nobody presses anything.
-        if (st.client_id) startFirstRead(st.client_id, 'connect');
-        back({ meta: 'ok', pages: saved, client: st.client_id || '' });
+        if (st.client_id && mine.size) startFirstRead(st.client_id, 'connect');
+        back({ meta: 'ok', pages: saved, client: st.client_id || '', filed: st.client_id ? mine.size : 0, unfiled });
     } catch (err) {
         logger.error('meta_oauth_callback', { message: err.message });
         back({ meta: 'error', message: String(err.message || 'OAuth failed').slice(0, 200) });
@@ -839,8 +883,12 @@ async function metaDailyTick({ now = new Date(), limit = 10 } = {}) {
     const out = { due: 0, synced: 0, failed: 0 };
     try {
         const { data } = await supabase.from('meta_connections').select('*').eq('status', 'active').limit(500);
+        // Archived clients are not read (phase 57): archiving stops the work, as it does for schedules.
+        const cids = [...new Set((data || []).map(c => c.client_id).filter(Boolean))];
+        const { data: arch } = cids.length ? await supabase.from('clients').select('id').in('id', cids).eq('archived', true) : { data: [] };
+        const archived = new Set((arch || []).map(c => c.id));
         const cutoff = now.getTime() - META_DAILY_EVERY_MS;
-        const due = (data || []).filter(c => !c.daily_synced_at || Date.parse(c.daily_synced_at) < cutoff).slice(0, limit);
+        const due = (data || []).filter(c => !archived.has(c.client_id) && (!c.daily_synced_at || Date.parse(c.daily_synced_at) < cutoff)).slice(0, limit);
         out.due = due.length;
         for (const conn of due) {
             const r = await metaDailySync(conn, { days: conn.daily_synced_at ? 3 : META_DAILY_FIRST_DAYS, now });

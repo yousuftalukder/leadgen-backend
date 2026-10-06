@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Edgelead — Competitor Intel</title>
+<title>Competitor intel — EdgeLead</title>
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
@@ -127,7 +127,7 @@
 
 </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="report-cover.js"></script>
 <script>
@@ -178,11 +178,11 @@
         $('rivals').appendChild(row);
         estimate();
     }
-    $('add-rival').addEventListener('click', () => addRival());
-    addRival();
-
+    // Declared before the first addRival() (phase 57): it calls estimate(), which reads this.
     const rivalHandles = () => Array.from($('rivals').querySelectorAll('input'))
         .map(i => i.value.replace('@', '').trim().toLowerCase()).filter(Boolean);
+    $('add-rival').addEventListener('click', () => addRival());
+    addRival();
 
     /**
      * Turn the estimate response into a plain answer: can this run finish on

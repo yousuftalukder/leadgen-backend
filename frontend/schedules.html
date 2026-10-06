@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Edgelead — Schedules</title>
+<title>Schedules — EdgeLead</title>
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
@@ -48,7 +48,7 @@
 </div>
 </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script>
 (async () => {
@@ -56,16 +56,20 @@
     const $ = id => document.getElementById(id);
     const esc = EL.escape;
     const fmt = d => d ? new Date(d).toLocaleString() : '—';
-    const PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', fb_community_audit: 'fb-audit.html', fb_page_report: 'fb-report.html', meta_insights: 'content-plan.html' };
+    const PAGE = { ig_report: 'ig-report.html', deep_audit: 'ig-competitors.html', fb_community_audit: 'fb-audit.html', fb_page_report: 'fb-report.html', meta_insights: 'content-plan.html', review_scan: 'report.html' };
 
-    const cur = EL.currentClient();
-    $('scope').textContent = cur ? `Showing schedules filed under "${cur.name}" (client selected in the header).` : 'Showing your own schedules. Select a client in the header to see a client\'s schedules, including teammates\'.';
+    // Whose schedules (phase 57): yours, or one client's (everyone's on it). The page used to say
+    // "select a client in the header", and there is no header picker any more.
+    const clients = await EL.clients().catch(() => []);
+    $('scope').innerHTML = `<label for="sc-for" class="el-muted" style="margin-right:8px">Show</label><select id="sc-for" style="width:auto;min-width:220px">
+        <option value="">Schedules you set up</option>${clients.map(c => `<option value="${esc(c.id)}">${esc(c.name)}: everyone's</option>`).join('')}</select>`;
+    $('sc-for').addEventListener('change', () => load());
 
     async function load() {
         const host = $('list');
         try {
-            // EL.api adds client_id when a client is selected; without one the server lists the caller's own.
-            const { schedules } = await EL.api('/api/schedules');
+            const f = $('sc-for').value;
+            const { schedules } = await EL.api('/api/schedules' + (f ? '?client_id=' + encodeURIComponent(f) : ''), { scoped: false });
             const rows = (schedules || []).filter(s => $('show-paused').checked || !s.paused);
             host.innerHTML = rows.length ? rows.map(s => `
                 <div class="s-row ${s.paused ? 'is-paused' : ''}">
@@ -87,7 +91,7 @@
 
             host.querySelectorAll('[data-run]').forEach(b => b.addEventListener('click', async () => {
                 b.disabled = true; $('note').textContent = 'Starting…';
-                try { const r = await EL.api(`/api/schedules/${b.dataset.run}/run-now`, { method: 'POST' }); $('note').textContent = `Started job ${r.jobId}. It will appear on the client timeline and in the engine vault when done.`; }
+                try { const r = await EL.api(`/api/schedules/${b.dataset.run}/run-now`, { method: 'POST' }); $('note').textContent = 'Started. The report appears on the client’s Reports tab when it is done.'; }
                 catch (err) { $('note').textContent = err.message; if (err.status === 402) EL.openKeyModal(); }
                 b.disabled = false; setTimeout(load, 1500);
             }));

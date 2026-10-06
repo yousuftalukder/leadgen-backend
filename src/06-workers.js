@@ -121,7 +121,7 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
             await S.keepAuditImages([main, ...rivalAudits.map(r => ({ ...r, topPosts: (r.topPosts || []).slice(0, 2), bottomPosts: [], exemplars: {} }))], `ig/${jobId || crypto.randomUUID()}`);
 
             await progress(96, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
+            const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
                 user_id: userId,
                 client_id: input.clientId || null,
                 platform: 'instagram',
@@ -148,6 +148,8 @@ registerWorker('ig_report', (userId, input, jobId) => async (progress, ck) => {
                 ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
+            // Phase 57: a report that did not save is a failed run, not a "done" one with nothing to show.
+            if (saveErr) throw new Error('The report could not be saved: ' + saveErr.message);
 
             // The payload is already in reports.report_json. Storing a second
             // copy in jobs.result doubled the write and shipped ~600KB to the
@@ -228,7 +230,7 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
             await S.keepAuditImages([main, ...rivalAudits.map(r => ({ ...r, topPosts: (r.topPosts || []).slice(0, 2), bottomPosts: [], exemplars: {} }))], `ig/${jobId || crypto.randomUUID()}`);
 
             await progress(96, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
+            const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
                 user_id: userId,
                 client_id: input.clientId || null,
                 platform: 'instagram',
@@ -253,6 +255,8 @@ registerWorker('deep_audit', (userId, input, jobId) => async (progress, ck) => {
                 ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
+            // Phase 57: a report that did not save is a failed run, not a "done" one with nothing to show.
+            if (saveErr) throw new Error('The report could not be saved: ' + saveErr.message);
 
             if (activeSetId) {
                 await supabase.from('competitor_sets')
@@ -382,7 +386,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                     const { ai, aiStatus } = await S.fbNarrative({ mode: 'single', group: a });
                     const payload = { mode: 'individual', group: a, benchmark: null, ai, aiStatus };
 
-                    const { data: saved } = await supabase.from('reports').insert([{
+                    const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
                         user_id: userId,
                         client_id: input.clientId || null,
                         platform: 'facebook',
@@ -405,6 +409,8 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                         ai_status: aiStatus,
                         report_json: payload
                     }]).select('id').maybeSingle();
+                    // Phase 57: a report that did not save is a failed run, not a "done" one with nothing to show.
+                    if (saveErr) throw new Error('The report could not be saved: ' + saveErr.message);
 
                     if (saved?.id) {
                         await supabase.from('fb_posts').update({ report_id: saved.id })
@@ -436,7 +442,7 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
             const live = audits.filter(a => a.postsAnalyzed > 0);
 
             await progress(94, 'Saving report');
-            const { data: saved } = await supabase.from('reports').insert([{
+            const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
                 user_id: userId,
                 client_id: input.clientId || null,
                 platform: 'facebook',
@@ -459,6 +465,8 @@ registerWorker('fb_community_audit', (userId, input, jobId) => async (progress, 
                 ai_status: aiStatus,
                 report_json: payload
             }]).select('id').maybeSingle();
+            // Phase 57: a report that did not save is a failed run, not a "done" one with nothing to show.
+            if (saveErr) throw new Error('The report could not be saved: ' + saveErr.message);
 
             if (saved?.id) {
                 const ids = live.map(a => a.groupId);
@@ -557,7 +565,7 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
             const postsAnalyzed = main.postsAnalyzed + (rivalAudit?.postsAnalyzed || 0);
 
             await progress(95, 'Saving report to the vault');
-            const { data: saved } = await supabase.from('reports').insert([{
+            const { data: saved, error: saveErr } = await supabase.from('reports').insert([{
                 user_id: userId,
                 client_id: input.clientId || null,
                 platform: 'facebook',
@@ -580,6 +588,8 @@ registerWorker('fb_page_report', (userId, input, jobId) => async (progress, ck) 
                 followers_snapshot: main.followers ?? main.likes ?? null,
                 report_json: payload
             }]).select('id').maybeSingle();
+            // Phase 57: a report that did not save is a failed run, not a "done" one with nothing to show.
+            if (saveErr) throw new Error('The report could not be saved: ' + saveErr.message);
 
             if (saved?.id) {
                 const ids = rivalAudit ? [main.pageId, rivalAudit.pageId] : [main.pageId];

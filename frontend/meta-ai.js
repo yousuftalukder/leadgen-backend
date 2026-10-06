@@ -81,7 +81,12 @@
             // Assistant's routes check the caller may read that client.
             const list = await EL.clients();
             const cl = list.find(x => x.id === EL.clientId());
-            if (!cl) { $('chat-box').innerHTML = '<p class="oa-note">Open this from a client’s Assistant tab, so it knows whose numbers to read. <a href="clients.html">Choose a client</a>.</p>'; return; }
+            if (!cl) {
+                // No client: no composer and no chat list to offer (phase 57).
+                ['chat-form', 'oa-side'].forEach(id => { const el = $(id); if (el) el.hidden = true; });
+                $('chat-box').innerHTML = '<div class="ws-empty"><h3>Choose a client first</h3><p>Edge Meta AI reads one business’s numbers at a time. Open a client, then its Assistant tab.</p><a class="ws-btn is-gold" href="clients.html">Open Clients</a></div>';
+                return;
+            }
             activeClient = { id: cl.id, name: cl.name };
             document.title = `Edge Meta AI · ${cl.name} — EdgeLead`;
         }
@@ -142,10 +147,21 @@
     // starts the first read itself, so the owner is never handed a button to find.
     // While it reads, this page checks back on its own and opens up when it is done.
     async function loadStatus() {
-        const before = xpStatus && xpStatus.phase;
-        try { xpStatus = await EL.api('/api/xp/status?client_id=' + encodeURIComponent(activeClient.id)); } catch (err) { xpStatus = null; }
+        // Phase 57: once a refusal screen replaced the app, nothing is left to update.
+        if (!$('oa-state') || !activeClient) { clearTimeout(pollTimer); return; }
+        const before = xpStatus && xpStatus.phase, beforeKey = statusKey(xpStatus);
+        try { xpStatus = await EL.api('/api/xp/status?client_id=' + encodeURIComponent(activeClient.id)); }
+        catch (err) {
+            // A failed check keeps what was known and tries again later, rather than redrawing the
+            // welcome as if the business were connected (phase 57).
+            if (err.handled) return;
+            clearTimeout(pollTimer); pollTimer = setTimeout(loadStatus, 60000);
+            return;
+        }
+        if (!$('oa-state')) return;
         renderState();
-        if ($('welcome')) $('chat-box').innerHTML = welcomeHtml();
+        // Redrawn only when what it says changed: every poll used to reset focus and a pressed button.
+        if ($('welcome') && statusKey(xpStatus) !== beforeKey) $('chat-box').innerHTML = welcomeHtml();
         setComposerOpen();
         if (before && before !== 'ready' && xpStatus && xpStatus.phase === 'ready') EL.toast('Your numbers are in. Ask away.');
         clearTimeout(pollTimer);
@@ -174,6 +190,7 @@
         if (head) head.after(strip); else return;
         strip.querySelector('[data-connect]').addEventListener('click', e => connectMeta(e.currentTarget));
     }
+    const statusKey = (s) => (s ? [s.phase, !!s.running, !!s.stalled, hasData(s), (s.assets || []).length].join('|') : 'none');
     const hasData = (s) => !!(s && s.coverage && Array.isArray(s.coverage.assets) && s.coverage.assets.some(a => a.account_days > 0 || a.post_days > 0));
     // Phase 50: the chat is always open. Without Meta (or before the first read lands) it answers about
     // the agency's work, and says plainly that the numbers come once Meta is connected.
@@ -197,7 +214,11 @@
     function whenNext(s) {
         const sc = s && s.schedule;
         const m = sc && sc.enabled && /^(\d+)\s+([\d,]+)\s/.exec(sc.cron || '');
-        return m ? 'updates itself at ' + m[2].split(',').map(h => h.padStart(2, '0') + ':' + m[1].padStart(2, '0')).join(' and ') + ' ' + (sc.tz || 'UTC') : 'updates itself twice a day';
+        if (!m) return 'updates itself twice a day';
+        // In the reader's own time (phase 57), not UTC.
+        if (String(sc.tz || 'UTC').toUpperCase() !== 'UTC') return 'updates itself twice a day';
+        const at = h => { const d = new Date(); d.setUTCHours(+h, +m[1], 0, 0); return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); };
+        return 'updates itself at ' + m[2].split(',').map(at).join(' and ');
     }
     function ago(iso) {
         const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
@@ -277,12 +298,13 @@
      * everyone back to EdgeLead's Home; the note left here brings them back to the app.
      */
     async function connectMeta(btn) {
+        const label = btn.textContent;
         btn.disabled = true; btn.textContent = 'Opening Facebook…';
         try {
             const d = await EL.api('/api/meta/oauth/start');
             if (appMode) { try { localStorage.setItem('el-after-meta', JSON.stringify({ to: 'ai/', at: Date.now() })); } catch { /* private mode: they land on Home */ } }
             window.location.href = d.url;
-        } catch (err) { btn.disabled = false; btn.textContent = 'Connect with Facebook'; if (!err.handled) EL.toast(err.message, 'bad'); }
+        } catch (err) { btn.disabled = false; btn.textContent = label; if (!err.handled) EL.toast(err.message, 'bad'); }
     }
 
     // ---- composer (portal.js) -------------------------------------------------------
@@ -398,15 +420,19 @@
             const res = await authFetch('/api/xp/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, body, signal });
             if (res.status >= 400 && res.status < 500) {
                 const data = await res.json().catch(() => ({}));
-                const refusal = new Error(data.error || `The question was refused (${res.status}).`);
-                refusal.final = true;
-                if (res.status === 429) setQuestionsLeft(0);
+                // Phase 57: only the daily limit (remaining 0) is final; asking too fast is "wait a moment".
+                const daily = res.status === 429 && data.remaining === 0;
+                const tooFast = res.status === 429 && !daily;
+                const refusal = new Error(tooFast ? 'Too many questions at once. Wait a few seconds, then try again.'
+                    : data.error || 'That question could not be answered just now. Try again in a minute.');
+                refusal.final = !tooFast;
+                if (daily) setQuestionsLeft(0);
                 throw refusal;
             }
             if (!res.ok || !res.body || !/text\/event-stream/.test(res.headers.get('content-type') || '')) {
                 const r2 = await authFetch('/api/xp/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal });
                 const data = await r2.json().catch(() => ({}));
-                if (!r2.ok || data.error) throw new Error(typeof data.error === 'string' ? data.error : (data.error && data.error.message) || `Server error ${r2.status}`);
+                if (!r2.ok || data.error) throw new Error(typeof data.error === 'string' ? data.error : (data.error && data.error.message) || 'Something went wrong on our side. Try again in a minute.');
                 if (!(data.reply || '').trim()) throw new Error('The answer came back empty. Please try again.');
                 handleEvent('done', data);
             } else {
@@ -440,7 +466,10 @@
                 else root.remove();
             } else {
                 if (!text.trim()) root.remove(); else statusEl.remove();
-                if (activeClient) box.insertAdjacentHTML('beforeend', errorHtml(err.message || 'Something went wrong sending that message.', !err.final));
+                // Plain words (phase 57): a dropped connection is not "Failed to fetch", and a refusal that
+                // already put its own screen up (session, access ended) says nothing more here.
+                const offline = /Failed to fetch|Load failed|NetworkError|network/i.test(err.message || '');
+                if (activeClient && !err.handled) box.insertAdjacentHTML('beforeend', errorHtml(offline ? 'The connection dropped. Check you are online, then try again.' : (err.message || 'Something went wrong sending that message.'), offline || !err.final));
             }
             scrollToBottom();
         } finally {

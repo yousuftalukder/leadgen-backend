@@ -635,8 +635,11 @@ test('the client is not asked to see the agency\'s work yet — it has none', as
 });
 
 section('\nthe agency takes that business on');
-test('adding the client account to the agency\'s record absorbs its empty own record', async () => {
-    const r = await call('POST', `/api/clients/${state.C}/members`, { token: 't-admin', body: { email: CLIENT.email, role: 'editor' } });
+test('inviting the client account as the owner of the agency\'s record absorbs its empty own record', async () => {
+    // Phase 57: a business owner's login is never added as a teammate; the owner invite links it.
+    const team = await call('POST', `/api/clients/${state.C}/members`, { token: 't-admin', body: { email: CLIENT.email, role: 'editor' } });
+    assert.strictEqual(team.statusCode, 400, 'a business owner was added as a teammate');
+    const r = await call('POST', `/api/clients/${state.C}/portal-invite`, { token: 't-admin', body: { email: CLIENT.email } });
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.absorbed, state.own, 'the empty auto-created record was not absorbed');
     const row = tbl('clients').find(c => c.id === state.own);
@@ -671,9 +674,9 @@ test('a record with work in it is never absorbed', async () => {
     tbl('clients').push({ id: crypto.randomUUID(), owner_user_id: owner.id, name: 'Bloom own', archived: false, created_at: new Date().toISOString() });
     const own = tbl('clients').find(c => c.owner_user_id === owner.id);
     tbl('reports').push({ id: crypto.randomUUID(), user_id: owner.id, client_id: own.id, report_type: 'ig_report', created_at: new Date().toISOString() });
-    const r = await call('POST', `/api/clients/${state.C}/members`, { token: 't-admin', body: { email: owner.email, role: 'editor' } });
-    assert.strictEqual(r.statusCode, 200);
-    assert.strictEqual(r.body.absorbed, null, 'a record holding a report was archived');
+    // Phase 57: owners are linked by the owner invite, which refuses a login whose own business has work in it.
+    const r = await call('POST', `/api/clients/${state.C}/portal-invite`, { token: 't-admin', body: { email: owner.email } });
+    assert.strictEqual(r.statusCode, 409, JSON.stringify(r.body));
     assert.strictEqual(tbl('clients').find(c => c.id === own.id).archived, false);
 });
 
@@ -960,7 +963,7 @@ test('an engine that is not granted is refused at its route, not hidden in the p
     // The new hire has report and leadgen, not fb_community.
     const r = await call('POST', '/api/fb/audit-community', { token: 't-new.hire@agency.test', body: { groupIds: ['1'], clientId: state.C } });
     assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
-    assert.ok(/fb_community/.test(r.body.error));
+    assert.ok(/Facebook communities/.test(r.body.error) && r.body.code === 'no_engine', r.body.error);
 });
 test('an employee cannot use the provisioning routes', async () => {
     const r = await call('POST', '/api/admin/users', { token: 't-emp', body: { email: 'x@x.test', password: 'a-strong-password', role: 'admin' } });
@@ -2278,7 +2281,7 @@ test('the client sees what the warehouse holds for it; a stranger sees nothing',
     assert.strictEqual(again.body.running, false);
     assert.strictEqual(XPREAD.calls.length, 1, 'a read that found nothing is not restarted on every poll');
     assert.strictEqual(r.body.schedule.cron, '0 9,21 * * *');
-    assert.strictEqual(r.body.model, xp.cfg.gemini.model);
+    assert.strictEqual(r.body.model, undefined, "an owner was told which AI model runs the chat (phase 57)");
     const s = await call('GET', '/api/xp/status', { token: 't-stranger', query: { client_id: state.C } });
     assert.strictEqual(s.statusCode, 403, JSON.stringify(s.body));
 });
@@ -2622,7 +2625,7 @@ test('with no mail set up, the admin gets a one-time link to pass on, and the ow
     assert.strictEqual(r.body.created, true);
     assert.strictEqual(r.body.emailed, false);
     // Phase 49: a one-tap sign-in straight into Edge Meta AI; no password is ever set.
-    assert.ok(/type=magiclink/.test(r.body.link || ''), 'no link to pass on: ' + r.body.link);
+    assert.ok(/type=magiclink|\/ai\/#th=/.test(r.body.link || ''), 'no link to pass on: ' + r.body.link);
     assert.ok(/\/ai\//.test(decodeURIComponent(r.body.link)) || !/redirect_to=http/.test(r.body.link), 'the link should land in the app');
     assert.strictEqual(MAIL.sent.length, 0);
     state.ownerT = r.body.owner.id;
@@ -2675,7 +2678,7 @@ test('inviting again links the same login and, with Gmail set up, sends the link
     assert.strictEqual(r.body.link, null, 'a sent link must not also come back to the page');
     const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
     assert.ok(m, 'no invite mail to the owner');
-    assert.ok(/Kite Surf School/.test(m.msg.subject) && /type=magiclink/.test(m.msg.text) && /code we email you/.test(m.msg.text), m.msg.subject + ' / ' + m.msg.text);
+    assert.ok(/Kite Surf School/.test(m.msg.subject) && /type=magiclink|\/ai\/#th=/.test(m.msg.text) && /code we email you/.test(m.msg.text), m.msg.subject + ' / ' + m.msg.text);
     assert.strictEqual(tbl('app_users').filter(u => u.email === 'owner@kitesurf.test').length, 1);
     await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { appPassword: '' } } });
 });
@@ -3917,7 +3920,7 @@ test('staff make a new sign-in link for the owner on their business, and only fo
     const off = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-admin', body: { userId: ownerId } });
     if (!off.body.emailed) {
         // Without Gmail the link comes back to pass on — the owner's way back in when their first link expired.
-        assert.ok(/type=magiclink/.test(off.body.link || ''), 'no link to pass on: ' + JSON.stringify(off.body));
+        assert.ok(/type=magiclink|\/ai\/#th=/.test(off.body.link || ''), 'no link to pass on: ' + JSON.stringify(off.body));
     }
     const set = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'agency@gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency' } } });
     assert.strictEqual(set.statusCode, 200, JSON.stringify(set.body));
@@ -3928,7 +3931,7 @@ test('staff make a new sign-in link for the owner on their business, and only fo
     assert.strictEqual(r.body.emailed, true);
     assert.strictEqual(r.body.link, null);
     const m = MAIL.sent.find(x => x.msg.to === 'owner@kitesurf.test');
-    assert.ok(m && /type=magiclink/.test(m.msg.text), 'no link was mailed');
+    assert.ok(m && /type=magiclink|\/ai\/#th=/.test(m.msg.text), 'no link was mailed');
     const other = await call('POST', `/api/clients/${state.D}/owner-link`, { token: 't-admin', body: { userId: ownerId } });
     assert.strictEqual(other.statusCode, 404, 'a link was made for a login that is not this business\'s owner');
     const team = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-admin', body: { userId: EMP.id } });
@@ -4031,6 +4034,7 @@ test('archiving a client pauses its schedules and its Meta reads; unarchiving re
     const mine = { id: crypto.randomUUID(), user_id: ADMIN.id, client_id: K, job_type: 'ig_report', engine: 'report', input: {}, next_run_at: now, paused: true, last_status: 'done' };
     tbl('schedules').push(live, mine);
     tbl('xp_clients').push({ id: K, client_name: 'Seasonal Kiosk', is_active: true });
+    tbl('meta_connections').push({ id: crypto.randomUUID(), user_id: ADMIN.id, client_id: K, page_id: 'kiosk-page', status: 'active' });
     const off = await call('PATCH', `/api/clients/${K}`, { token: 't-admin', body: { archived: true } });
     assert.strictEqual(off.statusCode, 200, JSON.stringify(off.body));
     assert.strictEqual(tbl('schedules').find(x => x.id === live.id).paused, true, 'an archived client kept its schedule running');
@@ -4199,6 +4203,104 @@ test('the hub: each client has one stage, its owners with when they last signed 
     assert.strictEqual(qb.stage, 'invited');
     assert.strictEqual(qb.owners[0].lastSeenAt, null);
     assert.strictEqual(qb.next.key, 'resend');
+});
+
+section('\nphase 57: the full review — security, data, owner app, workspace');
+test('an owner\'s assistant sees only the reports the team shared, never the rest of the business\'s research', async () => {
+    const secret = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', target_handle: 'rival-research', visible_to_client: false, created_at: new Date().toISOString() };
+    const shared = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', target_handle: 'harborcafe', visible_to_client: true, created_at: new Date().toISOString() };
+    tbl('reports').push(secret, shared);
+    const owner = await S.assistantScope(CLIENT.id, state.C, 'client');
+    const mine = await S.ASSISTANT_TOOLS.get_my_reports.run(owner, {});
+    const ids = JSON.stringify(mine);
+    assert.ok(!ids.includes(secret.id) && !ids.includes('rival-research'), 'the owner\'s assistant listed a report the team never shared');
+    assert.ok(ids.includes(shared.id), 'a shared report is missing for the owner');
+    const detail = await S.ASSISTANT_TOOLS.get_report_detail.run(owner, { report_id: secret.id });
+    assert.ok(detail && detail.error, 'the owner\'s assistant opened an unshared report');
+    const staff = await S.assistantScope(EMP.id, state.C, 'user');
+    assert.ok(JSON.stringify(await S.ASSISTANT_TOOLS.get_my_reports.run(staff, {})).includes(secret.id), 'the team lost its own research');
+});
+test('a merge into a business the assistant never saw moves its chats too, instead of failing halfway', async () => {
+    const A = (await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Fresh Target' } })).body.client.id;
+    const B = (await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Fresh Target (old)' } })).body.client.id;
+    tbl('xp_ai_conversations').push({ id: crypto.randomUUID(), client_id: B, title: 'Old chat' });
+    assert.ok(!tbl('xp_clients').some(x => x.id === A));
+    const r = await call('POST', `/api/clients/${A}/merge`, { token: 't-admin', body: { fromId: B } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.ok(tbl('xp_clients').some(x => x.id === A), 'the assistant\'s record of the target was not made before its chats moved');
+});
+test('deleting a teammate hands over the leads inside their campaigns, not just the campaigns', () => {
+    const src = serverSource();
+    const list = src.slice(src.indexOf('HAND_OVER = ['), src.indexOf('];', src.indexOf('HAND_OVER = [')));
+    assert.ok(/\['campaign_leads', 'user_id'\]/.test(list), 'campaign leads cascade away with the login');
+});
+test('the monthly report reads Instagram posts without a column only Facebook has; the timeline asks for real columns', () => {
+    const src = serverSource();
+    const ig = src.slice(src.indexOf("pmDedupe((await supabase.from('posts')"), src.indexOf("pmDedupe((await supabase.from('posts')") + 400);
+    assert.ok(!/performance_index/.test(ig), 'posts.performance_index does not exist: the monthly report loses every Instagram post');
+    assert.ok(!/verified_band/.test(src), 'fb_suggestions.verified_band does not exist');
+});
+test('a run is not resumed for an archived or deleted client, or by a switched-off account', async () => {
+    const mk = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Closing Shop' } });
+    const cid = mk.body.client.id;
+    const job = { user_id: EMP.id, client_id: cid, input: { clientId: cid } };
+    assert.strictEqual((await S.jobStillAllowed(job)).ok, true);
+    tbl('clients').find(c => c.id === cid).archived = true;
+    const no = await S.jobStillAllowed(job);
+    assert.strictEqual(no.ok, false, 'a run was resumed for an archived client');
+    assert.ok(/archived/.test(no.why));
+    assert.strictEqual((await S.jobStillAllowed({ ...job, client_id: crypto.randomUUID(), input: {} })).ok, false, 'a run was resumed for a client that no longer exists');
+});
+test('owners cannot read the raw report rows; staff still can', async () => {
+    const rep = tbl('reports').find(r => r.client_id === state.C && r.visible_to_client === true);
+    const o = await call('GET', `/api/report/${rep.id}`, { token: 't-client' });
+    assert.ok([403, 404].includes(o.statusCode), 'an owner got the raw report row: ' + o.statusCode);
+});
+test('a teammate is someone on the team: a business owner\'s login is refused, with the way to invite them instead', async () => {
+    const r = await call('POST', `/api/clients/${state.C}/members`, { token: 't-admin', body: { email: 'nobody@nowhere.test' } });
+    assert.strictEqual(r.statusCode, 404);
+    assert.ok(/Team & settings/.test(r.body.error) && !/sign up/i.test(r.body.error), 'the message still sends people to the trial signup: ' + r.body.error);
+});
+test('extending needs a trial; a self-serve business\'s own login counts as its owner in the hub', async () => {
+    const mk = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Steady Client' } });
+    const ext = await call('POST', `/api/clients/${mk.body.client.id}/trial`, { token: 't-emp', body: { action: 'extend', days: 7 } });
+    assert.strictEqual(ext.statusCode, 400, 'a regular client was put on a trial by "extend"');
+    const SELF2 = person('selfserve2@shop.test'); TOKENS['t-self2'] = SELF2;
+    const me = await call('GET', '/api/me', { token: 't-self2' });
+    const own = me.body.business.id;
+    const r = await call('GET', '/api/clients', { token: 't-admin' });
+    const row = r.body.clients.find(c => c.id === own);
+    assert.ok(row && row.owners.some(o => o.email === 'selfserve2@shop.test'), 'the self-serve owner is not listed as the owner');
+    assert.notStrictEqual(row.next && row.next.key, 'invite', 'a business with its owner already in was told to invite the owner');
+});
+test('an owner whose trial ended still gets a code, so signing in can tell them; a sign-in link is refused until it is extended', async () => {
+    const mk = await call('POST', '/api/clients', { token: 't-emp', body: { name: 'Short Trial', trialDays: 7 } });
+    const T = mk.body.client.id;
+    await call('POST', `/api/clients/${T}/portal-invite`, { token: 't-emp', body: { email: 'ended@trial.test' } });
+    tbl('clients').find(c => c.id === T).trial_ends_at = new Date(Date.now() - 60000).toISOString();
+    const set = await call('PATCH', '/api/admin/settings', { token: 't-admin', body: { mail: { from: 'agency@gmail.com', appPassword: 'abcd efgh ijkl mnop', fromName: 'Harbor Agency' } } });
+    assert.strictEqual(set.statusCode, 200);
+    MAIL.sent.length = 0;
+    await call('POST', '/api/public/owner-code', { body: { email: 'ended@trial.test' }, ip: '10.57.0.1' });
+    assert.ok(MAIL.sent.some(x => x.msg.to === 'ended@trial.test'), 'an owner whose trial ended could never learn it ended');
+    const uid = tbl('app_users').find(u => u.email === 'ended@trial.test').id;
+    const link = await call('POST', `/api/clients/${T}/owner-link`, { token: 't-emp', body: { userId: uid } });
+    assert.strictEqual(link.statusCode, 400);
+    assert.ok(/Extend the trial/.test(link.body.error), link.body.error);
+    const g = await call('GET', '/api/client/growth', { token: 't-ended@trial.test' });
+    assert.strictEqual(g.body.code, 'no_business');
+    assert.ok(g.body.trial && g.body.trial.name === 'Short Trial', 'the refusal does not say the trial ended');
+});
+test('the pages: sign-out lands on the app, not /ai/ai/; lists that cover every client are not narrowed to the last one opened', () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
+    assert.ok(/new URL\(\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? 'ai\/' : 'index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
+    assert.ok(/opts\.scoped === false \? null : EL\.clientId\(\)/.test(h));
+    assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'pipeline.html'), 'utf8')), 'the pipeline is still narrowed to the remembered client');
+    assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'home.html'), 'utf8')));
+    const html = fs.readdirSync(FRONT).filter(f => f.endsWith('.html'));
+    for (const f of html) assert.ok(!/cdn\.jsdelivr\.net\/npm\/@supabase/.test(fs.readFileSync(path.join(FRONT, f), 'utf8')), f + ' still loads the sign-in library from the CDN');
+    assert.ok(fs.existsSync(path.join(FRONT, 'vendor', 'supabase-js-2.116.0.js')));
 });
 
 (async () => {

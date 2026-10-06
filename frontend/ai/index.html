@@ -54,6 +54,7 @@
     .ai-code { font-family: 'JetBrains Mono', monospace; font-size: 1.6rem !important; letter-spacing: 0.4em; text-align: center; }
     .ai-links { display: flex; justify-content: space-between; gap: 10px; }
     .ai-fine { font-size: 0.76rem; color: var(--text-muted); margin-top: 22px; line-height: 1.55; }
+    .ai-form + .ai-fine, .ai-fine + .ai-form { margin-top: 14px; }
 
     /* ---- the app: one screen, the chat scrolls inside it ---- */
     .ai-page { height: 100dvh; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -95,17 +96,23 @@
         <p id="ai-lead">Your Instagram and Facebook, your agency’s work and your reports, in one chat. Sign in with the email your agency invited.</p>
         <!-- Step 1: the email. Step 2: the 6-digit code it receives. No password, ever. -->
         <form class="ai-form" id="ai-form" novalidate>
-            <div><label for="ai-email">Email</label><input id="ai-email" type="email" autocomplete="email" inputmode="email" required></div>
+            <div><label for="ai-email">Email</label><input id="ai-email" type="email" autocomplete="email" inputmode="email" placeholder="you@business.com" required></div>
             <p class="ai-err" id="ai-err" role="alert"></p>
             <button class="btn-primary" type="submit" id="ai-go">Email me a code</button>
         </form>
         <form class="ai-form" id="ai-code-form" novalidate hidden>
-            <div><label for="ai-code">6-digit code</label><input id="ai-code" class="ai-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" required></div>
+            <div><label for="ai-code">6-digit code</label><input id="ai-code" class="ai-code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></div>
             <p class="ai-err" id="ai-err2" role="alert"></p>
             <button class="btn-primary" type="submit" id="ai-go2">Sign in</button>
             <div class="ai-links"><button class="ai-link" type="button" id="ai-resend">Send a new code</button><button class="ai-link" type="button" id="ai-other">Use another email</button></div>
         </form>
-        <p class="ai-fine">No password to remember: each sign-in is a code sent to your email, and the app stays signed in after that. No login yet? Ask your agency to invite you.</p>
+        <p class="ai-fine"><button class="ai-link" type="button" id="ai-paste">Have a sign-in link from your agency? Paste it here</button></p>
+        <form class="ai-form" id="ai-link-form" novalidate hidden>
+            <div><label for="ai-link-in">Your sign-in link</label><input id="ai-link-in" type="url" placeholder="https://…/ai/#th=…" autocomplete="off"></div>
+            <p class="ai-err" id="ai-err3" role="alert"></p>
+            <button class="btn-primary" type="submit">Sign in with the link</button>
+        </form>
+        <p class="ai-fine">No password to remember: each sign-in is a code sent to your email. No login yet? Ask your agency to invite you.</p>
     </div>
 </div>
 
@@ -114,7 +121,7 @@
     <div class="ai-card">
         <img src="icons/ai-192.png?v=1" alt="">
         <h1>Edge Meta <span class="a">AI</span></h1>
-        <p>This app is the business owner’s. On your team, you ask about a client from the client itself: Clients → the client → Ask AI.</p>
+        <p>This app is the business owner’s. On your team, you ask about a client from the client itself: Clients → the client → Assistant.</p>
         <a class="btn-primary" style="display:block;text-decoration:none" href="clients.html">Open Clients</a>
         <div style="margin-top:14px"><button class="ai-link" type="button" data-signout>Sign out</button></div>
     </div>
@@ -161,7 +168,7 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+<script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
@@ -179,11 +186,28 @@
     // #error_code=otp_expired instead of a session (phase 52). Read it before the
     // client consumes the hash, and say so on the sign-in screen.
     const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
-    const linkError = hash.get('error_code') || hash.get('error');
-    const sb = EL.authClient();
+    let linkError = hash.get('error_code') || hash.get('error');
+    // Phase 57: a sign-in link from the agency carries its token as #th=. It is traded for a session here,
+    // in whichever browser or installed app opened it, and dropped from the address bar at once.
+    const th = hash.get('th');
+    if (linkError || th) history.replaceState(null, '', location.pathname + location.search);
+    let sb;
+    try { sb = EL.authClient(); }
+    catch { offline(); return; }
+    if (th) {
+        const { error } = await sb.auth.verifyOtp({ token_hash: th, type: 'magiclink' }).catch(e => ({ error: e }));
+        if (error) linkError = 'otp_expired';
+    }
     const { data } = await sb.auth.getSession();
-    if (linkError) history.replaceState(null, '', location.pathname + location.search);
     if (data.session) boot(); else signIn(linkError);
+
+    /** The sign-in library did not load: no connection on the very first open (phase 57). */
+    function offline() {
+        $('ai-signin').hidden = false;
+        $('ai-signin').querySelector('.ai-card').innerHTML = `<img src="icons/ai-192.png?v=1" alt=""><h1>Edge Meta <span class="a">AI</span></h1>
+            <p>You're offline, or the connection is too weak to open the app. It opens as soon as you're connected.</p>
+            <button class="btn-primary" type="button" onclick="location.reload()">Try again</button>`;
+    }
 
     async function post(path, body) {
         const r = await fetch(EL.backendUrl() + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -241,6 +265,18 @@
             if (Date.now() < resendAt) { say(err2, `Wait ${Math.ceil((resendAt - Date.now()) / 1000)} seconds, then ask again.`); return; }
             try { await sendCode(); say(err2, 'A new code is on its way.', 'good'); } catch (x) { say(err2, x.message); }
         });
+        $('ai-paste').addEventListener('click', () => { $('ai-link-form').hidden = !$('ai-link-form').hidden; if (!$('ai-link-form').hidden) $('ai-link-in').focus(); });
+        $('ai-link-form').addEventListener('submit', async e => {
+            e.preventDefault();
+            const err3 = $('ai-err3');
+            const m = /[#&?]th=([^&\s]+)/.exec($('ai-link-in').value || '');
+            if (!m) { say(err3, 'That is not an Edge Meta AI sign-in link. Ask your agency for a new one.'); return; }
+            say(err3, 'Signing in…', 'muted');
+            const { error } = await sb.auth.verifyOtp({ token_hash: decodeURIComponent(m[1]), type: 'magiclink' }).catch(x => ({ error: x }));
+            if (error) { say(err3, 'That link has expired or was already used. Ask your agency for a new one, or sign in with a code.'); return; }
+            $('ai-signin').hidden = true;
+            boot();
+        });
         $('ai-other').addEventListener('click', () => { $('ai-code-form').hidden = true; $('ai-form').hidden = false; $('ai-lead').textContent = 'Sign in with the email your agency invited.'; $('ai-email').focus(); });
     }
 
@@ -253,12 +289,26 @@
 
         // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.
         const side = $('oa-side'), scrim = $('ai-scrim');
-        new MutationObserver(() => { scrim.hidden = !side.classList.contains('is-open'); }).observe(side, { attributes: true, attributeFilter: ['class'] });
+        // On a phone the drawer is off-screen when closed, and out of reach of the keyboard too (phase 57).
+        const phone = matchMedia('(max-width: 940px)');
+        const syncSide = () => {
+            const open = side.classList.contains('is-open');
+            scrim.hidden = !open;
+            side.inert = phone.matches && !open;
+            $('oa-side-toggle').setAttribute('aria-expanded', String(open));
+        };
+        new MutationObserver(syncSide).observe(side, { attributes: true, attributeFilter: ['class'] });
+        phone.addEventListener('change', syncSide); syncSide();
         scrim.addEventListener('click', () => side.classList.remove('is-open'));
 
         const menu = $('ai-menu'), more = $('ai-more');
         more.addEventListener('click', e => { e.stopPropagation(); const open = menu.classList.toggle('hidden') === false; more.setAttribute('aria-expanded', String(open)); });
         document.addEventListener('click', e => { if (!e.target.closest('#ai-menu')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); } });
+        document.addEventListener('keydown', e => {
+            if (e.key !== 'Escape') return;
+            if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); more.focus(); }
+            else if (side.classList.contains('is-open') && phone.matches) side.classList.remove('is-open');
+        });
 
         MetaAI.start(me, { app: true });
         // Everything the agency shares with the owner, beside the chat (phase 49).

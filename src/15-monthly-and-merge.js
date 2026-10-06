@@ -537,6 +537,9 @@ app.post('/api/clients/:id/merge', async (req, res) => {
 
         if (dry) return res.json({ dry: true, into: { id: into.id, name: into.name }, from: { id: from.id, name: from.name }, counts });
 
+        // The assistant's chats belong to its own record of the business (xp_clients); moving them to a
+        // business it has never seen failed on that reference after everything else had moved (phase 57).
+        if (counts.xp_ai_conversations) await S.xp.ensureChatClient(into.id);
         for (const t of MERGE_TABLES) {
             if (!counts[t]) continue;
             const { error } = await supabase.from(t).update({ client_id: into.id }).eq('client_id', from.id);
@@ -571,6 +574,8 @@ app.post('/api/clients/:id/merge', async (req, res) => {
             await supabase.from('client_members').upsert(
                 [{ client_id: into.id, user_id: from.owner_user_id, role: 'editor', added_by: ctx.user.id }],
                 { onConflict: 'client_id,user_id' });
+            // A business owner's login now belongs to an agency client: it never expires (phase 57).
+            if ((await S.userRole(from.owner_user_id)) === 'client') await S.markAgencyOwner(from.owner_user_id);
         }
         const stamp = new Date().toISOString().slice(0, 10);
         await supabase.from('clients').update({

@@ -540,8 +540,11 @@ const KEY_REVIVE_HOURS   = parseInt(process.env.KEY_REVIVE_HOURS || '12', 10);
 async function ensureProfile(user) {
     const email = (user.email || '').toLowerCase();
 
-    let { data: profile } = await supabase
+    let { data: profile, error: readErr } = await supabase
         .from('app_users').select('*').eq('id', user.id).maybeSingle();
+    // Phase 57: a failed read is not "no profile". Treating it as one re-provisioned an existing
+    // employee or admin as a trial client, overwriting their role.
+    if (readErr) throw Object.assign(new Error('Could not load your account. Try again in a moment.'), { statusCode: 503 });
 
     if (!profile) {
         // Reaching here means nobody provisioned this account, which since
@@ -556,9 +559,12 @@ async function ensureProfile(user) {
         if (MASTER_ADMIN_EMAIL && email === MASTER_ADMIN_EMAIL) {
             role = 'admin';
         } else {
-            const { count } = await supabase
+            const { count, error: countErr } = await supabase
                 .from('app_users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
-            if (!count) role = 'admin';
+            // A failed count is not zero: that made a stranger the admin (phase 57). And with a
+            // master admin named, nobody else is ever bootstrapped into the role.
+            if (countErr) throw Object.assign(new Error('Could not load your account. Try again in a moment.'), { statusCode: 503 });
+            if (!MASTER_ADMIN_EMAIL && count === 0) role = 'admin';
         }
 
         const row = {
@@ -576,8 +582,14 @@ async function ensureProfile(user) {
             // the point of the trial is that they do not need a key yet.
         }
 
-        const { data: created } = await supabase.from('app_users').upsert(row)
+        // Insert only: a row that appeared meanwhile (another request, another instance) is never overwritten.
+        const { data: created, error: insErr } = await supabase.from('app_users').upsert(row, { onConflict: 'id', ignoreDuplicates: true })
             .select().maybeSingle();
+        if (!created) {
+            const { data: again } = await supabase.from('app_users').select('*').eq('id', user.id).maybeSingle();
+            if (again) return again;
+            if (insErr) throw Object.assign(new Error('Could not set up your account. Try again in a moment.'), { statusCode: 503 });
+        }
 
         profile = created || row;
 
@@ -728,6 +740,19 @@ function touchLastSeen(profile) {
         .then(r => { if (r && r.error) _seenAt.delete(profile.id); }).catch(() => _seenAt.delete(profile.id));
 }
 
+/**
+ * One profile load per user at a time (phase 57). A new signup's first page fires several
+ * requests at once; each used to provision on its own: duplicate businesses and emails.
+ */
+const _profileInflight = new Map();
+function ensureProfileOnce(user) {
+    const hit = _profileInflight.get(user.id);
+    if (hit) return hit;
+    const p = ensureProfile(user).finally(() => _profileInflight.delete(user.id));
+    _profileInflight.set(user.id, p);
+    return p;
+}
+
 async function auth(req, res, { allowLapsed = false } = {}) {
     const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
     if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
@@ -750,7 +775,9 @@ async function auth(req, res, { allowLapsed = false } = {}) {
         return null;
     }
 
-    const profile = await ensureProfile(data.user);
+    let profile;
+    try { profile = await ensureProfileOnce(data.user); }
+    catch (e) { res.status(e.statusCode || 503).json({ error: e.message || 'Could not load your account.' }); return null; }
     touchLastSeen(profile);
     // is_active is explicit on the fallback: accountState() reads it, and an
     // absent flag would otherwise read as suspended and lock out every caller
@@ -803,7 +830,7 @@ async function requireEngine(req, res, engine) {
     }
 
     if (!granted) {
-        res.status(403).json({ error: `No access to the ${engine} engine. Ask your administrator.` });
+        res.status(403).json({ error: `Your account can’t use ${ENGINE_LABELS[engine] || engine} yet. Ask an admin to switch it on in Team & settings → People.`, code: 'no_engine' });
         return null;
     }
     return ctx;
@@ -854,10 +881,15 @@ async function isByoOnly(userId) {
     if (hit && Date.now() - hit.t < 60000) return hit.v;
     let v = false;
     try {
-        const { data } = await supabase.from('app_users')
+        const { data, error } = await supabase.from('app_users')
             .select('byo_key_only').eq('id', userId).maybeSingle();
+        if (error) throw error;
         v = !!data?.byo_key_only;
-    } catch { v = false; }
+    } catch {
+        // A failed read keeps the last known answer, and with none assumes own keys only (phase 57):
+        // "not own-keys-only" let the person spend the shared pool for a minute.
+        v = hit ? hit.v : true;
+    }
     _byoCache.set(userId, { v, t: Date.now() });
     return v;
 }

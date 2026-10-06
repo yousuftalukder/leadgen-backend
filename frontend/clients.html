@@ -28,7 +28,7 @@
     .hb-bar input { max-width: 280px; }
     .hb-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; white-space: nowrap; }
     .hb-acts { display: flex; gap: 6px; align-items: center; justify-content: flex-end; white-space: nowrap; }
-    .hb-menu { position: absolute; z-index: 60; min-width: 210px; padding: 6px; border-radius: 12px; background: #0b1329; border: 1px solid rgba(217,181,108,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+    .hb-menu { position: absolute; z-index: 60; min-width: 210px; padding: 6px; border-radius: 12px; background: #0c1f18; border: 1px solid rgba(217,181,108,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
     .hb-menu button { display: block; width: 100%; text-align: left; padding: 9px 11px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 0.86rem; border-radius: 8px; cursor: pointer; }
     .hb-menu button:hover { background: rgba(255,255,255,0.06); }
     .hb-menu hr { border: 0; border-top: 1px solid var(--card-border); margin: 5px 4px; }
@@ -38,13 +38,26 @@
     .hb-choice:hover { border-color: var(--accent-solid); }
     .hb-link { overflow-wrap: anywhere; font-size: 0.8rem; }
     @media (max-width: 900px) { .hb-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    /* Phase 57: on a phone each client row keeps what decides the next move: who, where they stand, what next.
+       Owner, Meta and report count are one tap away on the client itself. */
+    @media (max-width: 640px) {
+        .hb-table thead { display: none; }
+        .hb-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; padding: 12px 14px; border-bottom: 1px solid var(--card-border); }
+        .hb-table td { display: block; padding: 0 !important; border: 0 !important; }
+        .hb-table td:nth-child(3), .hb-table td:nth-child(4), .hb-table td:nth-child(5) { display: none; }
+        .hb-table td:nth-child(2) { justify-self: end; }
+        .hb-table td:nth-child(6) { grid-column: 1 / -1; }
+        .hb-table .cl-name { min-width: 0; }
+        .hb-acts { justify-content: flex-start; }
+    }
+    .hb-bar input { max-width: 360px; }
     @media (max-width: 520px) { .hb-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
 <main class="el-page" id="cl"><div class="ws-empty"><p>Loading clients…</p></div></main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="ui.js"></script>
 <script>
@@ -56,7 +69,7 @@
     const q = new URLSearchParams(location.search);
     if (/^[0-9a-f-]{36}$/i.test(q.get('client') || '')) {
         const u = new URLSearchParams({ client: q.get('client') });
-        if (q.get('meta')) { u.set('tab', 'meta'); for (const k of ['meta', 'pages', 'message']) if (q.get(k)) u.set(k, q.get(k)); }
+        if (q.get('meta')) { u.set('tab', 'meta'); for (const k of ['meta', 'pages', 'message', 'filed', 'unfiled']) if (q.get(k)) u.set(k, q.get(k)); }
         location.replace('workspace.html?' + u.toString());
         return;
     }
@@ -154,8 +167,8 @@
         const list = visible();
         body.innerHTML = `
             <div class="hb-stages">${STAGES.map(([k, l, sub]) => `<button type="button" class="hb-stage" data-s="${k}" aria-pressed="${stage === k}"><b>${count(k)}</b><span>${l}</span><small>${sub}</small></button>`).join('')}</div>
-            <div class="hb-bar"><input id="hb-q" type="search" placeholder="Search name, handle or owner email" value="${esc(search)}" aria-label="Search clients"></div>
-            ${list.length ? `<div class="ws-table-wrap"><table class="ws-table">
+            <div class="hb-bar"><input id="hb-q" type="search" placeholder="Search clients" value="${esc(search)}" aria-label="Search clients"></div>
+            ${list.length ? `<div class="ws-table-wrap"><table class="ws-table hb-table">
                 <thead><tr><th>Client</th><th>Stage</th><th>Owner</th><th>Meta &amp; data</th><th>Reports</th><th></th></tr></thead>
                 <tbody>${list.map(c => `<tr class="is-link" data-go="${esc(c.id)}" tabindex="0">
                     <td><div class="cl-name"><span class="el-avatar">${esc(UI.initials(c.name))}</span><div><div class="t">${esc(c.name)}</div><div class="s">${esc([c.niche, c.ig_handle ? '@' + c.ig_handle : '', c.location].filter(Boolean).join(' · ') || 'No details yet')}</div></div></div></td>
@@ -192,7 +205,7 @@
                     <td class="ws-nowrap">${esc(o.invitedAt ? UI.day(o.invitedAt) : '—')}</td>
                     <td class="ws-nowrap">${esc(o.lastSeenAt ? ago(o.lastSeenAt) : 'Never')}</td>
                     <td>${!o.active ? '<span class="el-chip is-bad">Switched off</span>' : o.lastSeenAt ? '<span class="el-chip is-jade">Uses the app</span>' : '<span class="el-chip is-warn">Not opened yet</span>'}</td>
-                    <td><div class="hb-acts">${canEdit(o.client) && !o.client.archived ? `<button class="ws-btn is-sm" type="button" data-link="${esc(o.client.id)}|${esc(o.id)}">New sign-in link</button>` : ''}
+                    <td><div class="hb-acts">${canEdit(o.client) && !o.client.archived && !(o.client.trial && o.client.trial.ended) ? `<button class="ws-btn is-sm" type="button" data-link="${esc(o.client.id)}|${esc(o.id)}">New sign-in link</button>` : ''}
                         ${canManage(o.client) ? `<button class="ws-btn is-sm is-quiet" type="button" data-revoke="${esc(o.client.id)}|${esc(o.id)}">Remove</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>`
             : `<div class="ws-empty">${ic('clients')}<h3>No owner logins yet</h3><p>Invite a client's owner from its row on the Clients tab, or start a trial.</p></div>`}`;
         body.querySelectorAll('[data-link]').forEach(b => b.addEventListener('click', () => { const [cid, uid] = b.dataset.link.split('|'); signInLink(byId(cid), uid); }));
@@ -232,12 +245,13 @@
     }
     async function moreMenu(c, anchor) {
         const items = [['open', 'Open client']];
+        if (c.archived && canEdit(c)) items.push('-', ['unarchive', 'Unarchive']);   // phase 57
         if (canEdit(c) && !c.archived) {
             items.push('-');
             if (c.meta && c.meta.connected) items.push(['read', 'Read Meta numbers now'], ['history', 'Read full history again']);
             else items.push(['connect', 'Connect Meta']);
             items.push('-', ['invite', (c.owners || []).length ? 'Invite another owner login' : 'Invite the owner']);
-            if ((c.owners || []).length) items.push(['link', 'New sign-in link']);
+            if ((c.owners || []).length && !(c.trial && c.trial.ended)) items.push(['link', 'New sign-in link']);
             items.push('-');
             if (c.trial) items.push(['extend', 'Extend trial'], ['convert', 'Make a client (end the trial)']);
             else items.push(['start', 'Put on a trial']);
@@ -264,6 +278,11 @@
                 setTimeout(load, 4000);
             }
             else if (k === 'extend' || k === 'start') trialDays(c, k);
+            else if (k === 'unarchive') {
+                await EL.api(`/api/clients/${c.id}`, { method: 'PATCH', body: { archived: false } });
+                EL.toast(`${c.name} is back. Its schedules and Meta reads carry on.`);
+                load();
+            }
             else if (k === 'convert') {
                 await EL.api(`/api/clients/${c.id}/trial`, { method: 'POST', body: { action: 'convert' } });
                 EL.toast(`${c.name} is a client now. Its owner keeps Edge Meta AI with no end date.`);

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Edgelead — Admin</title>
+<title>Team &amp; settings — EdgeLead</title>
 <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
@@ -44,7 +44,7 @@
     .user-head::-webkit-details-marker { display: none; }
     .user-head:hover { background: rgba(255,255,255,0.03); }
     .user-head:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: -2px; }
-    .user-open { font-size: 0.74rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+    .user-open { font-size: 0.74rem; font-weight: 800; letter-spacing: 0.04em; text-transform: none;
         color: var(--text-muted); border: 1px solid var(--card-border); border-radius: 8px;
         padding: 6px 13px; white-space: nowrap; }
     .user-head:hover .user-open { color: var(--text-primary); }
@@ -143,7 +143,7 @@
     <div class="segment-bar">
         <button class="segment-btn active" type="button" data-tab="users">People</button>
         <button class="segment-btn" type="button" data-tab="keys">Keys (Apify &amp; AI)</button>
-        <button class="segment-btn" type="button" data-tab="plans">Trial &amp; plans</button>
+        <button class="segment-btn" type="button" data-tab="plans">Email &amp; sign-ups</button>
         <button class="segment-btn" type="button" data-tab="meta">Meta &amp; Edge AI</button>
         <button class="segment-btn" type="button" data-tab="health">Spend &amp; health</button>
     </div>
@@ -151,14 +151,15 @@
     <!-- ================= USERS ================= -->
     <section id="tab-users">
         <div class="card">
-            <h2 class="card-title">Add someone</h2>
-            <p class="card-subtitle">Creates a confirmed account they can sign in with straight away. Engine access
-                decides which pages they see — a user with no engines can sign in but has nothing to run.</p>
+            <h2 class="card-title">Add a teammate</h2>
+            <p class="card-subtitle">Creates a confirmed login for someone on your team, who can sign in straight away and
+                change the password from their profile. Engine access decides which tools they see. Business owners are not
+                added here: invite them from their client (Clients → the client's row → Invite owner).</p>
 
             <div class="field-grid">
                 <div>
                     <label for="nu-email">Email</label>
-                    <input type="email" id="nu-email" placeholder="client@company.com" autocomplete="off">
+                    <input type="email" id="nu-email" placeholder="colleague@agency.com" autocomplete="off">
                 </div>
                 <div>
                     <label for="nu-pass">Temporary password</label>
@@ -170,12 +171,10 @@
                 </div>
                 <div>
                     <label for="nu-role">Role</label>
-                    <!-- Client was missing here while the edit dropdown had it,
-                         so onboarding a client who paid out of band meant
-                         creating them as an employee and then changing it. -->
+                    <!-- Phase 57: no "Client" here. A business owner's login made from this form had no
+                         business and got a made-up one; owners are invited from their client. -->
                     <select id="nu-role">
-                        <option value="user">Employee</option>
-                        <option value="client">Client</option>
+                        <option value="user">Team member</option>
                         <option value="admin">Admin</option>
                     </select>
                 </div>
@@ -331,9 +330,10 @@
 
             <h3 class="block-title">Email</h3>
             <p class="card-subtitle" style="margin-bottom:12px">Sent from a Gmail account of yours, using an app password
-                (Google Account → Security → 2-Step Verification → App passwords). Three messages and nothing else: a
-                business starts a trial (to you), a client asks to continue (to you), you activate a plan (to the client).
-                Google allows roughly 500 messages a day from one account. The password is stored sealed and is never
+                (Google Account → Security → 2-Step Verification → App passwords). <b>Business owners need this to sign in to
+                Edge Meta AI</b>: their 6-digit sign-in codes and their invites are sent from it. Until it is set, send each
+                owner a sign-in link yourself (Clients → the owner's row → New sign-in link). It also tells you when someone
+                starts a free trial or asks to continue. Google allows roughly 500 messages a day from one account. The password is stored sealed and is never
                 shown again.</p>
             <div class="field-grid">
                 <div><label for="pl-mail-from">Send from (Gmail address)</label>
@@ -385,7 +385,7 @@
         <div class="card">
             <h2 class="card-title">What runs by itself</h2>
             <ul class="mx-how">
-                <li><b>Connect:</b> the owner (Home → Connect Meta) or you (client → Meta → Connect Meta). Reading starts at once, in the background, and takes a few minutes.</li>
+                <li><b>Connect:</b> the owner (in Edge Meta AI, Connect with Facebook) or you (client → Meta → Connect Meta). Reading starts at once, in the background, and takes a few minutes.</li>
                 <li><b>Every day:</b> at the scheduled times each business is read again: the last days are re-read until Meta settles them, new posts and comments come in, ads follow.</li>
                 <li><b>Catch-up:</b> after a server restart, anyone whose history was never read is started again, one at a time.</li>
                 <li><b>Only a person can fix:</b> a login Meta refused or that is about to end (someone reconnects), and a business with no owner login (you invite them).</li>
@@ -444,7 +444,7 @@
 
 </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script>
 (async function () {
@@ -473,7 +473,12 @@
      * reader to do arithmetic before they know whether to act, and this list
      * is the thing you scan to decide who to chase.
      */
+    // Tool names people know (phase 57), not engine keys.
+    const ENGINE_NAMES = { leadgen: 'Leads', report: 'Instagram audits', fb_community: 'Facebook groups', fb_page: 'Facebook Pages', content_plan: 'Content plan', meta_owned: 'Meta numbers' };
+
     function expiryLine(u) {
+        // An owner login the agency made never expires (phase 52); its old trial dates mean nothing.
+        if (u.agency_owner) return 'Business owner’s Edge Meta AI login · never expires while their business is your client';
         const ends = u.paid_until || u.trial_ends_at;
         if (!ends) return 'No plan and no trial — they can sign in but cannot run anything.';
 
@@ -709,7 +714,7 @@
     function renderFunnel(users) {
         const host = $('funnel');
         if (!host) return;
-        const clients = users.filter(u => u.role === 'client');
+        const clients = users.filter(u => u.role === 'client' && !u.agency_owner);   // self-serve sign-ups only (phase 57)
         const inDays = (iso, n) => { if (!iso) return false; const d = (new Date(iso).getTime() - Date.now()) / 86400000; return d >= 0 && d <= n; };
         const counts = {
             trial:   clients.filter(u => u.state === 'trial').length,
@@ -761,8 +766,8 @@
             // dropdowns. <details> gives the disclosure and its keyboard
             // handling for free — no open/closed state to track.
             const BUCKETS = [
-                { role: 'client', title: 'Clients',   note: 'People who bought or are trying the product.' },
-                { role: 'user',   title: 'Employees', note: 'Your team. Tools are granted per engine.' },
+                { role: 'client', title: 'Business owners & self-serve sign-ups', note: 'Owner logins you invited (they never expire), and anyone who signed up for a free trial themselves.' },
+                { role: 'user',   title: 'Team members', note: 'Your team. Tools are granted per engine.' },
                 { role: 'admin',  title: 'Admins',    note: 'Full access, including this page.' }
             ];
 
@@ -774,12 +779,12 @@
                     <summary class="user-head">
                         <div>
                             <strong>${esc(u.email || '(no email)')}</strong>
-                            ${u.role === 'client' ? `<span class="tag tag-state is-${esc(u.state || '')}">${esc(u.state || 'client')}</span>` : ''}
+                            ${u.role === 'client' ? (u.agency_owner ? '<span class="tag tag-state is-paid">owner login</span>' : `<span class="tag tag-state is-${esc(u.state || '')}">${esc(u.state || 'client')}</span>`) : ''}
                             ${u.activation_requested_at ? `<span class="tag tag-want" title="Asked on ${esc(dateStr(u.activation_requested_at))}">wants to continue</span>` : ''}
                             ${u.is_active ? '' : '<span class="tag tag-off">disabled</span>'}
                             ${isMe ? '<span class="tag tag-admin">you</span>' : ''}
                             <div class="meta">${esc(u.full_name || '—')} · joined ${dateStr(u.created_at)} ·
-                                ${engines.length ? esc(engines.join(', ')) : 'no engine access'}${u.byo_key_only ? ' · own keys only (Apify and AI)' : ''}</div>
+                                ${engines.length ? esc(engines.map(e => ENGINE_NAMES[e] || e).join(', ')) : 'no tools switched on'}${u.byo_key_only ? ' · own keys only (Apify and AI)' : ''}</div>
                             ${u.role === 'client' ? `<div class="meta">${expiryLine(u)}</div>` : ''}
                         </div>
                         <span class="user-open">Edit</span>
@@ -790,8 +795,8 @@
                         <div>
                             <label>Role</label>
                             <select data-role ${isMe ? 'disabled' : ''}>
-                                <option value="user"   ${u.role === 'user'   ? 'selected' : ''}>Employee</option>
-                                <option value="client" ${u.role === 'client' ? 'selected' : ''}>Client</option>
+                                <option value="user"   ${u.role === 'user'   ? 'selected' : ''}>Team member</option>
+                                <option value="client" ${u.role === 'client' ? 'selected' : ''}>Business owner</option>
                                 <option value="admin"  ${u.role === 'admin'  ? 'selected' : ''}>Admin</option>
                             </select>
                         </div>
@@ -1078,7 +1083,7 @@
                     ${r.assets.length ? `<button class="ws-btn is-sm is-quiet" type="button" data-mx-more="${esc(r.clientId)}">History and days</button>` : ''}
                     ${needsReconnect ? `<a class="ws-btn is-sm ${r.verdict === 'bad' ? 'is-gold' : ''}" href="${ws}&tab=meta">Reconnect Meta</a>` : ''}
                     ${r.owners.length ? '' : `<button class="ws-btn is-sm ${needsReconnect ? '' : 'is-gold'}" type="button" data-mx-invite="${esc(r.clientId)}">Invite the owner</button>`}
-                    <a class="ws-btn is-sm is-quiet" href="${ws}&tab=ask">Ask as them</a>
+                    <a class="ws-btn is-sm is-quiet" href="${ws}&tab=ask">Ask about them</a>
                 </div>
             </div>`;
         }).join('');

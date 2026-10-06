@@ -6,7 +6,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
-    <title>Edgelead - Instagram Performance Audit</title>
+    <title>Instagram audit — EdgeLead</title>
     <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
 <style>
@@ -71,8 +71,8 @@
 <div id="dashboard-section">
 
     <div class="segment-bar el-owner-only">
-        <button class="segment-btn active" data-tab="builder">📊 Audit Builder</button>
-        <button class="segment-btn" data-tab="vault">📦 Dedicated Reports Vault</button>
+        <button class="segment-btn active" data-tab="builder">Run an audit</button>
+        <button class="segment-btn" data-tab="vault">Reports</button>
     </div>
 
     <!-- TAB 1: AUDIT BUILDER -->
@@ -87,7 +87,7 @@
             <label class="toggle-container">
                 <input type="checkbox" id="rival-toggle" style="display:none;">
                 <div class="toggle-switch"></div>
-                <span style="font-weight: 700; font-size: 0.88rem;">Enable Competitor Head-to-Head Comparison Matrix</span>
+                <span style="font-weight: 700; font-size: 0.88rem;">Compare with competitors</span>
             </label>
 
             <div id="rival-inputs-container" class="hidden" style="margin-top: 15px; padding-left: 15px; border-left: 2px solid var(--accent-solid);">
@@ -98,7 +98,7 @@
                 <input type="text" id="rival-2" placeholder="e.g., @competitor_two">
             </div>
 
-            <button class="btn-primary" id="run">🚀 Execute Audit &amp; Build Report</button>
+            <button class="btn-primary" id="run">Run audit</button>
             <div id="run-cost" class="el-run-cost" style="margin-top:12px;"></div>
         </div>
 
@@ -150,7 +150,7 @@
 
 </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+    <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="report-cover.js"></script>
 <script>

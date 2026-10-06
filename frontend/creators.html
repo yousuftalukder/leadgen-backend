@@ -42,7 +42,7 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.js"></script>
+<script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script>
 (async () => {
@@ -50,7 +50,12 @@
     const $ = id => document.getElementById(id);
     const esc = EL.escape;
     const clientId = EL.clientId();
-    if (!clientId) { $('cr-grid').innerHTML = '<p class="el-muted">Open this from a client: Clients → the client → Ask AI → Creator posts.</p>'; return; }
+    if (!clientId) {
+        // No client, nothing to look for (phase 57): the form and tabs went away instead of offering buttons that do nothing.
+        document.querySelectorAll('.ld-actions, #cr-add, .ll-kinds').forEach(el => { el.hidden = true; });
+        $('cr-grid').innerHTML = '<div class="ws-empty"><h3>Choose a client first</h3><p>Creator posts are kept per client. Open a client, then its Meta tab → Creator posts.</p><a class="ws-btn is-gold" href="clients.html">Open Clients</a></div>';
+        return;
+    }
     const list = await EL.clients().catch(() => []);
     const cl = list.find(x => x.id === clientId);
     if (cl) $('cr-for').textContent = '· ' + cl.name;

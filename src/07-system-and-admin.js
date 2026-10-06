@@ -1086,7 +1086,9 @@ const HAND_OVER = [
     ['content_plan_notes', 'user_id'], ['ai_conversations', 'user_id'], ['reports', 'user_id'],
     ['fb_pages', 'user_id'], ['fb_page_posts', 'user_id'], ['fb_page_sets', 'user_id'], ['fb_groups', 'user_id'],
     ['fb_group_sets', 'user_id'], ['fb_posts', 'user_id'], ['fb_demand_signals', 'user_id'], ['fb_suggestions', 'user_id'],
-    ['client_tasks', 'assignee_user_id']
+    ['client_tasks', 'assignee_user_id'],
+    // phase 57: the leads inside those campaigns, which cascade with the login and left them empty
+    ['campaign_leads', 'user_id']
 ];
 async function handOverUser(fromId, toId) {
     const moved = {};
@@ -1118,7 +1120,10 @@ app.delete('/api/admin/users/:id', async (req, res) => {
         // Phase 51: hand everything over first; if that fails, nothing is deleted.
         const moved = await handOverUser(req.params.id, ctx.user.id);
         logger.info('user_handed_over', { from: req.params.id, to: ctx.user.id, moved });
-        await supabase.auth.admin.deleteUser(req.params.id);
+        // Phase 57: a login Supabase did not delete keeps working; its profile is not removed behind its back
+        // (it would come back as a brand-new trial on the next sign-in).
+        const { error: delErr } = await supabase.auth.admin.deleteUser(req.params.id);
+        if (delErr && !/not found/i.test(delErr.message || '')) throw new Error('The login could not be deleted: ' + delErr.message + ' Their work was already handed to you; try again.');
         await supabase.from('app_users').delete().eq('id', req.params.id);
         invalidateAuth(req.params.id);
         invalidateEngineAccess(req.params.id);
