@@ -617,6 +617,27 @@ console.log('\ntest runner: every test file actually runs');
 }
 
 // ---------------------------------------------------------------------------
+// Phase 58: the tool pages wear the workspace layout — one page header each,
+// not a title inside the first card.
+// ---------------------------------------------------------------------------
+{
+    const TOOL_PAGES = ['admin', 'content-plan', 'creators', 'fb-advisor', 'fb-audit', 'fb-communities',
+        'fb-leads', 'fb-report', 'ig-competitors', 'ig-report', 'leads', 'pipeline', 'reviews', 'schedules'];
+    check('every tool page has exactly one workspace header (ws-head)', TOOL_PAGES.map(n => {
+        const f = path.join(FRONT_DIR, n + '.html');
+        if (!fs.existsSync(f)) return `${n}.html is missing`;
+        const c = (fs.readFileSync(f, 'utf8').match(/class="ws-head"/g) || []).length;
+        return c === 1 ? null : `${n}.html has ${c} ws-head headers`;
+    }).filter(Boolean));
+    // The first addRival() runs estimate(), which touches estTimer: a later
+    // `let` threw (temporal dead zone) and stopped the whole page script.
+    const ic = fs.readFileSync(path.join(FRONT_DIR, 'ig-competitors.html'), 'utf8');
+    const decl = ic.indexOf('let estTimer'), first = ic.indexOf('addRival();');
+    check('ig-competitors declares estTimer before its first addRival()',
+        decl >= 0 && first >= 0 && decl < first ? [] : ['let estTimer comes after the first addRival() call']);
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n' + '─'.repeat(64));
 console.log(`${pass} checks passed, ${fail} failed, ${skip} skipped`);
 if (fail) {
