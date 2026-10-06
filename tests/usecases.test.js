@@ -421,10 +421,10 @@ function matchPath(pattern, p) {
  * to call next(). A path nothing registered throws; a path only the API's
  * 404 catch-all answers comes back as that 404, as it would in production.
  */
-async function call(method, p, { token, body, query } = {}) {
+async function call(method, p, { token, body, query, ip } = {}) {
     const req = {
         method, path: p, originalUrl: p, url: p, params: {},
-        body: body || {}, query: query || {}, ip: '127.0.0.1',
+        body: body || {}, query: query || {}, ip: ip || '127.0.0.1',
         headers: token ? { authorization: 'Bearer ' + token } : {},
         get(h) { return this.headers[String(h).toLowerCase()]; }
     };
@@ -489,6 +489,13 @@ for (const u of [EMP, EMP2]) {
     for (const e of ['report', 'leadgen', 'fb_community']) tbl('user_engine_access').push({ user_id: u.id, engine: e });
 }
 const ctxOf = (u, role) => ({ user: u, profile: { id: u.id, email: u.email, role, is_active: true } });
+
+/** Phase 51: a report reaches the owner only once the team shares it, so share it, then open it as the owner. */
+async function ownerOpen(id) {
+    const sh = await call('PATCH', `/api/reports/${id}/visibility`, { token: 't-admin', body: { visible: true } });
+    if (sh.statusCode !== 200) throw new Error('could not share the report: ' + JSON.stringify(sh.body));
+    return call('GET', `/api/client/report/${id}`, { token: 't-client' });
+}
 
 let passed = 0;
 const pending = [];
@@ -625,10 +632,22 @@ test('the client account now IS the agency\'s record — its runs go there', asy
     const cid = await S.resolveClientId({ body: {} }, ctxOf(CLIENT, 'client'));
     assert.strictEqual(cid, state.C, 'a client run would land in a second, separate record');
 });
-test('…and it can see the work the agency did', async () => {
-    const r = await call('GET', '/api/client/reports', { token: 't-client' });
-    assert.strictEqual(r.statusCode, 200);
-    assert.ok(r.body.reports.some(x => x.handle === 'harborcafe'), 'the agency\'s report is invisible to the client');
+test('…and it sees the agency\'s reports only once the team shares them (phase 51)', async () => {
+    const before = await call('GET', '/api/client/reports', { token: 't-client' });
+    assert.strictEqual(before.statusCode, 200);
+    const rep = tbl('reports').find(x => x.client_id === state.C && x.target_handle === 'harborcafe');
+    assert.ok(rep, 'the agency has a report on this client');
+    assert.ok(!before.body.reports.some(x => x.id === rep.id), 'a report reached the owner before the team shared it');
+    const hidden = await call('GET', `/api/client/report/${rep.id}`, { token: 't-client' });
+    assert.strictEqual(hidden.statusCode, 404, 'and it cannot be opened by id either');
+    const viewer = await call('PATCH', `/api/reports/${rep.id}/visibility`, { token: 't-client', body: { visible: true } });
+    assert.strictEqual(viewer.statusCode, 403, 'an owner cannot share a report with themselves');
+    const sh = await call('PATCH', `/api/reports/${rep.id}/visibility`, { token: 't-emp', body: { visible: true } });
+    assert.strictEqual(sh.statusCode, 200, JSON.stringify(sh.body));
+    const st = await call('GET', `/api/reports/${rep.id}/visibility`, { token: 't-emp' });
+    assert.strictEqual(st.body.visibleToClient, true);
+    const after = await call('GET', '/api/client/reports', { token: 't-client' });
+    assert.ok(after.body.reports.some(x => x.id === rep.id), 'the shared report is missing for the owner');
 });
 test('a record with work in it is never absorbed', async () => {
     // D has a job filed under it now; adding its owner as a member elsewhere must not touch it.
@@ -1143,6 +1162,7 @@ test('a Facebook page report and a monthly report are titled, not "Report"', asy
     const moAi = { headline: 'August was the strongest month for reach.', executive_summary: 'Reach rose 47%.', what_moved: ['Reach up 47%'], what_worked: ['Reels'], what_did_not: ['Carousels'], next_month: ['Post eight Reels'], caveats: '' };
     state.moRep = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, platform: 'meta', report_type: 'meta_monthly', target_handle: 'harborcafe', snapshot_date: '2026-08-01', ai_json: moAi, ai_summary: moAi.executive_summary, report_json: { month: '2026-08', monthLabel: 'August 2026', comparable: true, prevMonthLabel: 'July 2026', deltas: [{ label: 'Accounts reached', now: 41820, before: 28410, pct: 47.2, kind: 'up' }], posting: { count: 14 }, ai: moAi }, created_at: new Date().toISOString() };
     tbl('reports').push(state.moRep);
+    for (const id of [state.fbRep.id, state.moRep.id]) await call('PATCH', `/api/reports/${id}/visibility`, { token: 't-admin', body: { visible: true } });
     const r = await call('GET', '/api/client/reports', { token: 't-client' });
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const fb = r.body.reports.find(x => x.id === state.fbRep.id);
@@ -1154,7 +1174,7 @@ test('a Facebook page report and a monthly report are titled, not "Report"', asy
 });
 
 test('a Facebook page report opens in owner language: a headline, what is working, what to change', async () => {
-    const r = await call('GET', `/api/client/report/${state.fbRep.id}`, { token: 't-client' });
+    const r = await ownerOpen(state.fbRep.id);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const v = r.body.report;
     assert.strictEqual(v.headline, 'Steady, with weekends dark.');
@@ -1165,7 +1185,7 @@ test('a Facebook page report opens in owner language: a headline, what is workin
     for (const pt of [...v.working, ...v.fix]) assert.ok(pt.title && typeof pt.why === 'string', 'the page draws {title, why}: ' + JSON.stringify(pt));
 });
 test('a monthly report opens with its headline, its movements, and next month', async () => {
-    const r = await call('GET', `/api/client/report/${state.moRep.id}`, { token: 't-client' });
+    const r = await ownerOpen(state.moRep.id);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const v = r.body.report;
     assert.strictEqual(v.headline, 'August was the strongest month for reach.');
@@ -1178,7 +1198,7 @@ test('a monthly report opens with its headline, its movements, and next month', 
 });
 test('an Instagram report still comes out the Instagram way — bands, pillars, standing', async () => {
     const rep = tbl('reports').find(x => x.client_id === state.C && x.report_type === 'ig_report');
-    const r = await call('GET', `/api/client/report/${rep.id}`, { token: 't-client' });
+    const r = await ownerOpen(rep.id);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.report.band, 'healthy', 'score 71 is the healthy band');
     assert.ok(Array.isArray(r.body.report.working) && Array.isArray(r.body.report.fix));
@@ -1257,7 +1277,7 @@ test('the analyst reads the month back with the same numbers', async () => {
 
 section('\nphase 34 — the monthly report, as the agency sends it');
 test('the owner opens the month as a document: three headline cards, said in words and numbers', async () => {
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const m = r.body.report.month;
     assert.ok(m, 'a monthly report must carry its document');
@@ -1275,7 +1295,7 @@ test('the owner opens the month as a document: three headline cards, said in wor
     assert.strictEqual(r.body.report.movements.length, m.scorecard.length, 'the old movements list and the scorecard are the same rows');
 });
 test('the scorecard gives the exact change and a status nobody has to argue about', async () => {
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     const row = k => r.body.report.month.scorecard.find(x => x.key === k) || {};
     assert.strictEqual(row('reach').change, '+13,410 (+47%)');
     assert.deepStrictEqual(row('reach').status, { word: 'Growing', tone: 'jade' });
@@ -1289,7 +1309,7 @@ test('the scorecard gives the exact change and a status nobody has to argue abou
     assert.strictEqual(row('page_post_engagements').platform, 'Facebook');
 });
 test('posts, audience and next steps come out readable, and the audience is never overstated', async () => {
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     const m = r.body.report.month;
     assert.strictEqual(m.posts[0].kind, 'Reel');
     assert.strictEqual(m.posts[0].reach, 11240);
@@ -1320,7 +1340,7 @@ test('what the agency did that month: only what the client may see, only that mo
         { client_id: C, lead_id: lead(), source: 'ig_campaign', created_at: '2026-08-21T00:00:00.000Z' },
         { client_id: C, lead_id: lead(), source: 'ig_campaign', created_at: '2026-07-11T00:00:00.000Z' }
     );
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     const ctx = r.body.report.month.context;
     assert.deepStrictEqual(ctx.work.done.map(t => t.title), ['Filmed the seasonal menu Reel'],
@@ -1341,7 +1361,7 @@ test('standing comes from the comparison that existed when the report was built,
         { id: crypto.randomUUID(), user_id: EMP.id, client_id: C, report_type: 'deep_audit', platform: 'instagram', target_handle: 'harborcafe', engagement_rate: 4, created_at: '2099-01-01T00:00:00.000Z',
           report_json: bench([{ rank: 1, handle: 'harborcafe', isTarget: true }, { rank: 2, handle: 'ginzahibachi' }], 2) }
     );
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     const s = r.body.report.month.context.standing;
     assert.ok(s, 'no standing in the report');
     assert.strictEqual(s.verdict, 'You come 2nd out of 3 businesses like yours.');
@@ -1586,7 +1606,7 @@ test('the owner and a share link get the document; the assistant does not', asyn
     const main = igMain('harborcafe');
     const row = { id: crypto.randomUUID(), user_id: EMP.id, client_id: state.C, report_type: 'ig_report', platform: 'instagram', target_handle: 'harborcafe', score: 74, created_at: new Date().toISOString(), report_json: { main }, ai_json: { executive_summary: 'Healthy.' } };
     tbl('reports').push(row);
-    const r = await call('GET', `/api/client/report/${row.id}`, { token: 't-client' });
+    const r = await ownerOpen(row.id);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.report.doc.type, 'ig_report');
     const staff = await S.assistantScope(EMP.id, state.C, 'user');
@@ -1630,7 +1650,7 @@ test('a Facebook Page report becomes a document, and a rival Page is compared ro
 test('a single-Page report has no rival section, and the owner gets the document', async () => {
     const d = S.fbDoc({ id: 'g', report_type: 'fb_page', created_at: '2026-09-28T10:00:00Z', report_json: { mode: 'single', target: fbPage('Harbor Cafe') }, ai_json: null });
     assert.ok(!d.sections.some(x => /^Against /.test(x.title)));
-    const r = await call('GET', `/api/client/report/${state.fbRep.id}`, { token: 't-client' });
+    const r = await ownerOpen(state.fbRep.id);
     assert.strictEqual(r.body.report.doc && r.body.report.doc.type, 'fb_page');
     assert.strictEqual(r.body.report.headline, 'Steady, with weekends dark.', 'the older owner fields stay for the list and the assistant');
 });
@@ -1642,7 +1662,7 @@ test('the Meta monthly keeps its best posts’ photos, and never the expiring ad
     const p = rep.report_json.posting.topByReach[0];
     assert.ok(p.image && p.image.includes('/report-media/meta/'), 'no kept photo: ' + JSON.stringify(p));
     assert.ok(!('thumb' in p), 'the expiring address was saved');
-    const r = await call('GET', `/api/client/report/${state.moReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.moReport);
     assert.strictEqual(r.body.report.month.posts[0].image, p.image);
 });
 test('Facebook and Instagram side by side, with a sum only where both have the number', async () => {
@@ -1692,7 +1712,7 @@ test('without Meta, a monthly report is built from the stored public posts, and 
     assert.strictEqual(rep.report_json.ig.prevPosts, 1);
     assert.deepStrictEqual([rep.report_json.ig.followersStart.value, rep.report_json.ig.followers.value], [4700, 4812]);
     assert.ok(rep.report_json.ig.top[0].image && rep.report_json.ig.top[0].image.includes('/report-media/pm/'), 'the top post’s photo was not kept');
-    const view = await call('GET', `/api/client/report/${rep.id}`, { token: 't-client' });
+    const view = await ownerOpen(rep.id);
     const d = view.body.report.doc;
     assert.strictEqual(d.type, 'public_monthly');
     assert.strictEqual(view.body.report.title, 'Monthly report');
@@ -1786,7 +1806,7 @@ test('the boost gate held: every gap was downgraded, every proven cell kept, the
     assert.ok(briefs.removed >= 1, 'the invented cell was not dropped');
 });
 test('the client can read the plan as ideas, in owner language', async () => {
-    const r = await call('GET', `/api/client/report/${state.cpReport}`, { token: 't-client' });
+    const r = await ownerOpen(state.cpReport);
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.report.type, 'content_plan');
     assert.ok(/things to post next|content plan/i.test(r.body.report.headline), r.body.report.headline);
@@ -2700,6 +2720,49 @@ test('phase 50: without Meta, the owner still chats — about the agency\'s work
     const st = await call('GET', '/api/xp/status', { token: 't-owner@kitesurf.test' });
     assert.strictEqual(st.body.phase, 'not_connected');
 });
+section('\nphase 51: the audit\'s security batch');
+test('deleting a staff member hands their clients and work to the admin; nothing is lost', async () => {
+    const leaver = person('leaver@agency.test'); TOKENS['t-leaver'] = leaver;
+    tbl('app_users').push({ id: leaver.id, email: leaver.email, role: 'user', is_active: true });
+    const cid = crypto.randomUUID(), now = new Date().toISOString();
+    tbl('clients').push({ id: cid, owner_user_id: leaver.id, name: 'Leaver Co', archived: false, created_at: now });
+    tbl('schedules').push({ id: crypto.randomUUID(), user_id: leaver.id, client_id: cid, active: true, created_at: now });
+    tbl('meta_connections').push({ id: crypto.randomUUID(), user_id: leaver.id, client_id: cid, page_id: 'p-leaver', status: 'active', created_at: now });
+    tbl('client_tasks').push({ id: crypto.randomUUID(), client_id: cid, title: 'Theirs', status: 'todo', assignee_user_id: leaver.id, created_at: now, updated_at: now });
+    const emp = await call('DELETE', `/api/admin/users/${leaver.id}`, { token: 't-emp' });
+    assert.notStrictEqual(emp.statusCode, 200, 'only an admin deletes people');
+    const r = await call('DELETE', `/api/admin/users/${leaver.id}`, { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.movedTo, ADMIN.id);
+    assert.strictEqual(tbl('clients').find(c => c.id === cid).owner_user_id, ADMIN.id, 'the client went with them');
+    assert.ok(tbl('schedules').some(x => x.client_id === cid && x.user_id === ADMIN.id), 'schedule not handed over');
+    assert.ok(tbl('meta_connections').some(x => x.page_id === 'p-leaver' && x.user_id === ADMIN.id), 'Meta connection not handed over');
+    assert.ok(tbl('client_tasks').some(x => x.title === 'Theirs' && x.assignee_user_id === ADMIN.id), 'task not reassigned');
+    assert.ok(r.body.moved.clients >= 1);
+});
+test('an owner login cannot use the agency\'s routes, even on its own business', async () => {
+    const own = state.C;
+    for (const [m, path, body] of [
+        ['GET', `/api/clients/${own}`], ['GET', `/api/clients/${own}/timeline`], ['PATCH', `/api/clients/${own}`, { notes: 'mine now', archived: true }],
+        ['GET', '/api/clients'], ['POST', '/api/clients', { name: 'Sneaky' }], ['GET', `/api/clients/${own}/tasks`],
+        ['POST', `/api/clients/${own}/members`, { email: EMP.email, role: 'editor' }]
+    ]) {
+        const r = await call(m, path, { token: 't-client', body });
+        assert.ok([401, 403, 404].includes(r.statusCode), `${m} ${path} answered ${r.statusCode}: ${JSON.stringify(r.body).slice(0, 160)}`);
+    }
+    assert.notStrictEqual(tbl('clients').find(c => c.id === own).archived, true, 'the owner archived the record');
+    // Their own surfaces still work.
+    assert.strictEqual((await call('GET', '/api/client/tasks', { token: 't-client' })).statusCode, 200);
+    assert.strictEqual((await call('GET', '/api/xp/status', { token: 't-client' })).statusCode, 200);
+});
+test('guesses sent at the same moment cannot share one count and get past five tries', async () => {
+    const row = { id: crypto.randomUUID(), email: 'race@kitesurf.test', user_id: crypto.randomUUID(), code_hash: 'ab'.repeat(32), attempts: 4, expires_at: new Date(Date.now() + 600000).toISOString(), used_at: null, created_at: new Date().toISOString() };
+    tbl('owner_login_codes').push(row);
+    const tries = await Promise.all(['111111', '222222', '333333'].map((code, i) => call('POST', '/api/public/owner-verify', { body: { email: 'race@kitesurf.test', code }, ip: `10.0.0.${i + 1}` })));
+    assert.ok(tries.every(t => [400, 429].includes(t.statusCode)), tries.map(t => t.statusCode).join(','));
+    assert.ok(tries.some(t => t.statusCode === 400), 'at least one guess was weighed');
+    assert.strictEqual(row.attempts, 5, 'only one of the simultaneous guesses was counted against the last try, and the rest were refused');
+});
 test('a paid portal is an admin\'s to give', async () => {
     const e = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'shop@bloom.test', paidUntil: '2027-01-31' } });
     assert.strictEqual(e.statusCode, 403, JSON.stringify(e.body));
@@ -3247,7 +3310,7 @@ test('a scan: Maps finds the businesses, their Instagram is matched, tagged post
 });
 test('the scan can be repeated monthly, and the owner can open its document', async () => {
     assert.strictEqual(S.SCHEDULABLE_TYPES.review_scan, 'leadgen');
-    const v = await call('GET', `/api/client/report/${state.reviewReport}`, { token: 't-client' });
+    const v = await ownerOpen(state.reviewReport);
     assert.strictEqual(v.statusCode, 200, JSON.stringify(v.body));
     assert.strictEqual(v.body.report.doc.type, 'review_scan');
 });

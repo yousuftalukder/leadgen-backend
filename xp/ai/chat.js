@@ -400,7 +400,8 @@ async function agencyWork(clientId) {
   const [tasks, posts, reports] = await Promise.all([
     supabase.from('client_tasks').select('*').eq('client_id', clientId).eq('visible_to_client', true).limit(200),
     supabase.from('content_posts').select('planned_on, format, hook, status, posted_url').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
-    supabase.from('reports').select('report_type, snapshot_date, created_at').eq('client_id', clientId).order('created_at', { ascending: false }).limit(6)
+    // Phase 51: only reports the agency shared with the owner (an owner's own check-ups are shared at birth).
+    supabase.from('reports').select('report_type, snapshot_date, created_at').eq('client_id', clientId).eq('visible_to_client', true).order('created_at', { ascending: false }).limit(6)
   ]);
   const STATE = { todo: 'planned', doing: 'in progress', waiting: 'waiting on you', done: 'done' };
   const recentDone = (t) => t.status === 'done' && t.completed_at && Date.now() - Date.parse(t.completed_at) < 30 * 86400000;
