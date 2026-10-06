@@ -432,12 +432,25 @@
                     try {
                         let r;
                         if (isNew) r = await EL.api(`/api/clients/${encodeURIComponent(ctx.clientId)}/tasks`, { method: 'POST', body: { ...body, ...(ctx.source ? { source: ctx.source } : {}) } });
-                        else r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body });
+                        else r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body: { ...body, baseUpdatedAt: t.updatedAt || null } });
                         EL.closeDrawer();
                         const key = r && r.task && r.task.key;
                         EL.toast(isNew ? `${key ? key + ' a' : 'A'}dded to ${ctx.clientName || 'the client'}’s board.` : 'Saved. Everyone on this client sees the change.');
                         if (ctx.onSaved) ctx.onSaved();
-                    } catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; $('tk-save').disabled = false; }
+                    } catch (err) {
+                        $('tk-save').disabled = false;
+                        const note = $('tk-note');
+                        note.className = 'ws-note is-bad';
+                        if (err.code === 'task_conflict' && err.data && err.data.task) {
+                            // Someone saved since this opened (phase 53). Nothing was written; they choose.
+                            const theirs = err.data.task;
+                            note.innerHTML = `${esc(err.message)} Your edits are still here. <button class="ws-btn is-sm" type="button" id="tk-mine">Save mine over theirs</button> <button class="ws-btn is-sm is-quiet" type="button" id="tk-theirs">Show theirs instead</button>`;
+                            $('tk-mine').addEventListener('click', () => { t.updatedAt = theirs.updatedAt; $('tk-save').click(); });
+                            $('tk-theirs').addEventListener('click', () => { t = { ...t, ...theirs }; draw(); });
+                            return;
+                        }
+                        note.textContent = err.message;
+                    }
                 });
                 if (!isNew) $('tk-del').addEventListener('click', async () => {
                     const b = $('tk-del');
@@ -532,13 +545,13 @@
             </div>`;
             if (step === 3) body += `<p class="el-muted">Can you connect their Facebook Page and Instagram now? Audits and lead searches work without it; daily numbers, monthly reports and Edge Meta AI need it.</p>
                 <div class="ws-form">${[['now', 'Connect now', 'You sign in with a Facebook account that manages their Page. You pick which Page goes under this client.'],
-                    ['owner', 'The owner will connect', 'They do it from their own portal after you invite them in the next step.'],
+                    ['owner', 'The owner will connect', 'They do it from their Edge Meta AI app after you invite them in the next step.'],
                     ['later', 'Later', 'It stays on this client’s setup list.']].map(([k, t, s]) =>
                     `<button type="button" class="ws-option" data-meta="${k}" aria-pressed="${draft.meta === k}"><span class="radio"></span><span><b>${t}</b><span>${s}</span></span></button>`).join('')}</div>`;
             if (step === 4) body += `<div class="ws-form">
                 <div><label for="ac-team">Teammates on this client</label><input id="ac-team" value="${esc(draft.teamText || '')}" placeholder="colleague@agency.com, another@agency.com"><div class="ws-hint">They can open this client, see its board and start work under it. You are its owner.</div></div>
                 <div class="ws-form two">
-                    <div><label for="ac-owner">Owner’s email, for their portal</label><input id="ac-owner" type="email" value="${esc(draft.owner)}" placeholder="Optional"></div>
+                    <div><label for="ac-owner">Business owner’s email, for Edge Meta AI</label><input id="ac-owner" type="email" value="${esc(draft.owner)}" placeholder="Optional"></div>
                     <div><label for="ac-owner-name">Owner’s name</label><input id="ac-owner-name" value="${esc(draft.ownerName)}" placeholder="Optional"></div>
                 </div>
                 <div class="ws-hint">The owner gets their own login for this business only: their reports in plain words, their numbers, and the to-dos you share with them. Never your costs, keys or other clients.</div>

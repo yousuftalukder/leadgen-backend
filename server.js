@@ -12605,9 +12605,32 @@ app.patch('/api/clients/:id', async (req, res) => {
         if (patch.name === null) delete patch.name;
         const { data, error } = await supabase.from('clients').update(patch).eq('id', c.id).select().maybeSingle();
         if (error) throw error;
+        if (patch.archived !== undefined && !!patch.archived !== !!c.archived) await clientArchived(c.id, !!patch.archived);
         res.json({ client: { ...data, access: c.access } });
     } catch (err) { sendErr(res, err); }
 });
+
+/**
+ * What archiving a client stops, and unarchiving starts again (phase 53).
+ * Before, an archived client kept its scheduled reports running and spending,
+ * and Edge Meta AI kept reading its Meta twice a day. Schedules paused here are
+ * marked, so unarchiving resumes only those — never one the team paused itself.
+ */
+async function clientArchived(clientId, archived) {
+    const now = new Date().toISOString();
+    if (archived) {
+        const { error } = await supabase.from('schedules').update({ paused: true, last_status: 'archived', updated_at: now })
+            .eq('client_id', clientId).eq('paused', false);
+        if (error) logger.warn('archive_schedules_failed', { clientId, message: error.message });
+    } else {
+        const { error } = await supabase.from('schedules').update({ paused: false, last_status: null, updated_at: now })
+            .eq('client_id', clientId).eq('paused', true).eq('last_status', 'archived');
+        if (error) logger.warn('unarchive_schedules_failed', { clientId, message: error.message });
+    }
+    const { error: xe } = await supabase.from('xp_clients').update({ is_active: !archived }).eq('id', clientId);
+    if (xe && !missingTable(xe)) logger.warn('archive_xp_failed', { clientId, message: xe.message });
+    logger.info(archived ? 'client_archived' : 'client_unarchived', { clientId });
+}
 
 app.delete('/api/clients/:id', async (req, res) => {
     try {
@@ -13070,6 +13093,18 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
         const c = t ? await clientAccess(ctx.user.id, t.client_id, 'editor') : null;
         if (!t || !c) return res.status(404).json({ error: 'Task not found, or you cannot edit it.' });
 
+        // Phase 53: two people editing one task. The editor sends the version it opened (baseUpdatedAt);
+        // if someone saved since, nothing is written and the page is handed the newer task to choose from,
+        // instead of the later save silently wiping out the earlier one.
+        const base = req.body?.baseUpdatedAt ? String(req.body.baseUpdatedAt) : null;
+        const current = t.updated_at || t.created_at;
+        const stale = async () => {
+            const fresh = (await loadTask(t.id)) || t;
+            res.status(409).json({ error: 'Someone else saved this task while you had it open.', code: 'task_conflict',
+                task: taskView(fresh, await peopleById([fresh.assignee_user_id]), await taskCommentCounts([fresh.id]), c.name) });
+        };
+        if (base && current && Date.parse(base) !== Date.parse(current)) return stale();
+
         const now = new Date().toISOString();
         const patch = { ...cleanTaskBody(req.body || {}), ...(await resolveAssignee(req.body?.assignee, c)), updated_at: now };
         if (patch.status && patch.status !== t.status) {
@@ -13080,9 +13115,14 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
         const forClient = patch.assigned_to_client !== undefined ? patch.assigned_to_client : t.assigned_to_client;
         if (forClient) patch.visible_to_client = true;
 
-        const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
+        // Compare-and-set: the row is written only if nobody saved it since it was read here.
+        let upd = supabase.from('client_tasks').update(patch).eq('id', t.id);
+        if (base && t.updated_at) upd = upd.eq('updated_at', t.updated_at);
+        const { data, error } = await upd.select().maybeSingle();
         if (error) { if (missing48(error)) return migration48(res); throw error; }
+        if (!data) return stale();
         if (patch.notes !== undefined) await linkTaskMedia(data, [data.notes]);
+        await syncPostFromTask(data, t.status).catch(e => logger.warn('post_sync_failed', { taskId: t.id, message: e.message }));
         res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id]), c.name) });
     } catch (err) { sendErr(res, err); }
 });
@@ -13452,8 +13492,10 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         if (!staffOnly(ctx, res)) return;
-        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
-        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        // Phase 53: anyone on the team who can edit the client invites its business owner, not only the
+        // account lead — the person running the client day to day is usually the one who has the email.
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
         const email = String(req.body?.email || '').trim().toLowerCase();
         if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter the owner’s email address.' });
         const name = oneLine(req.body?.name, 80) || null;
@@ -13598,8 +13640,8 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         if (!staffOnly(ctx, res)) return;
-        const c = await clientAccess(ctx.user.id, req.params.id, 'owner');
-        if (!c) return res.status(404).json({ error: 'Client not found, or you are not its owner.' });
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
         const userId = String(req.body?.userId || '');
         if (!UUID_RE.test(userId)) return res.status(400).json({ error: 'Choose the owner login.' });
         const { data: u } = await supabase.from('app_users').select('id, email, role, is_active').eq('id', userId).maybeSingle();
@@ -15335,8 +15377,31 @@ const MERGE_TABLES = [
     // phase 32: a merged client keeps its board and the talk on it
     'client_tasks', 'client_task_comments',
     // phase 48: the pictures in them (the files keep their path; the row says whose they are)
-    'client_task_media'
+    'client_task_media',
+    // phase 53: the content calendar and its picks, and the assistant's chats (they were left behind)
+    'content_posts', 'content_picks', 'xp_ai_conversations'
 ];
+/**
+ * Tables with one row per (client, something): a plain re-point would collide
+ * where both records already hold that something. Each row moves on its own;
+ * one the target already has stays with the archived record, which keeps it.
+ */
+const MERGE_KEYED = ['content_topics', 'lead_pipeline', 'content_profiles'];
+async function mergeKeyed(table, fromId, intoId) {
+    const { data, error } = await supabase.from(table).select('*').eq('client_id', fromId);
+    if (error) { if (missingTable(error)) return { moved: 0, kept: 0 }; throw error; }
+    let moved = 0, kept = 0;
+    for (const row of (data || [])) {
+        // content_profiles is keyed by client_id itself: the target's own profile wins.
+        let q = supabase.from(table).update({ client_id: intoId }).eq('client_id', fromId);
+        q = row.id !== undefined ? q.eq('id', row.id) : q;
+        const { error: e } = await q;
+        if (!e) moved += 1;
+        else if (e.code === '23505') kept += 1;
+        else throw e;
+    }
+    return { moved, kept };
+}
 
 app.post('/api/clients/:id/merge', async (req, res) => {
     try {
@@ -15348,7 +15413,7 @@ app.post('/api/clients/:id/merge', async (req, res) => {
         const dry = String(req.query.dry || req.body?.dry || '') === '1';
 
         const counts = {};
-        for (const t of MERGE_TABLES) {
+        for (const t of [...MERGE_TABLES, ...MERGE_KEYED]) {
             const { count } = await supabase.from(t).select('*', { count: 'exact', head: true }).eq('client_id', from.id);
             counts[t] = count || 0;
         }
@@ -15363,6 +15428,12 @@ app.post('/api/clients/:id/merge', async (req, res) => {
             if (!counts[t]) continue;
             const { error } = await supabase.from(t).update({ client_id: into.id }).eq('client_id', from.id);
             if (error) throw error;
+        }
+        const keptBehind = {};
+        for (const t of MERGE_KEYED) {
+            if (!counts[t]) continue;
+            const r = await mergeKeyed(t, from.id, into.id);
+            if (r.kept) keptBehind[t] = r.kept;
         }
         // Links and members are keyed by (client, x): upsert into the target,
         // then clear the source, so a lead or a person already on both does not
@@ -15393,9 +15464,21 @@ app.post('/api/clients/:id/merge', async (req, res) => {
             archived: true,
             notes: `${from.notes ? from.notes + '\n\n' : ''}Merged into "${into.name}" (${into.id}) on ${stamp}.`
         }).eq('id', from.id);
+        await clientArchived(from.id, true);
 
-        logger.info('client_merged', { userId: ctx.user.id, from: from.id, into: into.id, counts });
-        res.json({ success: true, into: { id: into.id, name: into.name }, from: { id: from.id, name: from.name }, counts });
+        // Edge Meta AI's copy of the numbers is filed by business and by Meta account, so it cannot be
+        // re-pointed row by row. The connections moved above; the old copy goes (its chats moved too) and
+        // the merged business reads its history again from Meta, which is where it came from.
+        let reread = false;
+        if (counts.meta_connections) {
+            const p = await xp.purge(from.id).catch(e => ({ error: e.message }));
+            if (p && p.error) logger.warn('merge_xp_purge_failed', { from: from.id, message: p.error });
+            Promise.resolve().then(() => xp.kickoff(into.id, 'merge', { force: true })).catch(e => logger.warn('merge_xp_kickoff_failed', { into: into.id, message: e.message }));
+            reread = true;
+        }
+
+        logger.info('client_merged', { userId: ctx.user.id, from: from.id, into: into.id, counts, keptBehind });
+        res.json({ success: true, into: { id: into.id, name: into.name }, from: { id: from.id, name: from.name }, counts, keptBehind, reread });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -16349,6 +16432,42 @@ function contentPostOwnerView(p) {
     };
 }
 
+/** Who makes an approved post: a staff member who can still edit the client, or nobody. */
+async function contentPostAssignee(p) {
+    const candidates = [];
+    if (p.report_id) {
+        const { data: r } = await supabase.from('reports').select('user_id').eq('id', p.report_id).maybeSingle();
+        if (r && r.user_id) candidates.push(r.user_id);
+    }
+    if (p.pick_id) {
+        const { data: k } = await supabase.from('content_picks').select('created_by').eq('id', p.pick_id).maybeSingle();
+        if (k && k.created_by) candidates.push(k.created_by);
+    }
+    const { data: c } = await supabase.from('clients').select('owner_user_id').eq('id', p.client_id).maybeSingle();
+    if (c && c.owner_user_id) candidates.push(c.owner_user_id);
+    for (const id of candidates) {
+        if ((await userRole(id)) === 'client') continue;
+        if (await clientAccess(id, p.client_id, 'editor')) return id;
+    }
+    return null;
+}
+
+/**
+ * The task made for a post, moved on the board: the post follows (phase 53).
+ * Done means made; reopened means approved again. A post already posted, or one
+ * the owner sent back, is left alone — the board does not overrule them.
+ */
+async function syncPostFromTask(task, before) {
+    const m = /^post:([0-9a-f-]{36})$/i.exec(String(task.source_key || ''));
+    if (!m || task.status === before) return;
+    const now = new Date().toISOString();
+    if (task.status === 'done') {
+        await supabase.from('content_posts').update({ status: 'made', updated_at: now }).eq('id', m[1]).eq('status', 'approved');
+    } else if (before === 'done') {
+        await supabase.from('content_posts').update({ status: 'approved', updated_at: now }).eq('id', m[1]).eq('status', 'made');
+    }
+}
+
 /** Approving a post puts "make it" on the team's board, once. */
 async function contentPostTask(p, byUserId) {
     if (!p.client_id || p.task_id) return p.task_id || null;
@@ -16359,12 +16478,15 @@ async function contentPostTask(p, byUserId) {
     const b = p.brief || {};
     const due = new Date(p.planned_on + 'T00:00:00Z'); due.setUTCDate(due.getUTCDate() - 2);
     const today = new Date().toISOString().slice(0, 10);
+    // Phase 53: the task goes to someone. Whoever planned the post (the plan's or the pick's author)
+    // if they are still on the team, else the client's account lead; never the business owner.
+    const assignee = await contentPostAssignee(p);
     const notes = [b.topic ? `Topic: ${b.topic}` : null, b.concept, b.shot ? 'Shot: ' + b.shot : null, (b.tools || []).length ? 'Tools: ' + b.tools.join(', ') : null, (b.script || []).length ? 'Script:\n' + b.script.map((x, i) => `${i + 1}. ${x}`).join('\n') : null, p.caption ? 'Caption:\n' + p.caption : null]
         .filter(Boolean).join('\n\n').slice(0, 4000);
     const { data, error } = await supabase.from('client_tasks').insert([{
         client_id: p.client_id, title: oneLine(`Make the ${String(p.format || 'post').toLowerCase()}: ${p.hook || 'planned post'}`, 300),
         notes, status: 'todo', due_date: due.toISOString().slice(0, 10) < today ? today : due.toISOString().slice(0, 10),
-        labels: ['Content'], checklist: [], assignee_user_id: null, assigned_to_client: false, visible_to_client: false,
+        labels: ['Content'], checklist: [], assignee_user_id: assignee, assigned_to_client: false, visible_to_client: false,
         source_type: p.report_id ? 'report' : null, source_id: p.report_id || null, source_key: key, source_label: `Content plan · ${docDay(p.planned_on + 'T00:00:00Z')}`,
         position: await endOfColumn(p.client_id, 'todo'), created_by: byUserId || null
     }]).select('id').maybeSingle();

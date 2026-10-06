@@ -2589,9 +2589,13 @@ test('a card moved to Done is stamped and goes to the bottom of Done; moved back
 });
 
 section('\nphase 32: the owner\'s portal, opened by the agency');
-test('only the client\'s owner or an admin can invite its owner; a team email is refused', async () => {
-    const e = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-emp', body: { email: 'owner@kitesurf.test' } });
-    assert.strictEqual(e.statusCode, 404, 'an editor is not the client\'s owner');
+test('only someone who can edit the client invites its owner; a team email is refused', async () => {
+    // Phase 53: editors invite too. Someone who cannot edit this client cannot.
+    const access = await call('GET', `/api/clients/${state.T}`, { token: 't-emp2' });
+    if (access.statusCode !== 200 || !['owner', 'admin', 'editor'].includes(access.body.client.access)) {
+        const e = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-emp2', body: { email: 'owner@kitesurf.test' } });
+        assert.strictEqual(e.statusCode, 404, 'someone who cannot edit the client invited its owner');
+    }
     const team = await call('POST', `/api/clients/${state.T}/portal-invite`, { token: 't-admin', body: { email: EMP.email } });
     assert.strictEqual(team.statusCode, 400);
     assert.ok(/team/.test(team.body.error), team.body.error);
@@ -3356,6 +3360,19 @@ test('the owner approves one (it goes on the board), asks for changes on another
     const owner = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-client', body: { status: 'posted' } });
     assert.strictEqual(owner.statusCode, 403, 'an owner reached the staff route');
 });
+test('phase 53: the approved post\'s task goes to the plan\'s author, and the board moves the post along', async () => {
+    const [a] = state.cpPosts;
+    const task = tbl('client_tasks').find(t => t.source_key === 'post:' + a.id);
+    const plan = tbl('reports').find(r => r.id === state.cpReport);
+    assert.ok(task.assignee_user_id, 'the task to make an approved post went to nobody');
+    assert.strictEqual(task.assignee_user_id, plan.user_id, 'the task did not go to whoever made the plan');
+    const done = await call('PATCH', `/api/tasks/${task.id}`, { token: 't-emp', body: { status: 'done' } });
+    assert.strictEqual(done.statusCode, 200, JSON.stringify(done.body));
+    assert.strictEqual(tbl('content_posts').find(x => x.id === a.id).status, 'made', 'done on the board did not mark the post made');
+    const back = await call('PATCH', `/api/tasks/${task.id}`, { token: 't-emp', body: { status: 'doing' } });
+    assert.strictEqual(back.statusCode, 200);
+    assert.strictEqual(tbl('content_posts').find(x => x.id === a.id).status, 'approved', 'reopening the task left the post marked made');
+});
 test('posted with its link: the task closes, and the monthly report says how the planned posts did', async () => {
     const [a] = state.cpPosts;
     const r = await call('PATCH', `/api/content-posts/${a.id}`, { token: 't-emp', body: { status: 'posted', postedUrl: 'https://www.instagram.com/p/PLAN123/' } });
@@ -3973,6 +3990,73 @@ test('the owner app: refusals take the whole screen with a way out, the menus si
     const sw = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
     const shell = JSON.parse(sw.match(/const SHELL = (\[[\s\S]*?\]);/)[1].replace(/'/g, '"'));
     assert.strictEqual(new Set(shell).size, shell.length, 'a duplicate in the shell list makes the whole precache fail');
+});
+
+section('\nphase 53: the agency\'s workflow');
+test('two people edit one task: the later save is refused with the newer version, never silently over it', async () => {
+    const mk = await call('POST', `/api/clients/${state.C}/tasks`, { token: 't-emp', body: { title: 'Shoot the brunch menu' } });
+    assert.strictEqual(mk.statusCode, 201, JSON.stringify(mk.body));
+    const opened = mk.body.task;
+    await new Promise(r => setTimeout(r, 5));
+    const first = await call('PATCH', `/api/tasks/${opened.id}`, { token: 't-admin', body: { notes: 'Use the window light', baseUpdatedAt: opened.updatedAt } });
+    assert.strictEqual(first.statusCode, 200, JSON.stringify(first.body));
+    const second = await call('PATCH', `/api/tasks/${opened.id}`, { token: 't-emp', body: { notes: 'Bring the ring light', baseUpdatedAt: opened.updatedAt } });
+    assert.strictEqual(second.statusCode, 409, 'a stale save went through: ' + JSON.stringify(second.body));
+    assert.strictEqual(second.body.code, 'task_conflict');
+    assert.strictEqual(second.body.task.notes, 'Use the window light', 'the refusal did not hand back the newer version');
+    assert.strictEqual(tbl('client_tasks').find(t => t.id === opened.id).notes, 'Use the window light', 'the stale save was written');
+    const mine = await call('PATCH', `/api/tasks/${opened.id}`, { token: 't-emp', body: { notes: 'Bring the ring light', baseUpdatedAt: second.body.task.updatedAt } });
+    assert.strictEqual(mine.statusCode, 200, 'choosing to save over the newer version did not work');
+    const drag = await call('PATCH', `/api/tasks/${opened.id}`, { token: 't-emp', body: { status: 'doing' } });
+    assert.strictEqual(drag.statusCode, 200, 'a move on the board (no version sent) was refused');
+});
+test('archiving a client pauses its schedules and its Meta reads; unarchiving resumes only what archiving paused', async () => {
+    const mk = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Seasonal Kiosk' } });
+    const K = mk.body.client.id;
+    const now = new Date().toISOString();
+    const live = { id: crypto.randomUUID(), user_id: ADMIN.id, client_id: K, job_type: 'ig_report', engine: 'report', input: {}, next_run_at: now, paused: false };
+    const mine = { id: crypto.randomUUID(), user_id: ADMIN.id, client_id: K, job_type: 'ig_report', engine: 'report', input: {}, next_run_at: now, paused: true, last_status: 'done' };
+    tbl('schedules').push(live, mine);
+    tbl('xp_clients').push({ id: K, client_name: 'Seasonal Kiosk', is_active: true });
+    const off = await call('PATCH', `/api/clients/${K}`, { token: 't-admin', body: { archived: true } });
+    assert.strictEqual(off.statusCode, 200, JSON.stringify(off.body));
+    assert.strictEqual(tbl('schedules').find(x => x.id === live.id).paused, true, 'an archived client kept its schedule running');
+    assert.strictEqual(tbl('xp_clients').find(x => x.id === K).is_active, false, 'Edge Meta AI kept reading an archived client');
+    const on = await call('PATCH', `/api/clients/${K}`, { token: 't-admin', body: { archived: false } });
+    assert.strictEqual(on.statusCode, 200);
+    assert.strictEqual(tbl('schedules').find(x => x.id === live.id).paused, false, 'unarchiving did not resume the schedule');
+    assert.strictEqual(tbl('schedules').find(x => x.id === mine.id).paused, true, 'unarchiving resumed a schedule the team had paused itself');
+    assert.strictEqual(tbl('xp_clients').find(x => x.id === K).is_active, true);
+});
+test('a merge carries the calendar, picks, topics, pipeline and assistant chats', async () => {
+    const A = (await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Twin Bakery' } })).body.client.id;
+    const B = (await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Twin Bakery (dup)' } })).body.client.id;
+    const id = () => crypto.randomUUID();
+    const post = { id: id(), client_id: B, status: 'idea', planned_on: '2026-11-02' };
+    const pick = { id: id(), client_id: B, status: 'shortlisted' };
+    const topic = { id: id(), client_id: B, title: 'Sourdough' };
+    const lead = { id: id(), client_id: B, platform: 'instagram', username: 'flourpower', kind: 'influencer', stage: 'new' };
+    const chat = { id: id(), client_id: B, title: 'Weekend sales' };
+    tbl('content_posts').push(post); tbl('content_picks').push(pick); tbl('content_topics').push(topic);
+    tbl('lead_pipeline').push(lead); tbl('xp_ai_conversations').push(chat);
+    const dry = await call('POST', `/api/clients/${A}/merge`, { token: 't-admin', body: { fromId: B, dry: '1' } });
+    assert.strictEqual(dry.statusCode, 200, JSON.stringify(dry.body));
+    for (const t of ['content_posts', 'content_picks', 'content_topics', 'lead_pipeline', 'xp_ai_conversations']) assert.strictEqual(dry.body.counts[t], 1, t + ' is not counted by the merge');
+    const r = await call('POST', `/api/clients/${A}/merge`, { token: 't-admin', body: { fromId: B } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    for (const [t, row] of [['content_posts', post], ['content_picks', pick], ['content_topics', topic], ['lead_pipeline', lead], ['xp_ai_conversations', chat]]) {
+        assert.strictEqual(tbl(t).find(x => x.id === row.id).client_id, A, t + ' was left on the archived record');
+    }
+    assert.strictEqual(tbl('clients').find(c => c.id === B).archived, true);
+});
+test('an editor on the team invites the business owner, and the screens call the team\'s lead "Account lead"', async () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const ws = fs.readFileSync(path.join(FRONT, 'workspace.html'), 'utf8');
+    assert.ok(/'Account lead'/.test(ws) && !/<h2>Owner portal<\/h2>/.test(ws), 'the two meanings of "Owner" are still mixed');
+    assert.ok(/\$\{canEdit\(\) \? `<div class="ws-form">\s*<div class="ws-form two"><div><label for="o-email">/.test(ws), 'editors are not offered the invite');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const route = src.slice(src.indexOf("app.post('/api/clients/:id/portal-invite'"), src.indexOf("app.post('/api/clients/:id/portal-invite'") + 900);
+    assert.ok(/clientAccess\(ctx\.user\.id, req\.params\.id, 'editor'\)/.test(route), 'the invite still needs the account lead');
 });
 
 (async () => {
