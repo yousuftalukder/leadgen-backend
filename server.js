@@ -6359,15 +6359,57 @@ app.patch('/api/admin/users/:id', async (req, res) => {
     } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+/**
+ * Phase 51: what a person's account carries that must outlive them. Every one of these is filed
+ * under the person with ON DELETE CASCADE, so deleting the login used to delete the clients they
+ * made — with every task, post, schedule and owner login under those clients — and their Meta
+ * connections, schedules, jobs and scraped posts on every client. They now move to the admin who
+ * deletes the account (decided by the agency: "clients go to admin"). Personal keys, usage counters
+ * and grants are the person's own and go with them.
+ */
+const HAND_OVER = [
+    ['clients', 'owner_user_id'], ['schedules', 'user_id'], ['meta_connections', 'user_id'], ['report_shares', 'user_id'],
+    ['jobs', 'user_id'], ['posts', 'user_id'], ['competitor_sets', 'user_id'], ['campaigns', 'user_id'],
+    ['content_plan_notes', 'user_id'], ['ai_conversations', 'user_id'], ['reports', 'user_id'],
+    ['fb_pages', 'user_id'], ['fb_page_posts', 'user_id'], ['fb_page_sets', 'user_id'], ['fb_groups', 'user_id'],
+    ['fb_group_sets', 'user_id'], ['fb_posts', 'user_id'], ['fb_demand_signals', 'user_id'], ['fb_suggestions', 'user_id'],
+    ['client_tasks', 'assignee_user_id']
+];
+async function handOverUser(fromId, toId) {
+    const moved = {};
+    for (const [table, col] of HAND_OVER) {
+        const { data, error } = await supabase.from(table).update({ [col]: toId }).eq(col, fromId).select('id');
+        if (!error) { if ((data || []).length) moved[table] = data.length; continue; }
+        if (missingTable(error)) continue;
+        if (error.code !== '23505') throw new Error(`Could not hand over ${table}: ${error.message}`);
+        // The admin already holds the same thing (the same Page connected, say): theirs is kept,
+        // this copy is the duplicate. Row by row, so only true duplicates go.
+        const { data: rows } = await supabase.from(table).select('id').eq(col, fromId);
+        let n = 0, dropped = 0;
+        for (const r of rows || []) {
+            const { error: e1 } = await supabase.from(table).update({ [col]: toId }).eq('id', r.id);
+            if (!e1) { n += 1; continue; }
+            if (e1.code !== '23505') throw new Error(`Could not hand over ${table}: ${e1.message}`);
+            await supabase.from(table).delete().eq('id', r.id); dropped += 1;
+        }
+        if (n || dropped) moved[table] = n + (dropped ? ` (+${dropped} duplicate${dropped === 1 ? '' : 's'} dropped)` : '');
+    }
+    return moved;
+}
+
 app.delete('/api/admin/users/:id', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
         if (req.params.id === ctx.user.id) return res.status(400).json({ error: 'You cannot delete yourself.' });
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Not a user id.' });
+        // Phase 51: hand everything over first; if that fails, nothing is deleted.
+        const moved = await handOverUser(req.params.id, ctx.user.id);
+        logger.info('user_handed_over', { from: req.params.id, to: ctx.user.id, moved });
         await supabase.auth.admin.deleteUser(req.params.id);
         await supabase.from('app_users').delete().eq('id', req.params.id);
         invalidateAuth(req.params.id);
         invalidateEngineAccess(req.params.id);
-        res.json({ success: true });
+        res.json({ success: true, movedTo: ctx.user.id, moved });
     } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -12297,6 +12339,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * workers with no request in hand, so the role has to be looked up here.
  */
 const _roleCache = new Map();
+/** Is this login the business owner of that client (its own record, or invited onto it)? */
+async function isOwnerOf(userId, clientId) {
+    const { data: c } = await supabase.from('clients').select('owner_user_id, archived').eq('id', clientId).maybeSingle();
+    if (!c || c.archived) return false;
+    if (c.owner_user_id === userId) return true;
+    const { data: m } = await supabase.from('client_members').select('user_id').eq('client_id', clientId).eq('user_id', userId).maybeSingle();
+    return !!m;
+}
+
 async function userRole(userId) {
     const hit = _roleCache.get(userId);
     if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
@@ -12310,13 +12361,20 @@ async function clientAccess(userId, clientId, need = 'viewer') {
     if (!userId || !clientId || !UUID_RE.test(String(clientId))) return null;
     const { data: c } = await supabase.from('clients').select('*').eq('id', clientId).maybeSingle();
     if (!c) return null;
+    // Phase 51: this is the agency's door. A business owner (role client) is a member of their client
+    // record so the owner routes can find it, but never passes here: through the staff routes that
+    // membership exposed the team's emails, job errors and costs, internal notes, and let an owner
+    // rename or archive the record, run or delete schedules and revoke share links. Owners have their
+    // own routes (/api/client/*, /api/xp/*), which resolve their business with ownClientFor.
+    const role = await userRole(userId);
+    if (role === 'client') return null;
     if (c.owner_user_id === userId) return { ...c, access: 'owner' };
     // An admin reaches every client. Without this, "admin creates the client
     // and assigns an employee" only worked when the admin happened to be the
     // one who created it — a client an employee made was untouchable by the
     // person whose job is to hand work out. requireEngine already lets admins
     // through every engine; this is the same rule applied to clients.
-    if (await userRole(userId) === 'admin') return { ...c, access: 'admin' };
+    if (role === 'admin') return { ...c, access: 'admin' };
     if (need === 'owner') return null;
     const { data: m } = await supabase.from('client_members')
         .select('role').eq('client_id', clientId).eq('user_id', userId).maybeSingle();
@@ -12374,8 +12432,10 @@ async function ownClientFor(ctx) {
  */
 async function resolveClientId(req, ctx) {
     const raw = req.body?.clientId || req.body?.client_id || req.query?.client_id || null;
+    // An owner's work is always filed under their own business, whatever id the browser sent along
+    // (a client picked on this device by someone on the team, say).
+    if (ctx.profile?.role === 'client') return (await ownClientFor(ctx))?.id || null;
     if (!raw) {
-        if (ctx.profile?.role === 'client') return (await ownClientFor(ctx))?.id || null;
         const e = new Error('Choose a client first. Every run is filed under a business, and this one has nowhere to go.');
         e.statusCode = 400;
         e.code = 'client_required';
@@ -12408,6 +12468,9 @@ async function applyReportScope(req, ctx) {
 async function canReadReport(ctx, row) {
     if (!row) return false;
     if (row.user_id === ctx.user.id) return true;
+    // Phase 51: an owner reads a report about their business only once the agency shares it
+    // (visible_to_client). Competitor research, prospect lists and drafts stay with the team.
+    if (ctx.profile?.role === 'client') return row.visible_to_client === true && !!row.client_id && await isOwnerOf(ctx.user.id, row.client_id);
     if (ctx.profile?.role === 'admin') return true;
     if (row.client_id && await clientAccess(ctx.user.id, row.client_id, 'viewer')) return true;
     return false;
@@ -12428,6 +12491,7 @@ function cleanClientBody(b = {}) {
 app.get('/api/clients', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;                  // phase 51: the agency's list; an owner lives in the app
         const includeArchived = String(req.query.archived || '') === '1';
         const { data: owned } = await supabase.from('clients').select('*')
             .eq('owner_user_id', ctx.user.id).order('created_at', { ascending: false });
@@ -12485,6 +12549,7 @@ app.get('/api/clients', async (req, res) => {
 app.post('/api/clients', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;                  // phase 51: the agency's list; an owner lives in the app
         const body = cleanClientBody(req.body);
         if (!body.name) return res.status(400).json({ error: 'Client name is required.' });
         const row = { owner_user_id: ctx.user.id };
@@ -12552,7 +12617,7 @@ app.get('/api/clients/:id/timeline', async (req, res) => {
         const c = await clientAccess(ctx.user.id, req.params.id, 'viewer');
         if (!c) return res.status(404).json({ error: 'Client not found.' });
         const { data: reports } = await supabase.from('reports')
-            .select('id, user_id, platform, report_type, target_handle, competitor_handles, fb_group_names, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, credits_estimate, source_report_ids')
+            .select('id, user_id, platform, report_type, target_handle, competitor_handles, fb_group_names, fb_page_names, audit_mode, grade, score, engagement_rate, posts_analyzed, snapshot_date, created_at, ai_summary, credits_estimate, source_report_ids, visible_to_client')
             .eq('client_id', c.id).order('created_at', { ascending: false }).limit(300);
         const { data: jobs } = await supabase.from('jobs')
             .select('id, type, engine, status, progress, credits_estimate, created_at, finished_at, error, result_report_id')
@@ -13276,12 +13341,13 @@ app.post('/api/public/owner-code', ownerCodeLimit, async (req, res) => {
         const { data: recent, error: re } = await supabase.from('owner_login_codes').select('created_at').eq('email', email).gte('created_at', since).order('created_at', { ascending: false }).limit(20);
         if (re) { if (ownerCodesMissing(re)) return res.status(503).json({ error: 'Sign-in codes need the phase-49 database update.', code: 'migration_required' }); throw re; }
         if ((recent || []).length && Date.now() - Date.parse(recent[0].created_at) < OWNER_CODE_GAP_MS) return res.json(generic);
-        if ((recent || []).length >= OWNER_CODE_PER_HOUR) return res.status(429).json({ error: 'Too many codes for this email. Try again in an hour.' });
+        // Phase 51: the same answer as any other address, so the limit cannot tell anyone which emails have logins.
+        if ((recent || []).length >= OWNER_CODE_PER_HOUR) return res.json(generic);
 
         const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
         const now = Date.now();
         const { error } = await supabase.from('owner_login_codes').insert([{
-            email, user_id: u.id, code_hash: ownerCodeHash(code, u.id),
+            email, user_id: u.id, code_hash: ownerCodeHash(code, u.id), attempts: 0,
             expires_at: new Date(now + OWNER_CODE_TTL_MS).toISOString(), created_at: new Date(now).toISOString()
         }]);
         if (error) throw error;
@@ -13310,12 +13376,18 @@ app.post('/api/public/owner-verify', ownerCodeLimit, async (req, res) => {
         if (error) { if (ownerCodesMissing(error)) return res.status(503).json({ error: 'Sign-in codes need the phase-49 database update.', code: 'migration_required' }); throw error; }
         const row = (rows || [])[0];
         if (!row || row.attempts >= OWNER_CODE_TRIES) return wrong();
+        // Phase 51: every try is counted BEFORE the code is compared, and only if the count is still the
+        // one just read (compare-and-set). Guesses sent at the same moment can no longer share one count
+        // and slip past the five-try limit: all but one of them find the count moved and are refused.
+        const { data: claimed } = await supabase.from('owner_login_codes').update({ attempts: (row.attempts || 0) + 1 })
+            .eq('id', row.id).eq('attempts', row.attempts || 0).is('used_at', null).select('id');
+        if (!(claimed || []).length) return wrong();
         const want = Buffer.from(row.code_hash, 'hex'), got = Buffer.from(ownerCodeHash(code, row.user_id), 'hex');
-        if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) {
-            await supabase.from('owner_login_codes').update({ attempts: (row.attempts || 0) + 1 }).eq('id', row.id);
-            return wrong();
-        }
-        await supabase.from('owner_login_codes').update({ used_at: new Date().toISOString() }).eq('id', row.id);
+        if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return wrong();
+        // One use: only the request that marks it used goes on.
+        const { data: used } = await supabase.from('owner_login_codes').update({ used_at: new Date().toISOString() })
+            .eq('id', row.id).is('used_at', null).select('id');
+        if (!(used || []).length) return wrong();
         const { data: u } = await supabase.from('app_users').select('id, role, is_active').eq('id', row.user_id).maybeSingle();
         if (!u || u.role !== 'client' || u.is_active === false) return wrong();
         const { data: gl, error: ge } = await supabase.auth.admin.generateLink({ type: 'magiclink', email });
@@ -13791,10 +13863,14 @@ app.get('/api/meta/oauth/start', async (req, res) => {
     try {
         const ctx = await requireEngine(req, res, 'meta_owned'); if (!ctx) return;
         if (!metaConfigured()) return res.status(503).json({ error: 'META_APP_ID / META_APP_SECRET are not set on the server.' });
-        let clientId = req.query.client_id ? (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null : null;
-        if (req.query.client_id && !clientId) return res.status(403).json({ error: 'No edit access to that client.' });
-        // A client account connects its own business; it is never asked which. (phase 30)
+        // A client account connects its own business; it is never asked which (phase 30), and an id
+        // the browser sent along is ignored rather than refused (phase 51).
+        let clientId = null;
         if (ctx.profile?.role === 'client') clientId = (await ownClientFor(ctx)).id;
+        else if (req.query.client_id) {
+            clientId = (await clientAccess(ctx.user.id, req.query.client_id, 'editor'))?.id || null;
+            if (!clientId) return res.status(403).json({ error: 'No edit access to that client.' });
+        }
 
         const state = crypto.randomBytes(24).toString('hex');
         const { error } = await supabase.from('meta_oauth_states').insert([{
@@ -20699,15 +20775,20 @@ app.get('/api/client/reports', async (req, res) => {
             ...(owned || []).map(c => c.id)
         ])].filter(Boolean);
 
-        const ors = [`user_id.eq.${ctx.user.id}`];
-        if (clientIds.length) ors.push(`client_id.in.(${clientIds.join(',')})`);
-
-        const { data, error } = await supabase.from('reports')
-            .select('id, report_type, platform, target_handle, snapshot_date, created_at, grade, score')
-            .or(ors.join(','))
-            .order('created_at', { ascending: false })
-            .limit(60);
-        if (error) throw error;
+        // Phase 51: their own check-ups, and what the agency shared with them — nothing else.
+        const cols = 'id, report_type, platform, target_handle, snapshot_date, created_at, grade, score';
+        const [mine, shared] = await Promise.all([
+            supabase.from('reports').select(cols).eq('user_id', ctx.user.id).order('created_at', { ascending: false }).limit(60),
+            clientIds.length
+                ? supabase.from('reports').select(cols).in('client_id', clientIds).eq('visible_to_client', true).order('created_at', { ascending: false }).limit(60)
+                : Promise.resolve({ data: [] })
+        ]);
+        if (mine.error) throw mine.error;
+        const seen = new Set();
+        const data = [...(mine.data || []), ...(shared.data || [])]
+            .filter(r => !seen.has(r.id) && seen.add(r.id))
+            .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+            .slice(0, 60);
 
         const TITLES = CLIENT_REPORT_TITLES;
 
@@ -20945,6 +21026,47 @@ app.get('/api/client/demand', async (req, res) => {
 });
 
 /** One report, said in owner language. Same authorisation rule as the vault. */
+/**
+ * Phase 51: share a report with the business owner, or take it back. Reports start private to the
+ * team — competitor research, prospect lists and drafts must not reach the owner just because they
+ * are filed under the business. The owner's own check-ups are always theirs.
+ */
+/** Whether the owner sees this report — for the toggle beside Share link on every report page. */
+app.get('/api/reports/:id/visibility', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Bad report id.' });
+        const { data: row, error } = await supabase.from('reports').select('id, client_id, visible_to_client').eq('id', req.params.id).maybeSingle();
+        if (error) return res.json({ id: req.params.id, clientId: null, visibleToClient: false, unavailable: true });
+        if (!row) return res.status(404).json({ error: 'Report not found.' });
+        const c = row.client_id ? await clientAccess(ctx.user.id, row.client_id, 'viewer') : null;
+        if (row.client_id && !c) return res.status(404).json({ error: 'Report not found.' });
+        res.json({ id: row.id, clientId: row.client_id || null, visibleToClient: row.visible_to_client === true, canEdit: !!(c && ['owner', 'admin', 'editor'].includes(c.access)) });
+    } catch (err) { sendErr(res, err); }
+});
+
+app.patch('/api/reports/:id/visibility', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!UUID_RE.test(String(req.params.id))) return res.status(400).json({ error: 'Bad report id.' });
+        const { data: row } = await supabase.from('reports').select('id, client_id, user_id, report_type').eq('id', req.params.id).maybeSingle();
+        if (!row) return res.status(404).json({ error: 'Report not found.' });
+        if (!row.client_id) return res.status(400).json({ error: 'File this report under a client first; then it can be shared with the owner.' });
+        const c = await clientAccess(ctx.user.id, row.client_id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Report not found, or you cannot edit its client.' });
+        const visible = req.body?.visible === true;
+        const { error } = await supabase.from('reports').update({ visible_to_client: visible }).eq('id', row.id);
+        if (error) {
+            if (/visible_to_client/.test(error.message || '')) return res.status(503).json({ error: 'Sharing reports needs the phase-51 database update. Run sql/schema-phase51.sql.', code: 'migration_required' });
+            throw error;
+        }
+        logger.info('report_visibility', { reportId: row.id, clientId: row.client_id, by: ctx.user.id, visible });
+        res.json({ id: row.id, visibleToClient: visible });
+    } catch (err) { sendErr(res, err); }
+});
+
 app.get('/api/client/report/:id', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;

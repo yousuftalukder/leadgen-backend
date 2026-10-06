@@ -239,7 +239,7 @@
         const { subject, result } = reportLine(r);
         const src = UI.sourceOf(r.report_type);
         return `<div class="ws-row is-link" data-open="${esc(r.id)}" role="button" tabindex="0"><span class="ws-sev ${src === 'meta' ? 'is-jade' : src === 'reports' ? 'is-gold' : ''}"></span>
-            <div class="ws-grow"><div class="ws-t">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</div><div class="ws-m">${esc([subject, UI.day(r.created_at), result].filter(Boolean).join(' · '))}</div></div>${UI.srcChip(src)}</div>`;
+            <div class="ws-grow"><div class="ws-t">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</div><div class="ws-m">${esc([subject, UI.day(r.created_at), result].filter(Boolean).join(' · '))}</div></div>${r.visible_to_client ? '<span class="el-chip is-jade" title="The owner sees this report in Edge Meta AI">Owner sees it</span>' : ''}${UI.srcChip(src)}</div>`;
     }
     function wireOpen(host) {
         host.querySelectorAll('[data-open]').forEach(el => {

@@ -781,7 +781,10 @@
         // ---------------------------------------------------------------
         _clients: null,
         clientId() {
-            const v = localStorage.getItem(CLIENT_KEY) || '';
+            // An owner is their business; a client picked on this device by the team is not theirs. (phase 51)
+            if (EL.me && EL.me.role === 'client') return null;
+            let v = '';
+            try { v = localStorage.getItem(CLIENT_KEY) || ''; } catch { /* private mode */ }
             return /^[0-9a-f-]{36}$/i.test(v) ? v : null;
         },
         setClientId(id) {
@@ -966,12 +969,39 @@
             if (!host || !reportId) return null;
             host.className = 'el-actions el-owner-only';
             host.innerHTML = `
+                <button class="el-btn el-mini" type="button" data-act="owner" hidden></button>
                 <button class="el-btn el-mini" type="button" data-act="share">🔗 Share link</button>
                 <button class="el-btn el-mini" type="button" data-act="schedule">⏱ Repeat on a schedule</button>
                 <span class="el-note" data-role="note"></span>
                 <div class="el-share-list" data-role="shares"></div>`;
             const note = host.querySelector('[data-role="note"]');
             const list = host.querySelector('[data-role="shares"]');
+
+            // Phase 51: a report reaches the business owner's app only once someone shares it here.
+            const ownerBtn = host.querySelector('[data-act="owner"]');
+            const drawOwner = (v) => {
+                ownerBtn.dataset.on = v ? '1' : '';
+                ownerBtn.textContent = v ? '✓ Shown in the owner’s app' : '👁 Share with the owner';
+                ownerBtn.title = v ? 'The owner sees this report in Edge Meta AI. Click to hide it again.' : 'Only your team sees this report. Click to show it in the owner’s Edge Meta AI.';
+                ownerBtn.classList.toggle('el-btn-go', !!v);
+            };
+            EL.api(`/api/reports/${encodeURIComponent(reportId)}/visibility`).then(v => {
+                if (!v || !v.clientId || v.unavailable) return;
+                drawOwner(v.visibleToClient);
+                ownerBtn.hidden = false;
+                ownerBtn.disabled = !v.canEdit;
+                ownerBtn.addEventListener('click', async () => {
+                    const want = ownerBtn.dataset.on !== '1';
+                    ownerBtn.disabled = true;
+                    try {
+                        const r = await EL.api(`/api/reports/${encodeURIComponent(reportId)}/visibility`, { method: 'PATCH', body: { visible: want } });
+                        drawOwner(r.visibleToClient);
+                        note.style.color = '#10b981';
+                        note.textContent = r.visibleToClient ? 'The owner now sees this report in their app.' : 'Hidden from the owner again.';
+                    } catch (err) { note.style.color = '#ef4444'; note.textContent = err.message; }
+                    finally { ownerBtn.disabled = false; }
+                });
+            }).catch(() => {});
 
             const renderShares = async () => {
                 try {

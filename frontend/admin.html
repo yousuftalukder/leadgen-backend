@@ -933,7 +933,7 @@
 
                 const del = row.querySelector('[data-del]');
                 if (del) del.addEventListener('click', async () => {
-                    if (!confirm('Delete this account? Their campaigns, leads and reports go with it.')) return;
+                    if (!confirm('Delete this account? Their clients, schedules, Meta connections, reports and assigned tasks move to you first; only their personal keys and login go.')) return;
                     say(note, 'Deleting…');
                     try {
                         await EL.api(`/api/admin/users/${id}`, { method: 'DELETE' });
