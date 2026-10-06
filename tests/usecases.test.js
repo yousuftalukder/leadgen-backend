@@ -34,7 +34,17 @@ const fs = require('fs');
 // AN IN-MEMORY POSTGREST
 // ===========================================================================
 const DB = {};
-const tbl = t => (t === 'leads_master' ? masterView() : t === 'leads' ? withComputed(DB.leads = DB.leads || []) : (DB[t] = DB[t] || []));
+const tbl = t => (t === 'leads_master' ? masterView() : t === 'leads' ? withComputed(DB.leads = DB.leads || []) : t === 'el_client_report_counts' ? reportCountsView() : (DB[t] = DB[t] || []));
+/** The phase-54 view: reports grouped by client and type. */
+function reportCountsView() {
+    const g = new Map();
+    for (const r of (DB.reports || [])) {
+        if (!r.client_id) continue;
+        const k = r.client_id + '|' + r.report_type;
+        g.set(k, { client_id: r.client_id, report_type: r.report_type, n: ((g.get(k) || {}).n || 0) + 1 });
+    }
+    return [...g.values()];
+}
 
 /** Generated columns, the way Postgres keeps them current (phase 40: kind_now). */
 function withComputed(rows) {
@@ -4057,6 +4067,70 @@ test('an editor on the team invites the business owner, and the screens call the
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
     const route = src.slice(src.indexOf("app.post('/api/clients/:id/portal-invite'"), src.indexOf("app.post('/api/clients/:id/portal-invite'") + 900);
     assert.ok(/clientAccess\(ctx\.user\.id, req\.params\.id, 'editor'\)/.test(route), 'the invite still needs the account lead');
+});
+
+section('\nphase 54: reliability and speed');
+test('the clients list counts reports in the database, past the 1,000-row cap', async () => {
+    const mk = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Busy Studio' } });
+    const B = mk.body.client.id;
+    for (let i = 0; i < 1203; i++) tbl('reports').push({ id: crypto.randomUUID(), user_id: ADMIN.id, client_id: B, report_type: i % 3 ? 'ig_audit' : 'monthly', created_at: new Date().toISOString() });
+    const r = await call('GET', '/api/clients', { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 200);
+    const row = r.body.clients.find(c => c.id === B);
+    assert.strictEqual(row.reports.total, 1203, 'the count stopped short: ' + row.reports.total);
+    assert.strictEqual(row.reports.byType.monthly, 401);
+    DB.reports = DB.reports.filter(x => x.client_id !== B);
+});
+test('My tasks still lists only clients the person can open, now in a handful of queries', async () => {
+    const r = await call('GET', '/api/my-tasks', { token: 't-emp' });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    for (const t of r.body.tasks) assert.ok(t.client && t.client.name, 'a task came back without its client');
+    const foreign = { id: crypto.randomUUID(), client_id: crypto.randomUUID(), title: 'Not yours', status: 'todo', assignee_user_id: EMP.id, created_at: new Date().toISOString() };
+    tbl('client_tasks').push(foreign);
+    const again = await call('GET', '/api/my-tasks', { token: 't-emp' });
+    assert.ok(!again.body.tasks.some(t => t.id === foreign.id), 'a task on a client the person cannot open was listed');
+});
+test('the twice-daily read is a slot: run once by whoever claims it first, and caught up after the server slept', async () => {
+    const X = require(path.join(__dirname, '..', 'xp'));
+    assert.deepStrictEqual(X.cronSlots('0 9,21 * * *'), { minute: 0, hours: [9, 21] });
+    assert.strictEqual(X.cronSlots('*/5 * * * *'), null, 'an unsupported schedule must fall back to node-cron');
+    assert.strictEqual(X.lastSlot('0 9,21 * * *', Date.parse('2026-10-06T10:40:00Z')), '2026-10-06T09:00:00.000Z');
+    assert.strictEqual(X.lastSlot('0 9,21 * * *', Date.parse('2026-10-06T08:59:00Z')), '2026-10-05T21:00:00.000Z');
+    DB.system_settings = (DB.system_settings || []).filter(r => r.key !== 'xp_cron_last_slot');
+    let runs = 0; const run = async () => { runs += 1; return { ok: true }; };
+    const late = Date.parse('2026-10-06T10:40:00Z');     // asleep at 09:00, woken at 10:40
+    const [a, b] = await Promise.all([X.tickSlot(late, run), X.tickSlot(late, run)]);
+    assert.strictEqual(runs, 1, 'the slot ran twice');
+    assert.ok(a.ran || b.ran, 'the missed 09:00 read was not caught up');
+    const again = await X.tickSlot(late + 5 * 60000, run);
+    assert.strictEqual(again.ran, false); assert.strictEqual(runs, 1, 'the same slot ran again five minutes later');
+    const evening = await X.tickSlot(Date.parse('2026-10-06T21:03:00Z'), run);
+    assert.strictEqual(evening.ran, true); assert.strictEqual(runs, 2);
+    assert.strictEqual(await X.claimSlot('2026-10-06T21:00:00.000Z'), false, 'a slot already run was claimed again');
+    // Two instances claiming the next slot at the same moment: the database lets exactly one through.
+    const both = await Promise.all([X.claimSlot('2026-10-07T09:00:00.000Z'), X.claimSlot('2026-10-07T09:00:00.000Z')]);
+    assert.deepStrictEqual(both.filter(Boolean).length, 1, 'two instances both claimed one slot: ' + JSON.stringify(both));
+});
+test('a shutting-down server parks only its own jobs, never another instance\'s', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const shut = src.slice(src.indexOf('async function gracefulShutdown'), src.indexOf("if (require.main === module)"));
+    assert.ok(/\.in\('id', mine\)/.test(shut), 'shutdown still parks every running job in the table');
+    assert.ok(S.LOCAL_JOBS instanceof Set);
+    assert.ok(/LOCAL_JOBS\.add\(String\(jobId\)\)/.test(src) && /LOCAL_JOBS\.delete\(String\(jobId\)\)/.test(src));
+});
+test('Gemini calls time out; the pages load pinned CDN builds; the service worker answers a slow network from its cache', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    assert.ok((src.match(/signal: AbortSignal\.timeout\(GEMINI_TIMEOUT_MS\)/g) || []).length >= 2, 'a Gemini call can still hang for ever');
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const pages = fs.readdirSync(FRONT).filter(f => f.endsWith('.html')).map(f => path.join(FRONT, f)).concat([path.join(FRONT, 'ai', 'index.html')]);
+    for (const f of pages) {
+        const html = fs.readFileSync(f, 'utf8');
+        for (const m of html.matchAll(/src="https:\/\/cdn\.jsdelivr\.net\/npm\/([^"]+)"/g)) {
+            assert.ok(/@\d+\.\d+\.\d+\//.test(m[1]), `${path.basename(f)} loads an unpinned ${m[1]}`);
+        }
+    }
+    const sw = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
+    assert.ok(/NET_WAIT_MS/.test(sw) && /MAX_ENTRIES/.test(sw) && /u\.search = ''/.test(sw));
 });
 
 (async () => {

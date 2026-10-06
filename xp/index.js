@@ -674,6 +674,70 @@ async function purgeOldChats(now = Date.now()) {
   return (data || []).length;
 }
 
+// ---------------------------------------------------------------- the twice-daily read, once (phase 54)
+/**
+ * node-cron fired in every instance (two reads during a deploy's overlap) and in
+ * none while Render had the server asleep (the read was simply skipped). Now the
+ * read is a slot — "the 09:00 read of 6 Oct" — and whichever instance first sees
+ * a slot that has passed and is not done claims it in the database and runs it.
+ * A server that wakes at 10:40 runs the 09:00 read it missed; a second instance
+ * finds the slot taken and does nothing.
+ *
+ * Slots come from a "M H1,H2,… * * *" schedule in UTC. Anything else falls back
+ * to node-cron as before.
+ */
+const SLOT_KEY = 'xp_cron_last_slot';
+function cronSlots(expr) {
+  const m = /^\s*(\d{1,2})\s+([\d,]+)\s+\*\s+\*\s+\*\s*$/.exec(String(expr || ''));
+  if (!m) return null;
+  const minute = +m[1], hours = m[2].split(',').map(Number);
+  if (minute > 59 || !hours.length || hours.some((h) => !(h >= 0 && h <= 23))) return null;
+  return { minute, hours: [...new Set(hours)].sort((a, b) => a - b) };
+}
+/** The most recent slot at or before `now`, as an ISO time. */
+function lastSlot(expr, now = Date.now()) {
+  const sl = cronSlots(expr); if (!sl) return null;
+  const d = new Date(now);
+  for (let back = 0; back < 3; back++) {
+    const day = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back);
+    for (const h of [...sl.hours].reverse()) {
+      const t = day + h * 3600000 + sl.minute * 60000;
+      if (t <= now) return new Date(t).toISOString();
+    }
+  }
+  return null;
+}
+/** Claims `slot` for this instance: true only for the one that moves the marker forward. */
+async function claimSlot(slot) {
+  const { data: row, error } = await supabase.from('system_settings').select('value').eq('key', SLOT_KEY).maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!row) {
+    const { error: ie } = await supabase.from('system_settings').insert({ key: SLOT_KEY, value: slot, updated_at: new Date().toISOString() });
+    return !ie;                                      // a duplicate key means another instance took it first
+  }
+  if (String(row.value || '') >= slot) return false; // done already
+  const { data: won } = await supabase.from('system_settings').update({ value: slot, updated_at: new Date().toISOString() })
+    .eq('key', SLOT_KEY).eq('value', row.value).select('key');
+  return !!(won && won.length);
+}
+let slotBusy = false;
+/** Run the latest slot if it is due and ours. Returns what happened. */
+async function tickSlot(now = Date.now(), run = runCron) {
+  if (slotBusy) return { ran: false, reason: 'busy' };
+  const slot = lastSlot(cfg.cron.schedule, now);
+  if (!slot) return { ran: false, reason: 'no_slot' };
+  slotBusy = true;
+  try {
+    if (!(await claimSlot(slot))) return { ran: false, reason: 'taken', slot };
+    const late = Math.round((now - Date.parse(slot)) / 60000);
+    console.log('[xp cron] running the', slot, 'read', late > 10 ? `(${late} min late: the server was asleep)` : '');
+    const r = await run('internal-cron');
+    console.log('[xp cron]', JSON.stringify(r).slice(0, 500));
+    return { ran: true, slot };
+  } finally { slotBusy = false; }
+}
+const SLOT_CHECK_MS = 5 * 60000;
+
 function start() {
   setInterval(() => purgeOldChats().then((n) => { if (n) console.log('[xp] old chats deleted', n); }).catch((e) => console.error('[xp] purgeOldChats', e.message)), 86400000).unref?.();
   if (!cfg.cron.enabled) return { enabled: false };
@@ -681,9 +745,16 @@ function start() {
     .then((r) => { console.log('[xp] provisioned', JSON.stringify(r)); return catchUp(); })
     .then((r) => { if (r && r.length) console.log('[xp] first reads started', r.filter((x) => x.started).length); })
     .catch((e) => console.error('[xp] provision', e.message)), 20000).unref?.();
-  cron.schedule(cfg.cron.schedule, () => runCron('internal-cron').then((r) => console.log('[xp cron]', JSON.stringify(r).slice(0, 500))).catch((e) => console.error('[xp cron]', e.message)), { timezone: cfg.cron.tz });
+  if (String(cfg.cron.tz).toUpperCase() === 'UTC' && cronSlots(cfg.cron.schedule)) {
+    // Checked on boot (a server woken late runs what it missed) and every five minutes after.
+    const tick = () => tickSlot().catch((e) => console.error('[xp cron]', e.message));
+    setTimeout(tick, 45000).unref?.();
+    setInterval(tick, SLOT_CHECK_MS).unref?.();
+  } else {
+    cron.schedule(cfg.cron.schedule, () => runCron('internal-cron').then((r) => console.log('[xp cron]', JSON.stringify(r).slice(0, 500))).catch((e) => console.error('[xp cron]', e.message)), { timezone: cfg.cron.tz });
+  }
   console.log(`[xp] owner assistant sync on: "${cfg.cron.schedule}" ${cfg.cron.tz}`);
   return { enabled: true, schedule: cfg.cron.schedule };
 }
 
-module.exports = { mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks, ensureChatClient };
+module.exports = { cronSlots, lastSlot, claimSlot, tickSlot, mount, start, provisionClient, provisionAll, ensureProvisioned, status, runCron, chat, finalize, cfg, purge, purgeOrphans, purgeOldChats, kickoff, catchUp, overview, phaseOf, rangeError, _setHooks, ensureChatClient };

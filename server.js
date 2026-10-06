@@ -3114,6 +3114,8 @@ async function geminiDiscoverModels(key) {
 }
 
 const GEMINI_KEY_COOLDOWN_MS = parseInt(process.env.GEMINI_KEY_COOLDOWN_MS || '90000', 10);
+// A Gemini call that has not answered in this long is abandoned and retried on the next key (phase 54).
+const GEMINI_TIMEOUT_MS = parseInt(process.env.GEMINI_TIMEOUT_MS || '90000', 10);
 const GEMINI_DEAD_MODEL_MS   = 3600000;
 
 const _geminiDeadModels = new Map();     // model -> ts
@@ -3249,7 +3251,9 @@ async function geminiCallDetailed(prompt, {
             const r = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cand.key },
-                body: buildBody(text, model, withThinking)
+                body: buildBody(text, model, withThinking),
+                // Phase 54: a call Google never answers used to hold the job (and its slot) for good.
+                signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS)
             });
 
             if (r.status === 429) {
@@ -4266,7 +4270,17 @@ async function updateJob(jobId, patch, logLine) {
  * /api/job/:id/resume picks up exactly where it stopped and never pays twice
  * for work already in the database.
  */
+/**
+ * The jobs this process is running (phase 54). On a deploy Render starts the new
+ * instance before it stops the old one, so for a while both run jobs. Shutdown
+ * used to park every running job in the table — including the ones the new
+ * instance had just claimed — and resuming those started a second paid copy.
+ * Now an instance parks only its own.
+ */
+const LOCAL_JOBS = new Set();
+
 function runJob(jobId, worker, opts = {}) {
+    LOCAL_JOBS.add(String(jobId));
     (async () => {
         let beat = null;
         let row = null;
@@ -4280,6 +4294,7 @@ function runJob(jobId, worker, opts = {}) {
                 { resume: !!opts.resume }
             );
             if (!claimed) {
+                LOCAL_JOBS.delete(String(jobId));
                 logger.warn('job_claim_lost', { jobId, resume: !!opts.resume });
                 return;
             }
@@ -4374,6 +4389,7 @@ function runJob(jobId, worker, opts = {}) {
             await releaseQuota(row?.user_id, row?.input?._quota);
             if (row?.input?.scheduleId) scheduleNoteOutcome(row.input.scheduleId, { status: 'failed', error: err.message });
         } finally {
+            LOCAL_JOBS.delete(String(jobId));
             if (beat) clearInterval(beat);
         }
     })();
@@ -5754,8 +5770,11 @@ app.get('/api/me', async (req, res) => {
 
             const used = Object.fromEntries((rows || []).map(r => [r.metric, Number(r.used)]));
             body.usage = {};
-            for (const metric of ['ig_report', 'fb_group_audit', 'leads', 'usd']) {
-                const cap = await effectiveCap(ctx.user.id, state, metric);
+            // The four caps at once, not one after another (phase 54): /api/me is on every page load.
+            const METRICS_SHOWN = ['ig_report', 'fb_group_audit', 'leads', 'usd'];
+            const caps = await Promise.all(METRICS_SHOWN.map(m => effectiveCap(ctx.user.id, state, m)));
+            for (const [i, metric] of METRICS_SHOWN.entries()) {
+                const cap = caps[i];
                 body.usage[metric] = {
                     used: used[metric] || 0,
                     cap: cap === null ? null : cap,
@@ -12522,6 +12541,46 @@ function cleanClientBody(b = {}) {
     };
 }
 
+/**
+ * clientAccess for many clients in three queries instead of three per client
+ * (phase 54: My tasks opened one by one every client a person had a task on).
+ * Same rules: staff only; owner, admin, or a member at any level.
+ */
+async function clientsAccessible(ctx, ids) {
+    ids = (ids || []).filter(id => id && UUID_RE.test(String(id)));
+    if (!ids.length || ctx.profile?.role === 'client') return [];
+    const uid = ctx.user.id;
+    const [{ data: cs }, { data: mem }] = await Promise.all([
+        supabase.from('clients').select('*').in('id', ids),
+        ctx.profile?.role === 'admin' ? Promise.resolve({ data: [] }) : supabase.from('client_members').select('client_id, role').eq('user_id', uid).in('client_id', ids)
+    ]);
+    const role = Object.fromEntries((mem || []).map(m => [m.client_id, m.role]));
+    return (cs || []).map(c => {
+        if (c.owner_user_id === uid) return { ...c, access: 'owner' };
+        if (ctx.profile?.role === 'admin') return { ...c, access: 'admin' };
+        return role[c.id] ? { ...c, access: role[c.id] } : null;
+    }).filter(Boolean);
+}
+
+/**
+ * Reports per client and type, counted by the database (phase 54). The list
+ * used to fetch every report row to count them, which grew with the agency's
+ * history and stopped at PostgREST's 1,000-row cap — the counts were quietly
+ * wrong past it. Without the phase-54 view it falls back to the old way.
+ */
+async function reportCounts(ids) {
+    const counts = {};
+    const add = (cid, type, n) => {
+        const c = counts[cid] = counts[cid] || { total: 0, byType: {} };
+        c.total += n; c.byType[type] = (c.byType[type] || 0) + n;
+    };
+    const { data, error } = await supabase.from('el_client_report_counts').select('client_id, report_type, n').in('client_id', ids);
+    if (!error) { for (const r of (data || [])) add(r.client_id, r.report_type, Number(r.n) || 0); return counts; }
+    const { data: reps } = await supabase.from('reports').select('client_id, report_type').in('client_id', ids);
+    for (const r of (reps || [])) add(r.client_id, r.report_type, 1);
+    return counts;
+}
+
 app.get('/api/clients', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -12550,15 +12609,7 @@ app.get('/api/clients', async (req, res) => {
 
         // Counts per client so the list is a real overview rather than names.
         const ids = rows.map(r => r.id);
-        const counts = {};
-        if (ids.length) {
-            const { data: reps } = await supabase.from('reports').select('client_id, report_type').in('client_id', ids);
-            for (const r of (reps || [])) {
-                counts[r.client_id] = counts[r.client_id] || { total: 0, byType: {} };
-                counts[r.client_id].total += 1;
-                counts[r.client_id].byType[r.report_type] = (counts[r.client_id].byType[r.report_type] || 0) + 1;
-            }
-        }
+        const counts = ids.length ? await reportCounts(ids) : {};
         // Meta per client, so "is this one connected?" is answered on the row
         // rather than by opening each client and finding the tab.
         const meta = {};
@@ -13324,10 +13375,7 @@ app.get('/api/my-tasks', async (req, res) => {
         const cutoff = new Date(Date.now() - TASK_DONE_SHOWN_DAYS * 86400000).toISOString();
         const rows = (data || []).filter(t => t.status !== 'done' || (t.completed_at && t.completed_at >= cutoff));
         const clients = new Map();
-        for (const id of new Set(rows.map(t => t.client_id))) {
-            const c = await clientAccess(ctx.user.id, id, 'viewer');
-            if (c && !c.archived) clients.set(id, c);
-        }
+        for (const c of await clientsAccessible(ctx, [...new Set(rows.map(t => t.client_id))])) if (!c.archived) clients.set(c.id, c);
         const me = await peopleById([ctx.user.id]);
         const counts = await taskCommentCounts(rows.map(t => t.id));
         const tasks = rows.filter(t => clients.has(t.client_id))
@@ -13724,14 +13772,15 @@ function cleanGeminiKey(raw) {
 async function geminiProbeKey(key) {
     const why = async r => { try { const j = await r.json(); return j?.error?.message || ''; } catch { return ''; } };
     let r;
-    try { r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key } }); }
+    try { r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(15000) }); }
     catch { return { ok: false, error: 'Google could not be reached to check the key. Try again in a minute.' }; }
     if (r.ok || r.status === 429) return { ok: true };
     const first = await why(r);
     try {
         r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 1 } })
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 1 } }),
+            signal: AbortSignal.timeout(15000)
         });
     } catch { return { ok: false, error: 'Google could not be reached to check the key. Try again in a minute.' }; }
     if (r.ok || r.status === 429) return { ok: true };
@@ -20255,7 +20304,7 @@ async function geminiToolTurn(contents, functionDeclarations, { systemInstructio
             const r = await fetch(
                 `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
                 { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cand.key },
-                  body: JSON.stringify(body) });
+                  body: JSON.stringify(body), signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS) });
 
             if (r.status === 429) {
                 METRICS.gemini.retries += 1;
@@ -21878,7 +21927,9 @@ async function gracefulShutdown(signal, server) {
     } catch (_) {}
 
     try {
-        await Promise.race([
+        // Only this process's own jobs: another instance's are alive and must not be parked (phase 54).
+        const mine = [...LOCAL_JOBS];
+        if (mine.length) await Promise.race([
             supabase.from('jobs')
                 .update({
                     status: 'interrupted',
@@ -21886,6 +21937,7 @@ async function gracefulShutdown(signal, server) {
                            'Anything already scraped was saved — resume to finish the rest.',
                     updated_at: new Date().toISOString()
                 })
+                .in('id', mine)
                 .in('status', ['running', 'queued']),
             new Promise(r => setTimeout(r, 4000))
         ]);
@@ -21930,7 +21982,7 @@ module.exports = {
     METRICS, RECENT_EVENTS, logger, preflight, schemaProbe, migrateSecretsAtRest,
     sweepStaleJobs, sweepStaleReservations, keepAwakeIfBusy,
     // caches
-    invalidateAuth, invalidateEngineAccess,
+    invalidateAuth, invalidateEngineAccess, LOCAL_JOBS,
     // phase 11
     scheduleNextRun, scheduleInputForRun, cleanScheduleBody, scheduleSummary, SCHEDULABLE_TYPES,
     shareToken, shareUrlFor, REPORT_PAGE,
