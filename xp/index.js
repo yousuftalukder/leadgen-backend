@@ -319,6 +319,9 @@ async function status(clientId) {
     schedule: { cron: cfg.cron.schedule, tz: cfg.cron.tz, enabled: cfg.cron.enabled }
   };
   out.phase = phaseOf(out);
+  // Phase 52: connected, nothing running, a read has finished, and still nothing to answer from.
+  // Without this the page said "reading" for ever and kept asking every 15 seconds.
+  out.stalled = out.phase === 'reading' && !out.running && out.runs.some((r) => r.finished_at);
   return out;
 }
 
@@ -335,7 +338,15 @@ function mount(app, d) {
     const ctx = await auth(req, res); if (!ctx) return null;
     const clientId = await clientFor(req, ctx, wanted, need);
     if (!clientId) { res.status(ctx.profile && ctx.profile.role === 'client' ? 404 : 403).json({ error: 'No access to that client.' }); return null; }
-    return { ctx, clientId };
+    // Phase 52: whose chats these are. An owner and the team each keep their own.
+    const who = { userId: ctx.user.id, staff: !(ctx.profile && ctx.profile.role === 'client') };
+    return { ctx, clientId, who };
+  }
+  /** A chat this person may open, rename or delete, or null. */
+  async function ownConversation(a, conversationId) {
+    const conv = await q(supabase.from('xp_ai_conversations').select('id,client_id,title,deleted_at,user_id').eq('id', conversationId).maybeSingle(), 'conv');
+    if (!conv || conv.client_id !== a.clientId || conv.deleted_at || !chat.convVisible(conv, a.who)) return null;
+    return conv;
   }
 
   app.post('/api/xp/chat', rateLimit({ windowMs: 60000, max: 12, key: bearerId }), async (req, res) => {
@@ -347,7 +358,7 @@ function mount(app, d) {
     const gate = await chatLimitCheck(isAdmin(a.ctx), a.clientId);
     if (!gate.ok) return res.status(429).json({ error: gate.error, limit: gate.quota.limit, remaining: 0 });
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who });
       res.json({ ...out, remaining: leftAfter(gate.quota) });
     } catch (e) {
       log.error ? log.error('xp_chat_failed', { message: e.message }) : console.error('[xp chat]', e);
@@ -371,7 +382,7 @@ function mount(app, d) {
     const send = (type, data) => { if (!res.writableEnded) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
     const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
       send('done', { conversationId: out.conversationId, reply: out.reply, suggestions: out.suggestions, charts: out.charts || [], remaining: leftAfter(gate.quota) });
     } catch (e) {
       if (e.code === 'CHAT_CANCELLED') return;
@@ -386,7 +397,14 @@ function mount(app, d) {
   app.get('/api/xp/chat/:clientId/conversations', async (req, res) => {
     const a = await chatContext(req, res, req.params.clientId); if (!a) return;
     try {
-      const rows = await q(supabase.from('xp_ai_conversations').select('id,title,created_at,updated_at').eq('client_id', a.clientId).is('deleted_at', null).order('updated_at', { ascending: false }).limit(50), 'convs');
+      const list = (build) => q(build(supabase.from('xp_ai_conversations').select('id,title,created_at,updated_at').eq('client_id', a.clientId).is('deleted_at', null))
+        .order('updated_at', { ascending: false }).limit(50), 'convs');
+      // Your own chats; on the team, also the ones from before chats had an author.
+      const [mine, older] = await Promise.all([
+        list((b) => b.eq('user_id', a.who.userId)),
+        a.who.staff ? list((b) => b.is('user_id', null)) : Promise.resolve([])
+      ]);
+      const rows = [...mine, ...older].sort((x, y) => String(y.updated_at || y.created_at).localeCompare(String(x.updated_at || x.created_at))).slice(0, 50);
       res.json({ conversations: rows });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -397,8 +415,8 @@ function mount(app, d) {
     const { conversationId } = req.params;
     if (!CONV_ID_RE.test(conversationId)) return res.status(404).json({ error: 'Conversation not found.' });
     try {
-      const conv = await q(supabase.from('xp_ai_conversations').select('id,client_id,title,deleted_at').eq('id', conversationId).maybeSingle(), 'conv');
-      if (!conv || conv.client_id !== a.clientId || conv.deleted_at) return res.status(404).json({ error: 'Conversation not found.' });
+      const conv = await ownConversation(a, conversationId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
       const rows = (await q(supabase.from('xp_ai_messages').select('role,content,created_at,tool_calls,tool_results').eq('conversation_id', conv.id)
         .order('created_at', { ascending: false }).limit(60), 'messages')).reverse();
       let lastQuestion = '';
@@ -428,6 +446,7 @@ function mount(app, d) {
       // data behind each answer. What stays is one bare row per message (when, and the tokens it cost),
       // because the daily question limit and the cost figures count them; deleting a chat must not
       // reset the limit. Those bare rows go with the rest after CHAT_RETENTION_DAYS.
+      if (!(await ownConversation(a, conversationId))) return res.status(404).json({ error: 'Conversation not found.' });
       const rows = await q(supabase.from('xp_ai_conversations').update({ deleted_at: new Date().toISOString(), title: null })
         .eq('id', conversationId).eq('client_id', a.clientId).is('deleted_at', null).select('id'), 'delete conv');
       if (!rows.length) return res.status(404).json({ error: 'Conversation not found.' });
@@ -444,6 +463,7 @@ function mount(app, d) {
     const title = cleanChatTitle(req.body && req.body.title);
     if (!title) return res.status(400).json({ error: 'Type a name for the chat.' });
     try {
+      if (!(await ownConversation(a, conversationId))) return res.status(404).json({ error: 'Conversation not found.' });
       const rows = await q(supabase.from('xp_ai_conversations').update({ title })
         .eq('id', conversationId).eq('client_id', a.clientId).is('deleted_at', null).select('id,title'), 'rename conv');
       if (!rows.length) return res.status(404).json({ error: 'Conversation not found.' });

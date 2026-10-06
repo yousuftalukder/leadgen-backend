@@ -42,7 +42,15 @@
     // EdgeLead's seam: the bearer session instead of XpulseAI's client token.
     async function authFetch(path, options = {}) {
         const token = await EL.token();
-        return fetch(EL.backendUrl() + path, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` } });
+        const res = await fetch(EL.backendUrl() + path, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` } });
+        // A lost session or an account that has ended answers the same here as anywhere
+        // else (phase 52): the screen for it, rather than a chat error the owner cannot act on.
+        if (res.status === 401 || res.status === 402 || res.status === 403) {
+            const data = await res.clone().json().catch(() => null);
+            const ended = EL.refused(res.status, data);
+            if (ended) throw ended;
+        }
+        return res;
     }
     const scroller = () => $('chat-scroll');
     function scrollToBottom(force) {
@@ -60,7 +68,7 @@
     // ---- boot ---------------------------------------------------------------------
     // The page boots EL (the session, the account) and hands over. `opts.app` is
     // the Edge Meta AI app (ai/): the same chat, with no EdgeLead around it.
-    let isOwner = false, appMode = false, pollTimer = null;
+    let isOwner = false, appMode = false, pollTimer = null, pollDelay = 15000;
     async function start(me, opts = {}) {
         appMode = !!opts.app;
         isOwner = me.role === 'client';
@@ -141,7 +149,30 @@
         setComposerOpen();
         if (before && before !== 'ready' && xpStatus && xpStatus.phase === 'ready') EL.toast('Your numbers are in. Ask away.');
         clearTimeout(pollTimer);
-        if (xpStatus && (xpStatus.running || xpStatus.phase === 'reading')) pollTimer = setTimeout(loadStatus, 15000);
+        // Checks back while a read runs, less often the longer it takes (15 s up to 2 min). A read that
+        // finished with nothing (stalled) is not waited on: coming back to the app checks again.
+        if (xpStatus && (xpStatus.running || (xpStatus.phase === 'reading' && !xpStatus.stalled))) {
+            pollTimer = setTimeout(loadStatus, pollDelay);
+            pollDelay = Math.min(120000, Math.round(pollDelay * 1.5));
+        } else pollDelay = 15000;
+        renderStrip();
+    }
+    /**
+     * Meta stopped letting us read (phase 52). The welcome says so, but only until the
+     * first question; after that, and on a phone where the header has no room for the
+     * status line, this strip under the header keeps saying it, with the button.
+     */
+    function renderStrip() {
+        let strip = $('oa-strip');
+        const show = isOwner && xpStatus && xpStatus.phase === 'reconnect' && !$('welcome');
+        if (!show) { if (strip) strip.remove(); return; }
+        if (strip) return;
+        strip = document.createElement('div');
+        strip.id = 'oa-strip'; strip.className = 'oa-strip';
+        strip.innerHTML = `<span>Meta stopped letting us read your numbers. Answers use what was read before.</span><button class="btn-primary" type="button" data-connect>Reconnect</button>`;
+        const head = document.querySelector('.oa-head');
+        if (head) head.after(strip); else return;
+        strip.querySelector('[data-connect]').addEventListener('click', e => connectMeta(e.currentTarget));
     }
     const hasData = (s) => !!(s && s.coverage && Array.isArray(s.coverage.assets) && s.coverage.assets.some(a => a.account_days > 0 || a.post_days > 0));
     // Phase 50: the chat is always open. Without Meta (or before the first read lands) it answers about
@@ -185,7 +216,7 @@
         if (s.phase === 'not_connected') return set('Meta not connected', 'warn');
         if (s.phase === 'reconnect') return set('Reconnect Meta to keep your numbers current', 'bad');
         if (s.running) return set(hasData(s) ? 'Updating your numbers…' : 'Reading your numbers…', 'live');
-        if (s.phase === 'reading') return set('Getting ready…', 'live');
+        if (s.phase === 'reading') return s.stalled ? set('No numbers read yet', 'warn') : set('Getting ready…', 'live');
         set(last ? `Updated ${ago(last)} · ${whenNext(s)}` : whenNext(s), 'ok');
     }
     const STARTERS = [
@@ -216,11 +247,16 @@
         }
         if (phase === 'reading' || (s && s.running && !hasData(s))) {
             const names = (s.assets || []).map(a => (a.platform === 'IG' ? 'Instagram ' : 'Facebook ') + (a.username ? '@' + a.username : a.name || '')).join(' and ');
-            return `<div id="welcome" class="rise"><div class="oa-connect oa-reading">
+            const card = s.stalled && !s.running
+                ? `<div class="oa-connect">
+                <p><b>The first read of ${names ? escHtml(names) : 'your accounts'} came back without numbers.</b> A new account with no posts yet looks like this,
+                   and so does a Page that did not give us access to its insights. It tries again by itself; if nothing changes by tomorrow, tell your agency.</p></div>`
+                : `<div class="oa-connect oa-reading">
                 <div class="oa-pulse" aria-hidden="true"><i></i><i></i><i></i></div>
                 <p><b>Reading your numbers${names ? ' from ' + escHtml(names) : ''}.</b> The first time, Edge Meta AI reads the last 90 days
                    and every post. It usually takes a few minutes; you can leave and come back. This page opens up by itself when it is done.</p>
-            </div>
+            </div>`;
+            return `<div id="welcome" class="rise">${card}
             <p class="oa-fine" style="text-align:center">Meanwhile, ask about your agency’s work:</p>
             <div class="starters">${AGENCY_STARTERS.map(([q, sub]) => `<button type="button" class="starter" data-q="${escHtml(q)}"><b>${escHtml(q)}</b><span>${escHtml(sub)}</span></button>`).join('')}</div></div>`;
         }
@@ -316,6 +352,7 @@
         lastQuestion = message;
         setComposerBusy(true);
         $('welcome')?.remove();
+        renderStrip();
 
         const box = $('chat-box');
         box.querySelectorAll('[data-suggestions]').forEach((el) => { el.innerHTML = ''; });
@@ -639,6 +676,7 @@
         stick = true;
         scroller().scrollTop = 0;
         updateToBottom();
+        renderStrip();
     }
     function newChat() {
         resetChat();
@@ -678,6 +716,7 @@
         if (!isDesktop()) $('oa-side').classList.remove('is-open');
         const box = $('chat-box');
         box.innerHTML = '<p class="oa-note" style="padding-top:40px">Opening the chat…</p>';
+        renderStrip();
         try {
             const res = await authFetch('/api/xp/chat/' + encodeURIComponent(activeClient.id) + '/conversations/' + encodeURIComponent(id));
             const data = await res.json().catch(() => ({}));

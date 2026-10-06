@@ -43,13 +43,21 @@
     let me = null, data = { tasks: [], media: {}, posts: [], reports: [], growth: null }, host = null;
 
     // ---- the sheet ---------------------------------------------------------------
-    function sheet(title, sub = '') {
-        close();
+    // One sheet at a time, with a way back (phase 52): a task opened from the to-do list
+    // goes back to the list, not out of Updates. The phone's own back button does the
+    // same instead of leaving the app — one history entry stands for every open sheet.
+    let current = null, stack = [], inHistory = false;
+    function sheet(title, sub = '', reopen = null) {
+        const open = !!document.getElementById('hub-sheet');
+        if (open && current) stack.push(current);
+        if (!open) stack = [];
+        remove();
+        current = reopen;
         const wrap = document.createElement('div');
         wrap.className = 'hub-wrap'; wrap.id = 'hub-sheet';
         wrap.innerHTML = `<div class="hub-scrim" data-hub-close></div>
             <section class="hub-sheet" role="dialog" aria-modal="true" aria-labelledby="hub-t">
-                <header class="hub-h"><button class="icon-btn hub-back" type="button" data-hub-close aria-label="Back">←</button>
+                <header class="hub-h"><button class="icon-btn hub-back" type="button" data-hub-back aria-label="Back">←</button>
                     <div class="hub-ht"><h2 id="hub-t">${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div>
                     <button class="icon-btn" type="button" data-hub-close aria-label="Close">✕</button></header>
                 <div class="hub-b"></div>
@@ -57,17 +65,43 @@
         document.body.appendChild(wrap);
         document.body.classList.add('hub-open');
         wrap.querySelectorAll('[data-hub-close]').forEach(b => b.addEventListener('click', close));
+        wrap.querySelector('[data-hub-back]').addEventListener('click', back);
+        document.removeEventListener('keydown', escClose);
         document.addEventListener('keydown', escClose);
+        if (!inHistory) { try { history.pushState({ hub: 1 }, ''); inHistory = true; } catch { /* sandboxed */ } }
         setTimeout(() => wrap.classList.add('is-in'), 10);
         return { el: wrap, body: wrap.querySelector('.hub-b'), title: t => { wrap.querySelector('#hub-t').innerHTML = t; } };
     }
-    function escClose(e) { if (e.key === 'Escape') close(); }
-    function close() {
+    function escClose(e) { if (e.key === 'Escape') back(); }
+    function remove() {
         const w = document.getElementById('hub-sheet');
         if (w) w.remove();
+    }
+    /** One step back: the sheet this one was opened from, or out of Updates. */
+    function back() {
+        const prev = stack.pop();
+        if (!prev) return close();
+        remove(); current = null;
+        const keep = stack; stack = [];
+        prev();                       // opens as a first sheet, so put the rest of the trail back under it
+        stack = keep;
+    }
+    function close() {
+        remove();
+        current = null; stack = [];
         document.body.classList.remove('hub-open');
         document.removeEventListener('keydown', escClose);
+        if (inHistory) { inHistory = false; try { if (history.state && history.state.hub) history.back(); } catch { /* sandboxed */ } }
     }
+    // The phone's back button: one step back, keeping the history entry while a sheet stays open.
+    window.addEventListener('popstate', () => {
+        if (!inHistory) return;
+        inHistory = false;
+        if (!document.getElementById('hub-sheet')) return;
+        if (!stack.length) { close(); return; }
+        back();
+        try { history.pushState({ hub: 1 }, ''); inHistory = true; } catch { /* sandboxed */ }
+    });
 
     // ---- loading -----------------------------------------------------------------
     async function load() {
@@ -122,7 +156,7 @@
         return bits.join(' · ');
     };
     function openTodos() {
-        const s = sheet('Your to-dos', 'What your agency needs from you');
+        const s = sheet('Your to-dos', 'What your agency needs from you', openTodos);
         const drawList = () => {
             const list = data.tasks.filter(t => t.yours && (t.status !== 'done' || recentDone(t)));
             s.body.innerHTML = list.length ? `<div class="hub-list">${list.map(t => `<div class="hub-item">
@@ -142,7 +176,7 @@
         drawList();
     }
     function openWork() {
-        const s = sheet('What we are working on', 'Your agency’s work for you, as it stands');
+        const s = sheet('What we are working on', 'Your agency’s work for you, as it stands', openWork);
         const open = working(), done = data.tasks.filter(t => !t.yours && recentDone(t));
         const order = { doing: 0, waiting: 1, todo: 2 };
         open.sort((a, b) => (order[a.status] - order[b.status]) || (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
@@ -154,7 +188,7 @@
     }
     function openTask(t) {
         if (!t) return;
-        const s = sheet(esc(t.title), t.yours ? 'Your to-do' : esc(STATE[t.status] || ''));
+        const s = sheet(esc(t.title), t.yours ? 'Your to-do' : esc(STATE[t.status] || ''), () => openTask(data.tasks.find(x => x.id === t.id) || t));
         const steps = t.checklist || [];
         s.body.innerHTML = `
             <div class="hub-meta">${taskLine(t) || ''}</div>
@@ -183,7 +217,7 @@
 
     // ---- planned posts -------------------------------------------------------------------
     function openPosts() {
-        const s = sheet('Posts planned for you', 'Approve the ones you like; your agency makes them');
+        const s = sheet('Posts planned for you', 'Approve the ones you like; your agency makes them', openPosts);
         const drawList = () => {
             const posts = data.posts;
             s.body.innerHTML = posts.length ? `<div class="cp-list">${posts.map(p => `<article class="cp-card is-${esc(p.status)}" data-post="${esc(p.id)}">
@@ -222,7 +256,7 @@
     // ---- reports --------------------------------------------------------------------------
     const BAND = { strong: 'Strong', healthy: 'Healthy', mixed: 'Mixed', weak: 'Weak', poor: 'Needs work' };
     function openReports() {
-        const s = sheet('Your reports');
+        const s = sheet('Your reports', '', openReports);
         s.body.innerHTML = data.reports.length ? `<div class="hub-list">${data.reports.map(r => `<button type="button" class="hub-item is-btn" data-rep="${esc(r.id)}">
                 <span class="hub-it">${esc(r.title)}${r.handle ? ' · @' + esc(String(r.handle).replace(/^@/, '')) : ''}</span>
                 <span class="hub-im">${esc(shortDay(r.date))}${r.band ? ' · ' + esc(BAND[r.band] || r.band) : ''}</span></button>`).join('')}</div>`
@@ -230,7 +264,7 @@
         s.body.querySelectorAll('[data-rep]').forEach(b => b.addEventListener('click', () => openReport(b.dataset.rep)));
     }
     async function openReport(id) {
-        const s = sheet('Report');
+        const s = sheet('Report', '', () => openReport(id));
         s.body.innerHTML = '<p class="hub-empty">Opening…</p>';
         try {
             const { report } = await EL.api('/api/client/report/' + encodeURIComponent(id));
@@ -245,7 +279,7 @@
     // ---- daily numbers ---------------------------------------------------------------------
     function openNumbers() {
         const g = data.growth || {}, gr = g.growth || {}, c = g.connection || {};
-        const s = sheet('Your numbers, every day', esc(c.ig_username ? '@' + c.ig_username : (c.page_name || '')));
+        const s = sheet('Your numbers, every day', esc(c.ig_username ? '@' + c.ig_username : (c.page_name || '')), openNumbers);
         const n = v => (v === null || v === undefined ? '—' : Number(v).toLocaleString('en-US'));
         if (gr.empty || !(gr.series || []).length) { s.body.innerHTML = '<p class="hub-empty">Your first numbers are being read and appear here soon. Updates by itself.</p>'; return; }
         const f = gr.followers || {};
@@ -262,7 +296,7 @@
     // theirs to compare with. It runs on the agency's account allowance; the report opens here.
     const LAST_HANDLE = 'el-checkup-handle';
     function openCheckup() {
-        const s = sheet('New check-up', 'How your Instagram is doing, and how you compare');
+        const s = sheet('New check-up', 'How your Instagram is doing, and how you compare', openCheckup);
         let last = '';
         try { last = localStorage.getItem(LAST_HANDLE) || ''; } catch { /* private mode */ }
         s.body.innerHTML = `<div class="hub-form">
@@ -289,11 +323,15 @@
             try {
                 await EL.runJob('/api/generate-ig-report', { target, compareRivals: !!(r1 || r2), rival1: r1 || null, rival2: r2 || null }, {
                     onProgress: j => step(j.progress, j.current_step),
-                    onFailed: j => { stop(); err.textContent = j.error || 'That check-up did not finish.'; },
+                    onFailed: j => { stop(); err.textContent = j.error || 'That check-up did not finish.'; if (!s.el.isConnected) EL.toast('Your check-up did not finish. Try again from Updates.', 'bad'); },
+                    // Stopped with its work saved (credit ran out, a restart): the agency resumes it, not the owner.
+                    onPaused: () => { stop(); err.className = 'hub-err is-quota'; err.textContent = 'Your check-up paused partway. Your agency can finish it from their side; nothing is lost.'; if (!s.el.isConnected) EL.toast('Your check-up paused partway. Your agency can finish it.', 'bad'); },
                     onDone: async j => {
                         step(100, 'Done — opening your report');
                         const id = j.result && (j.result.reportId || j.result.reportRef);
                         await load().catch(() => {});
+                        // Still on this sheet: open the report. Gone elsewhere meanwhile: say so, without pulling them away.
+                        if (!s.el.isConnected) { EL.toast('Your check-up is ready. Open it from Reports.'); return; }
                         if (id) openReport(id); else openReports();
                     }
                 });
@@ -311,7 +349,7 @@
 
     // ---- a shared tool, inside the app ----------------------------------------------------
     function openTool(label, page) {
-        const s = sheet(esc(label));
+        const s = sheet(esc(label), '', () => openTool(label, page));
         s.body.classList.add('is-frame');
         s.body.innerHTML = `<iframe class="hub-frame" src="${page}?embed=1" title="${esc(label)}"></iframe>`;
     }

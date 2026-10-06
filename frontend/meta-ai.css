@@ -19,7 +19,8 @@ body { padding-bottom: 0; }
 .conv-more:hover { background: rgba(255,255,255,0.06); color: var(--text-primary); }
 .conv-item.editing .conv-row, .conv-item.editing .conv-more { display: none; }
 .conv-edit { width: 100%; padding: 8px 10px; border-radius: 10px; font: inherit; font-size: 0.84rem; }
-.oa-menu { position: fixed; z-index: 60; width: 160px; padding: 6px; border-radius: 12px; background: #0b1329; border: 1px solid rgba(217,181,108,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+/* Above the app's chats drawer (70) and scrim (65), below the Updates sheets (90). */
+.oa-menu { position: fixed; z-index: 80; width: 160px; padding: 6px; border-radius: 12px; background: #0b1329; border: 1px solid rgba(217,181,108,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
 .oa-menu button { display: block; width: 100%; text-align: left; padding: 9px 11px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 0.84rem; border-radius: 8px; cursor: pointer; }
 .oa-menu button:hover { background: rgba(255,255,255,0.06); }
 .oa-menu button.danger { color: #fda4af; }
@@ -253,3 +254,9 @@ body.el-has-plan .oa-side { top: 132px; }
 .hub-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.09); overflow: hidden; }
 .hub-track i { display: block; height: 100%; width: 0; background: var(--accent-glow, var(--accent-solid)); transition: width .3s; }
 .hub-step { font-size: 0.82rem; color: var(--text-muted); margin-top: 8px; }
+
+/* Phase 52: Meta stopped letting us read; stays under the header once the welcome is gone. */
+.oa-strip { display: flex; align-items: center; gap: 10px; margin: 10px 0 0; padding: 9px 12px; border-radius: 12px;
+    border: 1px solid rgba(253,164,175,0.35); background: rgba(253,164,175,0.08); font-size: 0.84rem; line-height: 1.45; }
+.oa-strip span { flex: 1; min-width: 0; }
+.oa-strip .btn-primary { flex: none; width: auto; margin: 0; padding: 8px 14px; font-size: 0.82rem; white-space: nowrap; }

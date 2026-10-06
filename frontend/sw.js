@@ -12,10 +12,10 @@
  *   - Offline fallback: the last good copy of the page, else the dashboard
  *     (or, inside the Edge Meta AI app, the chat).
  */
-const VERSION = 'el-shell-v5';   // v5: owners live in Edge Meta AI (code sign-in, Updates)
+const VERSION = 'el-shell-v6';   // v6: phase 52 (access-ended screen, back in Updates); a duplicate entry had stopped v5 precaching
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
     'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
-    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js', 'report-view.js'];
+    'ai/', 'ai/manifest.webmanifest', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();
