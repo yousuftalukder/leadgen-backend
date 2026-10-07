@@ -215,7 +215,7 @@ test('the chat is one piece of code, in EdgeLead and in the app', () => {
     assert.ok(/if \(me\.role === 'client' && !app\)/.test(h), 'the owner pages\' redirect leaves the app alone');
     assert.ok(/\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? 'ai\/' : 'index\.html'/.test(h), 'signing out of the app lands on its own sign-in; staff go to EdgeLead\'s (phase 52)');
     assert.ok(/window\.location\.replace\('ai\/' \+ location\.search\)/.test(h), 'phase 49: an owner on any dashboard page goes to the app');
-    assert.ok(/OWNER_EMBEDS = \['client-leads\.html', 'client-community\.html'\]/.test(h), 'only the shared tools open for owners, inside the app');
+    assert.ok(/OWNER_EMBEDS = \['client-leads\.html', 'client-community\.html', 'invoice\.html'\]/.test(h), 'only the shared tools and an invoice (phase 60) open for owners, inside the app');
 });
 test('the worker keeps the app offline too, and Netlify serves its manifest right', () => {
     const src = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');

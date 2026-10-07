@@ -79,7 +79,8 @@ require('./src/17-schedules-and-shares');
 require('./src/18-agency-reports');
 require('./src/19-reviews');
 require('./src/20-assistant');
-require('./src/21-runtime');
+require('./src/21-billing');
+require('./src/22-runtime');
 const {
     ASSISTANT_TOOLS, CLIENT_PILLARS, CLIENT_REPORT_TITLES, DEMAND_INTENT, JOB_QUOTA_METRIC, JOB_WORKERS,
     KEY_COVERAGE, LEADGEN_JOB_TYPES, LEAD_SORTS, LOCAL_JOBS, MAIL_KEYS, MEDIA_HOST_RE, MERGE_TABLES,

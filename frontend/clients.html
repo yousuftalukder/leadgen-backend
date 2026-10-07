@@ -308,9 +308,19 @@
             body: `<div class="ws-form">
                 <p class="el-muted" style="margin:0">They get a one-tap link into Edge Meta AI for ${esc(c.name)} only: their numbers, your work for them, posts to approve and their reports. ${c.trial ? 'It lasts as long as the trial.' : 'It never runs out while this is your client.'}</p>
                 <div class="ws-form two"><div><label for="iv-email">Owner’s email</label><input id="iv-email" type="email" placeholder="owner@business.com"></div><div><label for="iv-name">Their name</label><input id="iv-name" placeholder="Optional"></div></div>
+                <div id="iv-agr"></div>
                 <div id="iv-out"></div></div>`,
             foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button><button class="ws-btn is-gold" type="button" id="iv-go">Send invite</button>' });
         const q1 = s => d.el.querySelector(s);
+        // Phase 60: the agreement goes with the invite. The owner reads and signs it when they open the app.
+        EL.api(`/api/clients/${encodeURIComponent(c.id)}/agreement`, { scoped: false }).then(r => {
+            const a = r.agreement, box = q1('#iv-agr'); if (!box) return;
+            const taka = n => '৳' + Number(n || 0).toLocaleString('en-IN');
+            const edit = `billing.html?client=${encodeURIComponent(c.id)}&agreement=1`;
+            box.innerHTML = a && a.status !== 'empty'
+                ? `<p class="ws-note">Agreement: ${a.items.map(i => esc(i.name)).join(', ')} · ${taka(a.totals.monthly)} a month${a.totals.oneOff ? ` + ${taka(a.totals.oneOff)} once` : ''}. ${a.status === 'signed' ? 'Already signed.' : 'It is in the email, and they sign it when they first open the app.'} <a href="${edit}">Change it</a></p>`
+                : `<p class="ws-note">No agreement yet. <a href="${edit}">Set one up in Billing</a> first and the owner signs it when they open the app; without one they go straight in.</p>`;
+        }).catch(() => {});
         q1('#iv-go').addEventListener('click', async () => {
             const out = q1('#iv-out'), email = q1('#iv-email').value.trim();
             if (!email) { out.innerHTML = '<p class="ws-note is-bad">Enter the owner’s email.</p>'; return; }

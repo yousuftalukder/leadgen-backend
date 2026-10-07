@@ -13,7 +13,7 @@ const {
     mailSettings, markAgencyOwner, ownClientFor, rateLimit, sendErr, sendMail, supabase, trialDaysSetting,
     userRole
 } = S;
-Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn });
+Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor });
 
 // ===========================================================================
 // PHASE 32 :: THE CLIENT'S TASK BOARD
@@ -946,6 +946,7 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
                     '',
                     `Open it here (one tap signs you in): ${link}`,
                     '',
+                    ...(await S.agreementMailLines(c.id)),
                     'On your phone, add it to your home screen from there and it opens like an app.',
                     `Next time, open ${base ? base + '/ai/' : 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
                     '— EdgeLead'
@@ -1008,6 +1009,7 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
                 text: [
                     'Hello,', '',
                     `Here is a new link into Edge Meta AI for ${c.name}. One tap signs you in: ${link}`, '',
+                    ...(await S.agreementMailLines(c.id)),
                     'It works once and expires within the hour. Next time you can also sign in with a code we email you.',
                     '— EdgeLead'
                 ].join('\n')
