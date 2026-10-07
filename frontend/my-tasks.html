@@ -70,7 +70,12 @@
                 const t = tasks.find(x => x.id === el.dataset.task); if (!t) return;
                 if (!boards.has(t.client.id)) boards.set(t.client.id, await EL.api(`/api/clients/${encodeURIComponent(t.client.id)}/tasks`).catch(() => null));
                 const b = boards.get(t.client.id);
-                UI.openTask(t, { clientId: t.client.id, clientName: t.client.name, people: b ? b.people : [], canEdit: b ? b.canEdit : false, onSaved: load });
+                UI.openTask(t, { clientId: t.client.id, clientName: t.client.name, people: b ? b.people : [], canEdit: b ? b.canEdit : false, onSaved: (saved, info = {}) => {
+                    // Phase 61: shown at once from the server's answer, then re-read quietly.
+                    if (saved && saved.id) { const i = all.findIndex(x => x.id === saved.id); if (i >= 0) { all[i] = { ...all[i], ...saved }; draw(); } }
+                    else if (info.deleted) { all = all.filter(x => x.id !== info.deleted); draw(); }
+                    load();
+                } });
             };
             el.addEventListener('click', open1);
             el.addEventListener('keydown', e => { if (e.key === 'Enter') open1(); });

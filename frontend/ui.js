@@ -142,7 +142,21 @@
         }
 
         function ctx() {
-            return { clientId, clientName: data && data.client ? data.client.name : '', people: data ? data.people : [], canEdit: !!(data && data.canEdit), onSaved: load };
+            return { clientId, clientName: data && data.client ? data.client.name : '', people: data ? data.people : [], canEdit: !!(data && data.canEdit), onSaved: saved };
+        }
+        /** Phase 61: the board shows a save at once from the server's answer, then re-reads itself quietly. */
+        function saved(task, info = {}) {
+            if (data && data.tasks) {
+                if (task && task.id) {
+                    const i = data.tasks.findIndex(t => t.id === task.id);
+                    if (i >= 0) data.tasks[i] = { ...data.tasks[i], ...task }; else data.tasks.push(task);
+                    draw();
+                } else if (info.deleted) {
+                    data.tasks = data.tasks.filter(t => t.id !== info.deleted);
+                    draw();
+                }
+            }
+            load();
         }
 
         function draw() {
@@ -462,7 +476,7 @@
                         EL.closeDrawer();
                         const key = r && r.task && r.task.key;
                         EL.toast(isNew ? `${key ? key + ' a' : 'A'}dded to ${ctx.clientName || 'the client'}’s board.` : 'Saved. Everyone on this client sees the change.');
-                        if (ctx.onSaved) ctx.onSaved();
+                        if (ctx.onSaved) ctx.onSaved(r && r.task);
                     } catch (err) {
                         $('tk-save').disabled = false;
                         const note = $('tk-note');
@@ -481,7 +495,7 @@
                 if (!isNew) $('tk-del').addEventListener('click', async () => {
                     const b = $('tk-del');
                     if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Delete, with its pictures — press again'; return; }
-                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); EL.closeDrawer(); EL.toast('Task deleted.'); if (ctx.onSaved) ctx.onSaved(); }
+                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); EL.closeDrawer(); EL.toast('Task deleted.'); if (ctx.onSaved) ctx.onSaved(null, { deleted: t.id }); }
                     catch (err) { $('tk-note').className = 'ws-note is-bad'; $('tk-note').textContent = err.message; }
                 });
             }
@@ -632,7 +646,7 @@
                 try { invite = await EL.api(`/api/clients/${client.id}/portal-invite`, { method: 'POST', body: { email: draft.owner, name: draft.ownerName || null } }); }
                 catch (err) { problems.push('owner invite: ' + err.message); }
             }
-            EL._clients = null;
+            EL.clientsChanged();
             EL.rememberClient(client.id);
             // Kept before Facebook takes over the page (phase 57): the owner's one-time link and any
             // problems used to be lost when "Connect now" redirected first.

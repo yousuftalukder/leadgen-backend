@@ -389,7 +389,7 @@
                 out.innerHTML = `<p class="ws-note is-bad">The trial started, but the invite did not go: ${esc(err.message)} Invite the owner from its row.</p>`;
             }
             q1('#tr-go').remove();
-            EL._clients = null;
+            EL.clientsChanged();
             load();
         });
     }
