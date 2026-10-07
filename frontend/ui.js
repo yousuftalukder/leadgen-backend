@@ -67,9 +67,31 @@
         ['done', 'Done', 'var(--jade)']
     ];
     const STATUS_NAME = Object.fromEntries(STATUS.map(([k, n]) => [k, n]));
-    const LABELS = ['Content', 'Reporting', 'Ads', 'Community', 'Leads', 'Setup', 'Profile'];
-    const LABEL_COLOR = { Content: 'var(--accent-solid)', Reporting: 'var(--jade)', Ads: 'var(--warn)', Community: '#f0d39a', Leads: '#60a5fa', Setup: 'var(--text-muted)', Profile: 'var(--danger)' };
+    const LABELS = ['Website', 'Content', 'Reporting', 'Ads', 'Community', 'Leads', 'Setup', 'Profile'];   // the server files a typed "website" as Website
+    const LABEL_COLOR = { Website: '#a78bfa', Content: 'var(--accent-solid)', Reporting: 'var(--jade)', Ads: 'var(--warn)', Community: '#f0d39a', Leads: '#60a5fa', Setup: 'var(--text-muted)', Profile: 'var(--danger)' };
     const labelChip = l => `<span class="ws-lbl" style="--c:${LABEL_COLOR[l] || 'var(--text-muted)'}">${esc(l)}</span>`;
+
+    /**
+     * Phase 59: filter by label. One chip per label the tasks carry (the known ones
+     * first), each with its count; `current` is the chosen label or ''. The page
+     * wires [data-label] clicks.
+     */
+    function labelBar(tasks, current) {
+        const n = {};
+        for (const t of tasks) for (const l of (t.labels || [])) n[l] = (n[l] || 0) + 1;
+        const seen = Object.keys(n).sort((a, b) => {
+            const ia = LABELS.indexOf(a), ib = LABELS.indexOf(b);
+            return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+        });
+        if (!seen.length && !current) return '';
+        if (current && !n[current]) seen.unshift(current);
+        return `<div class="ws-filters ws-lblbar" role="group" aria-label="Filter by label">
+            <span class="el-muted" style="font-size:.8rem;font-weight:700">Label</span>
+            <button type="button" data-label="" aria-pressed="${!current}">Any</button>
+            ${seen.map(l => `<button type="button" data-label="${esc(l)}" aria-pressed="${current === l}"><span class="ws-lbl-dot" style="background:${LABEL_COLOR[l] || 'var(--text-muted)'}"></span>${esc(l)} <span class="ws-num">${n[l] || 0}</span></button>`).join('')}
+        </div>`;
+    }
+    const hasLabel = (t, l) => !l || (t.labels || []).some(x => String(x).toLowerCase() === String(l).toLowerCase());
 
     const whoName = (t, ctx = {}) => {
         if (!t.assignee) return 'Unassigned';
@@ -105,7 +127,7 @@
      * cards never see a board that only exists in their own tab.
      */
     function board(host, clientId, opts = {}) {
-        let data = null, filter = 'all';
+        let data = null, filter = 'all', label = opts.label || '';
         const state = { reload: load };
 
         async function load() {
@@ -129,7 +151,8 @@
             const all = data.tasks || [];
             const list = all.filter(t => filter === 'all'
                 || (filter === 'mine' && t.assignee && t.assignee.id === me)
-                || (filter === 'client' && t.assignee && t.assignee.kind === 'client'));
+                || (filter === 'client' && t.assignee && t.assignee.kind === 'client'))
+                .filter(t => hasLabel(t, label));
             host.innerHTML = `
                 <div class="ws-head" style="margin-bottom:12px">
                     <div><h2 style="margin:0;font-size:1.1rem;color:var(--text-primary)">Task board</h2>
@@ -141,6 +164,7 @@
                     <button type="button" data-filter="mine" aria-pressed="${filter === 'mine'}">Mine</button>
                     <button type="button" data-filter="client" aria-pressed="${filter === 'client'}">The client’s to-dos</button>
                 </div>
+                ${labelBar(all, label)}
                 <div class="ws-board">${STATUS.map(([k, name, color]) => {
                     const items = list.filter(t => t.status === k).sort((a, b) => (a.position - b.position) || String(a.createdAt).localeCompare(String(b.createdAt)));
                     return `<section class="ws-col" data-col="${k}" aria-label="${name}">
@@ -151,7 +175,9 @@
                 }).join('')}</div>`;
 
             host.querySelectorAll('[data-filter]').forEach(b => b.addEventListener('click', () => { filter = b.dataset.filter; draw(); }));
-            host.querySelectorAll('[data-new]').forEach(b => b.addEventListener('click', () => openTask(null, { ...ctx(), status: b.dataset.new })));
+            host.querySelectorAll('[data-label]').forEach(b => b.addEventListener('click', () => { label = b.dataset.label; draw(); }));
+            // A new task made while a label is chosen carries it, so it stays in view.
+            host.querySelectorAll('[data-new]').forEach(b => b.addEventListener('click', () => openTask(null, { ...ctx(), status: b.dataset.new, labels: label ? [label] : [] })));
             host.querySelectorAll('[data-task]').forEach(el => {
                 const open = () => openTask((data.tasks || []).find(t => t.id === el.dataset.task), ctx());
                 el.addEventListener('click', open);
@@ -317,7 +343,7 @@
      */
     function openTask(task, ctx = {}) {
         const isNew = !task;
-        let t = task || { title: '', notes: '', status: ctx.status || 'todo', priority: 'medium', dueDate: null, labels: [], checklist: [], assignee: EL.me ? { kind: 'person', id: EL.me.id } : null, visibleToClient: false };
+        let t = task || { title: '', notes: '', status: ctx.status || 'todo', priority: 'medium', dueDate: null, labels: [...(ctx.labels || [])], checklist: [], assignee: EL.me ? { kind: 'person', id: EL.me.id } : null, visibleToClient: false };
         let canEdit = ctx.canEdit !== false;
         const people = ctx.people || [];
         const media = {};
@@ -773,7 +799,7 @@
 
     window.UI = {
         TYPE_LABEL, TYPE_PAGE, JOB_LABEL, jobName, jobState, sourceOf, srcChip, STATUS, STATUS_NAME, LABELS,
-        initials, day, ago, today, isLate, labelChip,
+        initials, day, ago, today, isLate, labelChip, labelBar, hasLabel, LABEL_COLOR,
         board, openTask, taskRow, addClient, askBox, answerHtml, richHtml, prioIcon
     };
 })();

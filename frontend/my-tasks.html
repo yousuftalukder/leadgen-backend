@@ -23,6 +23,16 @@
     const esc = v => EL.esc(v);
     const root = document.getElementById('mt');
     const boards = new Map();       // clientId -> the board payload, for people and edit rights
+    // Phase 59: filter by label (Website, Content…). Kept in the address, so a link opens filtered.
+    let label = new URLSearchParams(location.search).get('label') || '';
+    let all = [];
+    const setLabel = l => {
+        label = l;
+        const u = new URL(location.href);
+        if (l) u.searchParams.set('label', l); else u.searchParams.delete('label');
+        history.replaceState(null, '', u);
+        draw();
+    };
 
     async function load() {
         let d;
@@ -31,7 +41,12 @@
             root.innerHTML = `<div class="ws-head"><div><h1>My tasks</h1></div></div><div class="ws-empty">${EL.icon('alert')}<h3>${err.code === 'migration_required' ? 'Tasks are not switched on yet' : 'Your tasks could not be loaded'}</h3><p>${esc(err.message)}</p></div>`;
             return;
         }
-        const tasks = d.tasks || [];
+        all = d.tasks || [];
+        draw();
+    }
+
+    function draw() {
+        const tasks = all.filter(t => UI.hasLabel(t, label));
         const week = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
         const groups = [
             ['Overdue', tasks.filter(UI.isLate)],
@@ -43,10 +58,13 @@
         const open = tasks.filter(t => t.status !== 'done');
         root.innerHTML = `
             <div class="ws-head"><div><h1>My tasks</h1>
-                <p class="ws-sub">${open.length} open across ${new Set(open.map(t => t.client.id)).size} client${new Set(open.map(t => t.client.id)).size === 1 ? '' : 's'}. Each task lives on its client’s board, where the whole team on that client sees it.</p></div></div>
+                <p class="ws-sub">${open.length} open${label ? ` labelled ${esc(label)}` : ''} across ${new Set(open.map(t => t.client.id)).size} client${new Set(open.map(t => t.client.id)).size === 1 ? '' : 's'}. Each task lives on its client’s board, where the whole team on that client sees it.</p></div></div>
+            ${UI.labelBar(all, label)}
             ${groups.length ? groups.map(([g, l]) => `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>${g}</h2><span class="el-muted ws-num">${l.length}</span></div>
                 <div class="ws-rows">${l.map(t => UI.taskRow(t, { showClient: true })).join('')}</div></section>`).join('')
+            : label && all.length ? `<div class="ws-empty">${EL.icon('check')}<h3>Nothing of yours labelled ${esc(label)}</h3><p>Pick another label, or Any.</p></div>`
             : `<div class="ws-empty">${EL.icon('check')}<h3>Nothing assigned to you</h3><p>Tasks are made on each client’s board, from a report’s recommendations, or by hand. Anything given to you shows up here.</p><a class="ws-btn" href="clients.html">Go to clients</a></div>`}`;
+        root.querySelectorAll('[data-label]').forEach(b => b.addEventListener('click', () => setLabel(b.dataset.label)));
         root.querySelectorAll('[data-task]').forEach(el => {
             const open1 = async () => {
                 const t = tasks.find(x => x.id === el.dataset.task); if (!t) return;

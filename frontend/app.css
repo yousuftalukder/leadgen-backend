@@ -1715,3 +1715,7 @@ body.el-has-sidebar .btn-primary { width: auto; min-width: 180px; padding: 12px 
 body.el-has-sidebar .explainer { border-radius: var(--r-md); backdrop-filter: none; margin-bottom: 16px; }
 body.el-has-sidebar .explainer > summary { padding: 14px 20px; }
 @media (max-width: 560px) { body.el-has-sidebar .btn-primary { width: 100%; } }
+
+/* Phase 59: filter by label (My tasks, a client's board, Websites). */
+.ws-lblbar { align-items: center; }
+.ws-lbl-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Websites — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    .wb-client { display: flex; align-items: center; gap: 10px; }
+    .wb-client a { color: var(--text-primary); text-decoration: none; }
+    .wb-client a:hover { text-decoration: underline; }
+    .wb-pick { display: grid; gap: 8px; }
+</style>
+</head>
+<body>
+<main class="el-page" id="wb"><div class="ws-empty"><p>Loading website work…</p></div></main>
+
+    <script src="vendor/supabase-js-2.116.0.js"></script>
+<script src="header.js"></script>
+<script src="ui.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Phase 59. Every task labelled Website, on every client you can open, whoever has it.
+    // Each one is a task on its client's board, so it is also in My tasks for whoever it
+    // is assigned to, and on the board under the Website label. Website work is always
+    // for a client: "New website work" asks which client first, and the server files
+    // every task under one.
+    await EL.init({ engine: null, page: 'websites.html' });
+    const esc = v => EL.esc(v);
+    const ic = n => EL.icon(n);
+    const root = document.getElementById('wb');
+    const LABEL = 'Website';
+    const qs = new URLSearchParams(location.search);
+    const boards = new Map();       // clientId -> the board payload, for people and edit rights
+    let d = null, show = 'open', only = qs.get('client') || '';
+
+    async function boardFor(id) {
+        if (!boards.has(id)) boards.set(id, await EL.api(`/api/clients/${encodeURIComponent(id)}/tasks`, { scoped: false }).catch(() => null));
+        return boards.get(id);
+    }
+
+    async function newWork(clientId) {
+        const clients = (d && d.clients) || [];
+        const c = clientId && clients.find(x => x.id === clientId);
+        if (!c) {
+            const dw = EL.drawer({
+                title: 'New website work',
+                sub: 'Which client is it for? Website work is always filed under a client.',
+                body: clients.length ? `<div class="wb-pick">${clients.map(x => `
+                    <button type="button" class="el-pick-row" data-pick="${esc(x.id)}">
+                        <span class="el-avatar">${esc(UI.initials(x.name))}</span>
+                        <span class="el-pick-t"><b>${esc(x.name)}</b></span>
+                    </button>`).join('')}</div>
+                    <a class="el-btn el-add" href="clients.html?add=1">${ic('plus')}Add a new client first</a>`
+                    : `<p class="el-muted">There is no client you can add work to yet. Add the client first, then its website work.</p>
+                       <a class="el-btn el-add" href="clients.html?add=1">${ic('plus')}Add a client</a>`
+            });
+            dw.body.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => { dw.close(); newWork(b.dataset.pick); }));
+            return;
+        }
+        const b = await boardFor(c.id);
+        UI.openTask(null, { clientId: c.id, clientName: c.name, people: b ? b.people : [], canEdit: true, labels: [LABEL], onSaved: load });
+    }
+
+    async function load() {
+        try { d = await EL.api(`/api/tasks?label=${encodeURIComponent(LABEL)}`, { scoped: false }); }
+        catch (err) {
+            root.innerHTML = `<header class="ws-head"><div><h1>Websites</h1></div></header><div class="ws-empty">${ic('alert')}<h3>${err.code === 'migration_required' ? 'Tasks are not switched on yet' : 'Website work could not be loaded'}</h3><p>${esc(err.message)}</p></div>`;
+            return;
+        }
+        draw();
+    }
+
+    function draw() {
+        const all = d.tasks || [];
+        if (only && !all.some(t => t.client.id === only) && !(d.clients || []).some(c => c.id === only)) only = '';
+        const inScope = all.filter(t => !only || t.client.id === only);
+        const pick = {
+            open: t => t.status !== 'done',
+            waiting: t => t.status === 'waiting',
+            done: t => t.status === 'done'
+        };
+        const list = inScope.filter(pick[show]);
+        const groups = new Map();
+        for (const t of list) { if (!groups.has(t.client.id)) groups.set(t.client.id, { client: t.client, tasks: [] }); groups.get(t.client.id).tasks.push(t); }
+        const open = all.filter(pick.open);
+        const late = open.filter(UI.isLate).length;
+        const clientsWith = new Map(all.map(t => [t.client.id, t.client.name]));
+        const canAdd = (d.clients || []).length > 0;
+
+        root.innerHTML = `
+            <header class="ws-head"><div><h1>Websites</h1>
+                <p class="ws-sub">Every piece of website work, on every client: ${open.length} open${late ? `, ${late} overdue` : ''}, across ${new Set(open.map(t => t.client.id)).size} client${new Set(open.map(t => t.client.id)).size === 1 ? '' : 's'}. Each one is a task on its client’s board labelled Website, so it is in My tasks for whoever has it.</p></div>
+                <div class="ws-actions"><button class="ws-btn is-gold" type="button" id="wb-new" ${canAdd ? '' : 'title="Add a client first"'}>${ic('plus')}New website work</button></div>
+            </header>
+            <div class="ws-filters" role="group" aria-label="Show">
+                <button type="button" data-show="open" aria-pressed="${show === 'open'}">Open <span class="ws-num">${inScope.filter(pick.open).length}</span></button>
+                <button type="button" data-show="waiting" aria-pressed="${show === 'waiting'}">Waiting on client <span class="ws-num">${inScope.filter(pick.waiting).length}</span></button>
+                <button type="button" data-show="done" aria-pressed="${show === 'done'}">Done, last 30 days <span class="ws-num">${inScope.filter(pick.done).length}</span></button>
+                ${clientsWith.size > 1 || only ? `<select id="wb-client" aria-label="Client" style="width:auto;min-width:180px;margin:0">
+                    <option value="">Every client</option>
+                    ${[...clientsWith].sort((a, b) => a[1].localeCompare(b[1])).map(([id, n]) => `<option value="${esc(id)}" ${only === id ? 'selected' : ''}>${esc(n)}</option>`).join('')}
+                </select>` : ''}
+            </div>
+            ${groups.size ? [...groups.values()].sort((a, b) => a.client.name.localeCompare(b.client.name)).map(g => `
+                <section class="ws-card" style="margin-bottom:16px">
+                    <div class="ws-card-h"><h2 class="wb-client"><a href="workspace.html?client=${encodeURIComponent(g.client.id)}&tab=tasks&label=Website">${esc(g.client.name)}</a></h2>
+                        <span style="display:inline-flex;gap:10px;align-items:center"><span class="el-muted ws-num">${g.tasks.length}</span>
+                        ${(d.clients || []).some(c => c.id === g.client.id) ? `<button class="ws-btn is-sm is-quiet" type="button" data-add="${esc(g.client.id)}">${ic('plus')}Add</button>` : ''}</span></div>
+                    <div class="ws-rows">${g.tasks.map(t => UI.taskRow(t)).join('')}</div>
+                </section>`).join('')
+            : `<div class="ws-empty">${ic('globe')}<h3>${all.length ? 'Nothing here' : 'No website work yet'}</h3>
+                <p>${all.length ? 'Nothing matches what is chosen above.' : canAdd
+                    ? 'Start with New website work: pick the client, say what needs doing, and assign it. It goes on that client’s board with the Website label.'
+                    : 'Website work is always for a client. Add the client first, then its website work.'}</p>
+                ${canAdd ? '' : '<a class="ws-btn is-gold" href="clients.html?add=1">Add a client</a>'}</div>`}`;
+
+        root.querySelector('#wb-new').addEventListener('click', () => canAdd ? newWork(only || null) : (location.href = 'clients.html?add=1'));
+        root.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { show = b.dataset.show; draw(); }));
+        root.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => newWork(b.dataset.add)));
+        const sel = root.querySelector('#wb-client');
+        if (sel) sel.addEventListener('change', () => { only = sel.value; draw(); });
+        root.querySelectorAll('[data-task]').forEach(el => {
+            const open1 = async () => {
+                const t = all.find(x => x.id === el.dataset.task); if (!t) return;
+                const b = await boardFor(t.client.id);
+                UI.openTask(t, { clientId: t.client.id, clientName: t.client.name, people: b ? b.people : [], canEdit: b ? b.canEdit : t.canEdit, onSaved: load });
+            };
+            el.addEventListener('click', open1);
+            el.addEventListener('keydown', e => { if (e.key === 'Enter') open1(); });
+        });
+    }
+
+    await load();
+    // Opened from New work on a client: straight to the new task, already filed under it.
+    if (d && qs.get('new') === '1') newWork(qs.get('client'));
+})();
+</script>
+</body>
+</html>

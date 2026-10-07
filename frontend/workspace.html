@@ -315,7 +315,7 @@
 
     // ---- tasks ------------------------------------------------------------------
     function tabTasks(body) {
-        UI.board(body, c.id, { onLoad: d => { tasks = d; } });
+        UI.board(body, c.id, { label: new URLSearchParams(location.search).get('label') || '', onLoad: d => { tasks = d; } });
     }
 
     // ---- reports ----------------------------------------------------------------

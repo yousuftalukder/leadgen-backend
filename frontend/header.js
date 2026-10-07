@@ -94,6 +94,7 @@
         { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
         { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
         { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
+        { href: 'websites.html',  icon: 'globe',   label: 'Websites',  engine: null },     // phase 59: website work, every client
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
@@ -120,6 +121,9 @@
         { group: 'Compare with competitors', items: [
             { href: 'ig-competitors.html', name: 'Competitor benchmark',     text: 'Side by side with their rivals: rank, gaps, what rivals win.', engine: 'report',       apify: true },
             { href: 'workspace.html',      name: 'Find competitors',         text: 'Suggest similar businesses to compare against.',              engine: 'report',       apify: true, tab: 'settings' }
+        ] },
+        { group: 'Build websites', items: [
+            { href: 'websites.html',       name: 'Website work',             text: 'A site, a page, a fix: a task on their board, labelled Website.', engine: null, extra: 'new=1' }
         ] },
         { group: 'Plan content', items: [
             { href: 'content-plan.html',   name: 'Content plan',             text: 'A month of posts built from what already works for them.',    engine: 'content_plan' },
@@ -165,7 +169,8 @@
         pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
         alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
         info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
-        out: '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4M6 12h10"/>'
+        out: '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4M6 12h10"/>',
+        globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>'
     };
     const icon = (name, cls = '') => ICONS[name]
         ? `<svg class="el-svg ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`
@@ -1442,7 +1447,7 @@
         }
 
         const connected = !!(client.meta && client.meta.connected);
-        const href = item => `${item.href}?client=${encodeURIComponent(client.id)}${item.tab ? '&tab=' + item.tab : ''}`;
+        const href = item => `${item.href}?client=${encodeURIComponent(client.id)}${item.tab ? '&tab=' + item.tab : ''}${item.extra ? '&' + item.extra : ''}`;
         const groups = WORK.map(g => {
             const items = g.items.filter(can);
             if (!items.length) return '';
