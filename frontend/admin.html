@@ -134,6 +134,8 @@
     .primary-chip { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
         padding: 13px 17px; font-size: 0.82rem; }
     .primary-chip strong { display: block; margin-top: 4px; font-size: 0.9rem; }
+    .bp-item { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px; margin-bottom: 14px; }
+    .bp-item .btn-danger { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -147,6 +149,7 @@
         <button class="segment-btn" type="button" data-tab="keys">Keys (Apify &amp; AI)</button>
         <button class="segment-btn" type="button" data-tab="plans">Email &amp; sign-ups</button>
         <button class="segment-btn" type="button" data-tab="meta">Meta &amp; Edge AI</button>
+        <button class="segment-btn" type="button" data-tab="billing">Packages &amp; billing</button>
         <button class="segment-btn" type="button" data-tab="health">Spend &amp; health</button>
     </div>
 
@@ -396,6 +399,34 @@
         </div>
     </section>
 
+    <section id="tab-billing" class="hidden">
+        <div class="card">
+            <h2 class="card-title">Packages</h2>
+            <p class="card-subtitle">What you sell, in taka: a price, monthly or one-off, and what you deliver for it. A client's
+                agreement is picked from these in Billing and can be changed for that client; changing a package here does not
+                change agreements already made.</p>
+            <div id="bp-list"></div>
+            <button class="btn-secondary" type="button" id="bp-add">+ Add a package</button>
+        </div>
+        <div class="card">
+            <h2 class="card-title">Your details on invoices and agreements</h2>
+            <p class="card-subtitle">Printed at the top of every invoice. The ways to pay are the ones under Email &amp; sign-ups.</p>
+            <label for="bf-name">Agency name</label><input id="bf-name" maxlength="120" placeholder="EdgeLead Agency">
+            <label for="bf-address">Address</label><textarea id="bf-address" rows="2" maxlength="400"></textarea>
+            <div class="field-grid">
+                <div><label for="bf-phone">Phone</label><input id="bf-phone" maxlength="40"></div>
+                <div><label for="bf-email">Email</label><input id="bf-email" type="email" maxlength="120"></div>
+            </div>
+            <label for="bf-terms">Standard agreement terms</label>
+            <textarea id="bf-terms" rows="7" maxlength="8000" placeholder="Fees are paid in advance by the 5th of each month. Either side can end the agreement with 30 days' notice…"></textarea>
+            <p class="card-subtitle" style="margin-top:4px">Filled into every new agreement; you can change them for one client there.</p>
+            <label for="bf-note">Line at the foot of every invoice</label>
+            <textarea id="bf-note" rows="2" maxlength="1000" placeholder="Thank you for your business."></textarea>
+        </div>
+        <button class="btn-primary" type="button" id="bp-save">Save packages &amp; details</button>
+        <p class="note" id="bp-note"></p>
+    </section>
+
     <section id="tab-health" class="hidden">
 
         <div class="card">
@@ -502,12 +533,62 @@
         btn.addEventListener('click', () => {
             document.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            ['users', 'keys', 'plans', 'meta', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            ['users', 'keys', 'plans', 'meta', 'billing', 'health'].forEach(t => $(`tab-${t}`).classList.toggle('hidden', t !== btn.dataset.tab));
+            if (btn.dataset.tab === 'billing') loadBilling();
             if (btn.dataset.tab === 'meta') loadMeta();
             if (btn.dataset.tab === 'keys') { loadPools(); loadKeys(); loadGemini(); }
             if (btn.dataset.tab === 'plans') loadPlans();
             if (btn.dataset.tab === 'health') loadMetrics();
         });
+    });
+
+    // ---------------- packages & billing (phase 60) ----------------
+    let packages = [];
+    const bpSync = () => document.querySelectorAll('#bp-list [data-p]').forEach(box => {
+        const p = packages[+box.dataset.p]; if (!p) return;
+        p.name = box.querySelector('[data-k=name]').value;
+        p.billing = box.querySelector('[data-k=billing]').value;
+        p.price = box.querySelector('[data-k=price]').value;
+        p.description = box.querySelector('[data-k=description]').value;
+        p.deliverables = box.querySelector('[data-k=deliverables]').value.split('\n').map(x => x.trim()).filter(Boolean);
+    });
+    function bpDraw() {
+        $('bp-list').innerHTML = packages.length ? packages.map((p, i) => `
+            <div class="bp-item" data-p="${i}">
+                <div class="field-grid">
+                    <div><label>Package name</label><input data-k="name" maxlength="120" value="${EL.esc(p.name || '')}" placeholder="Social Growth"></div>
+                    <div><label>Billed</label><select data-k="billing"><option value="monthly" ${p.billing !== 'one_off' ? 'selected' : ''}>Monthly</option><option value="one_off" ${p.billing === 'one_off' ? 'selected' : ''}>One-off</option></select></div>
+                    <div><label>Price (৳)</label><input data-k="price" type="number" min="0" step="1" value="${EL.esc(p.price ?? '')}"></div>
+                </div>
+                <label>What it is</label><input data-k="description" maxlength="500" value="${EL.esc(p.description || '')}" placeholder="Instagram and Facebook managed for you">
+                <label>Deliverables, one per line</label>
+                <textarea data-k="deliverables" rows="${Math.max(3, (p.deliverables || []).length + 1)}" placeholder="12 posts a month&#10;4 Reels a month&#10;Monthly report">${EL.esc((p.deliverables || []).join('\n'))}</textarea>
+                <button class="btn-danger" type="button" data-rm="${i}">Remove package</button>
+            </div>`).join('') : '<p class="card-subtitle">No packages yet. Add the first one.</p>';
+        document.querySelectorAll('#bp-list [data-rm]').forEach(b => b.addEventListener('click', () => { bpSync(); packages.splice(+b.dataset.rm, 1); bpDraw(); }));
+    }
+    async function loadBilling() {
+        try {
+            const d = await EL.api('/api/admin/billing');
+            packages = d.packages || [];
+            bpDraw();
+            const p = d.profile || {};
+            $('bf-name').value = p.name || ''; $('bf-address').value = p.address || ''; $('bf-phone').value = p.phone || '';
+            $('bf-email').value = p.email || ''; $('bf-terms').value = p.terms || ''; $('bf-note').value = p.invoiceNote || '';
+        } catch (err) { say($('bp-note'), err.message, false); }
+    }
+    $('bp-add').addEventListener('click', () => { bpSync(); packages.push({ name: '', billing: 'monthly', price: '', description: '', deliverables: [] }); bpDraw(); });
+    $('bp-save').addEventListener('click', async () => {
+        bpSync();
+        say($('bp-note'), 'Saving…');
+        try {
+            const d = await EL.api('/api/admin/billing', { method: 'PUT', body: {
+                packages: packages.map(p => ({ ...p, price: Number(p.price || 0) })),
+                profile: { name: $('bf-name').value, address: $('bf-address').value, phone: $('bf-phone').value, email: $('bf-email').value, terms: $('bf-terms').value, invoiceNote: $('bf-note').value }
+            } });
+            packages = d.packages || []; bpDraw();
+            say($('bp-note'), `Saved ${packages.length} package${packages.length === 1 ? '' : 's'} and your details.`, true);
+        } catch (err) { say($('bp-note'), err.message, false); }
     });
 
     // ---------------- users ----------------

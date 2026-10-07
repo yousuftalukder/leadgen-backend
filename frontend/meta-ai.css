@@ -269,3 +269,24 @@ body.el-has-plan .oa-side { top: 132px; }
 
 /* Phase 57: a long placeholder stays on one line in the one-row composer instead of being cut in half. */
 .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Phase 60: the agreement, signed before anything else, and billing. */
+.hub-wrap.is-locked [data-hub-close], .hub-wrap.is-locked .hub-back { display: none !important; }
+.hub-wrap.is-locked .hub-scrim { cursor: default; }
+.hub-agr { display: grid; gap: 12px; margin-bottom: 18px; }
+.hub-agr-i { border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 12px 14px; }
+.hub-agr-h { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.hub-agr-h b { color: var(--text-primary); }
+.hub-agr-h span { color: #f0d39a; font-weight: 800; white-space: nowrap; }
+.hub-agr-i p { margin: 6px 0 0; color: var(--text-secondary); font-size: 0.88rem; }
+.hub-agr-i ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.88rem; line-height: 1.6; }
+.hub-agr-t { display: flex; gap: 18px; flex-wrap: wrap; justify-content: flex-end; color: var(--text-secondary); }
+.hub-agr-t b { color: var(--text-primary); }
+.hub-agr-s { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 18px 0 8px; }
+.hub-agr-terms { white-space: pre-line; color: var(--text-secondary); font-size: 0.86rem; line-height: 1.6; margin: 0; }
+.hub-note { border: 1px solid rgba(217,181,108,0.4); background: rgba(217,181,108,0.08); border-radius: 12px; padding: 10px 12px; color: #f0d39a; font-size: 0.86rem; }
+.hub-check { display: flex; gap: 10px; align-items: flex-start; font-size: 0.88rem; color: var(--text-secondary); margin: 6px 0 4px; cursor: pointer; }
+.hub-check input { width: 18px; height: 18px; margin-top: 2px; flex: none; }
+.hub-agr { grid-template-columns: minmax(0, 1fr); }
+.hub-agr-m { color: var(--text-muted); font-size: 0.82rem; margin: 0; }
+.hub-form .hub-check { text-transform: none; letter-spacing: 0; font-size: 0.88rem; font-weight: 600; color: var(--text-secondary); }

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Invoice — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    .iv { max-width: 860px; margin: 0 auto; }
+    .iv-paper { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 32px; }
+    .iv-top { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 28px; }
+    .iv-from b { font-size: 1.15rem; color: var(--text-primary); display: block; margin-bottom: 4px; }
+    .iv-from, .iv-to { color: var(--text-secondary); font-size: .9rem; line-height: 1.5; white-space: pre-line; }
+    .iv-title { text-align: right; }
+    .iv-title h1 { margin: 0; font-size: 1.8rem; letter-spacing: .04em; color: var(--text-primary); }
+    .iv-title .no { font-family: 'JetBrains Mono', monospace; color: var(--accent-solid); font-weight: 600; }
+    .iv-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .iv-meta dt { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); font-weight: 700; }
+    .iv-meta dd { margin: 4px 0 0; color: var(--text-primary); font-weight: 600; }
+    .iv table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    .iv th { text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); padding: 8px 6px; border-bottom: 1px solid var(--card-border); }
+    .iv td { padding: 10px 6px; border-bottom: 1px solid var(--card-border); color: var(--text-primary); vertical-align: top; }
+    .iv .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .iv-total { display: flex; justify-content: flex-end; gap: 24px; margin-top: 14px; font-size: 1.15rem; font-weight: 800; color: var(--text-primary); }
+    .iv-stamp { display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 800; font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; margin-top: 8px; }
+    .iv-stamp.paid { background: rgba(16,185,129,.15); color: var(--jade); }
+    .iv-stamp.unpaid { background: rgba(240,211,154,.15); color: #f0d39a; }
+    .iv-stamp.overdue { background: rgba(239,68,68,.15); color: var(--danger); }
+    .iv-stamp.void { background: rgba(148,163,184,.15); color: var(--text-muted); }
+    .iv-sec { margin-top: 26px; }
+    .iv-sec h3 { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: 0 0 8px; }
+    .iv-sec p, .iv-sec li { color: var(--text-secondary); font-size: .9rem; line-height: 1.55; white-space: pre-line; margin: 0; }
+    .iv-sec ul { margin: 0; padding-left: 18px; }
+    .iv-bar { display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 14px; }
+    body.el-embed .iv-bar { margin-top: 10px; }
+    @media (max-width: 560px) { .iv-paper { padding: 18px; } .iv-title { text-align: left; } }
+    @media print { .iv-paper { border: 0; padding: 0; } .iv-stamp { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<main class="el-page iv" id="iv"><div class="ws-empty"><p>Loading the invoice…</p></div></main>
+
+    <script src="vendor/supabase-js-2.116.0.js"></script>
+<script src="header.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Phase 60. One invoice, ready to print or save as a PDF. Staff open it from Billing;
+    // an owner sees it inside their app (?embed=1), from their own endpoint.
+    const me = await EL.init({ engine: null, page: 'invoice.html' });
+    const esc = v => EL.esc(v);
+    const root = document.getElementById('iv');
+    const id = new URLSearchParams(location.search).get('id') || '';
+    const owner = me && me.role === 'client';
+    const taka = n => '৳' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const day = iso => iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—';
+
+    let d;
+    try { d = await EL.api(owner ? `/api/client/invoices/${encodeURIComponent(id)}` : `/api/invoices/${encodeURIComponent(id)}`, { scoped: false }); }
+    catch (err) {
+        root.innerHTML = `<div class="ws-empty">${EL.icon('alert')}<h3>This invoice could not be opened</h3><p>${esc(err.message)}</p></div>`;
+        return;
+    }
+    const v = d.invoice, p = d.profile || {}, pay = d.paymentOptions || [];
+    document.title = `${v.number} — ${v.client ? v.client.name : 'Invoice'}`;
+    const stamp = v.status === 'paid' ? ['paid', 'Paid' + (v.paidAt ? ' · ' + day(v.paidAt) : '')]
+        : v.status === 'void' ? ['void', 'Void'] : v.overdue ? ['overdue', 'Overdue'] : ['unpaid', 'Unpaid'];
+
+    root.innerHTML = `
+        <div class="iv-bar no-print">
+            ${owner ? '' : '<a class="ws-btn is-quiet" href="billing.html?tab=invoices">← Billing</a>'}
+            <button class="ws-btn is-gold" type="button" id="iv-print">${EL.icon('doc')}Print or save as PDF</button>
+        </div>
+        <article class="iv-paper">
+            <div class="iv-top">
+                <div class="iv-from"><b>${esc(p.name || 'Your agency')}</b>${esc([p.address, p.phone, p.email].filter(Boolean).join('\n'))}</div>
+                <div class="iv-title"><h1>INVOICE</h1><div class="no">${esc(v.number)}</div><span class="iv-stamp ${stamp[0]}">${esc(stamp[1])}</span></div>
+            </div>
+            <dl class="iv-meta">
+                <div><dt>Billed to</dt><dd>${esc(v.client ? v.client.name : '')}</dd></div>
+                <div><dt>Issued</dt><dd>${esc(day(v.issueDate))}</dd></div>
+                <div><dt>Due</dt><dd>${esc(v.dueDate ? day(v.dueDate) : 'On receipt')}</dd></div>
+                <div><dt>Amount</dt><dd>${esc(taka(v.total))}</dd></div>
+            </dl>
+            <table>
+                <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th></tr></thead>
+                <tbody>${v.items.map(i => `<tr><td>${esc(i.text)}</td><td class="num">${esc(i.qty)}</td><td class="num">${esc(taka(i.price))}</td><td class="num">${esc(taka(i.qty * i.price))}</td></tr>`).join('')}</tbody>
+            </table>
+            <div class="iv-total"><span>Total</span><span>${esc(taka(v.total))}</span></div>
+            ${v.notes ? `<section class="iv-sec"><h3>Notes</h3><p>${esc(v.notes)}</p></section>` : ''}
+            ${v.status !== 'paid' && v.status !== 'void' && pay.length ? `<section class="iv-sec"><h3>How to pay</h3><ul>${pay.map(o => `<li><b>${esc(o.label)}</b>${o.details ? ': ' + esc(o.details) : ''}${o.url ? ` · <a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.url)}</a>` : ''}</li>`).join('')}</ul>
+                <p style="margin-top:6px">Please put ${esc(v.number)} in the payment reference.</p></section>` : ''}
+            ${v.status === 'paid' && v.paidNote ? `<section class="iv-sec"><h3>Payment received</h3><p>${esc(v.paidNote)}</p></section>` : ''}
+            ${p.invoiceNote ? `<section class="iv-sec"><p>${esc(p.invoiceNote)}</p></section>` : ''}
+        </article>`;
+    document.getElementById('iv-print').addEventListener('click', () => window.print());
+})();
+</script>
+</body>
+</html>

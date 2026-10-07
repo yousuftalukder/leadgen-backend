@@ -4358,6 +4358,125 @@ test('the pages: Websites is in the menu and in New work; boards and My tasks fi
     assert.ok(/labels: \[LABEL\]/.test(w), 'new website work is not labelled Website');
 });
 
+section('\nphase 60: packages, the agreement the owner signs, and invoices');
+test('packages and invoice details: only an admin sets them; a bad price is refused', async () => {
+    assert.strictEqual((await call('PUT', '/api/admin/billing', { token: 't-emp', body: { packages: [] } })).statusCode, 403);
+    const bad = await call('PUT', '/api/admin/billing', { token: 't-admin', body: { packages: [{ name: 'Growth', price: -5 }] } });
+    assert.strictEqual(bad.statusCode, 400, JSON.stringify(bad.body));
+    const r = await call('PUT', '/api/admin/billing', { token: 't-admin', body: {
+        packages: [
+            { name: 'Social Growth', billing: 'monthly', price: 25000, description: 'Instagram and Facebook, managed', deliverables: '12 posts a month\n4 Reels a month\nMonthly report' },
+            { name: 'Website Build', billing: 'one_off', price: 40000, deliverables: ['5-page website', 'Booking form'] }
+        ],
+        profile: { name: 'Harbor Agency', address: 'Gulshan, Dhaka', terms: 'Fees are paid by the 5th.' }
+    } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.packages.length, 2);
+    assert.ok(r.body.packages.every(p => p.id), 'a package has no id to pick it by');
+    assert.deepStrictEqual(r.body.packages[0].deliverables, ['12 posts a month', '4 Reels a month', 'Monthly report']);
+    state.pk = r.body.packages;
+    const g = await call('GET', '/api/admin/billing', { token: 't-admin' });
+    assert.strictEqual(g.body.profile.name, 'Harbor Agency');
+});
+test('an agreement is picked from the packages, changed for the client, and goes in the invite email', async () => {
+    const items = [{ ...state.pk[0], price: 22000 }, state.pk[1], { name: 'Ad budget management', billing: 'monthly', price: 5000, deliverables: ['Weekly ad check'] }];
+    state.adminOnly = (await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Admin-only Tailor' } })).body.client.id;
+    assert.strictEqual((await call('PUT', `/api/clients/${state.adminOnly}/agreement`, { token: 't-emp', body: { items } })).statusCode, 404, 'someone not on the client changed its agreement');
+    const r = await call('PUT', `/api/clients/${state.D}/agreement`, { token: 't-emp', body: { items, startDate: '2026-11-01', terms: 'Fees are paid by the 5th.' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const a = r.body.agreement;
+    assert.strictEqual(a.status, 'awaiting'); assert.strictEqual(a.version, 1);
+    assert.deepStrictEqual(a.totals, { monthly: 27000, oneOff: 40000 });
+    assert.strictEqual(a.items[0].packageId, state.pk[0].id, 'the line forgot which package it came from');
+    const same = await call('PUT', `/api/clients/${state.D}/agreement`, { token: 't-emp', body: { items, startDate: '2026-11-01', terms: 'Fees are paid by the 5th.' } });
+    assert.strictEqual(same.body.changed, false); assert.strictEqual(same.body.agreement.version, 1);
+
+    MAIL.sent.length = 0;
+    const inv = await call('POST', `/api/clients/${state.D}/portal-invite`, { token: 't-emp', body: { email: 'owner@bloom.test', name: 'Rina Akter' } });
+    assert.ok([200, 201].includes(inv.statusCode), JSON.stringify(inv.body));
+    const mail = MAIL.sent.find(x => x.msg.to === 'owner@bloom.test');
+    assert.ok(mail, 'no invite email');
+    assert.ok(/Your agreement with us/.test(mail.msg.text) && /৳22,000 a month/.test(mail.msg.text) && /৳40,000 once/.test(mail.msg.text), mail.msg.text);
+});
+test('the owner signs before anything else: typed name and "I agree"; a changed agreement is signed again', async () => {
+    const tok = 't-owner@bloom.test';
+    const b = await call('GET', '/api/client/billing', { token: tok });
+    assert.strictEqual(b.statusCode, 200, JSON.stringify(b.body));
+    assert.strictEqual(b.body.needsSignature, true);
+    assert.strictEqual(b.body.agreement.items.length, 3);
+    assert.strictEqual((await call('POST', '/api/client/agreement/sign', { token: tok, body: { name: 'Rina Akter' } })).statusCode, 400, 'signed without ticking I agree');
+    assert.strictEqual((await call('POST', '/api/client/agreement/sign', { token: tok, body: { name: ' ', agree: true } })).statusCode, 400, 'signed without a name');
+    const s = await call('POST', '/api/client/agreement/sign', { token: tok, body: { name: 'Rina Akter', agree: true, version: 1 }, ip: '203.0.113.9' });
+    assert.strictEqual(s.statusCode, 200, JSON.stringify(s.body));
+    assert.strictEqual(s.body.agreement.status, 'signed');
+    const row = tbl('client_agreements').find(x => x.client_id === state.D);
+    assert.strictEqual(row.signed_name, 'Rina Akter'); assert.strictEqual(row.signed_ip, '203.0.113.9'); assert.ok(row.signed_at);
+    assert.strictEqual((await call('GET', '/api/client/billing', { token: tok })).body.needsSignature, false);
+
+    const items = row.items.slice(0, 2);
+    const ch = await call('PUT', `/api/clients/${state.D}/agreement`, { token: 't-emp', body: { items, terms: row.terms, startDate: row.start_date } });
+    assert.strictEqual(ch.body.agreement.version, 2); assert.strictEqual(ch.body.agreement.status, 'awaiting');
+    assert.strictEqual(ch.body.agreement.signed.name, 'Rina Akter', 'the earlier signature was forgotten');
+    const stale = await call('POST', '/api/client/agreement/sign', { token: tok, body: { name: 'Rina Akter', agree: true, version: 1 } });
+    assert.strictEqual(stale.statusCode, 409, 'an owner signed a version they were not shown');
+    assert.strictEqual((await call('POST', '/api/client/agreement/sign', { token: tok, body: { name: 'Rina Akter', agree: true, version: 2 } })).statusCode, 200);
+    assert.strictEqual((await call('GET', '/api/clients/' + state.D + '/agreement', { token: tok })).statusCode, 403, 'an owner read the staff route');
+});
+test('invoices: made by hand, numbered, shown to the owner, marked paid; void ones are hidden; a paid one is fixed', async () => {
+    const tok = 't-owner@bloom.test';
+    assert.strictEqual((await call('POST', `/api/clients/${state.D}/invoices`, { token: 't-emp', body: { items: [] } })).statusCode, 400);
+    assert.strictEqual((await call('POST', `/api/clients/${state.D}/invoices`, { token: 't-emp', body: { items: [{ text: 'x', qty: 1, price: 1 }], issueDate: '2026-11-05', dueDate: '2026-11-01' } })).statusCode, 400);
+    const r = await call('POST', `/api/clients/${state.D}/invoices`, { token: 't-emp', body: {
+        items: [{ text: 'Social Growth · November 2026', qty: 1, price: 22000 }, { text: 'Extra Reels', qty: 2, price: 1500 }],
+        issueDate: '2026-11-01', dueDate: '2026-11-08', notes: 'Thank you!'
+    } });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.body.invoice.total, 25000);
+    const id = r.body.invoice.id;
+    tbl('invoices').find(x => x.id === id).invoice_number = 7;             // the database numbers it; the fake does not
+    const one = await call('GET', `/api/invoices/${id}`, { token: 't-emp' });
+    assert.strictEqual(one.body.invoice.number, 'INV-0007');
+    assert.strictEqual(one.body.profile.name, 'Harbor Agency');
+
+    const own = await call('GET', '/api/client/billing', { token: tok });
+    assert.ok(own.body.invoices.some(v => v.id === id && v.status === 'unpaid'), 'the owner does not see the invoice');
+    assert.strictEqual((await call('GET', `/api/client/invoices/${id}`, { token: tok })).statusCode, 200);
+    assert.strictEqual((await call('GET', `/api/client/invoices/${id}`, { token: 't-owner@kitesurf.test' })).statusCode, 404, 'another business read the invoice');
+    const hidden = await call('POST', `/api/clients/${state.adminOnly}/invoices`, { token: 't-admin', body: { items: [{ text: 'Setup', qty: 1, price: 900 }] } });
+    assert.strictEqual(hidden.statusCode, 201);
+    assert.strictEqual((await call('GET', `/api/invoices/${hidden.body.invoice.id}`, { token: 't-emp' })).statusCode, 404, 'someone not on the client read the invoice');
+    assert.strictEqual((await call('PATCH', `/api/invoices/${hidden.body.invoice.id}`, { token: 't-emp', body: { status: 'paid' } })).statusCode, 404, 'someone not on the client marked it paid');
+
+    const paid = await call('PATCH', `/api/invoices/${id}`, { token: 't-emp', body: { status: 'paid', paidNote: 'bKash TrxID 8N7A6' } });
+    assert.strictEqual(paid.body.invoice.status, 'paid'); assert.ok(paid.body.invoice.paidAt); assert.strictEqual(paid.body.invoice.paidNote, 'bKash TrxID 8N7A6');
+    assert.strictEqual((await call('PATCH', `/api/invoices/${id}`, { token: 't-emp', body: { items: [{ text: 'y', qty: 1, price: 1 }] } })).statusCode, 400, 'a paid invoice was changed');
+
+    const v = await call('POST', `/api/clients/${state.D}/invoices`, { token: 't-emp', body: { items: [{ text: 'Mistake', qty: 1, price: 100 }] } });
+    await call('PATCH', `/api/invoices/${v.body.invoice.id}`, { token: 't-emp', body: { status: 'void' } });
+    const after = await call('GET', '/api/client/billing', { token: tok });
+    assert.ok(!after.body.invoices.some(x => x.id === v.body.invoice.id), 'the owner sees a void invoice');
+
+    const all = await call('GET', '/api/billing', { token: 't-emp' });
+    assert.strictEqual(all.statusCode, 200, JSON.stringify(all.body));
+    const bloom = all.body.clients.find(c => c.id === state.D);
+    assert.strictEqual(bloom.agreement.status, 'signed');
+    assert.ok(all.body.invoices.some(x => x.id === id && x.client.name === 'Bloom Florist'));
+    assert.strictEqual((await call('GET', '/api/billing', { token: tok })).statusCode, 403, 'an owner read the agency’s billing');
+});
+test('the pages: Billing in the menu, Packages & billing in settings, the owner app signs first and shows invoices', () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const read = f => fs.readFileSync(path.join(FRONT, f), 'utf8');
+    const h = read('header.js');
+    assert.ok(/href: 'billing\.html',\s+icon: 'receipt',\s+label: 'Billing'/.test(h), 'Billing is not in the menu');
+    assert.ok(/OWNER_EMBEDS = \[[^\]]*'invoice\.html'/.test(h), 'an owner cannot open an invoice inside the app');
+    assert.ok(/data-tab="billing"/.test(read('admin.html')) && /\/api\/admin\/billing/.test(read('admin.html')));
+    const hub = read('owner-hub.js');
+    assert.ok(/needsSignature && !locked\) openSign\(\)/.test(hub), 'the owner is not asked to sign first');
+    assert.ok(/\{ locked: true \}/.test(hub) && /if \(locked\) return;/.test(hub), 'the agreement sheet can be closed unsigned');
+    assert.ok(/agree: true, version: a\.version/.test(hub));
+    assert.ok(/\/api\/billing'/.test(read('billing.html')) && /window\.print\(\)/.test(read('invoice.html')));
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

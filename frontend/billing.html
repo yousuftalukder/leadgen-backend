@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Billing — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    .bl-row { display: grid; grid-template-columns: minmax(160px, 1.3fr) 2fr auto auto auto; gap: 14px; align-items: center; padding: 14px 4px; border-bottom: 1px solid var(--card-border); }
+    .bl-row:last-child { border-bottom: 0; }
+    .bl-name { font-weight: 800; color: var(--text-primary); }
+    .bl-pk { color: var(--text-secondary); font-size: .88rem; }
+    .bl-amt { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text-primary); white-space: nowrap; text-align: right; }
+    .bl-amt small { display: block; font-weight: 600; color: var(--text-muted); font-size: .72rem; }
+    .bl-inv { display: grid; grid-template-columns: 96px minmax(120px, 1.4fr) 110px 110px 120px 120px auto; gap: 12px; align-items: center; padding: 12px 4px; border-bottom: 1px solid var(--card-border); font-size: .9rem; }
+    .bl-inv:last-child { border-bottom: 0; }
+    .bl-no { font-family: 'JetBrains Mono', monospace; color: var(--accent-solid); font-weight: 600; text-decoration: none; }
+    .bl-acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+    .bl-item { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 14px; margin-bottom: 12px; display: grid; gap: 10px; }
+    .bl-item-h { display: grid; grid-template-columns: 1fr 140px 150px auto; gap: 10px; align-items: end; }
+    .bl-item label, .bl-f label { font-size: .75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; }
+    .bl-item input, .bl-item select, .bl-item textarea, .bl-f input, .bl-f textarea, .bl-f select { margin: 0; }
+    .bl-line { display: grid; grid-template-columns: 1fr 80px 130px 110px auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .bl-tot { display: flex; gap: 18px; justify-content: flex-end; font-weight: 800; color: var(--text-primary); margin: 10px 0 4px; flex-wrap: wrap; }
+    .bl-f { margin-bottom: 14px; }
+    .bl-note { font-size: .85rem; color: var(--text-muted); margin: 6px 0 14px; }
+    .bl-warn { border: 1px solid rgba(240,211,154,.35); background: rgba(240,211,154,.08); border-radius: var(--r-md); padding: 10px 14px; color: #f0d39a; font-size: .88rem; margin-bottom: 14px; }
+    @media (max-width: 900px) {
+        .bl-row { grid-template-columns: 1fr auto; }
+        .bl-row .bl-pk { grid-column: 1 / -1; }
+        .bl-inv { grid-template-columns: 1fr auto; }
+        .bl-inv .bl-hide-m { display: none; }
+        .bl-item-h, .bl-line { grid-template-columns: 1fr 1fr; }
+        .bl-line .bl-amt { text-align: left; }
+    }
+</style>
+</head>
+<body>
+<main class="el-page" id="bl"><div class="ws-empty"><p>Loading billing…</p></div></main>
+
+    <script src="vendor/supabase-js-2.116.0.js"></script>
+<script src="header.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Phase 60. What every client pays for, and the invoices. An agreement is picked from the
+    // packages set in Team & settings → Packages & billing, changed for the client as needed,
+    // and signed by the owner in their app. Invoices are made here by hand and marked paid
+    // when the money arrives.
+    await EL.init({ engine: null, page: 'billing.html' });
+    const esc = v => EL.esc(v);
+    const ic = n => EL.icon(n);
+    const root = document.getElementById('bl');
+    const qs = new URLSearchParams(location.search);
+    let tab = qs.get('tab') === 'invoices' ? 'invoices' : 'agreements';
+    let show = 'open', only = qs.get('client') || '';
+    let d = null;
+
+    const taka = n => '৳' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    const day = iso => iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '—';
+    const today = () => new Date().toISOString().slice(0, 10);
+    const plusDays = n => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    const MONTH = () => new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
+    function agreementChip(a) {
+        if (!a || a.status === 'empty') return '<span class="el-chip">No agreement</span>';
+        if (a.status === 'signed') return `<span class="el-chip is-jade" title="Signed by ${esc(a.signed.name)}">Signed ${esc(day(a.signed.at))}</span>`;
+        if (a.signed) return '<span class="el-chip is-gold">Changed · awaiting signature</span>';
+        return '<span class="el-chip is-gold">Awaiting signature</span>';
+    }
+    function invoiceChip(v) {
+        if (v.status === 'paid') return '<span class="el-chip is-jade">Paid</span>';
+        if (v.status === 'void') return '<span class="el-chip">Void</span>';
+        return v.overdue ? '<span class="el-chip is-bad" style="color:var(--danger)">Overdue</span>' : '<span class="el-chip is-gold">Unpaid</span>';
+    }
+
+    async function load() {
+        try { d = await EL.api('/api/billing', { scoped: false }); }
+        catch (err) {
+            root.innerHTML = `<header class="ws-head"><div><h1>Billing</h1></div></header><div class="ws-empty">${ic('alert')}<h3>${err.code === 'migration_required' ? 'Billing is not switched on yet' : 'Billing could not be loaded'}</h3><p>${esc(err.message)}</p></div>`;
+            return;
+        }
+        draw();
+    }
+
+    function draw() {
+        const clients = d.clients || [], invoices = d.invoices || [];
+        const unpaid = invoices.filter(v => v.status === 'unpaid');
+        const owed = unpaid.reduce((a, v) => a + v.total, 0);
+        const monthly = clients.reduce((a, c) => a + (c.agreement && c.agreement.status === 'signed' ? c.agreement.totals.monthly : 0), 0);
+        const awaiting = clients.filter(c => c.agreement && c.agreement.status === 'awaiting').length;
+        root.innerHTML = `
+            <header class="ws-head"><div><h1>Billing</h1>
+                <p class="ws-sub">${taka(monthly)} a month on signed agreements${awaiting ? ` · ${awaiting} awaiting signature` : ''} · ${taka(owed)} unpaid on ${unpaid.length} invoice${unpaid.length === 1 ? '' : 's'}. Packages and your invoice details are set in Team &amp; settings → Packages &amp; billing.</p></div>
+                <div class="ws-actions"><button class="ws-btn is-gold" type="button" id="bl-new">${ic('plus')}New invoice</button></div>
+            </header>
+            <nav class="ws-tabs" role="tablist">
+                <a role="tab" href="#" data-tab="agreements" aria-selected="${tab === 'agreements'}">Agreements <span class="n">${clients.filter(c => c.agreement && c.agreement.status !== 'empty').length}</span></a>
+                <a role="tab" href="#" data-tab="invoices" aria-selected="${tab === 'invoices'}">Invoices <span class="n">${unpaid.length}</span></a>
+            </nav>
+            <div id="bl-body" style="margin-top:16px"></div>`;
+        root.querySelector('#bl-new').addEventListener('click', () => newInvoice(only || null));
+        root.querySelectorAll('[data-tab]').forEach(a => a.addEventListener('click', e => {
+            e.preventDefault(); tab = a.dataset.tab;
+            const u = new URL(location.href); u.searchParams.set('tab', tab); history.replaceState(null, '', u);
+            draw();
+        }));
+        const body = root.querySelector('#bl-body');
+        if (tab === 'agreements') drawAgreements(body, clients); else drawInvoices(body, invoices, clients);
+    }
+
+    function drawAgreements(body, clients) {
+        if (!clients.length) { body.innerHTML = `<div class="ws-empty">${ic('clients')}<h3>No clients yet</h3><p>An agreement belongs to a client. Add the client first.</p><a class="ws-btn is-gold" href="clients.html?add=1">Add a client</a></div>`; return; }
+        body.innerHTML = `<section class="ws-card">${clients.map(c => {
+            const a = c.agreement;
+            const has = a && a.status !== 'empty';
+            return `<div class="bl-row">
+                <div class="bl-name">${esc(c.name)}</div>
+                <div class="bl-pk">${has ? a.items.map(i => esc(i.name)).join(' · ') : 'Nothing agreed yet'}</div>
+                <div class="bl-amt">${has ? `${taka(a.totals.monthly)}<small>a month${a.totals.oneOff ? ` · ${taka(a.totals.oneOff)} once` : ''}</small>` : ''}</div>
+                <div>${agreementChip(a)}</div>
+                <div class="bl-acts">${c.canEdit ? `<button class="ws-btn is-sm ${has ? 'is-quiet' : ''}" type="button" data-agr="${esc(c.id)}">${has ? 'Edit' : 'Set up'}</button>` : (has ? `<button class="ws-btn is-sm is-quiet" type="button" data-agr="${esc(c.id)}">View</button>` : '')}</div>
+            </div>`;
+        }).join('')}</section>`;
+        body.querySelectorAll('[data-agr]').forEach(b => b.addEventListener('click', () => editAgreement(b.dataset.agr)));
+    }
+
+    function drawInvoices(body, invoices, clients) {
+        const pick = { open: v => v.status === 'unpaid', overdue: v => v.overdue, paid: v => v.status === 'paid', void: v => v.status === 'void', all: () => true };
+        const inScope = invoices.filter(v => !only || v.clientId === only);
+        const list = inScope.filter(pick[show]);
+        const withInv = [...new Map(invoices.map(v => [v.clientId, v.client ? v.client.name : ''])).entries()];
+        const canEdit = id => (clients.find(c => c.id === id) || {}).canEdit;
+        body.innerHTML = `
+            <div class="ws-filters" role="group" aria-label="Show">
+                ${[['open', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([k, l]) => `<button type="button" data-show="${k}" aria-pressed="${show === k}">${l} <span class="ws-num">${inScope.filter(pick[k]).length}</span></button>`).join('')}
+                ${withInv.length > 1 || only ? `<select id="bl-client" aria-label="Client" style="width:auto;min-width:180px;margin:0"><option value="">Every client</option>${withInv.sort((a, b) => a[1].localeCompare(b[1])).map(([id, n]) => `<option value="${esc(id)}" ${only === id ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>` : ''}
+            </div>
+            ${list.length ? `<section class="ws-card">${list.map(v => `<div class="bl-inv">
+                <a class="bl-no" href="invoice.html?id=${encodeURIComponent(v.id)}">${esc(v.number)}</a>
+                <div class="bl-name">${esc(v.client ? v.client.name : '')}</div>
+                <div class="bl-hide-m el-muted">Issued ${esc(day(v.issueDate))}</div>
+                <div class="bl-hide-m el-muted">${v.dueDate ? 'Due ' + esc(day(v.dueDate)) : 'On receipt'}</div>
+                <div class="bl-amt">${taka(v.total)}</div>
+                <div class="bl-hide-m">${invoiceChip(v)}</div>
+                <div class="bl-acts">
+                    <a class="ws-btn is-sm is-quiet" href="invoice.html?id=${encodeURIComponent(v.id)}">Open</a>
+                    ${canEdit(v.clientId) && v.status === 'unpaid' ? `<button class="ws-btn is-sm is-quiet" type="button" data-edit="${esc(v.id)}">Edit</button><button class="ws-btn is-sm is-gold" type="button" data-paid="${esc(v.id)}">Mark paid</button>` : ''}
+                    ${canEdit(v.clientId) && v.status !== 'unpaid' ? `<button class="ws-btn is-sm is-quiet" type="button" data-unpaid="${esc(v.id)}">Mark unpaid</button>` : ''}
+                </div>
+            </div>`).join('')}</section>`
+            : `<div class="ws-empty">${ic('receipt')}<h3>${invoices.length ? 'Nothing here' : 'No invoices yet'}</h3><p>${invoices.length ? 'Nothing matches what is chosen above.' : 'Press New invoice, pick the client, and fill it from their agreement or by hand.'}</p></div>`}`;
+        body.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { show = b.dataset.show; draw(); }));
+        const sel = body.querySelector('#bl-client'); if (sel) sel.addEventListener('change', () => { only = sel.value; draw(); });
+        const find = id => invoices.find(v => v.id === id);
+        body.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => { const v = find(b.dataset.edit); invoiceDrawer(v.clientId, v.client ? v.client.name : '', v); }));
+        body.querySelectorAll('[data-paid]').forEach(b => b.addEventListener('click', () => markPaid(find(b.dataset.paid))));
+        body.querySelectorAll('[data-unpaid]').forEach(b => b.addEventListener('click', async () => {
+            const v = find(b.dataset.unpaid);
+            try { await EL.api(`/api/invoices/${encodeURIComponent(v.id)}`, { method: 'PATCH', body: { status: 'unpaid' }, scoped: false }); EL.toast(`${v.number} is unpaid again.`); load(); }
+            catch (err) { EL.toast(err.message); }
+        }));
+    }
+
+    // ---- an agreement ------------------------------------------------------------
+    async function editAgreement(clientId) {
+        let r;
+        try { r = await EL.api(`/api/clients/${encodeURIComponent(clientId)}/agreement`, { scoped: false }); }
+        catch (err) { EL.toast(err.message); return; }
+        const a = r.agreement, canEdit = r.canEdit, pk = r.packages || [];
+        let items = (a ? a.items : []).map(i => ({ ...i, deliverables: [...(i.deliverables || [])] }));
+        const dis = canEdit ? '' : 'disabled';
+        const dw = EL.drawer({
+            wide: 'xl', title: `Agreement · ${esc(r.client.name)}`,
+            sub: a && a.signed ? `Signed by ${esc(a.signed.name)} on ${esc(day(a.signed.at))}${a.status === 'awaiting' ? ' (an earlier version)' : ''}` : 'The owner reads and signs this in their app before using it.',
+            body: '<div id="ag"></div>',
+            foot: canEdit ? '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="ag-save">Save agreement</button>' : '<button class="ws-btn is-quiet" type="button" data-dw-close>Close</button>'
+        });
+        const host = dw.el.querySelector('#ag');
+        const sync = () => host.querySelectorAll('[data-i]').forEach(box => {
+            const i = +box.dataset.i, it = items[i]; if (!it) return;
+            it.name = box.querySelector('[data-k=name]').value;
+            it.billing = box.querySelector('[data-k=billing]').value;
+            it.price = box.querySelector('[data-k=price]').value;
+            it.description = box.querySelector('[data-k=description]').value;
+            it.deliverables = box.querySelector('[data-k=deliverables]').value.split('\n').map(s => s.trim()).filter(Boolean);
+        });
+        const tot = () => ({
+            m: items.filter(i => i.billing === 'monthly').reduce((s, i) => s + Number(i.price || 0), 0),
+            o: items.filter(i => i.billing === 'one_off').reduce((s, i) => s + Number(i.price || 0), 0)
+        });
+        // The terms and the date survive the repaints that adding or removing a line makes.
+        let termsNow = a ? a.terms : (r.profile && r.profile.terms) || '';
+        let startNow = a ? a.startDate || '' : today();
+        const keep = () => { const t = host.querySelector('#ag-terms'), s = host.querySelector('#ag-start'); if (t) termsNow = t.value; if (s) startNow = s.value; };
+        const paint = () => {
+            const t = tot();
+            host.innerHTML = `
+                ${a && a.status === 'signed' && canEdit ? '<div class="bl-warn">This agreement is signed. Saving a change asks the owner to read and sign it again.</div>' : ''}
+                ${canEdit ? `<div class="bl-f"><label for="ag-add">Add a package</label>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap"><select id="ag-add" style="width:auto;min-width:260px"><option value="">${pk.length ? 'Choose from your packages…' : 'No packages yet: set them in Team & settings'}</option>${pk.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${taka(p.price)} ${p.billing === 'monthly' ? 'a month' : 'once'}</option>`).join('')}</select>
+                    <button class="ws-btn is-quiet" type="button" id="ag-custom">${ic('plus')}Custom line</button></div>
+                    <p class="bl-note">A package is copied in; change its price or deliverables here for this client only.</p></div>` : ''}
+                ${items.length ? items.map((it, i) => `<div class="bl-item" data-i="${i}">
+                    <div class="bl-item-h">
+                        <div><label>Service</label><input data-k="name" value="${esc(it.name)}" maxlength="120" ${dis}></div>
+                        <div><label>Billed</label><select data-k="billing" ${dis}><option value="monthly" ${it.billing === 'monthly' ? 'selected' : ''}>Monthly</option><option value="one_off" ${it.billing === 'one_off' ? 'selected' : ''}>One-off</option></select></div>
+                        <div><label>Price (৳)</label><input data-k="price" type="number" min="0" step="1" value="${esc(it.price)}" ${dis}></div>
+                        ${canEdit ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${i}" aria-label="Remove ${esc(it.name)}">Remove</button>` : '<span></span>'}
+                    </div>
+                    <div><label>What it is</label><input data-k="description" value="${esc(it.description || '')}" maxlength="500" ${dis}></div>
+                    <div><label>Deliverables, one per line</label><textarea data-k="deliverables" rows="${Math.max(3, (it.deliverables || []).length + 1)}" ${dis}>${esc((it.deliverables || []).join('\n'))}</textarea></div>
+                </div>`).join('') : '<p class="el-muted">Nothing in this agreement yet. Add a package above.</p>'}
+                <div class="bl-tot"><span>${taka(t.m)} a month</span>${t.o ? `<span>${taka(t.o)} once</span>` : ''}</div>
+                <div class="bl-f"><label for="ag-start">Starts</label><input id="ag-start" type="date" value="${esc(startNow)}" style="max-width:220px" ${dis}></div>
+                <div class="bl-f"><label for="ag-terms">Terms</label><textarea id="ag-terms" rows="7" maxlength="8000" placeholder="Payment terms, notice period, what happens on late payment…" ${dis}>${esc(termsNow)}</textarea></div>`;
+            if (!canEdit) return;
+            host.querySelector('#ag-add').addEventListener('change', e => {
+                const p = pk.find(x => x.id === e.target.value); if (!p) return;
+                sync(); items.push({ id: p.id, name: p.name, billing: p.billing, price: p.price, description: p.description || '', deliverables: [...(p.deliverables || [])] }); keep(); paint();
+            });
+            host.querySelector('#ag-custom').addEventListener('click', () => { sync(); items.push({ name: '', billing: 'monthly', price: 0, description: '', deliverables: [] }); keep(); paint(); });
+            host.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { sync(); items.splice(+b.dataset.rm, 1); keep(); paint(); }));
+            host.querySelectorAll('[data-k=price], [data-k=billing]').forEach(x => x.addEventListener('change', () => { sync(); keep(); paint(); }));
+        };
+        paint();
+        if (!canEdit) return;
+        dw.el.querySelector('#ag-save').addEventListener('click', async e => {
+            sync(); keep();
+            e.target.disabled = true;
+            try {
+                const res = await EL.api(`/api/clients/${encodeURIComponent(clientId)}/agreement`, { method: 'PUT', scoped: false, body: {
+                    items: items.map(({ packageId, ...i }) => ({ ...i, ...(packageId ? { id: packageId } : {}), price: Number(i.price || 0) })),
+                    terms: termsNow, startDate: startNow || null
+                } });
+                dw.close();
+                EL.toast(!res.changed ? 'Nothing changed.' : res.agreement.status === 'awaiting' ? `Saved. ${r.client.name}'s owner is asked to sign it when they open their app.` : 'Saved.');
+                load();
+            } catch (err) { e.target.disabled = false; EL.toast(err.message); }
+        });
+    }
+
+    // ---- invoices ----------------------------------------------------------------
+    function newInvoice(clientId) {
+        const clients = (d.clients || []).filter(c => c.canEdit);
+        const c = clientId && clients.find(x => x.id === clientId);
+        if (c) return invoiceDrawer(c.id, c.name, null);
+        const dw = EL.drawer({
+            title: 'New invoice', sub: 'Which client is it for?',
+            body: clients.length ? clients.map(x => `<button type="button" class="el-pick-row" data-pick="${esc(x.id)}" style="margin-bottom:8px">
+                <span class="el-avatar">${esc(String(x.name || '?').split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase())}</span>
+                <span class="el-pick-t"><b>${esc(x.name)}</b><small>${x.agreement && x.agreement.status !== 'empty' ? `${taka(x.agreement.totals.monthly)} a month` : 'No agreement'}</small></span></button>`).join('')
+                : '<p class="el-muted">There is no client you can bill yet.</p><a class="el-btn el-add" href="clients.html?add=1">Add a client</a>'
+        });
+        dw.body.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => { const x = clients.find(y => y.id === b.dataset.pick); dw.close(); invoiceDrawer(x.id, x.name, null); }));
+    }
+
+    function invoiceDrawer(clientId, clientName, inv) {
+        const agr = ((d.clients || []).find(c => c.id === clientId) || {}).agreement;
+        let lines = inv ? inv.items.map(i => ({ ...i })) : [];
+        const dw = EL.drawer({
+            wide: 'xl', title: inv ? `${esc(inv.number)} · ${esc(clientName)}` : `New invoice · ${esc(clientName)}`,
+            sub: inv ? 'Changes show in the owner’s app straight away.' : 'Numbered when saved. The owner sees it in their app.',
+            body: '<div id="ivd"></div>',
+            foot: `<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="ivd-save">${inv ? 'Save' : 'Create invoice'}</button>`
+        });
+        const host = dw.el.querySelector('#ivd');
+        let issue = inv ? inv.issueDate : today(), due = inv ? (inv.dueDate || '') : plusDays(7), notes = inv ? inv.notes : '';
+        const sync = () => {
+            host.querySelectorAll('[data-l]').forEach(row => {
+                const l = lines[+row.dataset.l]; if (!l) return;
+                l.text = row.querySelector('[data-k=text]').value; l.qty = row.querySelector('[data-k=qty]').value; l.price = row.querySelector('[data-k=price]').value;
+            });
+            issue = host.querySelector('#ivd-issue').value; due = host.querySelector('#ivd-due').value; notes = host.querySelector('#ivd-notes').value;
+        };
+        const paint = () => {
+            const total = lines.reduce((s, l) => s + Number(l.qty || 0) * Number(l.price || 0), 0);
+            host.innerHTML = `
+                ${agr && agr.status !== 'empty' ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+                    <button class="ws-btn is-quiet" type="button" id="ivd-monthly">${ic('plus')}Monthly fees for ${esc(MONTH())}</button>
+                    ${agr.totals.oneOff ? `<button class="ws-btn is-quiet" type="button" id="ivd-oneoff">${ic('plus')}One-off fees</button>` : ''}</div>` : '<p class="bl-note">This client has no agreement; add the lines by hand.</p>'}
+                ${lines.map((l, i) => `<div class="bl-line" data-l="${i}">
+                    <input data-k="text" value="${esc(l.text)}" placeholder="Description" maxlength="200" aria-label="Description">
+                    <input data-k="qty" type="number" min="0.01" step="any" value="${esc(l.qty)}" aria-label="Quantity">
+                    <input data-k="price" type="number" min="0" step="1" value="${esc(l.price)}" aria-label="Price in taka">
+                    <span class="bl-amt">${taka(Number(l.qty || 0) * Number(l.price || 0))}</span>
+                    <button class="ws-btn is-sm is-quiet" type="button" data-rm="${i}" aria-label="Remove line">✕</button>
+                </div>`).join('')}
+                <button class="ws-btn is-sm is-quiet" type="button" id="ivd-line">${ic('plus')}Add a line</button>
+                <div class="bl-tot"><span>Total ${taka(total)}</span></div>
+                <div style="display:flex;gap:14px;flex-wrap:wrap">
+                    <div class="bl-f"><label for="ivd-issue">Issued</label><input id="ivd-issue" type="date" value="${esc(issue)}"></div>
+                    <div class="bl-f"><label for="ivd-due">Due</label><input id="ivd-due" type="date" value="${esc(due)}"></div>
+                </div>
+                <div class="bl-f"><label for="ivd-notes">Notes on the invoice</label><textarea id="ivd-notes" rows="3" maxlength="2000">${esc(notes)}</textarea></div>`;
+            const add = list => { sync(); lines.push(...list); paint(); };
+            const m = host.querySelector('#ivd-monthly');
+            if (m) m.addEventListener('click', () => add(agr.items.filter(i => i.billing === 'monthly').map(i => ({ text: `${i.name} · ${MONTH()}`, qty: 1, price: i.price }))));
+            const o = host.querySelector('#ivd-oneoff');
+            if (o) o.addEventListener('click', () => add(agr.items.filter(i => i.billing === 'one_off').map(i => ({ text: i.name, qty: 1, price: i.price }))));
+            host.querySelector('#ivd-line').addEventListener('click', () => add([{ text: '', qty: 1, price: 0 }]));
+            host.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { sync(); lines.splice(+b.dataset.rm, 1); paint(); }));
+            host.querySelectorAll('[data-k=qty], [data-k=price]').forEach(x => x.addEventListener('change', () => { sync(); paint(); }));
+        };
+        paint();
+        dw.el.querySelector('#ivd-save').addEventListener('click', async e => {
+            sync();
+            e.target.disabled = true;
+            const body = { items: lines.map(l => ({ text: l.text, qty: Number(l.qty || 0), price: Number(l.price || 0) })), issueDate: issue, dueDate: due || null, notes };
+            try {
+                const res = inv
+                    ? await EL.api(`/api/invoices/${encodeURIComponent(inv.id)}`, { method: 'PATCH', body, scoped: false })
+                    : await EL.api(`/api/clients/${encodeURIComponent(clientId)}/invoices`, { method: 'POST', body, scoped: false });
+                dw.close();
+                EL.toast(`${res.invoice.number} saved: ${taka(res.invoice.total)}. ${clientName}'s owner sees it in their app.`);
+                tab = 'invoices'; load();
+            } catch (err) { e.target.disabled = false; EL.toast(err.message); }
+        });
+    }
+
+    function markPaid(v) {
+        const dw = EL.drawer({
+            title: `Mark ${esc(v.number)} paid`, sub: `${esc(v.client ? v.client.name : '')} · ${taka(v.total)}`,
+            body: `<div class="bl-f"><label for="pd-note">How it was paid (optional)</label><input id="pd-note" maxlength="300" placeholder="bKash, TrxID 8N7A6…"></div>`,
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="pd-go">Mark paid</button>'
+        });
+        dw.el.querySelector('#pd-go').addEventListener('click', async e => {
+            e.target.disabled = true;
+            try {
+                await EL.api(`/api/invoices/${encodeURIComponent(v.id)}`, { method: 'PATCH', scoped: false, body: { status: 'paid', paidNote: dw.el.querySelector('#pd-note').value } });
+                dw.close(); EL.toast(`${v.number} is paid.`); load();
+            } catch (err) { e.target.disabled = false; EL.toast(err.message); }
+        });
+    }
+
+    await load();
+    if (d && only && qs.get('agreement') === '1') editAgreement(only);
+})();
+</script>
+</body>
+</html>

@@ -95,6 +95,7 @@
         { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
         { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
         { href: 'websites.html',  icon: 'globe',   label: 'Websites',  engine: null },     // phase 59: website work, every client
+        { href: 'billing.html',   icon: 'receipt', label: 'Billing',   engine: null },     // phase 60: agreements and invoices
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
@@ -170,6 +171,7 @@
         alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
         info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
         out: '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4M6 12h10"/>',
+        receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
         globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>'
     };
     const icon = (name, cls = '') => ICONS[name]
@@ -203,7 +205,7 @@
      * not see the tab either.
      */
     /** Owner tools that open inside the Edge Meta AI app, as a sheet (phase 49). */
-    const OWNER_EMBEDS = ['client-leads.html', 'client-community.html'];
+    const OWNER_EMBEDS = ['client-leads.html', 'client-community.html', 'invoice.html'];   // phase 60: an invoice, printable, inside the app
 
     const CLIENT_NAV = [
         { href: 'client.html',           icon: 'home',   label: 'Home',           engine: null },

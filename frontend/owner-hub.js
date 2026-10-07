@@ -11,6 +11,7 @@
  *   Reports         every report, read in full
  *   Numbers         the daily numbers from their own Meta
  *   Shared tools    Find customers / Local demand, when the agency gave them
+ *   Billing         the agreement (signed once, before anything else) and the invoices (phase 60)
  *
  * The chat answers questions about all of this too (get_agency_work); anything
  * that changes something — an approval, a tick — is a button here, never a
@@ -40,14 +41,16 @@
         return out.join('');
     }
 
-    let me = null, data = { tasks: [], media: {}, posts: [], reports: [], growth: null }, host = null;
+    let me = null, data = { tasks: [], media: {}, posts: [], reports: [], growth: null, billing: null }, host = null;
+    // Phase 60: while the agreement waits for a signature, its sheet cannot be closed or stepped back from.
+    let locked = false;
 
     // ---- the sheet ---------------------------------------------------------------
     // One sheet at a time, with a way back (phase 52): a task opened from the to-do list
     // goes back to the list, not out of Updates. The phone's own back button does the
     // same instead of leaving the app — one history entry stands for every open sheet.
     let current = null, stack = [], inHistory = false, opener = null;
-    function sheet(title, sub = '', reopen = null) {
+    function sheet(title, sub = '', reopen = null, opts = {}) {
         const open = !!document.getElementById('hub-sheet');
         if (open && current) stack.push(current);
         if (!open) stack = [];
@@ -62,13 +65,15 @@
                     <button class="icon-btn" type="button" data-hub-close aria-label="Close">✕</button></header>
                 <div class="hub-b"></div>
             </section>`;
-        wrap.classList.toggle('has-back', stack.length > 0 || open);
+        wrap.classList.toggle('has-back', !opts.locked && (stack.length > 0 || open));
+        wrap.classList.toggle('is-locked', !!opts.locked);
+        locked = !!opts.locked;
         document.body.appendChild(wrap);
         document.body.classList.add('hub-open');
         if (!open) opener = document.activeElement;
         // Focus goes into the sheet, and back to what opened it on close (phase 57).
         setTimeout(() => { const t = wrap.querySelector('#hub-t'); if (t) { t.tabIndex = -1; t.focus(); } }, 30);
-        wrap.querySelectorAll('[data-hub-close]').forEach(b => b.addEventListener('click', close));
+        wrap.querySelectorAll('[data-hub-close]').forEach(b => b.addEventListener('click', () => { if (!locked) close(); }));
         wrap.querySelector('[data-hub-back]').addEventListener('click', back);
         document.removeEventListener('keydown', escClose);
         document.addEventListener('keydown', escClose);
@@ -77,7 +82,7 @@
         return { el: wrap, body: wrap.querySelector('.hub-b'), title: t => { wrap.querySelector('#hub-t').innerHTML = t; } };
     }
     // Escape steps back, except while typing something not yet sent (phase 57): that lost the draft.
-    function escClose(e) { if (e.key === 'Escape' && !(e.target && /TEXTAREA|INPUT/.test(e.target.tagName) && e.target.value)) back(); }
+    function escClose(e) { if (locked) return; if (e.key === 'Escape' && !(e.target && /TEXTAREA|INPUT/.test(e.target.tagName) && e.target.value)) back(); }
     function remove() {
         const w = document.getElementById('hub-sheet');
         if (w) w.remove();
@@ -105,6 +110,7 @@
         if (!inHistory) return;
         inHistory = false;
         if (!document.getElementById('hub-sheet')) return;
+        if (locked) { try { history.pushState({ hub: 1 }, ''); inHistory = true; } catch { /* sandboxed */ } return; }
         if (!stack.length) { close(); return; }
         back();
         try { history.pushState({ hub: 1 }, ''); inHistory = true; } catch { /* sandboxed */ }
@@ -123,13 +129,17 @@
         ]);
         // All four failing is no connection, not "nothing waiting on you" (phase 57).
         loadFailed = fails === 4;
-        if (!loadFailed) { data = { tasks: t.tasks || [], media: t.media || {}, posts: c.posts || [], reports: r.reports || [], growth: g }; loadedAt = Date.now(); }
+        const b = await EL.api('/api/client/billing').catch(() => null);
+        if (!loadFailed) { data = { tasks: t.tasks || [], media: t.media || {}, posts: c.posts || [], reports: r.reports || [], growth: g, billing: b }; loadedAt = Date.now(); }
         draw();
+        // The agreement comes first: until it is signed, its sheet is the app.
+        if (b && b.needsSignature && !locked) openSign();
     }
     const recentDone = t => t.status === 'done' && t.completedAt && Date.now() - Date.parse(t.completedAt) < 30 * 86400000;
     const todos = () => data.tasks.filter(t => t.yours && t.status !== 'done');
     const working = () => data.tasks.filter(t => !t.yours && t.status !== 'done');
     const waitingPosts = () => data.posts.filter(p => p.status === 'idea');
+    const unpaid = () => ((data.billing && data.billing.invoices) || []).filter(v => v.status === 'unpaid');
 
     function draw() {
         const tools = [
@@ -145,6 +155,7 @@
             ${data.growth && data.growth.connected ? chip('numbers', 'Daily numbers', 0, false) : ''}
             ${(me.engines || []).includes('report') ? chip('checkup', 'New check-up', 0, false) : ''}
             ${tools.map(([k, l]) => chip('tool-' + k, l, 0, false)).join('')}
+            ${data.billing && (data.billing.agreement || (data.billing.invoices || []).length) ? chip('billing', 'Billing', unpaid().length, unpaid().length > 0 || !!data.billing.needsSignature) : ''}
             ${loadFailed ? '<button type="button" class="hub-chip is-hot" data-hub="retry">Couldn’t load your updates · Retry</button>' : ''}
         </div>`;
         host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => {
@@ -156,6 +167,7 @@
             else if (k === 'reports') openReports();
             else if (k === 'numbers') openNumbers();
             else if (k === 'checkup') openCheckup();
+            else if (k === 'billing') openBilling();
             else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
         }));
         const n = todos().length + waitingPosts().length;
@@ -378,7 +390,73 @@
     function openTool(label, page) {
         const s = sheet(esc(label), '', () => openTool(label, page));
         s.body.classList.add('is-frame');
-        s.body.innerHTML = `<iframe class="hub-frame" src="${page}?embed=1" title="${esc(label)}"></iframe>`;
+        s.body.innerHTML = `<iframe class="hub-frame" src="${page}${page.includes('?') ? '&' : '?'}embed=1" title="${esc(label)}"></iframe>`;
+    }
+
+    // ---- billing (phase 60) ------------------------------------------------------------
+    const taka = n => '৳' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    /** The agreement, as the owner reads it: each service, its price, what is delivered, the terms. */
+    function agreementHtml(a) {
+        return `<div class="hub-agr">
+            ${a.items.map(i => `<div class="hub-agr-i">
+                <div class="hub-agr-h"><b>${esc(i.name)}</b><span>${esc(taka(i.price))} ${i.billing === 'monthly' ? 'a month' : 'once'}</span></div>
+                ${i.description ? `<p>${esc(i.description)}</p>` : ''}
+                ${(i.deliverables || []).length ? `<ul>${i.deliverables.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+            </div>`).join('')}
+            <div class="hub-agr-t">${a.totals.monthly ? `<span>Monthly total <b>${esc(taka(a.totals.monthly))}</b></span>` : ''}${a.totals.oneOff ? `<span>One-off total <b>${esc(taka(a.totals.oneOff))}</b></span>` : ''}</div>
+            ${a.startDate ? `<p class="hub-agr-m">Starts ${esc(shortDay(a.startDate))}</p>` : ''}
+            ${a.terms ? `<h3 class="hub-agr-s">Terms</h3><p class="hub-agr-terms">${esc(a.terms)}</p>` : ''}
+        </div>`;
+    }
+    function openSign() {
+        const b = data.billing; if (!b || !b.agreement) return;
+        const a = b.agreement;
+        const who = (b.profile && b.profile.name) || 'your agency';
+        const s = sheet('Your agreement', `With ${esc(who)}. Read it, then sign to continue.`, openSign, { locked: true });
+        s.body.innerHTML = `${a.signed ? '<p class="hub-note">Your agency changed the agreement since you last signed it. Please read the new one.</p>' : ''}
+            ${agreementHtml(a)}
+            <div class="hub-form hub-sign">
+                <label for="sg-name">Type your full name to sign</label>
+                <input id="sg-name" autocomplete="name" maxlength="120" value="${esc((me && me.full_name) || '')}">
+                <label class="hub-check"><input type="checkbox" id="sg-ok"> I have read this agreement and I agree to it, including the fees and the terms.</label>
+                <button class="btn-primary" type="button" id="sg-go" disabled>Sign and continue</button>
+                <p class="hub-err" id="sg-msg" role="alert"></p>
+            </div>`;
+        const $ = id => s.body.querySelector('#' + id);
+        const ready = () => { $('sg-go').disabled = !($('sg-ok').checked && $('sg-name').value.trim().length >= 2); };
+        $('sg-ok').addEventListener('change', ready); $('sg-name').addEventListener('input', ready); ready();
+        $('sg-go').addEventListener('click', async () => {
+            $('sg-go').disabled = true; $('sg-msg').textContent = '';
+            try {
+                await EL.api('/api/client/agreement/sign', { method: 'POST', body: { name: $('sg-name').value.trim(), agree: true, version: a.version } });
+                locked = false; close();
+                if (EL.toast) EL.toast('Signed. A copy is under Billing whenever you need it.');
+                load().catch(() => {});
+            } catch (err) {
+                if (err.code === 'agreement_changed') { locked = false; load().catch(() => {}); return; }
+                $('sg-msg').textContent = err.message; ready();
+            }
+        });
+    }
+    function openBilling() {
+        const b = data.billing || {};
+        if (b.needsSignature) return openSign();
+        const s = sheet('Billing', esc((b.profile && b.profile.name) || ''), openBilling);
+        const inv = b.invoices || [];
+        const state = v => v.status === 'paid' ? 'Paid' : v.overdue ? '<span class="hub-late">Overdue</span>' : 'Unpaid';
+        s.body.innerHTML = `
+            <h3 class="hub-agr-s">Invoices</h3>
+            ${inv.length ? `<div class="hub-list">${inv.map(v => `<button type="button" class="hub-item is-btn" data-inv="${esc(v.id)}">
+                <span class="hub-it">${esc(v.number)} · ${esc(taka(v.total))}</span>
+                <span class="hub-im">${esc(shortDay(v.issueDate))} · ${state(v)}${v.status === 'unpaid' && v.dueDate ? ' · due ' + esc(shortDay(v.dueDate)) : ''}</span></button>`).join('')}</div>`
+            : '<p class="hub-empty">No invoices yet.</p>'}
+            ${b.agreement ? `<h3 class="hub-agr-s">Your agreement</h3>
+                ${b.agreement.signed ? `<p class="hub-agr-m">Signed by ${esc(b.agreement.signed.name)} on ${esc(shortDay(b.agreement.signed.at))}</p>` : ''}
+                ${agreementHtml(b.agreement)}` : ''}`;
+        s.body.querySelectorAll('[data-inv]').forEach(x => x.addEventListener('click', () => {
+            const v = inv.find(i => i.id === x.dataset.inv);
+            openTool(v ? v.number : 'Invoice', `invoice.html?id=${encodeURIComponent(x.dataset.inv)}`);
+        }));
     }
 
     /** Mount under the app bar. `onAsk` lets a sheet hand a question to the chat. */
@@ -388,5 +466,5 @@
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
 })();
