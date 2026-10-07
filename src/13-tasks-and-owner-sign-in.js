@@ -37,6 +37,11 @@ const TASK_LABELS_MAX = 8;
 const TASK_CHECKLIST_MAX = 30;
 const TASK_COMMENT_MAX = 4000;
 const TASK_DONE_SHOWN_DAYS = 14;          // "My tasks" keeps a fortnight of finished work in view
+// Phase 59: the labels the pages offer. A typed "website" is filed as "Website", so a
+// filter on one label finds every task carrying it, whoever typed it.
+const TASK_KNOWN_LABELS = ['Website', 'Content', 'Reporting', 'Ads', 'Community', 'Leads', 'Setup', 'Profile'];
+const KNOWN_LABEL = Object.fromEntries(TASK_KNOWN_LABELS.map(l => [l.toLowerCase(), l]));
+const TASK_LIST_DONE_DAYS = 30;           // a label's list keeps a month of finished work in view
 const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -109,7 +114,8 @@ function cleanTaskBody(b = {}, { create = false } = {}) {
         if (!Array.isArray(b.labels)) throw taskFail('Labels must be a list.');
         const seen = new Set(); const labels = [];
         for (const raw of b.labels) {
-            const l = oneLine(raw, 24);
+            let l = oneLine(raw, 24);
+            if (l && KNOWN_LABEL[l.toLowerCase()]) l = KNOWN_LABEL[l.toLowerCase()];
             if (!l || seen.has(l.toLowerCase())) continue;
             seen.add(l.toLowerCase()); labels.push(l);
         }
@@ -587,6 +593,69 @@ app.get('/api/my-tasks', async (req, res) => {
             .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || String(a.created_at).localeCompare(String(b.created_at)))
             .map(t => ({ ...taskView(t, me, counts, clients.get(t.client_id).name), client: { id: t.client_id, name: clients.get(t.client_id).name } }));
         res.json({ tasks });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** Every client the caller can open and that is not archived: their own, the ones they are on, and for an admin every one. */
+async function openClientsFor(ctx) {
+    const uid = ctx.user.id;
+    if (ctx.profile?.role === 'admin') {
+        const { data } = await supabase.from('clients').select('*').limit(5000);
+        return (data || []).filter(c => !c.archived).map(c => ({ ...c, access: c.owner_user_id === uid ? 'owner' : 'admin' }));
+    }
+    const [{ data: owned }, { data: mem }] = await Promise.all([
+        supabase.from('clients').select('*').eq('owner_user_id', uid),
+        supabase.from('client_members').select('client_id, role').eq('user_id', uid)
+    ]);
+    const rows = (owned || []).map(c => ({ ...c, access: 'owner' }));
+    const have = new Set(rows.map(c => c.id));
+    const shared = (mem || []).filter(m => !have.has(m.client_id));
+    if (shared.length) {
+        const { data } = await supabase.from('clients').select('*').in('id', shared.map(m => m.client_id));
+        for (const c of (data || [])) rows.push({ ...c, access: (shared.find(m => m.client_id === c.id) || {}).role || 'viewer' });
+    }
+    return rows.filter(c => !c.archived);
+}
+
+/**
+ * Phase 59: one label's work across every client the caller can open, whoever it is
+ * assigned to. The Websites page is this with label=Website. A task still lives on
+ * its client's board; this gathers them, as My tasks does for one person.
+ */
+app.get('/api/tasks', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const raw = oneLine(req.query.label, 24);
+        if (!raw) return res.status(400).json({ error: 'Say which label: /api/tasks?label=Website.' });
+        const label = KNOWN_LABEL[raw.toLowerCase()] || raw;
+        const clients = await openClientsFor(ctx);
+        const byId = new Map(clients.map(c => [c.id, c]));
+        let rows = [];
+        if (clients.length) {
+            const { data, error } = await supabase.from('client_tasks').select('*').in('client_id', [...byId.keys()]).limit(5000);
+            if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
+            rows = data || [];
+        }
+        const want = label.toLowerCase();
+        const cutoff = new Date(Date.now() - TASK_LIST_DONE_DAYS * 86400000).toISOString();
+        rows = rows.filter(t => (t.labels || []).some(l => String(l).toLowerCase() === want)
+            && (t.status !== 'done' || (t.completed_at && t.completed_at >= cutoff)));
+        const people = await peopleById(rows.map(t => t.assignee_user_id).filter(Boolean));
+        const counts = await taskCommentCounts(rows.map(t => t.id));
+        const tasks = rows
+            .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || String(a.created_at).localeCompare(String(b.created_at)))
+            .map(t => {
+                const c = byId.get(t.client_id);
+                return { ...taskView(t, people, counts, c.name), client: { id: c.id, name: c.name }, canEdit: ['owner', 'admin', 'editor'].includes(c.access) };
+            });
+        res.json({
+            label, labels: TASK_KNOWN_LABELS, tasks,
+            // The clients new work can be filed under: only where the caller may add a task.
+            clients: clients.filter(c => ['owner', 'admin', 'editor'].includes(c.access))
+                .map(c => ({ id: c.id, name: c.name }))
+                .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+        });
     } catch (err) { sendErr(res, err); }
 });
 

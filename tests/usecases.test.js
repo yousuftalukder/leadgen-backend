@@ -4303,6 +4303,61 @@ test('the pages: sign-out lands on the app, not /ai/ai/; lists that cover every 
     assert.ok(fs.existsSync(path.join(FRONT, 'vendor', 'supabase-js-2.116.0.js')));
 });
 
+section('\nphase 59: Websites — one label\'s work across every client');
+test('website work: a typed "website" is filed as Website and listed across clients, only where the caller can open the client', async () => {
+    const a = await call('POST', `/api/clients/${state.D}/tasks`, { token: 't-emp', body: { title: 'Fix the booking form on the site', labels: ['website', 'Setup'], assignee: EMP.id } });
+    assert.strictEqual(a.statusCode, 201, JSON.stringify(a.body));
+    assert.deepStrictEqual(a.body.task.labels, ['Website', 'Setup'], 'a typed label was not filed under the known one');
+    const priv = await call('POST', '/api/clients', { token: 't-admin', body: { name: 'Admin-only Bakery' } });
+    const hidden = await call('POST', `/api/clients/${priv.body.client.id}/tasks`, { token: 't-admin', body: { title: 'New landing page', labels: ['Website'] } });
+    assert.strictEqual(hidden.statusCode, 201);
+    await call('POST', `/api/clients/${state.D}/tasks`, { token: 't-emp', body: { title: 'Plan October posts', labels: ['Content'] } });
+
+    const r = await call('GET', '/api/tasks', { token: 't-emp', query: { label: 'WEBSITE' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.label, 'Website');
+    const titles = r.body.tasks.map(t => t.title);
+    assert.ok(titles.includes('Fix the booking form on the site'), titles.join(' | '));
+    assert.ok(!titles.includes('Plan October posts'), 'another label leaked into the website list');
+    assert.ok(!titles.includes('New landing page'), 'a client the caller cannot open was listed');
+    const t = r.body.tasks.find(x => x.title === 'Fix the booking form on the site');
+    assert.strictEqual(t.client.name, 'Bloom Florist'); assert.strictEqual(t.canEdit, true);
+    assert.ok(r.body.clients.every(c => c.id && c.name), 'the clients new work can go under');
+    assert.ok(!r.body.clients.some(c => c.id === priv.body.client.id));
+
+    const ad = await call('GET', '/api/tasks', { token: 't-admin', query: { label: 'Website' } });
+    assert.ok(ad.body.tasks.some(x => x.title === 'New landing page'), 'an admin sees website work on every client');
+    tbl('clients').find(c => c.id === priv.body.client.id).archived = true;
+    const arch = await call('GET', '/api/tasks', { token: 't-admin', query: { label: 'Website' } });
+    assert.ok(!arch.body.tasks.some(x => x.title === 'New landing page'), 'an archived client\'s work is still listed');
+
+    const mine = await call('GET', '/api/my-tasks', { token: 't-emp' });
+    assert.ok(mine.body.tasks.some(x => x.title === 'Fix the booking form on the site' && x.labels.includes('Website')), 'website work is not in My tasks');
+});
+test('website work always has a client: no label, no list; owners and strangers are refused', async () => {
+    assert.strictEqual((await call('GET', '/api/tasks', { token: 't-emp' })).statusCode, 400);
+    assert.strictEqual((await call('GET', '/api/tasks', { token: 't-owner@kitesurf.test', query: { label: 'Website' } })).statusCode, 403);
+    assert.strictEqual((await call('GET', '/api/tasks', { query: { label: 'Website' } })).statusCode, 401);
+    // There is no route that makes a task without a client.
+    const src = serverSource();
+    assert.ok(!/app\.post\('\/api\/tasks'/.test(src), 'a task could be created without a client');
+});
+test('the pages: Websites is in the menu and in New work; boards and My tasks filter by label', () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
+    assert.ok(/href: 'websites\.html',\s+icon: 'globe',\s+label: 'Websites'/.test(h), 'Websites is not in the menu');
+    assert.ok(/name: 'Website work'/.test(h), 'Website work is not in New work');
+    const ui = fs.readFileSync(path.join(FRONT, 'ui.js'), 'utf8');
+    assert.ok(/const LABELS = \['Website'/.test(ui));
+    assert.ok(/function labelBar\(/.test(ui) && /hasLabel\(t, label\)/.test(ui), 'the board does not filter by label');
+    const mt = fs.readFileSync(path.join(FRONT, 'my-tasks.html'), 'utf8');
+    assert.ok(/UI\.labelBar\(/.test(mt) && /UI\.hasLabel\(/.test(mt), 'My tasks does not filter by label');
+    const w = fs.readFileSync(path.join(FRONT, 'websites.html'), 'utf8');
+    assert.ok(/\/api\/tasks\?label=/.test(w));
+    assert.ok(/Which client is it for\?/.test(w), 'new website work does not ask for the client first');
+    assert.ok(/labels: \[LABEL\]/.test(w), 'new website work is not labelled Website');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');
