@@ -35,10 +35,12 @@
     const ic = n => EL.icon(n);
     const root = document.getElementById('hm');
 
-    const [clients, my, jobs] = await Promise.all([
-        EL.clients(true),
+    // Phase 61: everything Home shows is asked for at once.
+    const [clients, my, jobs, recentReports] = await Promise.all([
+        EL.clients(),   // the tab's copy (a minute at most; any change to a client clears it)
         EL.api('/api/my-tasks', { scoped: false }).catch(err => ({ tasks: [], error: err })),
-        EL.api('/api/jobs', { scoped: false }).catch(() => ({ jobs: [] }))
+        EL.api('/api/jobs', { scoped: false }).catch(() => ({ jobs: [] })),
+        EL.api('/api/reports-history?limit=6', { scoped: false }).then(r => r.reports || []).catch(() => [])
     ]);
     const live = clients.filter(c => !c.archived);
     const tasks = my.tasks || [];
@@ -62,7 +64,6 @@
     const hour = new Date().getHours();
     const hello = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
     const name = (me.full_name || (me.email || '').split('@')[0] || '').split(/[\s._-]/)[0];
-    const recentReports = await EL.api('/api/reports-history?limit=6', { scoped: false }).then(r => r.reports || []).catch(() => []);
 
     root.innerHTML = `
         <div class="ws-head"><div><h1>${hello}${name ? ', ' + esc(name.charAt(0).toUpperCase() + name.slice(1)) : ''}</h1>

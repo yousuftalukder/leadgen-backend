@@ -89,6 +89,11 @@
     const canEdit = () => detail && ['owner', 'admin', 'editor'].includes(detail.client.access);
     const isOwner = () => detail && ['owner', 'admin'].includes(detail.client.access);
 
+    // Phase 61: the client, its timeline and its board are asked for together, not one after another.
+    const early = {
+        timeline: EL.api(`/api/clients/${id}/timeline`).catch(() => null),
+        tasks: EL.api(`/api/clients/${id}/tasks`).catch(err => ({ error: err }))
+    };
     try {
         detail = await EL.api(`/api/clients/${id}`);
     } catch (err) {
@@ -720,7 +725,7 @@
                 notes: $('f-notes').value.trim() || null };
             if (!bodyV.name) { n.className = 'ws-note is-bad'; n.textContent = 'The client needs a name.'; return; }
             save.disabled = true;
-            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: bodyV }); EL._clients = null; await refreshDetail(); EL.toast('Saved.'); render(); }
+            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: bodyV }); EL.clientsChanged(); await refreshDetail(); EL.toast('Saved.'); render(); }
             catch (err) { n.className = 'ws-note is-bad'; n.textContent = err.message; save.disabled = false; }
         });
         const rSave = $('r-save');
@@ -755,7 +760,7 @@
         const xNote = $('x-note');
         const arch = $('x-archive');
         if (arch) arch.addEventListener('click', async () => {
-            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: { archived: !c.archived } }); if (!c.archived && EL.clientId() === c.id) EL.setClientId(null); EL._clients = null; await refreshDetail(); render(); }
+            try { await EL.api(`/api/clients/${id}`, { method: 'PATCH', body: { archived: !c.archived } }); if (!c.archived && EL.clientId() === c.id) EL.setClientId(null); EL.clientsChanged(); await refreshDetail(); render(); }
             catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; }
         });
         const from = $('x-from'), merge = $('x-merge');
@@ -774,7 +779,7 @@
         if (merge) merge.addEventListener('click', async () => {
             if (merge.dataset.sure !== '1') { merge.dataset.sure = '1'; merge.textContent = 'Merge — press again'; return; }
             merge.disabled = true; xNote.textContent = 'Merging…';
-            try { const d = await EL.api(`/api/clients/${id}/merge`, { method: 'POST', body: { fromId: from.value } }); EL._clients = null; timeline = null; tasks = null; await refreshDetail(); EL.toast(`“${d.from.name}” merged in and archived.`); render(); }
+            try { const d = await EL.api(`/api/clients/${id}/merge`, { method: 'POST', body: { fromId: from.value } }); EL.clientsChanged(); timeline = null; tasks = null; await refreshDetail(); EL.toast(`“${d.from.name}” merged in and archived.`); render(); }
             catch (err) { xNote.className = 'ws-note is-bad'; xNote.textContent = err.message; merge.disabled = false; }
         });
         const del = $('x-delete');
@@ -788,7 +793,10 @@
     // ---- boot ---------------------------------------------------------------------
     // The timeline and the board feed the setup list and the tab counts, so
     // they are read once, together, before the first draw.
-    await Promise.all([loadTimeline().catch(() => { timeline = { reports: [], jobs: [], suggestions: [] }; }), loadTasks()]);
+    await Promise.all([
+        early.timeline.then(t => { timeline = t || { reports: [], jobs: [], suggestions: [] }; }),
+        early.tasks.then(t => { tasks = t; })
+    ]);
     render();
 })();
 </script>

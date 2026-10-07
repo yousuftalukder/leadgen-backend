@@ -69,6 +69,25 @@
      * Deliberately unauthenticated and deliberately ignored: this is a wake-up
      * call, not a health check, and nothing should wait on it or fail from it.
      */
+    /**
+     * Phase 61: what every page asks on its way in — who am I, the clients, the menu
+     * counts — is kept for this browser tab, per signed-in person. A page draws at once
+     * from it and the server answers only what the page itself needs. The server checks
+     * every request on its own, so a stale copy can only show a menu, never open a door.
+     */
+    const SESSION_KEY = 'el-c:';
+    const memo = {
+        get(key, maxAgeMs) {
+            try {
+                const v = JSON.parse(sessionStorage.getItem(SESSION_KEY + key) || 'null');
+                return v && Date.now() - v.t < maxAgeMs ? v.v : null;
+            } catch { return null; }
+        },
+        set(key, value) { try { sessionStorage.setItem(SESSION_KEY + key, JSON.stringify({ t: Date.now(), v: value })); } catch { /* private mode, or full */ } },
+        clear() { try { Object.keys(sessionStorage).filter(k => k.startsWith(SESSION_KEY)).forEach(k => sessionStorage.removeItem(k)); } catch { /* private mode */ } }
+    };
+    const ME_FRESH_MS = 10 * 60000, CLIENTS_FRESH_MS = 60000, COUNTS_FRESH_MS = 5 * 60000;
+
     const _wokeAt = Date.now();
     let _backendCold = false;          // set once the wake-up call comes back slow
     try {
@@ -254,6 +273,8 @@
         async api(path, opts = {}) {
             const method = String(opts.method || 'GET').toUpperCase();
             const isPublic = path.startsWith('/api/public/');
+            // A client added, changed, archived, merged or removed: the tab's copy of the list is out of date.
+            if (method !== 'GET' && /^\/api\/clients(\/[^/?]+(\/(merge|trial|portal-invite))?)?(\?|$)/.test(path)) EL.clientsChanged();
             const headers = { ...(opts.headers || {}) };
             if (!isPublic) headers['Authorization'] = `Bearer ${await EL.token()}`;
 
@@ -590,6 +611,7 @@
 
         async signOut() {
             if (EL.isShared()) return;
+            memo.clear();
             try { await EL.supabase.auth.signOut(); } catch {}
             // The Edge Meta AI app signs in on its own page, so an owner signs out to it too
             // (phase 47); someone on the team who opened the app goes to EdgeLead's login. A
@@ -653,8 +675,23 @@
             ), _backendCold ? 250 : 1800);
 
             let me;
+            const meKey = 'me:' + EL.user.id;
+            const remembered = memo.get(meKey, ME_FRESH_MS);
             try {
-                me = await EL.api('/api/me');
+                if (remembered) {
+                    // Draw now; ask again behind it. A changed role or set of tools redraws the page.
+                    me = remembered;
+                    clearTimeout(slowTimer);
+                    EL.api('/api/me').then(fresh => {
+                        memo.set(meKey, fresh);
+                        const shape = m => JSON.stringify([m.role, (m.engines || []).slice().sort(), m.is_active, m.agency_owner]);
+                        if (shape(fresh) !== shape(remembered)) location.reload();
+                        else EL.me = fresh;
+                    }).catch(() => { /* EL.api has already put up the right screen, or the next call will */ });
+                } else {
+                    me = await EL.api('/api/me');
+                    memo.set(meKey, me);
+                }
                 clearTimeout(slowTimer); clearBootNotice();
             } catch (err) {
                 clearTimeout(slowTimer); clearBootNotice();
@@ -845,9 +882,13 @@
         // died" — and there was no way to tell which from the screen. The
         // reason is kept so the picker can say which one happened.
         _clientsErr: null,
+        /** The client list changed here (added, archived, renamed): the next read goes to the server. */
+        clientsChanged() { EL._clients = null; if (EL.user) memo.set('clients:' + EL.user.id, null); },
         _clientsP: null,
         clients(force = false) {
             if (EL._clients && !force) return Promise.resolve(EL._clients);
+            const kept = !force && EL.user ? memo.get('clients:' + EL.user.id, CLIENTS_FRESH_MS) : null;
+            if (kept) { EL._clients = kept; return Promise.resolve(kept); }
             // One request however many callers ask at once (phase 54): the rail, the picker and the
             // page all used to fetch the same list in parallel on every load.
             if (EL._clientsP) return EL._clientsP;
@@ -863,6 +904,7 @@
                 const d = await res.json().catch(() => ({}));
                 if (!res.ok) EL._clientsErr = d.error || `HTTP ${res.status}`;
                 EL._clients = res.ok ? (d.clients || []) : [];
+                if (res.ok && EL.user) memo.set('clients:' + EL.user.id, EL._clients);
             } catch (err) { EL._clientsErr = err.message || 'network error'; EL._clients = []; }
             return EL._clients;
         },
@@ -1277,6 +1319,7 @@
             bar.querySelector('#el-newwork').addEventListener('click', go);
             top.querySelector('#el-newwork-top').addEventListener('click', go);
             wireFind(bar.querySelector('#el-find'), bar.querySelector('#el-find-list'));
+            ['tasks', 'followups'].forEach(k => { const c = memo.get('count:' + EL.user.id + ':' + k, COUNTS_FRESH_MS); if (c) setCount(k, ...c); });
             // "My tasks" is a count of what is still open. Quiet on failure:
             // before the phase-32 SQL has run it is simply not there yet.
             EL.api('/api/my-tasks').then(d => {
@@ -1297,6 +1340,7 @@
 
     /** A number beside a menu entry; `hot` marks it as needing attention. */
     function setCount(key, n, title = '', hot = false) {
+        if (EL.user) memo.set('count:' + EL.user.id + ':' + key, [n, title, hot]);
         document.querySelectorAll(`.el-count[data-count="${key}"]`).forEach(el => {
             el.textContent = n ? String(n) : '';
             el.title = title;

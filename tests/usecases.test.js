@@ -4477,6 +4477,27 @@ test('the pages: Billing in the menu, Packages & billing in settings, the owner 
     assert.ok(/\/api\/billing'/.test(read('billing.html')) && /window\.print\(\)/.test(read('invoice.html')));
 });
 
+section('\nphase 61: pages draw after one trip to the server');
+test('the page shell remembers who you are and the clients for the tab, and forgets them when they change', () => {
+    const FRONT = path.join(__dirname, '..', 'frontend');
+    const read = f => fs.readFileSync(path.join(FRONT, f), 'utf8');
+    const h = read('header.js');
+    assert.ok(/const remembered = memo\.get\(meKey, ME_FRESH_MS\)/.test(h), 'the page still waits for /api/me before drawing');
+    assert.ok(/if \(shape\(fresh\) !== shape\(remembered\)\) location\.reload\(\)/.test(h), 'a changed role or set of tools is not picked up');
+    assert.ok(/memo\.clear\(\);\s*try \{ await EL\.supabase\.auth\.signOut\(\)/.test(h), 'signing out leaves the last person’s details in the tab');
+    // Every change to a client clears the tab's copy of the list.
+    const re = /if \(method !== 'GET' && (\/.*?\/)\.test\(path\)\) EL\.clientsChanged\(\);/.exec(h);
+    assert.ok(re, 'changing a client does not clear the remembered list');
+    const rx = eval(re[1]);
+    for (const p of ['/api/clients', '/api/clients/abc', '/api/clients/abc/merge', '/api/clients/abc/trial']) assert.ok(rx.test(p), p + ' does not clear the list');
+    assert.ok(!rx.test('/api/clients/abc/tasks'), 'a task change throws away the client list');
+    assert.ok(!/EL\._clients = null;/.test(read('workspace.html') + read('clients.html') + read('ui.js')), 'a page clears the list by hand and misses the tab copy');
+    // Home and a client's workspace ask for everything at once.
+    assert.ok(/EL\.api\('\/api\/reports-history\?limit=6'[^\n]*\n\s*\]\);/.test(read('home.html')), 'Home asks for its recent reports after everything else');
+    assert.ok(/const early = \{\s*timeline: EL\.api/.test(read('workspace.html')), 'the workspace waits for the client before asking for its board');
+    assert.ok(/onSaved: saved/.test(read('ui.js')) && /ctx\.onSaved\(r && r\.task\)/.test(read('ui.js')), 'a saved task waits for the whole board to reload');
+});
+
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');
