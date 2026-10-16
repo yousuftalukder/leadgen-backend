@@ -485,7 +485,7 @@
         ADS: { color: '#fbbf24', soft: 'rgba(251, 191, 36, 0.30)', fill: 'rgba(251, 191, 36, 0.16)' }
     };
     const platColor = (pl) => PLAT[pl] || PLAT.IG;
-    const chartPalette = () => ({ tipBg: '#0f0f10', tipBorder: 'rgba(24,106,255,0.35)', tipTitle: '#ffffff', tipBody: '#c3c9d6', tick: '#8a9a92', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(0,0,0,0)', hole: '#000000' });
+    const chartPalette = () => ({ tipBg: '#0f0f10', tipBorder: 'rgba(24,106,255,0.35)', tipTitle: '#ffffff', tipBody: '#c3c9d6', tick: '#a3a3a8', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(0,0,0,0)', hole: '#000000' });
     const platLabel = (sec) => `<div class="plat"><i style="background:${platColor(sec.platform).color}"></i><span>${escHtml(sec.name)}</span></div>`;
     const panelHead = (title, subtitle, right = '') => `
         <div class="panel-head"><div><div class="panel-title">${escHtml(title)}</div>${subtitle ? `<div class="panel-sub">${escHtml(subtitle)}</div>` : ''}</div>

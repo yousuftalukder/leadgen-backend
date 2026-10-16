@@ -1801,6 +1801,9 @@ label.ws-btn { margin: 0; font-size: .8rem; color: inherit; }
 .ws-btn.is-gold { background: var(--accent-solid); color: #fff; border-color: transparent; }
 .ws-btn.is-gold:hover { background: #2f7bff; filter: none; }
 .ws-btn.is-sm { border-radius: 5px; }
+.btn-primary { border-radius: 6px; background: var(--accent-solid); color: #fff; font-weight: 600; }
+.btn-primary:hover:not([disabled]) { background: #2f7bff; filter: none; box-shadow: none; }
+.btn-secondary, .btn-danger { border-radius: 6px; }
 input, select, textarea { border-radius: 6px; }
 input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); box-shadow: 0 0 0 3px rgba(24,106,255,.25); }
 :focus-visible { outline-color: var(--accent-solid); }

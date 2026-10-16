@@ -19,11 +19,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
     <title>Edge Meta AI</title>
-    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="meta-ai.css">
     <link rel="manifest" href="ai/manifest.webmanifest">
-    <meta name="theme-color" content="#06140f">
+    <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -40,8 +40,8 @@
     .ai-gate { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); overflow-y: auto; }
     .ai-card { width: 100%; max-width: 380px; text-align: center; }
     .ai-card img { width: 76px; height: 76px; border-radius: 20px; box-shadow: 0 14px 40px rgba(0,0,0,0.45); }
-    .ai-card h1 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin: 18px 0 6px; }
-    .ai-card h1 .a { color: var(--accent-solid); }
+    .ai-card h1 { font-family: var(--font-display); text-transform: uppercase; font-size: 2rem; font-weight: 700; letter-spacing: .02em; line-height: 1; margin: 18px 0 10px; }
+    .ai-card h1 .a { color: var(--lime); }
     .ai-card > p { color: var(--text-secondary); font-size: 0.92rem; line-height: 1.6; margin: 0 0 22px; }
     .ai-form { text-align: left; display: grid; gap: 12px; }
     .ai-form label { font-size: 0.74rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); display: block; margin-bottom: 6px; }
@@ -62,7 +62,7 @@
     .ai-page .oa-side { position: relative; top: 0; height: 100%; overflow-y: auto; padding: max(16px, env(safe-area-inset-top)) 14px 16px; border-right: 1px solid var(--card-border); background: rgba(255,255,255,0.015); }
     .ai-page .oa-main { min-height: 0; height: 100%; padding: 0 16px; }
     .ai-page .oa-head { margin: 0 -16px; padding: max(10px, env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--card-border); flex-wrap: nowrap;
-        background: rgba(6,20,15,0.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+        background: rgba(0,0,0,0.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
     .ai-page .oa-scroll { min-height: 0; padding-top: 18px; }
     .ai-page .oa-form { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
     .ai-page .oa-to-bottom { bottom: 120px; }
@@ -77,7 +77,7 @@
     #ai-nudge .el-install { margin: 12px auto 0; max-width: 860px; }
     @media (max-width: 940px) {
         .ai-page .oa-wrap { grid-template-columns: minmax(0, 1fr); }
-        .ai-page .oa-side { display: block; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(84vw, 320px); background: #081a14;
+        .ai-page .oa-side { display: block; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(84vw, 320px); background: #0a0a0b;
             transform: translateX(-102%); transition: transform .22s ease; box-shadow: 20px 0 50px rgba(0,0,0,0.5); }
         .ai-page .oa-side.is-open { transform: none; }
         .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); }

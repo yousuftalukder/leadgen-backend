@@ -20,7 +20,7 @@ body { padding-bottom: 0; }
 .conv-item.editing .conv-row, .conv-item.editing .conv-more { display: none; }
 .conv-edit { width: 100%; padding: 8px 10px; border-radius: 10px; font: inherit; font-size: 0.84rem; }
 /* Above the app's chats drawer (70) and scrim (65), below the Updates sheets (90). */
-.oa-menu { position: fixed; z-index: 80; width: 160px; padding: 6px; border-radius: 12px; background: #0c1f18; border: 1px solid rgba(24,106,255,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+.oa-menu { position: fixed; z-index: 80; width: 160px; padding: 6px; border-radius: 12px; background: #0f0f10; border: 1px solid rgba(24,106,255,0.35); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
 .oa-menu button { display: block; width: 100%; text-align: left; padding: 9px 11px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 0.84rem; border-radius: 8px; cursor: pointer; }
 .oa-menu button:hover { background: rgba(255,255,255,0.06); }
 .oa-menu button.danger { color: #fda4af; }
@@ -290,3 +290,26 @@ body.el-has-plan .oa-side { top: 132px; }
 .hub-agr { grid-template-columns: minmax(0, 1fr); }
 .hub-agr-m { color: var(--text-muted); font-size: 0.82rem; margin: 0; }
 .hub-form .hub-check { text-transform: none; letter-spacing: 0; font-size: 0.88rem; font-weight: 600; color: var(--text-secondary); }
+
+/* ===========================================================================
+   The site's look (phase 63), the same as the workspace's (app.css, phase 62):
+   uppercase Space Grotesk for the name and the section labels, Inter for the
+   chat, blue for sending and for what you wrote, lime for "AI". The app's
+   icon is its own and unchanged.
+   =========================================================================== */
+.oa-brand, .ai-card h1 { font-family: var(--font-display); text-transform: uppercase; letter-spacing: .02em; font-weight: 700; }
+.oa-brand .oa-a, .ai-card h1 .a { color: var(--lime); }
+.ai-card h1 { font-size: 2rem; line-height: 1; }
+.oa-side-h, .ai-form label { font-family: var(--font-display); letter-spacing: .14em; font-weight: 700; }
+.user-bubble { background: var(--accent-solid); border-color: transparent; color: #fff; border-radius: 14px 14px 4px 14px; }
+.send-btn { color: #fff; border-radius: 8px; }
+.send-btn:hover:not([disabled]) { background: #2f7bff; }
+.composer { border-radius: 10px; background: var(--surface-1); border-color: rgba(255,255,255,.16); }
+.starter { border-radius: 8px; background: var(--surface-1); }
+.starter b { font-family: var(--font-display); text-transform: uppercase; letter-spacing: .03em; font-size: .84rem; }
+.oa-menu { border-radius: 8px; border-color: rgba(255,255,255,.16); background: var(--surface-2); }
+.oa-menu button { border-radius: 5px; }
+.ai-page .oa-head { background: rgba(0,0,0,.92); }
+.ai-page .oa-side { background: #000; }
+.oa-welcome h2 { font-family: var(--font-display); text-transform: uppercase; letter-spacing: .01em; line-height: 1; font-weight: 700; font-size: clamp(1.6rem, 3vw, 2.2rem); }
+.oa-welcome .mark img { filter: none; }
