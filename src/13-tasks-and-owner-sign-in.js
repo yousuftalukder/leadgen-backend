@@ -13,7 +13,7 @@ const {
     mailSettings, markAgencyOwner, ownClientFor, rateLimit, sendErr, sendMail, supabase, trialDaysSetting,
     userRole
 } = S;
-Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor });
+Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName });
 
 // ===========================================================================
 // PHASE 32 :: THE CLIENT'S TASK BOARD
@@ -397,6 +397,7 @@ app.delete('/api/tasks/:taskId', async (req, res) => {
         const c = t ? await clientAccess(ctx.user.id, t.client_id, 'editor') : null;
         if (!t || !c) return res.status(404).json({ error: 'Task not found, or you cannot edit it.' });
         await removeTaskMedia(t.id);                      // the pictures go with it, files and all
+        await removeTaskFiles(t.id);                      // phase 62: and the attached documents
         const { error } = await supabase.from('client_tasks').delete().eq('id', t.id);
         if (error) throw error;
         res.json({ success: true });
@@ -559,6 +560,221 @@ app.post('/api/clients/:id/task-media',
         }
     });
 
+// ===========================================================================
+// PHASE 62 :: DOCUMENTS ON A TASK
+//
+// Pictures sit inside a description (phase 48). A brief, a contract, a content
+// calendar in Excel does not: it is a file the task carries. Each one is a row
+// in client_task_files and an object in the private "task-files" bucket, which
+// the server makes. Like a picture it is only ever handed out as a short-lived
+// signed link, to someone who may read the task, and it downloads under the
+// name it was uploaded with.
+//
+// What a file is comes from its bytes, never from the browser's header: a PDF
+// starts %PDF, Word and Excel's current formats are zip packages with word/ or
+// xl/ inside, the older .doc/.xls are OLE compound files (told apart by the
+// extension, which is all they carry), and a CSV must be plain text.
+// ===========================================================================
+const TASK_FILE_BUCKET = process.env.TASK_FILE_BUCKET || 'task-files';
+const TASK_FILE_MAX_BYTES = 20 * 1024 * 1024;
+const TASK_FILE_MAX_PER_TASK = 25;
+const TASK_FILE_TTL_SECS = 3600;
+const TASK_FILE_TYPES = {
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    csv: 'text/csv'
+};
+const TASK_FILE_KINDS = 'PDF, Word (.doc, .docx) or Excel (.xls, .xlsx, .csv)';
+
+function missing62(err) {
+    return !!err && (err.code === 'PGRST205' || err.code === '42P01' || err.code === 'PGRST204' || err.code === '42703')
+        && /client_task_files/i.test(String(err.message || ''));
+}
+function migration62(res) {
+    return res.status(503).json({
+        error: 'Attaching documents to tasks needs the phase-62 database update. Run sql/schema-phase62.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+
+/** A name that is safe to store and to hand back in Content-Disposition. Keeps letters in any script. */
+function cleanFileName(raw) {
+    let name = String(raw || '');
+    try { name = decodeURIComponent(name); } catch (_) { /* already plain */ }
+    name = name.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    name = name.replace(/^[.\s]+/, '');                               // no hidden names, no leading "../"
+    if (name.length > 180) {
+        const dot = name.lastIndexOf('.');
+        const ext = dot > 0 ? name.slice(dot) : '';
+        name = name.slice(0, 180 - ext.length).trim() + ext;
+    }
+    return name;
+}
+
+/** Which allowed type the bytes are, given the name's extension. null when they do not match. */
+function sniffDocument(buf, filename) {
+    if (!buf || buf.length < 8) return null;
+    const ext = (String(filename || '').toLowerCase().match(/\.([a-z0-9]{1,5})$/) || [])[1] || '';
+    const head = buf.subarray(0, 8);
+    if (buf.toString('latin1', 0, 5) === '%PDF-') return ext === 'pdf' ? 'pdf' : null;
+    if (head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04) {
+        // A zip: an Office Open XML package names its parts in plain text.
+        const names = buf.toString('latin1');
+        if (ext === 'docx' && names.includes('word/')) return 'docx';
+        if (ext === 'xlsx' && names.includes('xl/')) return 'xlsx';
+        return null;
+    }
+    if (head.equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) {
+        return (ext === 'doc' || ext === 'xls') ? ext : null;
+    }
+    if (ext === 'csv') {
+        const sample = buf.subarray(0, Math.min(buf.length, 64 * 1024));
+        if (sample.includes(0)) return null;                         // binary, not text
+        return 'csv';
+    }
+    return null;
+}
+
+let _taskFileBucket = null;
+function ensureTaskFileBucket() {
+    if (!supabase.storage) return Promise.resolve(false);
+    if (!_taskFileBucket) {
+        _taskFileBucket = (async () => {
+            try {
+                const { data } = await supabase.storage.getBucket(TASK_FILE_BUCKET);
+                if (data) return true;
+                const { error } = await supabase.storage.createBucket(TASK_FILE_BUCKET, {
+                    public: false, fileSizeLimit: TASK_FILE_MAX_BYTES, allowedMimeTypes: Object.values(TASK_FILE_TYPES)
+                });
+                if (error && !/exist/i.test(error.message || '')) throw error;
+                return true;
+            } catch (err) {
+                logger.warn('task_file_bucket_unavailable', { message: err.message });
+                _taskFileBucket = null;
+                return false;
+            }
+        })();
+    }
+    return _taskFileBucket;
+}
+
+/** The task's documents, newest first, each with a signed download link. [] before the migration. */
+async function taskFiles(taskId) {
+    const { data, error } = await supabase.from('client_task_files')
+        .select('id, filename, content_type, bytes, uploaded_by, created_at, path')
+        .eq('task_id', taskId).order('created_at', { ascending: false });
+    if (error) { if (missing62(error)) return []; throw error; }
+    const rows = data || [];
+    if (!rows.length || !supabase.storage) return rows.map(r => fileView(r, null, {}));
+    const people = await peopleById(rows.map(r => r.uploaded_by));
+    const links = await Promise.all(rows.map(r => supabase.storage.from(TASK_FILE_BUCKET)
+        .createSignedUrl(r.path, TASK_FILE_TTL_SECS, { download: r.filename })
+        .then(x => (x && x.data && x.data.signedUrl) || null).catch(() => null)));
+    return rows.map((r, i) => fileView(r, links[i], people));
+}
+function fileView(r, url, people) {
+    const by = r.uploaded_by && people[r.uploaded_by];
+    return { id: r.id, name: r.filename, type: r.content_type, bytes: r.bytes, createdAt: r.created_at,
+        uploadedBy: by ? { id: r.uploaded_by, name: by.name } : null, url };
+}
+
+async function removeTaskFiles(taskId) {
+    const { data, error } = await supabase.from('client_task_files').select('path').eq('task_id', taskId);
+    if (error || !(data || []).length || !supabase.storage) return;
+    const { error: re } = await supabase.storage.from(TASK_FILE_BUCKET).remove(data.map(r => r.path));
+    if (re) logger.warn('task_file_remove_failed', { message: re.message });
+}
+
+/** The task's documents. Anyone who can read the task. */
+app.get('/api/tasks/:taskId/files', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const t = await loadTask(req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        const c = t ? await clientAccess(ctx.user.id, t.client_id, 'viewer') : null;
+        if (!t || !c) return res.status(404).json({ error: 'Task not found.' });
+        res.json({ files: await taskFiles(t.id), canAttach: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Attach one document. The body is the file itself; its name rides in the
+ * X-File-Name header (URI-encoded, so a Bangla name survives). Anyone who can
+ * read the task may attach to it: the person doing the work is often a viewer.
+ */
+app.post('/api/tasks/:taskId/files',
+    rateLimit({ windowMs: 10 * 60 * 1000, max: 40, key: S.bearerId }),   // 40 files in ten minutes, per person
+    express.raw({ type: () => true, limit: TASK_FILE_MAX_BYTES }),
+    async (req, res) => {
+        try {
+            const ctx = await auth(req, res); if (!ctx) return;
+            if (!staffOnly(ctx, res)) return;
+            const t = await loadTask(req.params.taskId);
+            if (t === TASK_MISSING) return migrationNeeded(res);
+            const c = t ? await clientAccess(ctx.user.id, t.client_id, 'viewer') : null;
+            if (!t || !c) return res.status(404).json({ error: 'Task not found.' });
+            const name = cleanFileName(req.get('x-file-name'));
+            if (!name) return res.status(400).json({ error: 'Send the file name in the X-File-Name header.' });
+            const buf = Buffer.isBuffer(req.body) ? req.body : null;
+            if (!buf || !buf.length) return res.status(400).json({ error: `Choose a file: ${TASK_FILE_KINDS}.` });
+            const ext = sniffDocument(buf, name);
+            if (!ext) return res.status(400).json({ error: `That file is not a ${TASK_FILE_KINDS} file, or its name does not match what is inside it.` });
+            const { count, error: ce } = await supabase.from('client_task_files').select('id', { count: 'exact', head: true }).eq('task_id', t.id);
+            if (ce) { if (missing62(ce)) return migration62(res); throw ce; }
+            if ((count || 0) >= TASK_FILE_MAX_PER_TASK) return res.status(409).json({ error: `A task can carry up to ${TASK_FILE_MAX_PER_TASK} files. Remove one first.` });
+            if (!(await ensureTaskFileBucket())) return res.status(503).json({ error: 'File storage is not available right now. Try again in a minute.' });
+            const id = crypto.randomUUID();
+            const path = `${t.client_id}/${t.id}/${id}.${ext}`;
+            const type = TASK_FILE_TYPES[ext];
+            const { error: ue } = await supabase.storage.from(TASK_FILE_BUCKET).upload(path, buf, { contentType: type, upsert: false, cacheControl: '3600' });
+            if (ue) throw ue;
+            const row = { id, client_id: t.client_id, task_id: t.id, path, filename: name, content_type: type, bytes: buf.length,
+                uploaded_by: ctx.user.id, created_at: new Date().toISOString() };
+            const { error } = await supabase.from('client_task_files').insert([row]);
+            if (error) {
+                await supabase.storage.from(TASK_FILE_BUCKET).remove([path]).catch(() => {});
+                if (missing62(error)) return migration62(res);
+                throw error;
+            }
+            const { data: signed } = await supabase.storage.from(TASK_FILE_BUCKET).createSignedUrl(path, TASK_FILE_TTL_SECS, { download: name });
+            const people = await peopleById([ctx.user.id]);
+            res.status(201).json({ file: fileView(row, (signed && signed.signedUrl) || null, people) });
+        } catch (err) {
+            if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That file is over 20 MB. Use a smaller one.' });
+            sendErr(res, err);
+        }
+    });
+
+/** Remove a document: whoever attached it, or an editor of the client. */
+app.delete('/api/tasks/:taskId/files/:fileId', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        if (!UUID_RE.test(String(req.params.fileId || ''))) return res.status(404).json({ error: 'File not found.' });
+        const t = await loadTask(req.params.taskId);
+        if (t === TASK_MISSING) return migrationNeeded(res);
+        const c = t ? await clientAccess(ctx.user.id, t.client_id, 'viewer') : null;
+        if (!t || !c) return res.status(404).json({ error: 'Task not found.' });
+        const { data: f, error } = await supabase.from('client_task_files').select('id, path, uploaded_by')
+            .eq('id', req.params.fileId).eq('task_id', t.id).maybeSingle();
+        if (error) { if (missing62(error)) return migration62(res); throw error; }
+        if (!f) return res.status(404).json({ error: 'File not found.' });
+        const mayEdit = ['owner', 'admin', 'editor'].includes(c.access);
+        if (f.uploaded_by !== ctx.user.id && !mayEdit) return res.status(403).json({ error: 'Only the person who attached this file, or an editor, can remove it.' });
+        const { error: de } = await supabase.from('client_task_files').delete().eq('id', f.id);
+        if (de) throw de;
+        if (supabase.storage) {
+            const { error: re } = await supabase.storage.from(TASK_FILE_BUCKET).remove([f.path]);
+            if (re) logger.warn('task_file_remove_failed', { message: re.message });
+        }
+        res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
 /** One task, opened: everything the board card has, plus who made it and signed links for its pictures. */
 app.get('/api/tasks/:taskId', async (req, res) => {
     try {
@@ -571,7 +787,8 @@ app.get('/api/tasks/:taskId', async (req, res) => {
         const people = await peopleById([t.assignee_user_id, t.created_by]);
         const view = taskView(t, people, await taskCommentCounts([t.id]), c.name);
         view.reporter = t.created_by && people[t.created_by] ? { id: t.created_by, name: people[t.created_by].name, email: people[t.created_by].email } : null;
-        res.json({ task: view, media: await taskMediaUrls(t.client_id, [t.notes]), canEdit: ['owner', 'admin', 'editor'].includes(c.access) });
+        const [media, files] = await Promise.all([taskMediaUrls(t.client_id, [t.notes]), taskFiles(t.id)]);
+        res.json({ task: view, media, files, canEdit: ['owner', 'admin', 'editor'].includes(c.access) });
     } catch (err) { sendErr(res, err); }
 });
 

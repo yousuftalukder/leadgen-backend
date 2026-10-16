@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
     <title>Instagram audit — EdgeLead</title>
-    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
 <style>
     /* ig-report.html — page-specific only. Shared rules live in app.css. */
@@ -23,7 +23,7 @@
         font-size: 1.2rem; background: rgba(16, 185, 129, 0.2); color: var(--success); }
     .post-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
         gap: 15px; margin-top: 15px; }
-    .post-card { background: rgba(15, 23, 42, 0.8); border: 1px solid var(--card-border);
+    .post-card { background: rgba(15,15,16,0.8); border: 1px solid var(--card-border);
         border-radius: 10px; padding: 14px; font-size: 0.8rem; }
     .post-card a { color: var(--accent-solid); font-size: 0.75rem; font-weight: 700; text-decoration: none; }
 
@@ -47,7 +47,7 @@
 
     /* Mean vs median comparison */
     .dual { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
-    .dual-box { background: rgba(15,23,42,0.8); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; }
+    .dual-box { background: rgba(15,15,16,0.8); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; }
     .dual-box .lbl { font-size: 0.7rem; color: var(--text-muted); font-weight: 800; text-transform: uppercase; }
     .dual-box .med { font-size: 1.35rem; font-weight: 800; color: #fff; margin-top: 4px; }
     .dual-box .mn  { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
@@ -343,7 +343,7 @@
         <div class="kpi-grid">
             ${kpi('Followers', num(m.followers))}
             ${kpi('Engagement rate', `${esc(m.engagementRateMedian ?? m.engagementRate)}%`, 'var(--accent-solid)')}
-            ${kpi('Views per follower', `${esc(m.viralityScoreMedian ?? m.viralityScore)}x`, '#d9b56c')}
+            ${kpi('Views per follower', `${esc(m.viralityScoreMedian ?? m.viralityScore)}x`, '#186aff')}
             ${kpi('Posts / week', esc(m.postsPerWeek))}
             ${kpi('Median likes', num(m.distribution?.likes?.median ?? m.avgLikes))}
             ${kpi('Median comments', num(m.distribution?.comments?.median ?? m.avgComments))}

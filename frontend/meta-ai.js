@@ -485,7 +485,7 @@
         ADS: { color: '#fbbf24', soft: 'rgba(251, 191, 36, 0.30)', fill: 'rgba(251, 191, 36, 0.16)' }
     };
     const platColor = (pl) => PLAT[pl] || PLAT.IG;
-    const chartPalette = () => ({ tipBg: '#0b1329', tipBorder: 'rgba(217,181,108,0.35)', tipTitle: '#f3efe4', tipBody: '#c3c9d6', tick: '#8a9a92', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(6, 20, 15, 0)', hole: '#06140f' });
+    const chartPalette = () => ({ tipBg: '#0f0f10', tipBorder: 'rgba(24,106,255,0.35)', tipTitle: '#ffffff', tipBody: '#c3c9d6', tick: '#8a9a92', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(0,0,0,0)', hole: '#000000' });
     const platLabel = (sec) => `<div class="plat"><i style="background:${platColor(sec.platform).color}"></i><span>${escHtml(sec.name)}</span></div>`;
     const panelHead = (title, subtitle, right = '') => `
         <div class="panel-head"><div><div class="panel-title">${escHtml(title)}</div>${subtitle ? `<div class="panel-sub">${escHtml(subtitle)}</div>` : ''}</div>
@@ -643,7 +643,7 @@
                 chips.forEach((b) => b.addEventListener('click', () => { current = sec.series[Number(b.dataset.series)]; fallbackBars(box, sec, current); chips.forEach((x) => x.classList.toggle('on', x === b)); }));
                 return;
             }
-            Chart.defaults.font.family = "'Anek Latin', system-ui, sans-serif";
+            Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
             const pal = chartPalette();
             const chart = new Chart(box.querySelector('canvas'), {
                 type: p.type === 'line' ? 'line' : 'bar',

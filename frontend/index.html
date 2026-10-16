@@ -7,10 +7,10 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
     <title>EdgeLead — Sign in</title>
-    <link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="app.css">
     <link rel="manifest" href="manifest.webmanifest">
-    <meta name="theme-color" content="#06140f">
+    <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="EdgeLead">
@@ -32,20 +32,20 @@
     .card-subtext { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 25px; }
     .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 12px; }
     .checkbox-item { display: flex; align-items: center; gap: 12px; background: var(--input-bg); padding: 14px 16px; border-radius: 10px; border: 1px solid var(--card-border); cursor: pointer; font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
-    .checkbox-item:has(input:checked) { border-color: var(--accent-solid); color: #ffffff; background: rgba(217,181,108,0.1); }
+    .checkbox-item:has(input:checked) { border-color: var(--accent-solid); color: #ffffff; background: rgba(24,106,255,0.1); }
     .btn-primary[disabled], .btn-enrich[disabled] { opacity: 0.55; cursor: not-allowed; }
-    .btn-enrich { width: 100%; padding: 16px; background: var(--enrich-glow); color: #ffffff; border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 20px; }
+    .btn-enrich { width: 100%; padding: 16px; background: var(--enrich-glow); color: #000000; border: none; border-radius: 10px; font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 20px; }
     .btn-success { background: #10b981; color: white; border: none; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 0.8rem; }
     .history-card { background: var(--input-bg); border: 1px solid var(--card-border); padding: 22px; border-radius: 12px; margin-top: 18px; }
     .method-badge { background: rgba(255,255,255,0.05); color: #64748b; padding: 4px 10px; border-radius: 6px; font-size: 0.72rem; font-weight: 700; margin-right: 6px; }
-    .method-badge-active { background: rgba(217,181,108,0.15); color: var(--accent-solid); border: 1px solid rgba(217,181,108,0.3); }
+    .method-badge-active { background: rgba(24,106,255,0.15); color: var(--accent-solid); border: 1px solid rgba(24,106,255,0.3); }
     .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 800; }
-    .status-raw { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; }
+    .status-raw { background: rgba(255, 255, 255, 0.08); color: #d4d4d8; }
     .status-enriched { background: rgba(16, 185, 129, 0.2); color: #34d399; }
 
     /* Job panel — same shape as the other pages, so a paused run looks the
        same here as it does on the audit and community pages. */
-    .job-panel { background: var(--terminal-bg); border: 1px solid rgba(12,120,86,0.35); border-radius: 14px; padding: 20px; margin-top: 22px; }
+    .job-panel { background: var(--terminal-bg); border: 1px solid rgba(24,106,255,0.35); border-radius: 14px; padding: 20px; margin-top: 22px; }
     .el-run-cost { font-size: 0.8rem; color: var(--text-muted); }
 </style>
 </head>
