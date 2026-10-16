@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Content plan — EdgeLead</title>
-<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* content-plan.html — page-specific only. */
@@ -20,17 +20,17 @@
     .tab { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; font-size: 0.8rem; font-family: inherit; }
     .tab.is-on { background: var(--accent-glow); color: #fff; border-color: transparent; }
     .brief-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
-    .brief { border: 1px solid var(--card-border); border-radius: 12px; padding: 16px; background: rgba(15,23,42,0.55); font-size: 0.86rem; line-height: 1.55; }
+    .brief { border: 1px solid var(--card-border); border-radius: 12px; padding: 16px; background: rgba(15,15,16,0.55); font-size: 0.86rem; line-height: 1.55; }
     .brief h4 { margin: 0 0 8px; color: #fff; font-size: 0.95rem; }
-    .brief .cell { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #f0d39a; word-break: break-all; }
+    .brief .cell { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #b5ff3b; word-break: break-all; }
     .brief .cap { white-space: pre-wrap; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px; margin: 8px 0; font-size: 0.82rem; }
-    .brief a { color: #f0d39a; font-size: 0.78rem; }
+    .brief a { color: #b5ff3b; font-size: 0.78rem; }
     .band { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 800; }
-    .band.top { background: rgba(16,185,129,0.18); color: #6ee7b7; } .band.above { background: rgba(12,120,86,0.18); color: #f0d39a; }
-    .band.typical { background: rgba(148,163,184,0.15); color: #cbd5e1; } .band.below { background: rgba(239,68,68,0.15); color: #fca5a5; }
+    .band.top { background: rgba(16,185,129,0.18); color: #6ee7b7; } .band.above { background: rgba(24,106,255,0.18); color: #b5ff3b; }
+    .band.typical { background: rgba(148,163,184,0.15); color: #d4d4d8; } .band.below { background: rgba(239,68,68,0.15); color: #fca5a5; }
     .src { font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 5px; margin-left: 4px; }
-    .src.scraped { background: rgba(148,163,184,0.15); color: #cbd5e1; } .src.insights { background: rgba(16,185,129,0.18); color: #6ee7b7; } .src.derived { background: rgba(184,145,63,0.18); color: #f0d39a; }
-    td a { color: #f0d39a; }
+    .src.scraped { background: rgba(148,163,184,0.15); color: #d4d4d8; } .src.insights { background: rgba(16,185,129,0.18); color: #6ee7b7; } .src.derived { background: rgba(184,145,63,0.18); color: #b5ff3b; }
+    td a { color: #b5ff3b; }
     .verdict { font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 5px; }
     .verdict.gap { background: rgba(245,158,11,0.18); color: #fcd34d; } .verdict.double_down { background: rgba(16,185,129,0.18); color: #6ee7b7; } .verdict.stop { background: rgba(239,68,68,0.18); color: #fca5a5; }
     .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }

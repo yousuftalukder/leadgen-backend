@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Team &amp; settings — EdgeLead</title>
-<link href="https://fonts.googleapis.com/css2?family=Anek+Latin:wdth,wght@75..125,300..800&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <style>
     /* admin.html — page-specific only. Shared rules live in app.css. */
@@ -12,21 +12,21 @@
         margin: 0 auto; min-height: 100vh; }
     .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 18px; }
     .check-row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
-    .check:has(input:checked) { border-color: var(--accent-solid); background: rgba(217,181,108,0.1); color: #fff; }
+    .check:has(input:checked) { border-color: var(--accent-solid); background: rgba(24,106,255,0.1); color: #fff; }
     /* ---- people, in buckets ---- */
     .bucket { margin-bottom: 30px; }
     .bucket:last-child { margin-bottom: 0; }
-    .tag-want { background: rgba(217,181,108,0.2); color: var(--accent-solid); }
+    .tag-want { background: rgba(24,106,255,0.2); color: var(--accent-solid); }
     .funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
     .funnel-tile { padding: 12px 14px; border-radius: var(--r-md); background: rgba(255,255,255,0.035);
         border: 1px solid var(--card-border); }
     .funnel-tile .k { font-size: 0.66rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
     .funnel-tile .v { font-size: 1.5rem; font-weight: 800; margin-top: 4px; letter-spacing: -0.02em; }
     .funnel-tile .s { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; }
-    .funnel-tile.is-hot { border-color: rgba(217,181,108,0.45); }
+    .funnel-tile.is-hot { border-color: rgba(24,106,255,0.45); }
     .funnel-tile.is-hot .v { color: var(--accent-solid); }
     .funnel-tile.is-link { cursor: pointer; }
-    .funnel-tile.is-link:hover { background: rgba(217,181,108,0.08); }
+    .funnel-tile.is-link:hover { background: rgba(24,106,255,0.08); }
     .bucket-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
         margin-bottom: 12px; padding-bottom: 9px; border-bottom: 1px solid var(--card-border); }
     .bucket-head h3 { font-size: 0.96rem; font-weight: 800; letter-spacing: -0.01em; }
@@ -36,7 +36,7 @@
 
     .user-row { background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 12px;
         margin-bottom: 10px; overflow: hidden; }
-    .user-row[open] { border-color: rgba(217,181,108,0.30); }
+    .user-row[open] { border-color: rgba(24,106,255,0.30); }
     /* The whole summary is the hit target, so opening a row never needs aim. */
     .user-head { display: flex; justify-content: space-between; align-items: center; gap: 14px;
         flex-wrap: wrap; padding: 16px 20px; cursor: pointer; list-style: none;
@@ -48,7 +48,7 @@
         color: var(--text-muted); border: 1px solid var(--card-border); border-radius: 8px;
         padding: 6px 13px; white-space: nowrap; }
     .user-head:hover .user-open { color: var(--text-primary); }
-    .user-row[open] .user-open { color: var(--accent-solid); border-color: rgba(217,181,108,0.35); }
+    .user-row[open] .user-open { color: var(--accent-solid); border-color: rgba(24,106,255,0.35); }
     .user-row[open] .user-open::after { content: 'ing'; }
     .user-body { padding: 0 20px 20px; }
     .user-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px;
@@ -56,11 +56,11 @@
     .user-head strong { color: #fff; font-size: 1rem; }
     .user-head .meta { color: var(--text-muted); font-size: 0.79rem; margin-top: 5px; }
     .tag { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 0.71rem; font-weight: 800; margin-left: 6px; }
-    .tag-admin { background: rgba(184,145,63,0.18); color: #f0d39a; }
+    .tag-admin { background: rgba(184,145,63,0.18); color: #b5ff3b; }
     /* Account state at a glance. Expired is the one worth finding in a long
        list, so it is the only one that carries a warning colour. */
     .tag-state { background: rgba(255,255,255,0.08); color: var(--text-muted); }
-    .tag-state.is-trial   { background: rgba(217,181,108,0.16); color: #f0d39a; }
+    .tag-state.is-trial   { background: rgba(24,106,255,0.16); color: #b5ff3b; }
     .tag-state.is-paid    { background: rgba(52,211,153,0.16);  color: #6ee7b7; }
     .tag-state.is-expired { background: rgba(248,113,113,0.16); color: #fca5a5; }
     .billing-row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--card-border);
@@ -97,7 +97,7 @@
     .pool-tier .t { color: #fff; font-weight: 700; }
     .pool-tier .d { grid-column: 2; color: var(--text-muted); font-size: 0.78rem; line-height: 1.5; }
     .pool-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; margin: 2px 4px 2px 0; border: 1px solid var(--card-border); color: var(--text-secondary); }
-    .pool-chip.ok { color: var(--success); border-color: rgba(63,191,143,0.35); }
+    .pool-chip.ok { color: var(--success); border-color: rgba(181,255,59,0.35); }
     .pool-chip.warn { color: var(--warn); border-color: rgba(251,191,36,0.35); }
     .pool-chip.bad { color: var(--danger); border-color: rgba(248,113,113,0.35); }
     .pool-cover { padding: 8px 0; border-top: 1px solid var(--card-border); font-size: 0.84rem; }
@@ -111,7 +111,7 @@
     .mx-filter { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
     .mx-f { font: inherit; font-size: 0.8rem; font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer;
         color: var(--text-secondary); background: transparent; border: 1px solid var(--card-border); }
-    .mx-f.is-on { color: var(--text-primary); border-color: var(--accent-solid); background: rgba(12,120,86,0.12); }
+    .mx-f.is-on { color: var(--text-primary); border-color: var(--accent-solid); background: rgba(24,106,255,0.12); }
     .mx-f b { font-variant-numeric: tabular-nums; margin-left: 4px; }
     .mx-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 14px; padding: 16px 0; border-top: 1px solid var(--card-border); }
     .mx-row:first-child { border-top: 0; }

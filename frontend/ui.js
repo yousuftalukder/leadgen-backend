@@ -68,7 +68,7 @@
     ];
     const STATUS_NAME = Object.fromEntries(STATUS.map(([k, n]) => [k, n]));
     const LABELS = ['Website', 'Content', 'Reporting', 'Ads', 'Community', 'Leads', 'Setup', 'Profile'];   // the server files a typed "website" as Website
-    const LABEL_COLOR = { Website: '#a78bfa', Content: 'var(--accent-solid)', Reporting: 'var(--jade)', Ads: 'var(--warn)', Community: '#f0d39a', Leads: '#60a5fa', Setup: 'var(--text-muted)', Profile: 'var(--danger)' };
+    const LABEL_COLOR = { Website: '#a78bfa', Content: 'var(--accent-solid)', Reporting: 'var(--jade)', Ads: 'var(--warn)', Community: '#b5ff3b', Leads: '#60a5fa', Setup: 'var(--text-muted)', Profile: 'var(--danger)' };
     const labelChip = l => `<span class="ws-lbl" style="--c:${LABEL_COLOR[l] || 'var(--text-muted)'}">${esc(l)}</span>`;
 
     /**
@@ -227,9 +227,9 @@
     const PRIORITY = [
         ['highest', 'Highest', '#fb7185', '<path d="M6 14l6-6 6 6M6 9l6-6 6 6"/>'],
         ['high', 'High', '#fb923c', '<path d="M6 15l6-6 6 6"/>'],
-        ['medium', 'Medium', '#f0d39a', '<path d="M6 10h12M6 14h12"/>'],
+        ['medium', 'Medium', '#b5ff3b', '<path d="M6 10h12M6 14h12"/>'],
         ['low', 'Low', '#60a5fa', '<path d="M6 9l6 6 6-6"/>'],
-        ['lowest', 'Lowest', '#94a3b8', '<path d="M6 10l6 6 6-6M6 15l6 6 6-6"/>']
+        ['lowest', 'Lowest', '#a3a3a8', '<path d="M6 10l6 6 6-6M6 15l6 6 6-6"/>']
     ];
     const PRIO = Object.fromEntries(PRIORITY.map(([k, n, c, d]) => [k, { name: n, color: c, path: d }]));
     const prioIcon = k => { const p = PRIO[k] || PRIO.medium; return `<svg class="tk-prio" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${p.color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-label="${p.name} priority" role="img"><title>${p.name} priority</title>${p.path}</svg>`; };
@@ -290,6 +290,26 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'The picture did not upload.');
         return data;
+    }
+
+    // ---- documents on a task (phase 62) ----------------------------------------
+    const DOC_ACCEPT = '.pdf,.doc,.docx,.xls,.xlsx,.csv';
+    const DOC_EXT = /\.(pdf|docx?|xlsx?|csv)$/i;
+    const DOC_MAX = 20 * 1024 * 1024;
+    const fileSize = n => n >= 1048576 ? (n / 1048576).toFixed(n >= 10485760 ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+    const docKind = name => { const e = (String(name).match(/\.([a-z0-9]+)$/i) || [])[1] || ''; return /^pdf$/i.test(e) ? 'pdf' : /^docx?$/i.test(e) ? 'doc' : 'sheet'; };
+    /** The file itself is the body; the server reads what it is from its bytes. */
+    async function uploadDocument(taskId, file) {
+        if (!DOC_EXT.test(file.name)) throw new Error(`${file.name}: only PDF, Word or Excel files.`);
+        if (file.size > DOC_MAX) throw new Error(`${file.name} is over 20 MB.`);
+        const res = await fetch(`${EL.backendUrl()}/api/tasks/${encodeURIComponent(taskId)}/files`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${await EL.token()}`, 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
+            body: file
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `${file.name} did not upload.`);
+        return data.file;
     }
     /**
      * Make a contenteditable box take pasted and dropped pictures (uploaded at
@@ -361,6 +381,7 @@
         let canEdit = ctx.canEdit !== false;
         const people = ctx.people || [];
         const media = {};
+        let files = [];
         const d = EL.drawer({ wide: 'xl', title: isNew ? 'New task' : `${t.key ? `<span class="tk-key">${esc(t.key)}</span> ` : ''}${esc(t.title)}`,
             sub: `${esc(ctx.clientName || '')}${t.source && t.source.label ? ' · from ' + esc(t.source.label) : ''}`,
             body: '<p class="el-muted">Opening…</p>' });
@@ -384,6 +405,11 @@
                             ${canEdit ? `<div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('plus')}Add picture<input type="file" id="tk-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
                                 <span class="ws-hint" id="tk-desc-hint">${visible ? 'The client sees this description.' : 'Only your team sees this description.'} Paste (Ctrl+V) or drop pictures in.</span></div>` : ''}
                         </section>
+                        ${isNew ? '' : `<section class="tk-sec"><h3>Attachments <span class="ws-num" id="tk-files-n"></span></h3>
+                            <div id="tk-files" class="tk-files"></div>
+                            <div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('paperclip')}Attach file<input type="file" id="tk-doc" accept="${DOC_ACCEPT}" multiple hidden></label>
+                                <span class="ws-hint">PDF, Word or Excel, up to 20 MB each. Drop files here too.</span></div>
+                        </section>`}
                         <section class="tk-sec"><h3>Checklist <span class="ws-num" id="tk-check-n"></span></h3>
                             <div class="tk-bar"><i id="tk-check-bar"></i></div>
                             <div id="tk-check"></div>
@@ -501,6 +527,40 @@
             }
 
             if (!isNew) {
+                const me = EL.me ? EL.me.id : null;
+                const drawFiles = () => {
+                    $('tk-files-n').textContent = files.length ? String(files.length) : '';
+                    $('tk-files').innerHTML = files.length ? files.map(f => `
+                        <div class="tk-file ${f.pending ? 'is-busy' : ''}" data-file="${esc(f.id)}">
+                            <span class="tk-file-ic is-${docKind(f.name)}">${esc(((f.name.match(/\.([a-z0-9]+)$/i) || [])[1] || 'file').toUpperCase())}</span>
+                            <div class="ws-grow">${f.url ? `<a class="tk-file-name" href="${esc(f.url)}" target="_blank" rel="noopener" download="${esc(f.name)}">${esc(f.name)}</a>` : `<span class="tk-file-name">${esc(f.name)}</span>`}
+                                <div class="ws-m">${f.pending ? 'Uploading…' : `${fileSize(f.bytes)}${f.uploadedBy ? ' · ' + esc(f.uploadedBy.name) : ''} · ${esc(ago(f.createdAt))}`}</div></div>
+                            ${!f.pending && (canEdit || (f.uploadedBy && f.uploadedBy.id === me)) ? `<button type="button" class="tk-x" data-rm-file="${esc(f.id)}" aria-label="Remove ${esc(f.name)}">×</button>` : ''}
+                        </div>`).join('') : '<p class="el-muted">No files yet. Briefs, contracts, content calendars, reports.</p>';
+                };
+                const addDocs = async list => {
+                    for (const file of list) {
+                        const tmp = { id: 'up-' + Math.random().toString(36).slice(2), name: file.name, pending: true };
+                        files.unshift(tmp); drawFiles();
+                        try { const f = await uploadDocument(t.id, file); files[files.indexOf(tmp)] = f; }
+                        catch (err) { files.splice(files.indexOf(tmp), 1); EL.toast(err.message, 'bad'); }
+                        drawFiles();
+                    }
+                };
+                drawFiles();
+                $('tk-doc').addEventListener('change', e => { addDocs([...e.target.files]); e.target.value = ''; });
+                const zone = $('tk-files').closest('.tk-sec');
+                zone.addEventListener('dragover', e => { if ([...(e.dataTransfer.types || [])].includes('Files')) { e.preventDefault(); zone.classList.add('is-drop'); } });
+                zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('is-drop'); });
+                zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('is-drop'); addDocs([...e.dataTransfer.files]); });
+                $('tk-files').addEventListener('click', async e => {
+                    const b = e.target.closest('[data-rm-file]'); if (!b) return;
+                    const f = files.find(x => x.id === b.dataset.rmFile); if (!f || !confirm(`Remove ${f.name}?`)) return;
+                    b.disabled = true;
+                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/files/${encodeURIComponent(f.id)}`, { method: 'DELETE' }); files.splice(files.indexOf(f), 1); drawFiles(); }
+                    catch (err) { b.disabled = false; EL.toast(err.message, 'bad'); }
+                });
+
                 const cmedia = {};
                 const drawComments = async () => {
                     try {
@@ -532,6 +592,7 @@
         EL.api(`/api/tasks/${encodeURIComponent(t.id)}`).then(r => {
             t = { ...t, ...r.task };
             Object.assign(media, r.media || {});
+            files = r.files || [];
             if (r.canEdit === false) canEdit = false;
             d.setTitle(`${t.key ? `<span class="tk-key">${esc(t.key)}</span> ` : ''}${esc(t.title)}`);
             draw();

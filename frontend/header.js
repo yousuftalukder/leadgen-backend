@@ -171,6 +171,8 @@
         shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
         check: '<path d="M5 12l5 5 9-10"/>',
         plus: '<path d="M12 5v14M5 12h14"/>',
+        chevron: '<path d="M7 14l5-5 5 5"/>',
+        paperclip: '<path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.5 3.5 0 0 1 5 5L10.4 18a2 2 0 0 1-2.8-2.8L15 7.8"/>',
         search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
         x: '<path d="M6 6l12 12M18 6 6 18"/>',
         arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
@@ -554,7 +556,7 @@
             box.querySelector('[data-act="resume"]').addEventListener('click', async (e) => {
                 const btn = e.currentTarget;
                 btn.disabled = true;
-                note.style.color = '#94a3b8';
+                note.style.color = '#a3a3a8';
                 note.textContent = 'Checking for a key with credit…';
                 try {
                     const r = await EL.resumeJob(job.id);
@@ -1261,16 +1263,22 @@
                     <span class="el-node" id="el-node"></span>
                     <span id="el-status">Checking Apify…</span>
                 </div>` : ''}
-                <div class="el-user">
-                    <span class="el-avatar" aria-hidden="true">${EL.esc(initials)}</span>
-                    <span class="el-user-txt"><b>${EL.esc(who)}</b><small>${EL.esc(roleName)}</small></span>
+                <!-- Phase 62: the account controls fold into one menu. Four stacked
+                     buttons used to take ~150px at the bottom of the rail, and the
+                     nav above was squeezed until its labels were cut in half. -->
+                <div class="el-acct">
+                    <button class="el-user" type="button" id="el-acct-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="el-acct-menu">
+                        <span class="el-avatar" aria-hidden="true">${EL.esc(initials)}</span>
+                        <span class="el-user-txt"><b>${EL.esc(who)}</b><small>${EL.esc(roleName)}</small></span>
+                        <span class="el-acct-caret" aria-hidden="true">${icon('chevron')}</span>
+                    </button>
+                    <div class="el-acct-menu" id="el-acct-menu" role="menu" hidden>
+                        ${keys ? `<button class="el-acct-item" type="button" role="menuitem" id="el-key-btn" title="The Apify key your runs spend">Apify key</button>
+                        <button class="el-acct-item" type="button" role="menuitem" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>` : ''}
+                        <a class="el-acct-item" role="menuitem" href="welcome.html?change=1">Change password</a>
+                        <button class="el-acct-item el-acct-out" type="button" role="menuitem" id="el-out">Sign out</button>
+                    </div>
                 </div>
-                ${keys ? `<div class="el-side-actions">
-                    <button class="el-btn el-mini" type="button" id="el-key-btn" title="The Apify key your runs spend">Apify key</button>
-                    <button class="el-btn el-mini" type="button" id="el-ai-btn" title="Your own Gemini key — used only for runs you start">AI key</button>
-                </div>` : ''}
-                <a class="el-btn el-mini el-signout" href="welcome.html?change=1" style="text-align:center;text-decoration:none">Change password</a>
-                <button class="el-btn el-mini el-signout" type="button" id="el-out">Sign out</button>
             </div>`;
 
         // The rail is off-canvas on a phone, so the bar that opens it has to
@@ -1310,6 +1318,19 @@
             bar.querySelector('#el-ai-btn').addEventListener('click', openGeminiModal);
         }
         bar.querySelector('#el-out').addEventListener('click', () => EL.signOut());
+
+        // The account menu: opens above the name, closes on a choice, an outside
+        // click or Escape, and returns focus to the button it came from.
+        const acctBtn = bar.querySelector('#el-acct-btn'), acctMenu = bar.querySelector('#el-acct-menu');
+        const setAcct = open => {
+            acctMenu.hidden = !open;
+            acctBtn.setAttribute('aria-expanded', String(open));
+            if (open) acctMenu.querySelector('.el-acct-item')?.focus();
+        };
+        acctBtn.addEventListener('click', e => { e.stopPropagation(); setAcct(acctMenu.hidden); });
+        acctMenu.addEventListener('click', e => { if (e.target.closest('.el-acct-item')) setAcct(false); });
+        document.addEventListener('click', e => { if (!acctMenu.hidden && !e.target.closest('.el-acct')) setAcct(false); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && !acctMenu.hidden) { setAcct(false); acctBtn.focus(); } });
 
         if (!isClient && me) {
             const go = () => {
@@ -1647,6 +1668,9 @@
         const k = me && me.ownKeys;
         document.getElementById('el-key-btn')?.classList.toggle('el-needs', !!k && !k.apify);
         document.getElementById('el-ai-btn')?.classList.toggle('el-needs', !!k && !k.ai);
+        // The key buttons now live inside the closed account menu, so the
+        // reminder dot also shows on the account button that opens it.
+        document.getElementById('el-acct-btn')?.classList.toggle('el-needs', !!k && (!k.apify || !k.ai));
         if (!k || (k.apify && k.ai)) return;
         let later = 0;
         try { later = Number(localStorage.getItem(NUDGE_KEY) || 0); } catch (_) { /* no storage */ }
@@ -1821,7 +1845,7 @@
             const engine = scrim.querySelector('#el-key-engine').value;
             if (!newApiKey) { note.style.color = '#ef4444'; note.textContent = 'Paste a token first.'; return; }
 
-            note.style.color = '#94a3b8';
+            note.style.color = '#a3a3a8';
             note.textContent = 'Verifying with Apify…';
             try {
                 const data = await EL.api('/api/update-apify-key', { method: 'POST', body: { newApiKey, engine } });
@@ -1899,7 +1923,7 @@
             const key = scrim.querySelector('#el-ai-value').value.trim();
             const label = scrim.querySelector('#el-ai-label').value.trim();
             if (!key) { note.style.color = '#ef4444'; note.textContent = 'Paste a key first.'; return; }
-            note.style.color = '#94a3b8'; note.textContent = 'Verifying with Google…';
+            note.style.color = '#a3a3a8'; note.textContent = 'Verifying with Google…';
             try {
                 await EL.api('/api/gemini-keys', { method: 'POST', body: { key, label } });
                 note.style.color = '#10b981'; note.textContent = 'Saved. Your runs will use this key first.';
@@ -1945,7 +1969,7 @@
         scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
         scrim.querySelector('#el-share-go').addEventListener('click', async (e) => {
             e.currentTarget.disabled = true;
-            note.style.color = '#94a3b8'; note.textContent = 'Creating…';
+            note.style.color = '#a3a3a8'; note.textContent = 'Creating…';
             try {
                 const r = await EL.api('/api/share', { method: 'POST', body: {
                     reportId, expiresDays: +scrim.querySelector('#el-share-days').value,
@@ -2016,7 +2040,7 @@
         scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
         scrim.querySelector('#el-sched-go').addEventListener('click', async (e) => {
             e.currentTarget.disabled = true;
-            note.style.color = '#94a3b8'; note.textContent = 'Saving…';
+            note.style.color = '#a3a3a8'; note.textContent = 'Saving…';
             try {
                 const body = {
                     cadence: cad.value,
