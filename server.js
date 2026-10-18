@@ -99,7 +99,7 @@ const {
     geminiCandidates, geminiProbeKey, geminiRank, geminiReportKey, getPlays, getVideoViews,
     gracefulShutdown, graphInsights, growthForConnections, growthFrom, igAiPayload, igAiSlim,
     igDistribution, igDoc, igHandleFromUrl, igNormalisePost, igPlaceUrls, invalidateAuth,
-    invalidateEngineAccess, isEncrypted, keepAuditImages, keepAwakeIfBusy, keyPoolSummary, leadAssessment,
+    invalidateEngineAccess, isEncrypted, keepAuditImages, keepAwake, keyPoolSummary, leadAssessment,
     leadFilters, leadFit, leadPostSignal, leadScope, leadSignalsAdd, leadSignalsMerge, leaderboard,
     leadgenUnits, lengthBand, linkLeadsToClient, localParts, logger, mailSettings, maskSecret, median,
     metaDailySync, metaDailyTick, metaDefaultMonth, metaDeleteUserData, metaForget, metaMonthLabel,
@@ -146,7 +146,7 @@ module.exports = {
     budgetedJson, igAiPayload, igAiSlim, fbPageAiSlim, fbGroupAiSlim, aiPostCard, aiReasonText,
     // observability
     METRICS, RECENT_EVENTS, logger, preflight, schemaProbe, migrateSecretsAtRest,
-    sweepStaleJobs, sweepStaleReservations, keepAwakeIfBusy,
+    sweepStaleJobs, sweepStaleReservations, keepAwake,
     // caches
     invalidateAuth, invalidateEngineAccess, LOCAL_JOBS,
     // phase 11
