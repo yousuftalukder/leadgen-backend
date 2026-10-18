@@ -16,7 +16,7 @@ Object.assign(S, {
     quotaPeriod, invalidateQuotaCaps, contactSettings, cleanPaymentOption, mailSettings, sendMail,
     mailStatus, appUrl, mailActivationRequested, mailActivated, mailNewTrial, trialDaysSetting,
     effectiveCap, quotaError, takeLeadQuota, refundLeadQuota, createJob, assertJobSlot, claimJob,
-    jobUnitCount, updateJob, runJob, registerWorker, sweepStaleJobs, keepAwakeIfBusy,
+    jobUnitCount, updateJob, runJob, registerWorker, sweepStaleJobs, keepAwake,
     sweepStaleReservations, estimateCredits
 });
 Object.defineProperty(S, '_mailTransport', { get: () => _mailTransport, set: (v) => { _mailTransport = v; }, enumerable: true });
@@ -951,31 +951,34 @@ async function sweepStaleJobs() {
 }
 
 /**
- * Keep the instance awake while work is in flight.
+ * Keep the instance awake, always (phase 64).
  *
- * Render's free tier spins a web service down on absence of INBOUND HTTP. The
- * job heartbeat writes to Supabase, which is outbound and does not count, so
- * until now the only thing keeping a running job alive was the user's browser
- * polling it. Close the laptop mid-run and the instance slept, the Apify call
- * in flight was billed and produced nothing, and the job sat dead until
- * somebody came back and pressed Resume.
+ * Render's free tier spins a web service down after about fifteen minutes with
+ * no INBOUND HTTP. The job heartbeat writes to Supabase, which is outbound and
+ * does not count. Until phase 64 this pinged only while a job was running, so
+ * the first visit after a quiet spell waited 10-15 s for the instance to wake.
+ * Now one request to our own /api/health every four minutes, through the
+ * public URL, keeps it up around the clock.
  *
- * One request to our own /api/health is inbound traffic and resets the idle
- * timer. It only fires when there is actually a job running.
+ * The URL is hard-coded so the pinger never depends on an env var being set;
+ * SELF_URL still overrides it. It only runs on Render (RENDER is set there), so
+ * a laptop or the test suite never pings production. It cannot wake an
+ * instance that is already asleep; it only stops it falling asleep.
+ *
+ * Cost: 24/7 uses about 744 of a free workspace's 750 instance-hours a month.
  */
-const SELF_URL = (process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
+const PROD_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
+S.PROD_URL = PROD_URL;
+const SELF_URL = (process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || (process.env.RENDER ? PROD_URL : '')).replace(/\/+$/, '');
 S.SELF_URL = SELF_URL;
-const KEEPALIVE_MS = parseInt(process.env.KEEPALIVE_MS || '240000', 10);
+const KEEPALIVE_MS = 240000;                                       // four minutes, well inside the fifteen-minute idle window
 S.KEEPALIVE_MS = KEEPALIVE_MS;
 
-async function keepAwakeIfBusy() {
+async function keepAwake() {
     if (!SELF_URL) return;
     try {
-        const { data } = await supabase.from('jobs')
-            .select('id').in('status', ['running', 'queued']).limit(1);
-        if (!data?.length) return;
-        const r = await fetch(SELF_URL + '/api/health', { method: 'GET' });
-        logger.debug('keepalive_ping', { status: r.status, jobs: data.length });
+        const r = await fetch(SELF_URL + '/api/health', { method: 'GET', cache: 'no-store' });
+        logger.debug('keepalive_ping', { status: r.status });
     } catch (e) {
         logger.debug('keepalive_failed', { message: e.message });
     }

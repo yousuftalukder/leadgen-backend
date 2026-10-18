@@ -14,7 +14,7 @@ const {
     JOB_STALE_MINUTES, KEEPALIVE_MS, LOCAL_JOBS, MASTER_ADMIN_EMAIL, META_DAILY_POLL_MS, METRICS,
     SCHEDULER_ENABLED, SCHEDULER_POLL_MS, SELF_URL, _byoCache, _statusCache, alertOnce, app, auth, bearerId,
     callActor, clientAccess, crypto, decryptSecret, encryptSecret, fbEstimateCredits, geminiAvailable,
-    geminiCandidates, geminiReportKey, getWorkingClient, isEncrypted, keepAwakeIfBusy, loadGeminiPool,
+    geminiCandidates, geminiReportKey, getWorkingClient, isEncrypted, keepAwake, loadGeminiPool,
     logger, metaDailyTick, ownClientFor, primaryKeyName, rateLimit, requireAdmin, reviveStaleKeys,
     schedulerTick, supabase, sweepStaleJobs, sweepStaleReservations, tokenHash, xp
 } = S;
@@ -383,7 +383,7 @@ function preflight() {
     if (!MASTER_ADMIN_EMAIL) problems.push('MASTER_ADMIN_EMAIL is not set — the first user to sign in becomes admin');
     if (!ALERT_WEBHOOK) problems.push('ALERT_WEBHOOK_URL is not set — failures will only appear in the logs');
     if (!SELF_URL) problems.push(
-        'Neither SELF_URL nor RENDER_EXTERNAL_URL is set — the instance cannot keep itself awake, ' +
+        'Not on Render and no SELF_URL set — the instance does not ping itself awake, ' +
         'so a long job will be interrupted whenever the user closes the tab');
     if (BUDGET_MODE !== 'block') problems.push(`BUDGET_MODE=${BUDGET_MODE} — a run can overspend a key without pausing`);
 
@@ -440,7 +440,7 @@ async function start() {
         setInterval(sweepStaleJobs, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(sweepStaleReservations, Math.max(5, JOB_STALE_MINUTES) * 60000).unref?.();
         setInterval(reviveStaleKeys, 3600000).unref?.();
-        if (SELF_URL) setInterval(keepAwakeIfBusy, KEEPALIVE_MS).unref?.();
+        if (SELF_URL) { setInterval(keepAwake, KEEPALIVE_MS).unref?.(); logger.info('keepalive_on', { url: SELF_URL, everyMs: KEEPALIVE_MS }); }
 
         // Phase 11: heartbeat first so a second instance is visible at once,
         // then the scheduler, which stays quiet until a schedule is due.
