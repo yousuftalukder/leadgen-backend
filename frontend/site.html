@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Our website — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    .sp-row { display: grid; grid-template-columns: 56px minmax(160px, 1.6fr) 1fr auto auto; gap: 14px; align-items: center; padding: 12px 4px; border-bottom: 1px solid var(--card-border); }
+    .sp-row:last-child { border-bottom: 0; }
+    .sp-thumb { width: 56px; height: 42px; border-radius: 8px; background: var(--g, #186aff); background-size: cover; background-position: top; border: 1px solid var(--card-border); }
+    .sp-name { font-weight: 800; color: var(--text-primary); }
+    .sp-name small { display: block; font-weight: 500; color: var(--text-muted); font-size: .8rem; margin-top: 2px; }
+    .sp-meta { color: var(--text-secondary); font-size: .86rem; }
+    .sp-acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+    .sp-f { margin-bottom: 14px; }
+    .sp-f > label, .sp-lbl { font-size: .75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; }
+    .sp-f input, .sp-f select, .sp-f textarea { margin: 0; }
+    .sp-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .sp-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .sp-note { font-size: .84rem; color: var(--text-muted); margin: 4px 0 12px; }
+    .sp-sec { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 14px; margin: 18px 0 14px; }
+    .sp-sec h3 { margin: 0 0 10px; font-size: .95rem; }
+    .sp-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+    .sp-checks label { display: inline-flex; gap: 6px; align-items: center; font-weight: 600; font-size: .88rem; color: var(--text-secondary); margin: 0; }
+    .sp-checks input { width: auto; margin: 0; }
+    .sp-line { display: grid; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .sp-img { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .sp-img .sp-thumb { width: 120px; height: 80px; }
+    .sp-grid { overflow-x: auto; }
+    .sp-grid table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    .sp-grid th, .sp-grid td { padding: 4px; text-align: left; vertical-align: middle; }
+    .sp-grid input { margin: 0; min-width: 90px; }
+    .sp-status { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .sp-warn { border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.06); border-radius: var(--r-md); padding: 10px 14px; color: #b5ff3b; font-size: .88rem; margin-bottom: 14px; }
+    .sp-log { font-size: .84rem; color: var(--text-secondary); }
+    .sp-log a { color: var(--text-secondary); }
+    @media (max-width: 900px) {
+        .sp-row { grid-template-columns: 48px 1fr auto; }
+        .sp-row .sp-meta { display: none; }
+        .sp-2, .sp-3 { grid-template-columns: 1fr; }
+    }
+</style>
+</head>
+<body>
+<main class="el-page" id="sp"><div class="ws-empty"><p>Loading the website…</p></div></main>
+
+    <script src="vendor/supabase-js-2.116.0.js"></script>
+<script src="header.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Phase 66. The public website's content — work and proof, blog, prices and plans,
+    // results figures, the homepage stat, Edge Meta AI answers — published from here.
+    // Every save is a commit to the website's repository; Netlify rebuilds it in about a
+    // minute and the site shows it until the next save. Admins only.
+    await EL.init({ engine: null, page: 'site.html' });
+    const esc = v => EL.esc(v == null ? '' : String(v));
+    const ic = n => EL.icon(n);
+    const root = document.getElementById('sp');
+    const TABS = [['work', 'Work & proof'], ['blog', 'Blog'], ['pricing', 'Pricing & plans'], ['results', 'Results'], ['settings', 'Site settings']];
+    const SERVICES = { social: 'Social media', ads: 'Performance ads', leads: 'Lead generation', seo: 'SEO', influencers: 'Influencers', reporting: 'Reporting', websites: 'Websites' };
+    const FILTERS = ['Software', 'AI', 'Websites', 'Campaigns', 'Bangladesh', 'United States'];
+    const qs = new URLSearchParams(location.search);
+    let tab = TABS.some(t => t[0] === qs.get('tab')) ? qs.get('tab') : 'work';
+    let d = null, status = null, pollT = null;
+    const today = () => new Date().toISOString().slice(0, 10);
+    const day = iso => iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '—';
+    const slugify = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
+    const siteImg = p => p && d && d.siteUrl ? d.siteUrl + p : '';
+
+    if (!EL.me || EL.me.role !== 'admin') {
+        root.innerHTML = `<header class="ws-head"><div><h1>Our website</h1></div></header><div class="ws-empty">${ic('shield')}<h3>Admins only</h3><p>Publishing to the public website is limited to admins.</p></div>`;
+        return;
+    }
+
+    // ---- loading and the publish status ---------------------------------------------
+    async function load(fresh) {
+        try { d = await EL.api('/api/site/content' + (fresh ? '?fresh=1' : ''), { scoped: false }); }
+        catch (err) {
+            const setup = err.code === 'site_not_configured' || err.code === 'site_token';
+            root.innerHTML = `<header class="ws-head"><div><h1>Our website</h1></div></header><div class="ws-empty">${ic('alert')}<h3>${setup ? 'Publishing is not set up yet' : 'The website could not be loaded'}</h3><p>${esc(err.message)}</p></div>`;
+            return;
+        }
+        draw();
+        loadStatus();
+    }
+    async function loadStatus() {
+        try { status = await EL.api('/api/site/status', { scoped: false }); } catch { status = null; }
+        const el = root.querySelector('#sp-status'); if (el) el.innerHTML = statusHtml();
+        return status;
+    }
+    function statusHtml() {
+        if (!status) return '';
+        const b = status.build || {}, last = (status.commits || [])[0];
+        const chip = { success: '<span class="el-chip is-jade">Live</span>', pending: '<span class="el-chip is-gold">Building…</span>', failure: '<span class="el-chip is-bad" style="color:var(--danger)">Build failed</span>', unknown: '<span class="el-chip">Build status not reported</span>' }[b.state] || '';
+        const link = (b.reports || []).find(r => r.url);
+        return `${chip}${last ? `<span class="sp-log">Last publish ${esc(day(last.at))}: <a href="${esc(last.url)}" target="_blank" rel="noopener">${esc(last.message)}</a></span>` : ''}${link ? `<a class="sp-log" href="${esc(link.url)}" target="_blank" rel="noopener">Build log</a>` : ''}`;
+    }
+    /** After a save: poll the build for up to three minutes so the chip says when it is live. */
+    function watchBuild() {
+        clearTimeout(pollT);
+        let n = 0;
+        const tick = async () => {
+            const s = await loadStatus();
+            if (s && s.build && (s.build.state === 'pending' || (s.build.state === 'unknown' && n < 3)) && n++ < 18) pollT = setTimeout(tick, 10000);
+            else if (s && s.build && s.build.state === 'failure') EL.toast('The website build failed, so the site still shows the previous version. Open the build log.', 'bad');
+        };
+        pollT = setTimeout(tick, 4000);
+    }
+    async function saved(r, what) {
+        EL.toast(r.unchanged ? `Nothing changed in ${what}.` : `${what} published. The site rebuilds in about a minute.`);
+        await load(true);
+        if (!r.unchanged) watchBuild();
+    }
+    function failed(err) {
+        EL.toast(err.message, 'bad');
+        if (err.code === 'site_conflict') load(true);
+    }
+
+    function draw() {
+        const placeholders = [...d.services.filter(s => s.data.results && s.data.results.placeholder).map(s => s.data.name + ' results'),
+            ...(d.settings && d.settings.data.stat && d.settings.data.stat.placeholder ? ['Homepage stat'] : []),
+            ...(d.settings && d.settings.data.metaAi && d.settings.data.metaAi.placeholder ? ['Edge Meta AI answers'] : [])];
+        const counts = { work: d.work.length, blog: d.blog.length, pricing: d.services.length, results: placeholders.length, settings: '' };
+        root.innerHTML = `
+            <header class="ws-head"><div><h1>Our website</h1>
+                <p class="ws-sub">What you publish here goes to ${d.siteUrl ? `<a href="${esc(d.siteUrl)}" target="_blank" rel="noopener">${esc(d.siteUrl.replace(/^https?:\/\//, ''))}</a>` : 'the website'} in about a minute and stays until the next change. Nothing on the site updates by itself.</p>
+                <div class="sp-status" id="sp-status">${statusHtml()}</div></div>
+                <div class="ws-actions">
+                    ${d.siteUrl ? `<a class="ws-btn is-quiet" href="${esc(d.siteUrl)}" target="_blank" rel="noopener">${ic('out')}Open the site</a>` : ''}
+                    ${tab === 'work' ? `<button class="ws-btn is-gold" type="button" id="sp-new">${ic('plus')}Add work</button>` : ''}
+                    ${tab === 'blog' ? `<button class="ws-btn is-gold" type="button" id="sp-new">${ic('plus')}New article</button>` : ''}
+                </div>
+            </header>
+            ${placeholders.length ? `<div class="sp-warn">Still showing example figures: ${esc(placeholders.join(', '))}. Publish real ones under Results before launch.</div>` : ''}
+            <nav class="ws-tabs" role="tablist">${TABS.map(([k, l]) => `<a role="tab" href="#" data-tab="${k}" aria-selected="${tab === k}">${l}${counts[k] !== '' ? ` <span class="n">${counts[k]}</span>` : ''}</a>`).join('')}</nav>
+            <div id="sp-body" style="margin-top:16px"></div>`;
+        root.querySelectorAll('[data-tab]').forEach(a => a.addEventListener('click', e => {
+            e.preventDefault(); tab = a.dataset.tab;
+            const u = new URL(location.href); u.searchParams.set('tab', tab); history.replaceState(null, '', u);
+            draw();
+        }));
+        const nb = root.querySelector('#sp-new');
+        if (nb) nb.addEventListener('click', () => (tab === 'work' ? editWork(null) : editPost(null)));
+        const body = root.querySelector('#sp-body');
+        ({ work: drawWork, blog: drawBlog, pricing: drawPricing, results: drawResults, settings: drawSettings })[tab](body);
+    }
+
+    // ---- images: shrunk in the browser, stored as blobs until the save commits them ------
+    async function shrink(file, maxW, maxBytes = 1300000) {
+        const url = URL.createObjectURL(file);
+        try {
+            const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error('That file is not an image this browser can read.')); i.src = url; });
+            const scale = Math.min(1, maxW / img.naturalWidth);
+            const w = Math.round(img.naturalWidth * scale), h = Math.min(16000, Math.round(img.naturalHeight * scale));
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, Math.round(img.naturalHeight * scale));
+            for (const q of [0.85, 0.75, 0.65, 0.55, 0.45]) {
+                const blob = await new Promise(ok => c.toBlob(ok, 'image/jpeg', q));
+                if (blob.size <= maxBytes) {
+                    const data = await new Promise(ok => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.readAsDataURL(blob); });
+                    return { data, type: 'image/jpeg', size: blob.size };
+                }
+            }
+            throw new Error('That image is too large even after shrinking. Crop it and try again.');
+        } finally { URL.revokeObjectURL(url); }
+    }
+    /** Pick a file, shrink it, upload it. Returns { path, repoPath, blob } and remembers it for the save. */
+    function uploader(kind, getSlug, uploads) {
+        return (maxW) => new Promise(resolve => {
+            const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/jpeg,image/png,image/webp';
+            inp.onchange = async () => {
+                const f = inp.files && inp.files[0]; if (!f) return resolve(null);
+                const slug = getSlug();
+                if (!slug) { EL.toast('Give it a title first: the image is stored under its name.', 'bad'); return resolve(null); }
+                try {
+                    EL.toast('Uploading the image…');
+                    const s = await shrink(f, maxW);
+                    const r = await EL.api('/api/site/images', { method: 'POST', scoped: false, body: { kind, slug, name: f.name, type: s.type, data: s.data } });
+                    r.preview = URL.createObjectURL(f);
+                    uploads.push(r);
+                    EL.toast(`Image ready (${Math.round(s.size / 1024)} KB). It goes live when you publish.`);
+                    resolve(r);
+                } catch (err) { EL.toast(err.message, 'bad'); resolve(null); }
+            };
+            inp.click();
+        });
+    }
+    const previewOf = (path, uploads) => { const u = uploads.find(x => x.path === path); return u ? u.preview : siteImg(path); };
+    const thumb = (path, gradient, uploads = []) => `<span class="sp-thumb" style="${path ? `background-image:url('${esc(previewOf(path, uploads))}')` : `--g:${esc(gradient || '#186aff')}`}"></span>`;
+
+    // ---- work & proof -----------------------------------------------------------------
+    function drawWork(body) {
+        if (!d.work.length) { body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No work on the site yet</h3><p>Add a website, a campaign or a product. It appears on the homepage and the Work page.</p></div>`; return; }
+        body.innerHTML = `<p class="sp-note">Cards show in this order on the homepage and the Work page. Items tagged with a service also show on that service's page.</p><section class="ws-card">${d.work.map(w => {
+            const x = w.data;
+            return `<div class="sp-row">
+                ${thumb(x.cover || (x.site && x.site.pages[0] && x.site.pages[0].image), x.gradient)}
+                <div class="sp-name">${esc(x.title)}<small>${esc(x.category)} · ${esc(x.status)}</small></div>
+                <div class="sp-meta">${x.showCard === false ? 'Viewer only' : `Card ${esc(x.order ?? '')}`}${x.site ? ' · live-site viewer' : ''}${(x.services || []).length ? ' · ' + x.services.map(s => esc(SERVICES[s] || s)).join(', ') : ''}</div>
+                <div>${x.published === false ? '<span class="el-chip">Hidden</span>' : '<span class="el-chip is-jade">On the site</span>'}</div>
+                <div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" data-w="${esc(w.id)}">Edit</button></div>
+            </div>`;
+        }).join('')}</section>`;
+        body.querySelectorAll('[data-w]').forEach(b => b.addEventListener('click', () => editWork(d.work.find(w => w.id === b.dataset.w))));
+    }
+
+    function editWork(entry) {
+        const isNew = !entry;
+        const x = entry ? JSON.parse(JSON.stringify(entry.data)) : { kind: 'campaign', status: 'Delivered', filters: [], tags: [], results: [], services: [], related: {}, order: 1, showCard: true, published: true };
+        let id = entry ? entry.id : '';
+        const uploads = [];
+        const dw = EL.drawer({
+            wide: 'xl', title: isNew ? 'Add work' : `Edit · ${esc(x.title)}`,
+            sub: 'A website, a marketing campaign or a product. Publishing commits it to the website; it is live in about a minute.',
+            body: '<div id="wk"></div>',
+            foot: `${isNew ? '' : '<button class="ws-btn is-quiet" type="button" id="wk-del" style="margin-right:auto">Remove from the site</button>'}<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="wk-save">Publish</button>`
+        });
+        const host = dw.el.querySelector('#wk');
+        const up = uploader('work', () => id || slugify(x.title), uploads);
+        const val = k => (host.querySelector(`[data-k="${k}"]`) || {}).value;
+        const sync = () => {
+            if (!host.querySelector('[data-k=title]')) return;
+            x.title = val('title'); x.kind = val('kind'); x.status = val('status'); x.category = val('category');
+            x.summary = val('summary'); x.tags = val('tags').split(',').map(s => s.trim()).filter(Boolean);
+            x.coverAlt = val('coverAlt'); x.order = val('order'); x.date = val('date') || undefined;
+            x.showCard = host.querySelector('[data-k=showCard]').checked; x.published = host.querySelector('[data-k=published]').checked;
+            x.filters = [...host.querySelectorAll('[data-filter]:checked')].map(c => c.dataset.filter);
+            x.services = [...host.querySelectorAll('[data-svc]:checked')].map(c => c.dataset.svc);
+            x.results = [...host.querySelectorAll('[data-res]')].map(r => ({ label: r.querySelector('[data-rl]').value, value: r.querySelector('[data-rv]').value })).filter(r => r.label || r.value);
+            x.related = {};
+            host.querySelectorAll('[data-rel]').forEach(r => { const t = r.querySelector('[data-rt]').value, s = r.querySelector('[data-rs]').value; if (t || s) x.related[r.dataset.rel] = { title: t, text: s }; });
+            if (isNew) id = slugify(val('id') || x.title);
+            if (x.site) {
+                const s = x.site;
+                ['name', 'subtitle', 'host', 'color', 'headline', 'description', 'order'].forEach(k => { s[k] = host.querySelector(`[data-s="${k}"]`).value; });
+                s.stack = host.querySelector('[data-s=stack]').value.split(',').map(v => v.trim()).filter(Boolean);
+                s.signInOnly = host.querySelector('[data-s=signInOnly]').checked;
+                s.pages = [...host.querySelectorAll('[data-pg]')].map((r, i) => ({ label: r.querySelector('[data-pl]').value, path: r.querySelector('[data-pp]').value, image: (s.pages[i] || {}).image }));
+            }
+        };
+        const paint = () => {
+            const s = x.site;
+            host.innerHTML = `
+                <div class="sp-2">
+                    <div class="sp-f"><label>Title</label><input data-k="title" value="${esc(x.title)}" placeholder="Riverside Café: Eid campaign"></div>
+                    <div class="sp-f"><label>Address on the site</label><input data-k="id" value="${esc(id)}" ${isNew ? 'placeholder="made from the title"' : 'disabled'}></div>
+                </div>
+                <div class="sp-3">
+                    <div class="sp-f"><label>Kind</label><select data-k="kind">${['campaign', 'website', 'software'].map(k => `<option ${x.kind === k ? 'selected' : ''}>${k}</option>`).join('')}</select></div>
+                    <div class="sp-f"><label>Status</label><input data-k="status" value="${esc(x.status)}" list="wk-st"><datalist id="wk-st"><option>Live</option><option>Delivered</option><option>Running</option><option>In development</option></datalist></div>
+                    <div class="sp-f"><label>Category</label><input data-k="category" value="${esc(x.category)}" placeholder="Campaigns · Meta ads"></div>
+                </div>
+                <div class="sp-f"><label>Summary</label><textarea data-k="summary" rows="3" placeholder="One or two sentences.">${esc(x.summary)}</textarea></div>
+                <div class="sp-f"><label>Tags (comma separated)</label><input data-k="tags" value="${esc((x.tags || []).join(', '))}"></div>
+                <div class="sp-f"><span class="sp-lbl">Filters on the Work page</span><div class="sp-checks">${FILTERS.map(f => `<label><input type="checkbox" data-filter="${esc(f)}" ${(x.filters || []).includes(f) ? 'checked' : ''}>${esc(f)}</label>`).join('')}</div></div>
+                <div class="sp-sec"><h3>Cover photo</h3>
+                    <div class="sp-img">${thumb(x.cover, x.gradient, uploads)}<button class="ws-btn is-sm" type="button" id="wk-cover">${x.cover ? 'Replace' : 'Upload'} photo</button>${x.cover ? '<button class="ws-btn is-sm is-quiet" type="button" id="wk-nocover">Remove</button>' : ''}</div>
+                    ${!x.cover && x.mockupHtml ? '<p class="sp-note">This card uses its original drawn mockup. Upload a photo to replace it.</p>' : '<p class="sp-note">A screenshot, an ad or a photo of the work. Landscape, at least 1200 px wide.</p>'}
+                    <div class="sp-f"><label>Describe the photo</label><input data-k="coverAlt" value="${esc(x.coverAlt)}"></div>
+                </div>
+                <div class="sp-sec"><h3>Results on the card</h3><p class="sp-note">Up to four, for example Cost per result · ৳43. Leave empty for none.</p>
+                    ${[0, 1, 2, 3].map(i => { const r = (x.results || [])[i] || {}; return `<div class="sp-line" data-res style="grid-template-columns:1fr 1fr"><input data-rl placeholder="Label" value="${esc(r.label)}"><input data-rv placeholder="Value" value="${esc(r.value)}"></div>`; }).join('')}
+                </div>
+                <div class="sp-sec"><h3>Show on service pages</h3>
+                    <div class="sp-checks">${Object.entries(SERVICES).map(([k, l]) => `<label><input type="checkbox" data-svc="${k}" ${(x.services || []).includes(k) ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div>
+                    ${(x.services || []).map(k => { const r = (x.related || {})[k] || {}; return `<div data-rel="${k}" style="margin-top:12px"><span class="sp-lbl">On the ${esc(SERVICES[k])} page (optional, shorter wording)</span><div class="sp-line" style="grid-template-columns:1fr 2fr"><input data-rt placeholder="Title" value="${esc(r.title)}"><input data-rs placeholder="One line" value="${esc(r.text)}"></div></div>`; }).join('')}
+                </div>
+                <div class="sp-sec"><h3>Live-site viewer</h3>
+                    ${s ? `
+                        <p class="sp-note">Adds this website to "Browse the real sites": full-page screenshots, 1440 px wide, one per page.</p>
+                        <div class="sp-3">
+                            <div class="sp-f"><label>Site name</label><input data-s="name" value="${esc(s.name)}"></div>
+                            <div class="sp-f"><label>Short description</label><input data-s="subtitle" value="${esc(s.subtitle)}" placeholder="E-commerce store"></div>
+                            <div class="sp-f"><label>Address</label><input data-s="host" value="${esc(s.host)}" placeholder="example.com"></div>
+                        </div>
+                        <div class="sp-3">
+                            <div class="sp-f"><label>Bold lead-in</label><input data-s="headline" value="${esc(s.headline)}"></div>
+                            <div class="sp-f"><label>Colour</label><input data-s="color" value="${esc(s.color || '#186aff')}"></div>
+                            <div class="sp-f"><label>Viewer order</label><input data-s="order" type="number" value="${esc(s.order ?? 99)}"></div>
+                        </div>
+                        <div class="sp-f"><label>Description</label><input data-s="description" value="${esc(s.description)}"></div>
+                        <div class="sp-2">
+                            <div class="sp-f"><label>Built with (comma separated)</label><input data-s="stack" value="${esc((s.stack || []).join(', '))}"></div>
+                            <div class="sp-f sp-checks" style="align-items:end"><label><input type="checkbox" data-s="signInOnly" ${s.signInOnly ? 'checked' : ''}>Behind a sign-in (shows the screens, links to the sign-in page)</label></div>
+                        </div>
+                        <span class="sp-lbl">Screens</span>
+                        ${(s.pages || []).map((p, i) => `<div class="sp-line" data-pg style="grid-template-columns:120px 1fr 1fr auto auto">${thumb(p.image, x.gradient, uploads)}<input data-pl placeholder="Home" value="${esc(p.label)}"><input data-pp placeholder="/" value="${esc(p.path)}"><button class="ws-btn is-sm" type="button" data-pimg="${i}">${p.image ? 'Replace' : 'Upload'}</button><button class="ws-btn is-sm is-quiet" type="button" data-pdel="${i}" aria-label="Remove screen">${ic('x')}</button></div>`).join('')}
+                        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="ws-btn is-sm" type="button" id="wk-padd">${ic('plus')}Add a screen</button><button class="ws-btn is-sm is-quiet" type="button" id="wk-nosite">Take it out of the viewer</button></div>`
+                    : `<p class="sp-note">For websites you built: visitors click through its pages here.</p><button class="ws-btn is-sm" type="button" id="wk-site">${ic('plus')}Add to the live-site viewer</button>`}
+                </div>
+                <div class="sp-3">
+                    <div class="sp-f"><label>Card order (1 comes first)</label><input data-k="order" type="number" value="${esc(x.order ?? 999)}"></div>
+                    <div class="sp-f"><label>Date</label><input data-k="date" type="date" value="${esc(x.date ? String(x.date).slice(0, 10) : '')}"></div>
+                    <div class="sp-f sp-checks" style="align-items:end;flex-direction:column"><label><input type="checkbox" data-k="showCard" ${x.showCard !== false ? 'checked' : ''}>Show as a card</label><label><input type="checkbox" data-k="published" ${x.published !== false ? 'checked' : ''}>On the site</label></div>
+                </div>`;
+            const on = (sel, fn) => { const el = host.querySelector(sel); if (el) el.addEventListener('click', fn); };
+            on('#wk-cover', async () => { sync(); const r = await up(1600); if (r) { x.cover = r.path; paint(); } });
+            on('#wk-nocover', () => { sync(); delete x.cover; paint(); });
+            on('#wk-site', () => { sync(); x.site = { name: x.title.split(':')[0], subtitle: '', host: '', color: '#186aff', headline: x.title.split(':')[0], description: '', stack: [], order: 99, pages: [{ label: 'Home', path: '/' }] }; paint(); });
+            on('#wk-nosite', () => { sync(); delete x.site; paint(); });
+            on('#wk-padd', () => { sync(); x.site.pages.push({ label: '', path: '/' }); paint(); });
+            host.querySelectorAll('[data-pimg]').forEach(b => b.addEventListener('click', async () => { sync(); const r = await up(1440); if (r) { x.site.pages[+b.dataset.pimg].image = r.path; paint(); } }));
+            host.querySelectorAll('[data-pdel]').forEach(b => b.addEventListener('click', () => { sync(); x.site.pages.splice(+b.dataset.pdel, 1); paint(); }));
+            host.querySelectorAll('[data-svc]').forEach(c => c.addEventListener('change', () => { sync(); paint(); }));
+        };
+        paint();
+        dw.el.querySelector('#wk-save').addEventListener('click', async e => {
+            sync();
+            if (!id) { EL.toast('Give it a title.', 'bad'); return; }
+            if (x.site && !x.site.key) x.site.key = slugify(x.site.name || id);
+            e.target.disabled = true;
+            try {
+                const r = await EL.api(`/api/site/work/${encodeURIComponent(id)}`, { method: 'PUT', scoped: false, body: { item: x, sha: entry ? entry.sha : null, uploads: uploads.map(u => ({ repoPath: u.repoPath, blob: u.blob })) } });
+                dw.close(); saved(r, `"${x.title}"`);
+            } catch (err) { failed(err); e.target.disabled = false; }
+        });
+        const del = dw.el.querySelector('#wk-del');
+        if (del) del.addEventListener('click', async () => {
+            if (!confirm(`Remove "${x.title}" and its images from the website?`)) return;
+            try { const r = await EL.api(`/api/site/work/${encodeURIComponent(id)}?sha=${entry.sha}`, { method: 'DELETE', scoped: false }); dw.close(); saved(r, `Removing "${x.title}"`); }
+            catch (err) { failed(err); }
+        });
+    }
+
+    // ---- blog ---------------------------------------------------------------------------
+    function drawBlog(body) {
+        if (!d.blog.length) { body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No articles yet</h3><p>Write one with New article. The six newest show on the homepage.</p></div>`; return; }
+        body.innerHTML = `<section class="ws-card">${d.blog.map(p => `<div class="sp-row">
+            ${thumb(p.data.cover, p.data.gradient)}
+            <div class="sp-name">${esc(p.data.title)}<small>${esc(p.data.excerpt)}</small></div>
+            <div class="sp-meta">${esc(day(p.data.date))}${d.siteUrl ? ` · <a href="${esc(d.siteUrl)}/blog/${esc(p.id)}.html" target="_blank" rel="noopener">Open</a>` : ''}</div>
+            <div>${p.data.draft ? '<span class="el-chip is-gold">Draft</span>' : '<span class="el-chip is-jade">On the site</span>'}</div>
+            <div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" data-p="${esc(p.id)}">Edit</button></div>
+        </div>`).join('')}</section>`;
+        body.querySelectorAll('[data-p]').forEach(b => b.addEventListener('click', () => editPost(d.blog.find(p => p.id === b.dataset.p))));
+    }
+
+    function editPost(entry) {
+        const isNew = !entry;
+        const x = entry ? { ...entry.data } : { date: today(), author: 'EdgeLead', tag: 'Blog', draft: false, body: '' };
+        let id = entry ? entry.id : '';
+        const uploads = [];
+        const dw = EL.drawer({
+            wide: 'xl', title: isNew ? 'New article' : `Edit · ${esc(x.title)}`,
+            sub: 'Written in Markdown: ## for a heading, - for a list, [text](link) for a link.',
+            body: '<div id="bp"></div>',
+            foot: `${isNew ? '' : '<button class="ws-btn is-quiet" type="button" id="bp-del" style="margin-right:auto">Remove from the site</button>'}<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="bp-save">Publish</button>`
+        });
+        const host = dw.el.querySelector('#bp');
+        const up = uploader('blog', () => id || slugify(x.title), uploads);
+        const val = k => host.querySelector(`[data-k="${k}"]`).value;
+        const sync = () => {
+            ['title', 'excerpt', 'date', 'tag', 'author', 'body'].forEach(k => { x[k] = val(k); });
+            x.draft = host.querySelector('[data-k=draft]').checked;
+            if (isNew) id = slugify(val('id') || x.title);
+        };
+        const paint = () => {
+            host.innerHTML = `
+                <div class="sp-2">
+                    <div class="sp-f"><label>Title</label><input data-k="title" value="${esc(x.title)}"></div>
+                    <div class="sp-f"><label>Address on the site</label><input data-k="id" value="${esc(id)}" ${isNew ? 'placeholder="made from the title"' : 'disabled'}></div>
+                </div>
+                <div class="sp-f"><label>Excerpt (the card and search results)</label><input data-k="excerpt" value="${esc(x.excerpt)}"></div>
+                <div class="sp-3">
+                    <div class="sp-f"><label>Date</label><input data-k="date" type="date" value="${esc(String(x.date || today()).slice(0, 10))}"></div>
+                    <div class="sp-f"><label>Tag</label><input data-k="tag" value="${esc(x.tag || 'Blog')}"></div>
+                    <div class="sp-f"><label>Author</label><input data-k="author" value="${esc(x.author || 'EdgeLead')}"></div>
+                </div>
+                <div class="sp-sec"><h3>Cover image</h3><div class="sp-img">${thumb(x.cover, x.gradient, uploads)}<button class="ws-btn is-sm" type="button" id="bp-cover">${x.cover ? 'Replace' : 'Upload'}</button>${x.cover ? '<button class="ws-btn is-sm is-quiet" type="button" id="bp-nocover">Remove</button>' : ''}</div><p class="sp-note">Optional. Wide, about 1600 × 800.</p></div>
+                <div class="sp-f"><label style="display:flex;justify-content:space-between;align-items:center">Article <button class="ws-btn is-sm is-quiet" type="button" id="bp-img">${ic('plus')}Insert image</button></label><textarea data-k="body" rows="18" style="font-family:'JetBrains Mono',monospace;font-size:.86rem">${esc(x.body)}</textarea></div>
+                <div class="sp-checks"><label><input type="checkbox" data-k="draft" ${x.draft ? 'checked' : ''}>Draft: save it without showing it on the site</label></div>`;
+            const on = (sel, fn) => { const el = host.querySelector(sel); if (el) el.addEventListener('click', fn); };
+            on('#bp-cover', async () => { sync(); const r = await up(1600); if (r) { x.cover = r.path; paint(); } });
+            on('#bp-nocover', () => { sync(); delete x.cover; paint(); });
+            on('#bp-img', async () => {
+                const ta = host.querySelector('[data-k=body]'); const at = ta.selectionStart;
+                sync(); const r = await up(1400); if (!r) return;
+                x.body = x.body.slice(0, at) + `\n\n![](${r.path})\n\n` + x.body.slice(at); paint();
+            });
+        };
+        paint();
+        dw.el.querySelector('#bp-save').addEventListener('click', async e => {
+            sync();
+            if (!id) { EL.toast('Give it a title.', 'bad'); return; }
+            e.target.disabled = true;
+            const { body: text, ...fm } = x;
+            try {
+                const r = await EL.api(`/api/site/blog/${encodeURIComponent(id)}`, { method: 'PUT', scoped: false, body: { post: { ...fm, body: text }, sha: entry ? entry.sha : null, uploads: uploads.map(u => ({ repoPath: u.repoPath, blob: u.blob })) } });
+                dw.close(); saved(r, `"${x.title}"`);
+            } catch (err) { failed(err); e.target.disabled = false; }
+        });
+        const del = dw.el.querySelector('#bp-del');
+        if (del) del.addEventListener('click', async () => {
+            if (!confirm(`Remove "${x.title}" from the website?`)) return;
+            try { const r = await EL.api(`/api/site/blog/${encodeURIComponent(id)}?sha=${entry.sha}`, { method: 'DELETE', scoped: false }); dw.close(); saved(r, `Removing "${x.title}"`); }
+            catch (err) { failed(err); }
+        });
+    }
+
+    // ---- pricing & plans ------------------------------------------------------------------
+    const cellIn = v => (v === true ? '✓' : v === false ? '—' : v);
+    const cellOut = v => { const s = String(v || '').trim(); return /^(✓|yes|y|true)$/i.test(s) ? true : /^(—|-|–|no|n|false)$/i.test(s) ? false : s; };
+
+    function drawPricing(body) {
+        const on = d.settings && d.settings.data.showPrices;
+        body.innerHTML = `<p class="sp-note">Prices are ${on ? '<b>shown</b>' : '<b>hidden</b>'} on the site (switch it under Site settings). A service with no price always shows its "on request" line.</p>
+            <section class="ws-card">${d.services.map(s => `<div class="sp-row">
+                <span class="sp-thumb" style="--g:${esc(s.data.accent)}"></span>
+                <div class="sp-name">${esc(s.data.name)}<small>${esc(on && s.data.pricing.price ? s.data.pricing.price : s.data.pricing.onRequest)}</small></div>
+                <div class="sp-meta">${esc(s.data.plans.columns.join(' · '))} · ${s.data.plans.rows.length} rows</div>
+                <div></div>
+                <div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" data-s="${esc(s.id)}">Edit</button></div>
+            </div>`).join('')}</section>`;
+        body.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => editPricing(d.services.find(s => s.id === b.dataset.s))));
+    }
+
+    async function saveService(entry, svc, dw, btn) {
+        btn.disabled = true;
+        try {
+            const r = await EL.api(`/api/site/services/${encodeURIComponent(entry.id)}`, { method: 'PUT', scoped: false, body: { service: svc, sha: entry.sha } });
+            dw.close(); saved(r, entry.data.name);
+        } catch (err) { failed(err); btn.disabled = false; }
+    }
+
+    function editPricing(entry) {
+        const s = JSON.parse(JSON.stringify(entry.data));
+        const dw = EL.drawer({
+            wide: 'xl', title: `${esc(s.name)} · pricing and plans`,
+            sub: 'Describe what each plan includes, not fixed counts: the work is planned around each client\'s budget.',
+            body: '<div id="pr"></div>',
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="pr-save">Publish</button>'
+        });
+        const host = dw.el.querySelector('#pr');
+        const sync = () => {
+            const v = k => host.querySelector(`[data-k="${k}"]`).value;
+            s.pricing.price = v('price').trim() || null; s.pricing.onRequest = v('onRequest'); s.pricing.linkText = v('linkText');
+            s.pricing.points = v('points').split('\n').map(x => x.trim()).filter(Boolean);
+            s.plans.caption = v('caption'); s.plans.note = v('note');
+            s.plans.columns = [...host.querySelectorAll('[data-col]')].map(c => c.value);
+            const pop = v('popular'); s.plans.popular = pop === '' ? undefined : +pop;
+            s.plans.rows = [...host.querySelectorAll('[data-row]')].map(r => ({ label: r.querySelector('[data-rl]').value, values: [...r.querySelectorAll('[data-cell]')].map(c => cellOut(c.value)) }));
+        };
+        const paint = () => {
+            const cols = s.plans.columns;
+            host.innerHTML = `
+                <div class="sp-sec"><h3>Pricing card</h3>
+                    <div class="sp-2">
+                        <div class="sp-f"><label>Price (shown only when prices are switched on)</label><input data-k="price" value="${esc(s.pricing.price || '')}" placeholder="From ৳15,000 per month"></div>
+                        <div class="sp-f"><label>Instead of a price</label><input data-k="onRequest" value="${esc(s.pricing.onRequest)}"></div>
+                    </div>
+                    <div class="sp-2">
+                        <div class="sp-f"><label>Lines on the card (one per line)</label><textarea data-k="points" rows="3">${esc(s.pricing.points.join('\n'))}</textarea></div>
+                        <div class="sp-f"><label>Link text</label><input data-k="linkText" value="${esc(s.pricing.linkText)}"></div>
+                    </div>
+                </div>
+                <div class="sp-sec"><h3>Plan table</h3>
+                    <div class="sp-2">
+                        <div class="sp-f"><label>Top-left heading</label><input data-k="caption" value="${esc(s.plans.caption)}"></div>
+                        <div class="sp-f"><label>Highlighted plan</label><select data-k="popular"><option value="">None</option>${cols.map((c, i) => `<option value="${i}" ${s.plans.popular === i ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+                    </div>
+                    <p class="sp-note">In a cell, type ✓ (or yes) for included, — (or no) for not included, or a few words.</p>
+                    <div class="sp-grid"><table>
+                        <thead><tr><th>Row</th>${cols.map((c, i) => `<th><input data-col value="${esc(c)}" placeholder="Plan name"></th>`).join('')}<th>${cols.length < 5 ? `<button class="ws-btn is-sm is-quiet" type="button" id="pr-addcol" title="Add a plan">${ic('plus')}</button>` : ''}</th></tr></thead>
+                        <tbody>${s.plans.rows.map((r, ri) => `<tr data-row><td><input data-rl value="${esc(r.label)}"></td>${cols.map((_, ci) => `<td><input data-cell value="${esc(cellIn(r.values[ci] ?? ''))}"></td>`).join('')}<td><button class="ws-btn is-sm is-quiet" type="button" data-delrow="${ri}" aria-label="Remove row">${ic('x')}</button></td></tr>`).join('')}
+                        <tr><td colspan="${cols.length + 2}"><button class="ws-btn is-sm" type="button" id="pr-addrow">${ic('plus')}Add a row</button>${cols.length > 1 ? ` <button class="ws-btn is-sm is-quiet" type="button" id="pr-delcol">Remove the last plan</button>` : ''}</td></tr></tbody>
+                    </table></div>
+                    <div class="sp-f" style="margin-top:12px"><label>Note under the table</label><textarea data-k="note" rows="2">${esc(s.plans.note || '')}</textarea></div>
+                </div>`;
+            const on = (sel, fn) => { const el = host.querySelector(sel); if (el) el.addEventListener('click', fn); };
+            on('#pr-addrow', () => { sync(); s.plans.rows.push({ label: '', values: s.plans.columns.map(() => true) }); paint(); });
+            on('#pr-addcol', () => { sync(); s.plans.columns.push('New plan'); s.plans.rows.forEach(r => r.values.push(true)); paint(); });
+            on('#pr-delcol', () => { sync(); s.plans.columns.pop(); s.plans.rows.forEach(r => r.values.pop()); if (s.plans.popular >= s.plans.columns.length) s.plans.popular = undefined; paint(); });
+            host.querySelectorAll('[data-delrow]').forEach(b => b.addEventListener('click', () => { sync(); s.plans.rows.splice(+b.dataset.delrow, 1); paint(); }));
+        };
+        paint();
+        dw.el.querySelector('#pr-save').addEventListener('click', e => { sync(); saveService(entry, s, dw, e.target); });
+    }
+
+    // ---- results ----------------------------------------------------------------------------
+    function drawResults(body) {
+        const st = d.settings && d.settings.data;
+        const chip = r => !r ? '<span class="el-chip">None</span>' : r.placeholder ? '<span class="el-chip is-gold">Example figures</span>' : `<span class="el-chip is-jade">Updated ${esc(day(r.updated))}</span>`;
+        body.innerHTML = `<p class="sp-note">Enter figures from your reports. They show on the site exactly as entered until you change them.</p>
+            <section class="ws-card">
+                ${st ? `<div class="sp-row"><span class="sp-thumb"></span><div class="sp-name">Homepage stat<small>${esc(st.stat.heading)} · ${esc(Number(st.stat.value).toLocaleString('en-US'))}</small></div><div class="sp-meta">${esc(st.stat.row.map(r => r.label).join(' · '))}</div><div>${chip(st.stat)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" id="rs-stat">Edit</button></div></div>
+                <div class="sp-row"><span class="sp-thumb" style="--g:#5b3fd1"></span><div class="sp-name">Edge Meta AI answers<small>${st.metaAi.qa.length} questions, on the homepage and Tools page</small></div><div class="sp-meta"></div><div>${chip(st.metaAi)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" id="rs-ai">Edit</button></div></div>` : ''}
+                ${d.services.map(s => `<div class="sp-row"><span class="sp-thumb" style="--g:${esc(s.data.accent)}"></span><div class="sp-name">${esc(s.data.name)}<small>${s.data.results ? esc(s.data.results.metrics.map(m => `${m.label} ${m.value}`).join(' · ')) : 'No figures on the page'}</small></div><div class="sp-meta"></div><div>${chip(s.data.results)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" data-r="${esc(s.id)}">${s.data.results ? 'Edit' : 'Add'}</button></div></div>`).join('')}
+            </section>`;
+        body.querySelectorAll('[data-r]').forEach(b => b.addEventListener('click', () => editResults(d.services.find(s => s.id === b.dataset.r))));
+        const a = body.querySelector('#rs-stat'); if (a) a.addEventListener('click', editStat);
+        const b2 = body.querySelector('#rs-ai'); if (b2) b2.addEventListener('click', editAi);
+    }
+
+    function editResults(entry) {
+        const s = JSON.parse(JSON.stringify(entry.data));
+        const r = s.results || { note: '', metrics: [], placeholder: false };
+        const dw = EL.drawer({
+            wide: 'xl', title: `${esc(s.name)} · results`,
+            sub: 'The "Numbers you can check" cards on the service page. The page adds "Updated" with the date below.',
+            body: '<div id="rs"></div>',
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="rs-save">Publish</button>'
+        });
+        const host = dw.el.querySelector('#rs');
+        const sync = () => {
+            r.metrics = [...host.querySelectorAll('[data-m]')].map(row => {
+                const v = k => row.querySelector(`[data-f="${k}"]`).value;
+                return { value: v('value'), countTo: v('countTo') === '' ? undefined : Number(v('countTo')), change: v('change'), label: v('label'), trend: v('trend'), lowerIsBetter: row.querySelector('[data-f=lower]').checked };
+            }).filter(m => m.value || m.label);
+            r.note = host.querySelector('[data-k=note]').value; r.updated = host.querySelector('[data-k=updated]').value;
+            r.placeholder = host.querySelector('[data-k=placeholder]').checked;
+        };
+        const paint = () => {
+            host.innerHTML = `
+                ${r.metrics.map((m, i) => `<div class="sp-sec" data-m><h3 style="display:flex;justify-content:space-between">Figure ${i + 1}<button class="ws-btn is-sm is-quiet" type="button" data-del="${i}" aria-label="Remove">${ic('x')}</button></h3>
+                    <div class="sp-3">
+                        <div class="sp-f"><label>Label</label><input data-f="label" value="${esc(m.label)}" placeholder="Cost per result"></div>
+                        <div class="sp-f"><label>Value as shown</label><input data-f="value" value="${esc(m.value)}" placeholder="৳43"></div>
+                        <div class="sp-f"><label>Change</label><input data-f="change" value="${esc(m.change)}" placeholder="−18%"></div>
+                    </div>
+                    <div class="sp-3">
+                        <div class="sp-f"><label>Trend (6–8 numbers, oldest first)</label><input data-f="trend" value="${esc(Array.isArray(m.trend) ? m.trend.join(', ') : m.trend || '')}"></div>
+                        <div class="sp-f"><label>Count up to (optional number)</label><input data-f="countTo" type="number" value="${esc(m.countTo ?? '')}"></div>
+                        <div class="sp-f sp-checks" style="align-items:end"><label><input type="checkbox" data-f="lower" ${m.lowerIsBetter ? 'checked' : ''}>Lower is better (green line)</label></div>
+                    </div></div>`).join('')}
+                ${r.metrics.length < 6 ? `<button class="ws-btn is-sm" type="button" id="rs-add">${ic('plus')}Add a figure</button>` : ''}
+                <div class="sp-f" style="margin-top:14px"><label>Where the figures come from</label><input data-k="note" value="${esc(r.note)}" placeholder="Figures from one managed account, entered from our monthly report."></div>
+                <div class="sp-2">
+                    <div class="sp-f"><label>Entered on</label><input data-k="updated" type="date" value="${esc(r.placeholder || !r.updated ? today() : String(r.updated).slice(0, 10))}"></div>
+                    <div class="sp-f sp-checks" style="align-items:end"><label><input type="checkbox" data-k="placeholder" ${r.placeholder ? 'checked' : ''}>These are still example figures, not a real client's</label></div>
+                </div>`;
+            const add = host.querySelector('#rs-add'); if (add) add.addEventListener('click', () => { sync(); r.metrics.push({ value: '', change: '', label: '', trend: '' }); paint(); });
+            host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { sync(); r.metrics.splice(+b.dataset.del, 1); paint(); }));
+        };
+        paint();
+        dw.el.querySelector('#rs-save').addEventListener('click', e => { sync(); s.results = r; saveService(entry, s, dw, e.target); });
+    }
+
+    // ---- settings, the homepage stat and Edge Meta AI (all in settings.json) ------------------
+    async function saveSettings(st, dw, btn, what) {
+        btn.disabled = true;
+        try {
+            const r = await EL.api('/api/site/settings', { method: 'PUT', scoped: false, body: { settings: st, sha: d.settings.sha } });
+            if (dw) dw.close();
+            saved(r, what);
+        } catch (err) { failed(err); btn.disabled = false; }
+    }
+
+    function editStat() {
+        const st = JSON.parse(JSON.stringify(d.settings.data)), t = st.stat;
+        const dw = EL.drawer({
+            wide: true, title: 'Homepage stat', sub: 'The big number and its line, from one campaign you manage.',
+            body: `
+                <div class="sp-2"><div class="sp-f"><label>Heading</label><input id="st-h" value="${esc(t.heading)}"></div><div class="sp-f"><label>Big number</label><input id="st-v" type="number" value="${esc(t.value)}"></div></div>
+                <div class="sp-f"><label>Caption</label><textarea id="st-c" rows="2">${esc(t.caption)}</textarea></div>
+                <div class="sp-f"><label>Line (about 30 numbers, oldest first)</label><textarea id="st-s" rows="2">${esc(t.series.join(', '))}</textarea></div>
+                <div class="sp-3">${t.row.map((r, i) => `<div class="sp-f"><label>Small number ${i + 1}</label><input id="st-r${i}" type="number" value="${esc(r.value)}"><input id="st-l${i}" value="${esc(r.label)}" style="margin-top:6px"></div>`).join('')}</div>
+                <div class="sp-2"><div class="sp-f"><label>Entered on</label><input id="st-u" type="date" value="${esc(t.placeholder ? today() : String(t.updated).slice(0, 10))}"></div>
+                <div class="sp-f sp-checks" style="align-items:end"><label><input type="checkbox" id="st-p" ${t.placeholder ? 'checked' : ''}>Still an example figure</label></div></div>`,
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="st-save">Publish</button>'
+        });
+        const g = id => dw.el.querySelector('#' + id);
+        g('st-save').addEventListener('click', e => {
+            st.stat = { heading: g('st-h').value, value: Number(g('st-v').value), caption: g('st-c').value, series: g('st-s').value,
+                row: [0, 1, 2].map(i => ({ value: Number(g('st-r' + i).value), label: g('st-l' + i).value })), updated: g('st-u').value, placeholder: g('st-p').checked };
+            saveSettings(st, dw, e.target, 'The homepage stat');
+        });
+    }
+
+    function editAi() {
+        const st = JSON.parse(JSON.stringify(d.settings.data)), m = st.metaAi;
+        const dw = EL.drawer({
+            wide: 'xl', title: 'Edge Meta AI answers', sub: 'Real questions and answers from a client\'s Edge Meta AI, entered by hand. Bars are 0–100.',
+            body: '<div id="ai"></div>',
+            foot: '<button class="ws-btn is-quiet" type="button" data-dw-close>Cancel</button><button class="ws-btn is-gold" type="button" id="ai-save">Publish</button>'
+        });
+        const host = dw.el.querySelector('#ai');
+        const sync = () => {
+            m.qa = [...host.querySelectorAll('[data-q]')].map(b => ({
+                q: b.querySelector('[data-f=q]').value, a: b.querySelector('[data-f=a]').value, lang: b.querySelector('[data-f=lang]').value,
+                bars: b.querySelector('[data-f=bars]').value.split('\n').map(l => l.split(':')).filter(p => p[0].trim()).map(p => ({ label: p[0].trim(), value: Number(p[1]) || 0 }))
+            }));
+            m.updated = host.querySelector('#ai-u').value; m.placeholder = host.querySelector('#ai-p').checked;
+        };
+        const paint = () => {
+            host.innerHTML = `${m.qa.map((q, i) => `<div class="sp-sec" data-q><h3 style="display:flex;justify-content:space-between">Question ${i + 1}<button class="ws-btn is-sm is-quiet" type="button" data-del="${i}" aria-label="Remove">${ic('x')}</button></h3>
+                    <div class="sp-2"><div class="sp-f"><label>Question</label><input data-f="q" value="${esc(q.q)}"></div><div class="sp-f"><label>Language</label><select data-f="lang"><option value="en" ${q.lang !== 'bn' ? 'selected' : ''}>English</option><option value="bn" ${q.lang === 'bn' ? 'selected' : ''}>Bangla</option></select></div></div>
+                    <div class="sp-f"><label>Answer</label><textarea data-f="a" rows="3">${esc(q.a)}</textarea></div>
+                    <div class="sp-f"><label>Bars, one per line as label: value</label><textarea data-f="bars" rows="3">${esc((q.bars || []).map(b => `${b.label}: ${b.value}`).join('\n'))}</textarea></div></div>`).join('')}
+                ${m.qa.length < 6 ? `<button class="ws-btn is-sm" type="button" id="ai-add">${ic('plus')}Add a question</button>` : ''}
+                <div class="sp-2" style="margin-top:14px"><div class="sp-f"><label>Entered on</label><input id="ai-u" type="date" value="${esc(m.placeholder ? today() : String(m.updated).slice(0, 10))}"></div>
+                <div class="sp-f sp-checks" style="align-items:end"><label><input type="checkbox" id="ai-p" ${m.placeholder ? 'checked' : ''}>Still example answers</label></div></div>`;
+            const add = host.querySelector('#ai-add'); if (add) add.addEventListener('click', () => { sync(); m.qa.push({ q: '', a: '', lang: 'en', bars: [] }); paint(); });
+            host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { sync(); m.qa.splice(+b.dataset.del, 1); paint(); }));
+        };
+        paint();
+        dw.el.querySelector('#ai-save').addEventListener('click', e => { sync(); saveSettings(st, dw, e.target, 'Edge Meta AI answers'); });
+    }
+
+    function drawSettings(body) {
+        if (!d.settings) { body.innerHTML = `<div class="ws-empty">${ic('alert')}<h3>No settings file</h3><p>The website has no src/content/settings.json.</p></div>`; return; }
+        const st = d.settings.data;
+        body.innerHTML = `<section class="ws-card" style="padding:18px">
+            <div class="sp-checks sp-f"><label><input type="checkbox" id="se-prices" ${st.showPrices ? 'checked' : ''}>Show prices on the website (services without a price still say "on request")</label></div>
+            <div class="sp-3">
+                <div class="sp-f"><label>Phone</label><input id="se-phone" value="${esc(st.contact.phone)}"></div>
+                <div class="sp-f"><label>Email</label><input id="se-email" value="${esc(st.contact.email)}"></div>
+                <div class="sp-f"><label>Office</label><input id="se-office" value="${esc(st.contact.office)}"></div>
+            </div>
+            <div class="sp-f"><label>Ticker under the homepage headline (one line each)</label><textarea id="se-ticker" rows="7">${esc(st.ticker.join('\n'))}</textarea></div>
+            <button class="ws-btn is-gold" type="button" id="se-save">Publish settings</button>
+        </section>`;
+        body.querySelector('#se-save').addEventListener('click', e => {
+            const s2 = JSON.parse(JSON.stringify(st));
+            s2.showPrices = body.querySelector('#se-prices').checked;
+            s2.contact = { phone: body.querySelector('#se-phone').value, email: body.querySelector('#se-email').value, office: body.querySelector('#se-office').value };
+            s2.ticker = body.querySelector('#se-ticker').value.split('\n').map(x => x.trim()).filter(Boolean);
+            saveSettings(s2, null, e.target, 'Site settings');
+        });
+    }
+
+    load();
+})();
+</script>
+</body>
+</html>
