@@ -303,6 +303,149 @@ app.get('/api/clients/:id/tasks', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+// ===========================================================================
+// PHASE 68 :: TASK EMAILS
+//
+// Someone on the team hears about the tasks that are theirs without opening the
+// board: when a task is given to them, at once; when a task they hold or raised
+// changes (status, due date, title, priority, a comment, a file, the client
+// ticking it off), in one email a couple of minutes later. The wait is what
+// keeps a burst of edits, or a comment thread, from becoming a burst of mail:
+// every change to one task for one person inside the window goes in one message.
+//
+// Never the person who made the change, never a business owner (they have Edge
+// Meta AI), never a disabled login. Mail that is not set up, or fails, is logged
+// and dropped: a task save never waits on Gmail and never fails because of it.
+// TASK_EMAILS=off on Render switches all of it off. The queue lives in memory,
+// so a restart inside the window loses that one batch; the board still has it.
+// ===========================================================================
+const TASK_MAIL_DELAY_MS = 2 * 60 * 1000;
+const TASK_STATUS_NAME = { todo: 'To do', doing: 'In progress', waiting: 'Waiting on client', done: 'Done' };
+const _taskMail = new Map();          // `${taskId}:${userId}` -> { timer, lines, task, user, clientName }
+function taskEmailsOn() { return String(process.env.TASK_EMAILS || 'on').trim().toLowerCase() !== 'off'; }
+
+/** The task itself in the workspace: its client's board, with the task open. */
+function taskLink(t) {
+    const base = appUrl();
+    return base ? `${base}/workspace.html?client=${encodeURIComponent(t.client_id)}&tab=tasks&task=${encodeURIComponent(t.id)}` : '';
+}
+
+/** Staff who should hear, from a list of user ids: active, not a business owner, not the actor. */
+async function taskMailRecipients(ids, actorId) {
+    const want = [...new Set(ids.filter(id => id && id !== actorId))];
+    if (!want.length) return [];
+    const { data } = await supabase.from('app_users').select('id, email, full_name, role, is_active').in('id', want);
+    return (data || []).filter(u => u.role !== 'client' && u.is_active !== false && EMAIL_RE.test(String(u.email || '')));
+}
+
+async function taskMailActor(actorId) {
+    if (!actorId) return 'Someone';
+    const p = (await peopleById([actorId]))[actorId];
+    return (p && (p.name || p.email)) || 'Someone';
+}
+
+function taskMailText(first, t, clientName, lines) {
+    const link = taskLink(t);
+    return [
+        first ? `Hi ${first},` : 'Hello,', '',
+        ...lines, '',
+        `Task: ${t.title}`,
+        `Client: ${clientName || 'a client'}`,
+        `Status: ${TASK_STATUS_NAME[t.status] || t.status}${t.due_date ? ` · due ${t.due_date}` : ''}`,
+        ...(link ? ['', `Open it: ${link}`] : []),
+        '', '— EdgeLead'
+    ].join('\n');
+}
+
+async function taskClientName(t, known) {
+    if (known) return known;
+    const { data } = await supabase.from('clients').select('name').eq('id', t.client_id).maybeSingle();
+    return (data && data.name) || null;
+}
+
+/** A task was given to someone. Sent at once, to them only. */
+async function mailTaskAssigned(t, actorId, clientName) {
+    if (!taskEmailsOn() || !t || !t.assignee_user_id) return;
+    try {
+        const [who] = await taskMailRecipients([t.assignee_user_id], actorId);
+        if (!who) return;
+        const by = await taskMailActor(actorId);
+        const name = await taskClientName(t, clientName);
+        const r = await S.sendMail({
+            to: who.email,
+            subject: `New task for you: ${t.title}`,
+            text: taskMailText(String(who.full_name || '').split(' ')[0], t, name,
+                [`${by} gave you a task${name ? ` for ${name}` : ''}.`])
+        });
+        if (!r.ok && !r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t.id, message: e.message }); }
+}
+
+/** A change to a task: queued per person, sent as one email after the window. */
+async function queueTaskMail(t, actorId, line, clientName) {
+    if (!taskEmailsOn() || !t || !line) return;
+    try {
+        const people = await taskMailRecipients([t.assignee_user_id, t.created_by], actorId);
+        for (const u of people) {
+            const key = `${t.id}:${u.id}`;
+            const q = _taskMail.get(key) || { lines: [] };
+            q.task = t; q.user = u; q.clientName = clientName || q.clientName || null;
+            if (!q.lines.includes(line)) q.lines.push(line);
+            if (!q.timer) {
+                q.timer = setTimeout(() => flushTaskMail(key).catch(() => {}), TASK_MAIL_DELAY_MS);
+                if (q.timer.unref) q.timer.unref();
+            }
+            _taskMail.set(key, q);
+        }
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t && t.id, message: e.message }); }
+}
+
+async function flushTaskMail(key) {
+    const q = _taskMail.get(key);
+    _taskMail.delete(key);
+    if (!q || !q.lines.length) return;
+    if (q.timer) clearTimeout(q.timer);
+    const fresh = await loadTask(q.task.id).catch(() => null);
+    if (fresh === TASK_MISSING) return;
+    const t = fresh || null;                                      // deleted since: nothing to point at
+    if (!t) return;
+    const name = await taskClientName(t, q.clientName);
+    const r = await S.sendMail({
+        to: q.user.email,
+        subject: `Task updated: ${t.title}`,
+        text: taskMailText(String(q.user.full_name || '').split(' ')[0], t, name, q.lines.slice(0, 20))
+    });
+    if (!r.ok && !r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+}
+
+/** What changed between two versions of a task, in words, one line per change. */
+function taskChangeLines(before, after, by) {
+    const out = [];
+    if (after.status !== before.status) out.push(`${by} moved it from ${TASK_STATUS_NAME[before.status] || before.status} to ${TASK_STATUS_NAME[after.status] || after.status}.`);
+    if ((after.due_date || null) !== (before.due_date || null)) out.push(after.due_date ? `${by} set the due date to ${after.due_date}.` : `${by} removed the due date.`);
+    if (after.title !== before.title) out.push(`${by} renamed it (was "${String(before.title || '').slice(0, 120)}").`);
+    if ((after.priority || 'medium') !== (before.priority || 'medium')) out.push(`${by} changed the priority to ${after.priority}.`);
+    if ((after.notes || '') !== (before.notes || '')) out.push(`${by} edited the description.`);
+    const done = l => (l || []).filter(i => i && i.done).length;
+    if (JSON.stringify(after.checklist || []) !== JSON.stringify(before.checklist || [])) {
+        out.push(`${by} updated the checklist (${done(after.checklist)} of ${(after.checklist || []).length} done).`);
+    }
+    return out;
+}
+
+/** What a comment says, for an email: pictures named, spaces folded, kept short. */
+function commentExcerpt(body) {
+    const text = String(body || '').replace(/!\[[^\]]{0,80}\]\(media:[0-9a-f-]{36}\)/gi, '[picture]').replace(/\s+/g, ' ').trim();
+    return text.length > 280 ? text.slice(0, 277) + '...' : text;
+}
+
+/** After the response: a task save never waits on mail. */
+function afterTaskWrite(fn) {
+    setImmediate(() => { Promise.resolve().then(fn).catch(e => logger.warn('task_mail_failed', { message: e.message })); });
+}
+
+Object.assign(S, { taskChangeLines, taskLink, mailTaskAssigned, queueTaskMail, flushTaskMail, taskEmailsOn, commentExcerpt, afterTaskWrite, _taskMail, TASK_MAIL_DELAY_MS });
+
 app.post('/api/clients/:id/tasks', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -342,6 +485,7 @@ app.post('/api/clients/:id/tasks', async (req, res) => {
         if (error) { if (missing48(error)) return migration48(res); if (missingTable(error)) return migrationNeeded(res); throw error; }
         await linkTaskMedia(data, [data.notes]);
         res.status(201).json({ task: taskView(data, await peopleById([data.assignee_user_id]), {}, c.name) });
+        afterTaskWrite(() => mailTaskAssigned(data, ctx.user.id, c.name));                // phase 68
     } catch (err) { sendErr(res, err); }
 });
 
@@ -385,6 +529,12 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
         if (patch.notes !== undefined) await linkTaskMedia(data, [data.notes]);
         await S.syncPostFromTask(data, t.status).catch(e => logger.warn('post_sync_failed', { taskId: t.id, message: e.message }));
         res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id]), c.name) });
+        // Phase 68: a new assignee hears at once; whoever holds or raised it hears what changed, batched.
+        afterTaskWrite(async () => {
+            if (data.assignee_user_id && data.assignee_user_id !== t.assignee_user_id) await mailTaskAssigned(data, ctx.user.id, c.name);
+            const by = await taskMailActor(ctx.user.id);
+            for (const line of taskChangeLines(t, data, by)) await queueTaskMail(data, ctx.user.id, line, c.name);
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -449,6 +599,11 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
         await linkTaskMedia(t, [body]);
         await supabase.from('client_tasks').update({ updated_at: new Date().toISOString() }).eq('id', t.id);
         res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at } });
+        afterTaskWrite(async () => {                                                         // phase 68
+            const who = await taskMailActor(ctx.user.id);
+            const by = ctx.profile?.role === 'client' ? `${who} (the client)` : who;
+            await queueTaskMail(t, ctx.user.id, `${by} commented: "${commentExcerpt(body)}"`, null);
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -743,6 +898,7 @@ app.post('/api/tasks/:taskId/files',
             const { data: signed } = await supabase.storage.from(TASK_FILE_BUCKET).createSignedUrl(path, TASK_FILE_TTL_SECS, { download: name });
             const people = await peopleById([ctx.user.id]);
             res.status(201).json({ file: fileView(row, (signed && signed.signedUrl) || null, people) });
+            afterTaskWrite(async () => queueTaskMail(t, ctx.user.id, `${await taskMailActor(ctx.user.id)} attached ${name}.`, null));   // phase 68
         } catch (err) {
             if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That file is over 20 MB. Use a smaller one.' });
             sendErr(res, err);
@@ -912,6 +1068,10 @@ app.patch('/api/client/tasks/:taskId', async (req, res) => {
         const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
         if (error) throw error;
         res.json({ task: clientTaskView(data) });
+        if (status !== t.status) afterTaskWrite(async () => {                               // phase 68
+            const by = `${await taskMailActor(ctx.user.id)} (the client)`;
+            await queueTaskMail(data, ctx.user.id, status === 'done' ? `${by} marked it done.` : `${by} marked it not done.`, null);
+        });
     } catch (err) { sendErr(res, err); }
 });
 

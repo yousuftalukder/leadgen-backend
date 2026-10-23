@@ -139,6 +139,13 @@
             }
             if (opts.onLoad) opts.onLoad(data);
             draw();
+            // Phase 68: a task email links to the board with the task open. Once, then the address forgets it.
+            if (opts.openTask) {
+                const want = opts.openTask; opts.openTask = null;
+                const t = (data.tasks || []).find(x => x.id === want);
+                if (t) openTask(t, ctx()); else EL.toast('That task is no longer on this board.', 'bad');
+                const u = new URL(location.href); u.searchParams.delete('task'); history.replaceState(null, '', u);
+            }
         }
 
         function ctx() {
