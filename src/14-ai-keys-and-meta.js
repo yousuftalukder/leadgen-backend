@@ -256,6 +256,13 @@ const META_SCOPES        = (process.env.META_SCOPES ||
     'pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments,business_management,ads_read')
     .split(',').map(s => s.trim()).filter(Boolean);
 S.META_SCOPES = META_SCOPES;
+// Phase 65: the app uses Facebook Login for Business, which takes a configuration (made in the App
+// Dashboard: Facebook Login for Business -> Configurations) instead of a scope list. The
+// configuration names the same permissions as META_SCOPES. The id is not a secret, so EdgeLead's
+// is the default; META_CONFIG_ID overrides it, and META_CONFIG_ID=none falls back to scopes.
+const META_CONFIG_ID_RAW = (process.env.META_CONFIG_ID || '1507223484577016').trim();
+const META_CONFIG_ID     = /^none$/i.test(META_CONFIG_ID_RAW) ? '' : META_CONFIG_ID_RAW;
+S.META_CONFIG_ID = META_CONFIG_ID;
 const FRONTEND_URL       = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
 S.FRONTEND_URL = FRONTEND_URL;
 const BACKEND_URL_ENV    = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
@@ -269,6 +276,19 @@ function backendBase(req) {
     return `${proto}://${req.get('host')}`;
 }
 function metaRedirectUri(req) { return `${backendBase(req)}/api/meta/oauth/callback`; }
+
+/** The Facebook dialog that asks for the connection: a configuration when there is one, else the scopes. */
+function metaDialogUrl({ state, redirectUri, appId = META_APP_ID, configId = META_CONFIG_ID, scopes = META_SCOPES }) {
+    const u = new URL(`https://www.facebook.com/${META_GRAPH_VERSION}/dialog/oauth`);
+    u.searchParams.set('client_id', appId);
+    u.searchParams.set('redirect_uri', redirectUri);
+    u.searchParams.set('state', state);
+    if (configId) u.searchParams.set('config_id', configId);
+    else u.searchParams.set('scope', scopes.join(','));
+    u.searchParams.set('response_type', 'code');
+    return u.toString();
+}
+S.metaDialogUrl = metaDialogUrl;
 
 /** GET against the Graph API. Throws { code, type, message, subcode } on API error. */
 async function graphGet(path, params = {}, token) {
@@ -346,7 +366,7 @@ function startFirstRead(clientId, why) {
 app.get('/api/meta/status', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
-        res.json({ configured: metaConfigured(), scopes: META_SCOPES, graphVersion: META_GRAPH_VERSION, redirectUri: metaRedirectUri(req) });
+        res.json({ configured: metaConfigured(), scopes: META_SCOPES, configId: META_CONFIG_ID || null, graphVersion: META_GRAPH_VERSION, redirectUri: metaRedirectUri(req) });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -375,13 +395,7 @@ app.get('/api/meta/oauth/start', async (req, res) => {
         }]);
         if (error) throw error;
 
-        const u = new URL(`https://www.facebook.com/${META_GRAPH_VERSION}/dialog/oauth`);
-        u.searchParams.set('client_id', META_APP_ID);
-        u.searchParams.set('redirect_uri', metaRedirectUri(req));
-        u.searchParams.set('state', state);
-        u.searchParams.set('scope', META_SCOPES.join(','));
-        u.searchParams.set('response_type', 'code');
-        res.json({ url: u.toString(), redirectUri: metaRedirectUri(req) });
+        res.json({ url: metaDialogUrl({ state, redirectUri: metaRedirectUri(req) }), redirectUri: metaRedirectUri(req) });
     } catch (err) { sendErr(res, err); }
 });
 

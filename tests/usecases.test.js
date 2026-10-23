@@ -3051,7 +3051,9 @@ test('one group gets its own read: the score explained, no ranking table', async
 });
 
 section('\nphase 40 — who a lead is, and the pipeline');
-const igPost = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 120, commentsCount: 14, timestamp: '2026-09-20T12:00:00Z', url: `https://www.instagram.com/p/${sc}/`, ...extra });
+// Recent on any day the suite runs: lead fit gives points for a post in the last 30 days.
+const IG_POST_AT = new Date(Date.now() - 5 * 86400000).toISOString();
+const igPost = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 120, commentsCount: 14, timestamp: IG_POST_AT, url: `https://www.instagram.com/p/${sc}/`, ...extra });
 test('a creator reviewing several places reads as an influencer, with the reasons', () => {
     const posts = [
         S.leadPostSignal(igPost('dhakafoodie', 'a1', 'Tried the smash burger here, honest review: 8/10 🍔', { locationId: 'L1', taggedUsers: [{ username: 'burgerhouse' }] }), 'm4', 'burgerhouse'),
@@ -3346,11 +3348,13 @@ test('briefs land on their own weekday where they name one, never two on a day, 
     assert.strictEqual(d[0].time, '19:00');
     assert.deepStrictEqual(S.cpParseSlot('Sat 11am'), { dow: 6, time: '11:00' });
 });
+// The owner's view shows posts from the last 14 days on, so the plan starts a few days before the run.
+const CP_START = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
 test('staff put a plan on the calendar once; the owner sees what waits for them, and nothing about the team', async () => {
-    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: CP_START } });
     assert.strictEqual(put.statusCode, 201, JSON.stringify(put.body));
     assert.ok(put.body.added >= 2, JSON.stringify(put.body));
-    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: CP_START } });
     assert.strictEqual(again.body.added, 0, 'pressing it twice doubled the calendar');
     const own = await call('GET', '/api/client/content', { token: 't-client' });
     assert.strictEqual(own.statusCode, 200, JSON.stringify(own.body));
