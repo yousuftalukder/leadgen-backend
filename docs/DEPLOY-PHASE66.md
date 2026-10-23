@@ -5,15 +5,15 @@
 There's no SQL. Do these in order:
 
 1. **Create a GitHub token for the website repository.** GitHub → Settings → Developer settings → Fine-grained tokens → Generate:
-   - **Repository access:** only `yousuftalukder/edgelead-site`.
+   - **Repository access:** only `yousuftalukder/Edge-lead-Front-end`.
    - **Permissions:** Contents: Read and write. Commit statuses: Read-only. Checks: Read-only. (Metadata: Read-only is added automatically.)
    - **Expiry:** the longest you are comfortable with. When it expires, publishing stops with a "GitHub refused the website token" message until it is replaced.
 2. **Set these on Render** (the backend service → Environment):
    - `SITE_REPO_TOKEN` — the token from step 1.
-   - `SITE_PUBLIC_URL` — the website's address, e.g. `https://edgelead.netlify.app` (later the real domain). Used for "Open the site" and image previews.
-   - Optional: `SITE_REPO` (default `yousuftalukder/edgelead-site`) and `SITE_BRANCH` (default `main`).
+   - `SITE_PUBLIC_URL` — the website's address, e.g. `https://edgeleadweb.netlify.app` (later the real domain). Used for "Open the site" and image previews.
+   - Optional: `SITE_REPO` (default `yousuftalukder/Edge-lead-Front-end`) and `SITE_BRANCH` (default `main`).
 3. **Deploy the server on Render,** then the pages on Netlify.
-4. **Connect `edgelead-site` to Netlify** if it isn't already, with the Netlify GitHub app. Netlify then reports each build back on the commit, and the page shows Building… → Live, or Build failed with a link to the log.
+4. **Netlify already builds `Edge-lead-Front-end`** (site edgeleadweb). With its GitHub app connected, Netlify then reports each build back on the commit, and the page shows Building… → Live, or Build failed with a link to the log.
 
 ## What changed
 
@@ -38,6 +38,6 @@ There's no SQL. Do these in order:
 
 - Open **Our website**. The tabs list the site's current work, articles and services. If it says "Publishing is not set up yet", `SITE_REPO_TOKEN` is missing.
 - Edit one ticker line under **Site settings** and press **Publish**.
-  - A commit `content: update site settings…` appears in `edgelead-site`.
+  - A commit `content: update site settings…` appears in `Edge-lead-Front-end`.
   - Within about a minute, the status shows **Live** and the homepage shows the line.
 - Replace the example figures under **Results** with real ones, untick "still example figures", and publish. The yellow banner goes away when none are left.

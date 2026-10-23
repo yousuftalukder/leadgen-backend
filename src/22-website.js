@@ -16,7 +16,7 @@ Object.assign(S, {
 // ===========================================================================
 // PHASE 66 :: THE WEBSITE'S CONTENT, PUBLISHED FROM HERE
 //
-// edgelead.com.bd is a static site (repository edgelead-site). Its work and proof, blog,
+// The public website (edgeleadweb.netlify.app) is a static site (repository Edge-lead-Front-end). Its work and proof, blog,
 // prices, plan tables, results figures and Edge Meta AI answers are files under
 // src/content/ and public/uploads/ in that repository. Publishing is a commit to its
 // main branch; Netlify rebuilds, and the site shows that content until the next publish.
@@ -31,7 +31,7 @@ Object.assign(S, {
 // API's JSON limit is 2 MB), as unreferenced git blobs; the save puts them in its tree.
 // Images an item no longer uses are removed in the same commit.
 //
-// Contract: docs/WORKSPACE-CONTENT.md in edgelead-site. Admins only.
+// Contract: docs/WORKSPACE-CONTENT.md in Edge-lead-Front-end. Admins only.
 // ===========================================================================
 const SITE_SERVICES = ['social', 'ads', 'leads', 'seo', 'influencers', 'reporting', 'websites'];
 S.SITE_SERVICES = SITE_SERVICES;
@@ -47,7 +47,7 @@ const SHA = /^[0-9a-f]{40}$/;
 
 function siteConfig() {
     return {
-        repo: process.env.SITE_REPO || 'yousuftalukder/edgelead-site',
+        repo: process.env.SITE_REPO || 'yousuftalukder/Edge-lead-Front-end',
         branch: process.env.SITE_BRANCH || 'main',
         token: process.env.SITE_REPO_TOKEN || '',
         url: (process.env.SITE_PUBLIC_URL || '').replace(/\/+$/, '')
