@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Phase 66 offline tests — one Meta login for every Page, filed by hand.
+ * Phase 67 offline tests — one Meta login for every Page, filed by hand.
  *
  * The Clients page's New menu can now connect Facebook without naming a client.
  * What matters: that request carries no client (EL.api would otherwise add the
  * picked one, and the server would file Pages under it), the server's callback
  * leaves unnamed Pages unfiled, and the Clients page still offers the picker.
  *
- *   node tests/phase66.test.js
+ *   node tests/phase67.test.js
  */
 'use strict';
 const assert = require('assert');
@@ -21,7 +21,7 @@ function test(name, fn) { try { fn(); passed++; console.log('  ok   ' + name); }
 const clients = read('frontend/clients.html');
 const meta = read('src/14-ai-keys-and-meta.js');
 
-console.log('phase 66 :: connecting every Page from the Clients page');
+console.log('phase 67 :: connecting every Page from the Clients page');
 test('the New menu offers it', () => assert.ok(/\['pages', '<b>Connect your Facebook Pages<\/b>/.test(clients)));
 test('it asks for the dialog without a client, and without the picked one riding along', () =>
     assert.ok(/EL\.api\('\/api\/meta\/oauth\/start', \{ scoped: false \}\)/.test(clients)));
