@@ -117,7 +117,8 @@
         { href: 'billing.html',   icon: 'receipt', label: 'Billing',   engine: null },     // phase 60: agreements and invoices
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Admin' },
-        { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true }
+        { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true },
+        { href: 'site.html',      icon: 'link',    label: 'Our website', adminOnly: true }   // phase 66: publish to the public website
     ];
 
     /** Pages that belong under a menu entry without being one. */
