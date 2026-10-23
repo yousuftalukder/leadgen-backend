@@ -320,7 +320,8 @@
 
     // ---- tasks ------------------------------------------------------------------
     function tabTasks(body) {
-        UI.board(body, c.id, { label: new URLSearchParams(location.search).get('label') || '', onLoad: d => { tasks = d; } });
+        const qs = new URLSearchParams(location.search);
+        UI.board(body, c.id, { label: qs.get('label') || '', openTask: qs.get('task') || null, onLoad: d => { tasks = d; } });
     }
 
     // ---- reports ----------------------------------------------------------------
