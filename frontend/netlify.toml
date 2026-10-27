@@ -7,6 +7,22 @@
   command = ""
 
 # ---------------------------------------------------------------------------
+# DOMAIN
+#
+# The workspace lives at workspace.edgelead.online. The old Netlify address
+# still served the whole app, so bookmarks and older email links kept people
+# there, signed in on the wrong origin. Send it to the same path on the new
+# domain. The host is matched exactly, so deploy previews and branch deploys
+# (deploy-preview-N--edgeleadwork.netlify.app) are untouched.
+# ---------------------------------------------------------------------------
+
+[[redirects]]
+  from = "https://edgeleadwork.netlify.app/*"
+  to = "https://workspace.edgelead.online/:splat"
+  status = 301
+  force = true
+
+# ---------------------------------------------------------------------------
 # CACHING
 #
 # Nothing here is fingerprinted — app.css is always app.css — so the shared
