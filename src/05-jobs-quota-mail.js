@@ -161,7 +161,12 @@ function cleanPaymentOption(o) {
 // saved. Gmail's own ceiling is about 500 messages a day, which is a large
 // multiple of what three notifications will ever produce.
 // ===========================================================================
-const MAIL_KEYS = ['mail_from', 'mail_from_name', 'mail_notify_to', 'mail_app_password'];
+// Phase 71: or through Resend (resend.com), over HTTPS. Render's free plan blocks outgoing
+// SMTP, so Gmail times out there; a Resend key, when saved, is used instead of Gmail.
+const MAIL_KEYS = ['mail_from', 'mail_from_name', 'mail_notify_to', 'mail_app_password', 'mail_resend_key', 'mail_resend_from'];
+const RESEND_API = 'https://api.resend.com/emails';
+const RESEND_TEST_FROM = 'onboarding@resend.dev';    // Resend's own sender: delivers only to the Resend account's email
+S.RESEND_TEST_FROM = RESEND_TEST_FROM;
 S.MAIL_KEYS = MAIL_KEYS;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 S.EMAIL_RE = EMAIL_RE;
@@ -173,18 +178,24 @@ async function mailSettings() {
     if (hit && Date.now() - hit.t < AUTH_CACHE_MS) return hit.v;
     const { data } = await supabase.from('system_settings').select('key, value').in('key', MAIL_KEYS);
     const raw = Object.fromEntries((data || []).map(r => [r.key, r.value]));
-    let password = '';
-    if (raw.mail_app_password) {
-        try { password = String(decryptSecret(raw.mail_app_password) || ''); }
-        catch (e) { logger.error('mail_password_unreadable', { message: e.message }); password = ''; }
-    }
+    const unseal = (k, what) => {
+        if (!raw[k]) return '';
+        try { return String(decryptSecret(raw[k]) || ''); }
+        catch (e) { logger.error(`mail_${what}_unreadable`, { message: e.message }); return ''; }
+    };
+    const password = unseal('mail_app_password', 'password');
+    const resendKey = unseal('mail_resend_key', 'resend_key');
     const from = String(raw.mail_from || '').trim().toLowerCase();
+    const resendFrom = String(raw.mail_resend_from || '').trim().toLowerCase();
+    const provider = resendKey ? 'resend' : 'gmail';
+    // What the message says it is from: Resend sends only from a domain verified there (or its test sender).
+    const sender = provider === 'resend' ? (resendFrom || RESEND_TEST_FROM) : from;
     const v = {
-        from,
+        from, resendFrom, sender, provider,
         fromName: String(raw.mail_from_name || '').trim().slice(0, 60) || 'EdgeLead',
-        notifyTo: String(raw.mail_notify_to || '').trim().toLowerCase() || from,
-        password,
-        configured: !!(from && password)
+        notifyTo: String(raw.mail_notify_to || '').trim().toLowerCase() || from || resendFrom,
+        password, resendKey,
+        configured: provider === 'resend' ? true : !!(from && password)
     };
     _capsCache.set('mail', { v, t: Date.now() });
     return v;
@@ -209,22 +220,58 @@ function mailTransportFor(s) {
     return transport;
 }
 
+/**
+ * One message through Resend's API. Replies go to the Gmail address when one is saved,
+ * since the sending address is a domain's. Throws with Resend's own reason.
+ */
+async function sendViaResend(s, { to, subject, text }) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+        const res = await fetch(RESEND_API, {
+            method: 'POST', signal: ctl.signal,
+            headers: { Authorization: `Bearer ${s.resendKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                from: `${s.fromName.replace(/["<>\r\n]/g, '')} <${s.sender}>`, to: [to], subject, text,
+                ...(s.from && s.from !== s.sender ? { reply_to: s.from } : {})
+            })
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            let why = body.message || body.error || `Resend answered ${res.status}`;
+            if (res.status === 401 || res.status === 403) {
+                if (/domain|verify|testing/i.test(why)) why += ` Verify your domain at resend.com/domains and set "Send from" to an address on it${s.sender === RESEND_TEST_FROM ? `; until then ${RESEND_TEST_FROM} only delivers to your own Resend login email` : ''}.`;
+                else if (res.status === 401) why = 'Resend refused the API key. Paste the key again (it starts with re_).';
+            }
+            throw new Error(why);
+        }
+        return body.id || null;
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error('Resend did not answer within 15 seconds.');
+        throw e;
+    } finally { clearTimeout(timer); }
+}
+
 /** Send one message. Never throws. */
 async function sendMail({ to, subject, text }) {
     const s = await mailSettings();
-    if (!s.configured) return { ok: false, skipped: true, error: 'Email is not set up (Admin → Trial & plans → Email).' };
+    if (!s.configured) return { ok: false, skipped: true, error: 'Email is not set up (Team & settings → Email).' };
     const addr = String(to || '').trim().toLowerCase();
     if (!EMAIL_RE.test(addr)) return { ok: false, error: `"${addr}" is not an email address.` };
+    const subj = String(subject || '').replace(/[\r\n]+/g, ' ').slice(0, 200);
     try {
-        const info = await mailTransportFor(s).sendMail({
-            from: `"${s.fromName.replace(/["\r\n]/g, '')}" <${s.from}>`,
-            to: addr,
-            subject: String(subject || '').replace(/[\r\n]+/g, ' ').slice(0, 200),
-            text: String(text || '')
-        });
+        let id;
+        if (s.provider === 'resend') id = await sendViaResend(s, { to: addr, subject: subj, text: String(text || '') });
+        else {
+            const info = await mailTransportFor(s).sendMail({
+                from: `"${s.fromName.replace(/["\r\n]/g, '')}" <${s.from}>`,
+                to: addr, subject: subj, text: String(text || '')
+            });
+            id = info?.messageId || null;
+        }
         Object.assign(_mailState, { lastSentAt: new Date().toISOString(), lastError: null, lastTo: addr, sent: _mailState.sent + 1 });
-        logger.info('mail_sent', { to: addr, subject, id: info?.messageId || null });
-        return { ok: true, id: info?.messageId || null };
+        logger.info('mail_sent', { to: addr, subject, id, via: s.provider });
+        return { ok: true, id, via: s.provider };
     } catch (e) {
         _mailState.lastError = `${new Date().toISOString()} — ${e.message}`;
         logger.error('mail_failed', { to: addr, subject, message: e.message });
@@ -237,7 +284,8 @@ async function mailStatus() {
     const s = await mailSettings();
     return {
         from: s.from, fromName: s.fromName, notifyTo: s.notifyTo,
-        hasPassword: !!s.password, configured: s.configured, installed: mailInstalled(),
+        hasPassword: !!s.password, configured: s.configured, installed: s.provider === 'resend' || mailInstalled(),
+        provider: s.provider, hasResendKey: !!s.resendKey, resendFrom: s.resendFrom, sender: s.sender,
         lastSentAt: _mailState.lastSentAt, lastError: _mailState.lastError, sent: _mailState.sent
     };
 }

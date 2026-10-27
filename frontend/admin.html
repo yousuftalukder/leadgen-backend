@@ -334,14 +334,28 @@
             <button class="btn-secondary btn-mini" type="button" id="pl-pay-add" style="margin-top:8px">+ Add a way to pay</button>
 
             <h3 class="block-title">Email</h3>
-            <p class="card-subtitle" style="margin-bottom:12px">Sent from a Gmail account of yours, using an app password
+            <p class="card-subtitle" style="margin-bottom:12px"><b>Resend (recommended on Render).</b> Render's free plan blocks the way Gmail sends,
+                so the Gmail test times out there. Paste an API key from resend.com → API Keys and mail goes through Resend instead.
+                Resend sends only from a domain you have verified with it (resend.com → Domains), so set <i>Send from</i> to an
+                address on that domain. Left empty, it uses Resend's test sender, onboarding@resend.dev, which delivers only to the
+                email you signed up to Resend with. Replies go to the Gmail address below. The key is stored sealed and never shown again.</p>
+            <div class="field-grid">
+                <div><label for="pl-resend-key">Resend API key</label>
+                    <input type="password" id="pl-resend-key" placeholder="re_…" autocomplete="new-password"></div>
+                <div><label for="pl-resend-from">Send from (an address on your Resend domain)</label>
+                    <input type="email" id="pl-resend-from" placeholder="hello@yourdomain.com — empty: onboarding@resend.dev" autocomplete="off"></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 14px">
+                <button class="btn-secondary btn-mini" type="button" id="pl-resend-clear" hidden>Remove the Resend key (back to Gmail)</button>
+            </div>
+            <p class="card-subtitle" style="margin-bottom:12px"><b>Or Gmail.</b> Sent from a Gmail account of yours, using an app password
                 (Google Account → Security → 2-Step Verification → App passwords). <b>Business owners need this to sign in to
                 Edge Meta AI</b>: their 6-digit sign-in codes and their invites are sent from it. Until it is set, send each
                 owner a sign-in link yourself (Clients → the owner's row → New sign-in link). It also tells you when someone
                 starts a free trial or asks to continue. Google allows roughly 500 messages a day from one account. The password is stored sealed and is never
                 shown again.</p>
             <div class="field-grid">
-                <div><label for="pl-mail-from">Send from (Gmail address)</label>
+                <div><label for="pl-mail-from">Gmail address (sends with Gmail; with Resend, replies come here)</label>
                     <input type="email" id="pl-mail-from" placeholder="you@gmail.com" autocomplete="off"></div>
                 <div><label for="pl-mail-pass">App password</label>
                     <input type="password" id="pl-mail-pass" placeholder="xxxx xxxx xxxx xxxx" autocomplete="new-password"></div>
@@ -721,10 +735,15 @@
         $('pl-mail-pass').value = '';
         $('pl-mail-pass').placeholder = m.hasPassword ? 'saved — type here only to replace it' : 'xxxx xxxx xxxx xxxx';
         $('pl-mail-clear').hidden = !m.hasPassword;
+        $('pl-resend-key').value = '';
+        $('pl-resend-key').placeholder = m.hasResendKey ? 'saved — type here only to replace it' : 're_…';
+        $('pl-resend-from').value = m.resendFrom || '';
+        $('pl-resend-clear').hidden = !m.hasResendKey;
         const bits = [];
         if (m.installed === false) bits.push('The mail library is not installed on the server yet — it arrives with the next deploy.');
-        else if (!m.configured) bits.push('Not sending yet: save a Gmail address and an app password.');
-        else bits.push(`Sending from ${m.from}; notifications go to ${m.notifyTo}.`);
+        else if (!m.configured) bits.push('Not sending yet: save a Resend API key, or a Gmail address and an app password.');
+        else if (m.provider === 'resend') bits.push(`Sending through Resend from ${m.sender}${m.from ? `, replies to ${m.from}` : ''}; notifications go to ${m.notifyTo}.`);
+        else bits.push(`Sending through Gmail from ${m.from}; notifications go to ${m.notifyTo}.`);
         if (m.lastSentAt) bits.push(`Last sent ${new Date(m.lastSentAt).toLocaleString()}.`);
         if (m.lastError) bits.push(`Last error: ${m.lastError}`);
         $('pl-mail-state').textContent = bits.join(' ');
@@ -736,6 +755,8 @@
             notifyTo: $('pl-mail-to').value.trim()
         };
         if ($('pl-mail-pass').value.trim()) out.appPassword = $('pl-mail-pass').value;
+        if ($('pl-resend-key').value.trim()) out.resendKey = $('pl-resend-key').value.trim();
+        out.resendFrom = $('pl-resend-from').value.trim();
         return out;
     }
 
@@ -780,6 +801,14 @@
         } catch (err) {
             $('pl-mail-state').textContent = 'Not sent: ' + err.message;
         } finally { btn.disabled = false; }
+    });
+    if ($('pl-resend-clear')) $('pl-resend-clear').addEventListener('click', async () => {
+        if (!confirm('Remove the Resend key? Mail goes back to Gmail, which Render\'s free plan blocks.')) return;
+        try {
+            await EL.api('/api/admin/settings', { method: 'PATCH', body: { mail: { resendKey: '' } } });
+            const d = await EL.api('/api/admin/settings');
+            fillMail(d.mail || {});
+        } catch (err) { $('pl-mail-state').textContent = err.message; }
     });
     if ($('pl-mail-clear')) $('pl-mail-clear').addEventListener('click', async () => {
         if (!confirm('Remove the saved app password? No mail goes out until a new one is saved.')) return;
