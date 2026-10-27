@@ -46,6 +46,11 @@
     const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
     const BACKEND_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
+    // Phase 73: business owners have an address of their own. ai.edgelead.online serves Edge Meta AI at /.
+    const OWNER_APP_BY_HOST = {
+        'workspace.edgelead.online': 'https://ai.edgelead.online/',
+        'ai.edgelead.online': 'https://ai.edgelead.online/'
+    };
     const CLIENT_KEY = 'el-client-id';
 
     // Shown as a "Contact us" button to accounts whose access has lapsed.
@@ -637,7 +642,7 @@
             const owner = !EL.me || EL.me.role === 'client';
             // Against the page's base, not its address (phase 57): inside the app (base ../) the address
             // is /ai/, and 'ai/' from there was /ai/ai/, a page that does not exist.
-            const dest = new URL((EL._app || EL.isEmbedded()) && owner ? 'ai/' : 'index.html', document.baseURI).href;
+            const dest = (EL._app || EL.isEmbedded()) && owner ? EL.ownerAppHref() : new URL('index.html', document.baseURI).href;
             let win = window;
             if (EL.isEmbedded() && owner) { try { if (window.top.location.origin === location.origin) win = window.top; } catch { /* another origin */ } }
             win.location.href = dest;
@@ -651,6 +656,14 @@
         authClient() {
             if (!EL.supabase) EL.supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
             return EL.supabase;
+        },
+
+        /**
+         * Where business owners open Edge Meta AI (phase 73). On EdgeLead's own domains that is
+         * their address, https://ai.edgelead.online/; anywhere else (a deploy preview) this site's ai/.
+         */
+        ownerAppHref() {
+            return OWNER_APP_BY_HOST[location.hostname] || new URL('ai/', document.baseURI).href;
         },
 
         /** Boots the header. Resolves with /api/me, or blocks the page and never resolves. */
@@ -673,7 +686,7 @@
             EL.authClient();
 
             const { data } = await EL.supabase.auth.getSession();
-            if (!data.session) { window.location.href = app ? 'ai/' : 'index.html'; return new Promise(() => {}); }
+            if (!data.session) { window.location.href = app ? EL.ownerAppHref() : 'index.html'; return new Promise(() => {}); }
             EL.session = data.session;
             EL.user = data.session.user;
 
@@ -740,7 +753,7 @@
             if (me.role === 'client' && !app) {
                 const sharedTool = EL.isEmbedded() && OWNER_EMBEDS.includes(currentPage(page));
                 if (!sharedTool) {
-                    window.location.replace('ai/' + location.search);
+                    window.location.replace(EL.ownerAppHref() + location.search);
                     return new Promise(() => {});
                 }
             }

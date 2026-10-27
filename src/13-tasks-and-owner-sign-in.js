@@ -1262,18 +1262,19 @@ app.post('/api/public/owner-verify', ownerCodeLimit, async (req, res) => {
 const OWNER_INVITE_ENGINES = ['meta_owned', 'report'];
 
 /**
- * A one-tap sign-in link for an owner (phase 57). It points at the app itself, /ai/#th=<token>, and
+ * A one-tap sign-in link for an owner (phase 57). It points at the app itself, <app>#th=<token>, and
  * the app trades the token for a session. Supabase's own link signed the owner in wherever it was
  * opened, which on an iPhone is Safari, never the app on the home screen; this one can also be pasted
  * into the installed app. Without a known site address, Supabase's link is used as before.
+ * Phase 73: <app> is ownerAppUrl(), the owners' own address (ai.edgelead.online) when it is set.
  */
-async function ownerSignInLink(email, base) {
+async function ownerSignInLink(email, app) {
     const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
-        type: 'magiclink', email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
+        type: 'magiclink', email, ...(app ? { options: { redirectTo: app } } : {})
     });
     if (ge) throw ge;
     const hashed = gl?.properties?.hashed_token || null;
-    if (base && hashed) return `${base}/ai/#th=${encodeURIComponent(hashed)}`;
+    if (app && hashed) return `${app}#th=${encodeURIComponent(hashed)}`;
     return gl?.properties?.action_link || gl?.action_link || null;
 }
 
@@ -1370,14 +1371,14 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
         // existed it goes only to that person's inbox — handing someone
         // else's password link to whoever typed their address would let any
         // client's owner take over any business owner's account.
-        const base = appUrl();
+        const ownerApp = S.ownerAppUrl();
         const mailReady = (await mailSettings()).configured;
         let link = null;
         if (created || mailReady) {
             try {
                 // Phase 49: owners live in Edge Meta AI, signed in by email code. The
                 // invite is a one-tap sign-in straight into the app; no password is ever set.
-                link = await ownerSignInLink(email, base);
+                link = await ownerSignInLink(email, ownerApp);
             } catch (e) {
                 logger.warn('portal_invite_link_failed', { clientId: c.id, message: e.message });
             }
@@ -1397,7 +1398,7 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
                     '',
                     ...(await S.agreementMailLines(c.id)),
                     'On your phone, add it to your home screen from there and it opens like an app.',
-                    `Next time, open ${base ? base + '/ai/' : 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
+                    `Next time, open ${ownerApp || 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
                     '— EdgeLead'
                 ].join('\n')
             });
@@ -1446,8 +1447,7 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
         if (c.trial_ends_at && Date.parse(c.trial_ends_at) <= Date.now()) return res.status(400).json({ error: 'This business’s trial has ended, so a link would only show that. Extend the trial first, or make them a client.' });
         if (u.is_active === false) return res.status(400).json({ error: 'That login is switched off. An admin can switch it back on first.' });
 
-        const base = appUrl();
-        const link = await ownerSignInLink(u.email, base);
+        const link = await ownerSignInLink(u.email, S.ownerAppUrl());
         if (!link) return res.status(502).json({ error: 'A sign-in link could not be made. Try again in a minute.' });
 
         let emailed = false;

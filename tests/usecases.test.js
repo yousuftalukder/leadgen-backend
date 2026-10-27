@@ -2255,6 +2255,24 @@ test('provisioning again changes nothing: one connection, two assets', async () 
     assert.strictEqual(tbl('xp_meta_connections').filter(x => x.client_id === state.C).length, 1);
     assert.strictEqual(tbl('xp_meta_assets').filter(x => x.client_id === state.C).length, 2);
 });
+// Phase 73: el_connection_id has only a partial unique index, which Postgres refuses as an ON CONFLICT
+// target ("no unique or exclusion constraint matching"). The test database cannot see that, so the
+// source is held to not asking for it.
+test('provisioning never upserts on el_connection_id, which the real database refuses', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'xp', 'index.js'), 'utf8');
+    assert.ok(!/onConflict:\s*'el_connection_id'/.test(src), 'xp_meta_connections is looked up, then updated or inserted');
+});
+test('owners\' links use their own address when OWNER_APP_URL is set, else the workspace\'s ai/', () => {
+    const shared = require(path.join(__dirname, '..', 'src', 'shared'));
+    const before = process.env.OWNER_APP_URL;
+    try {
+        process.env.OWNER_APP_URL = 'https://ai.edgelead.online/';
+        assert.strictEqual(shared.ownerAppUrl(), 'https://ai.edgelead.online/');
+        delete process.env.OWNER_APP_URL;
+        const base = shared.appUrl();
+        assert.strictEqual(shared.ownerAppUrl(), base ? base + '/ai/' : '');
+    } finally { if (before === undefined) delete process.env.OWNER_APP_URL; else process.env.OWNER_APP_URL = before; }
+});
 // Phase 47: reads are started by the server, not by a button. The tests have no Graph behind the
 // warehouse sync, so a recorder stands in for it and says what would have been read, and why.
 const XPREAD = { calls: [], ads: 0, hold: 30 };
@@ -4298,7 +4316,9 @@ test('an owner whose trial ended still gets a code, so signing in can tell them;
 test('the pages: sign-out lands on the app, not /ai/ai/; lists that cover every client are not narrowed to the last one opened', () => {
     const FRONT = path.join(__dirname, '..', 'frontend');
     const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
-    assert.ok(/new URL\(\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? 'ai\/' : 'index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
+    // Phase 73: an owner signs out to their app's own address; staff to index.html, against the page's base.
+    assert.ok(/\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? EL\.ownerAppHref\(\) : new URL\('index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
+    assert.ok(/new URL\('ai\/', document\.baseURI\)/.test(h), 'off EdgeLead\'s domains the app is ai/ against the base, never /ai/ai/');
     assert.ok(/opts\.scoped === false \? null : EL\.clientId\(\)/.test(h));
     assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'pipeline.html'), 'utf8')), 'the pipeline is still narrowed to the remembered client');
     assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'home.html'), 'utf8')));

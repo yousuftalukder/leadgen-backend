@@ -14,7 +14,7 @@ const {
 Object.assign(S, {
     jobStillAllowed,
     quotaPeriod, invalidateQuotaCaps, contactSettings, cleanPaymentOption, mailSettings, sendMail,
-    mailStatus, appUrl, mailActivationRequested, mailActivated, mailNewTrial, trialDaysSetting,
+    mailStatus, appUrl, ownerAppUrl, mailActivationRequested, mailActivated, mailNewTrial, trialDaysSetting,
     effectiveCap, quotaError, takeLeadQuota, refundLeadQuota, createJob, assertJobSlot, claimJob,
     jobUnitCount, updateJob, runJob, registerWorker, sweepStaleJobs, keepAwake,
     sweepStaleReservations, estimateCredits
@@ -297,6 +297,18 @@ function appUrl() {
     return o ? o.replace(/\/+$/, '') : '';
 }
 
+/**
+ * Phase 73: Edge Meta AI, the business owners' app, for links in mail and redirects. OWNER_APP_URL
+ * is its own address (https://ai.edgelead.online, which serves the app at /); without it, the
+ * app's page on the workspace site. Ends with a slash; '' when no address is known.
+ */
+function ownerAppUrl() {
+    const own = String(process.env.OWNER_APP_URL || '').trim().replace(/\/+$/, '');
+    if (/^https?:\/\//i.test(own)) return own + '/';
+    const base = appUrl();
+    return base ? base + '/ai/' : '';
+}
+
 function fmtDay(iso) {
     const d = iso ? new Date(iso) : null;
     return d && !isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : 'a date not on file';
@@ -333,7 +345,7 @@ async function mailActivated(target, { planLabel, paidUntil }) {
     const { data: u } = await supabase.from('app_users').select('email, role, plan_label').eq('id', target).maybeSingle();
     if (!u?.email || u.role !== 'client') return { ok: false, skipped: true };
     const c = await contactSettings();
-    const base = appUrl();
+    const app = ownerAppUrl();
     const label = planLabel || u.plan_label || 'Your plan';
     return sendMail({
         to: u.email,
@@ -341,7 +353,7 @@ async function mailActivated(target, { planLabel, paidUntil }) {
         text: [
             `${label} is active on your EdgeLead account until ${fmtDay(paidUntil)}.`,
             '',
-            base ? `Sign in: ${base}/client.html` : 'Sign in as usual.',
+            app ? `Sign in: ${app}` : 'Sign in as usual.',
             c.email ? `Questions: ${c.email}` : null,
             '',
             '— EdgeLead'

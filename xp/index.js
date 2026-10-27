@@ -98,12 +98,19 @@ async function provisionClient(clientId) {
       userToken = conn.user_token_enc ? (deps.decrypt ? deps.decrypt(conn.user_token_enc) : conn.user_token_enc) : null;
     } catch (e) { console.warn('[xp] token unreadable for connection', conn.id, e.message); continue; }
     if (!pageToken) continue;
-    const xc = await q(supabase.from('xp_meta_connections').upsert({
+    // Phase 73: looked up, then updated or inserted. el_connection_id has only a partial unique index
+    // (where it is not null), which Postgres cannot use as an ON CONFLICT target, so the upsert this
+    // used to be failed for every business and Edge Meta AI said "Meta not connected".
+    const row = {
       el_connection_id: conn.id, client_id: c.id, connection_type: 'USER_OAUTH',
       meta_user_id: conn.fb_user_id || null,
       token_enc: S.encrypt(userToken || pageToken), token_expires_at: conn.token_expires_at || null,
       scopes: conn.scopes || [], status: 'ACTIVE'
-    }, { onConflict: 'el_connection_id' }).select('id').single(), 'xp connection');
+    };
+    const have = await q(supabase.from('xp_meta_connections').select('id').eq('el_connection_id', conn.id).maybeSingle(), 'xp connection find');
+    const xc = have
+      ? await q(supabase.from('xp_meta_connections').update(row).eq('id', have.id).select('id').single(), 'xp connection')
+      : await q(supabase.from('xp_meta_connections').insert(row).select('id').single(), 'xp connection');
     connections += 1;
     const fb = await q(supabase.from('xp_meta_assets').upsert({
       client_id: c.id, connection_id: xc.id, platform: 'FB', asset_id: String(conn.page_id),
