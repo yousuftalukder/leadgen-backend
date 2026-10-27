@@ -22,6 +22,16 @@
   status = 301
   force = true
 
+# Business owners use ai.edgelead.online: its front page is Edge Meta AI (ai/),
+# served in place so the address stays ai.edgelead.online/. ai/index.html sets
+# <base href="../">, which at / is still /, so its files load as they do at /ai/.
+# Every other path on that host is the same site as the workspace.
+[[redirects]]
+  from = "https://ai.edgelead.online/"
+  to = "/ai/"
+  status = 200
+  force = true
+
 # ---------------------------------------------------------------------------
 # CACHING
 #
