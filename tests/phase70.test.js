@@ -175,6 +175,31 @@ test('the team reads the tokens and who can be mentioned; the owner reads names 
     assert.ok(owner.body.comments.some(c => c.body.startsWith('@Anika Mate')));
     assert.deepStrictEqual(owner.body.people, [], 'an owner is never handed the team list');
 });
+// Phase 72: a mention names the person by their profile name, never their address.
+test('who can be mentioned comes with names only, no addresses', async () => {
+    const team = await GET('mate');
+    assert.ok(team.body.people.every(p => !('email' in p) && !String(p.name).includes('@')), JSON.stringify(team.body.people));
+    assert.deepStrictEqual(team.body.people.map(p => p.name).sort(), ['Anika Mate', 'Yousuf Lead']);
+});
+test('with no profile name, the part before the @ stands in, made readable', () => {
+    assert.strictEqual(S.personName({ name: 'Anika Mate', email: 'mate@agency.test' }), 'Anika Mate');
+    assert.strictEqual(S.personName({ full_name: 'Anika Mate', email: 'mate@agency.test' }), 'Anika Mate');
+    assert.strictEqual(S.personName({ name: null, email: 'yousuf.outreach951@gmail.com' }), 'Yousuf Outreach');
+    assert.strictEqual(S.personName({ name: 'someone@agency.test', email: 'someone@agency.test' }), 'Someone');
+    assert.strictEqual(S.personName({ name: '', email: '' }), 'Teammate');
+});
+test('the mention email is from a name, not an address, when the sender has no profile name', async () => {
+    const lead = tbl('app_users').find(u => u.id === LEAD);
+    lead.full_name = null;
+    SENT.length = 0;
+    await POST('lead', `${tok('Anika Mate', MATE)} one more take?`);
+    lead.full_name = 'Yousuf Lead';
+    const m = SENT.find(x => /mentioned you/.test(x.subject));
+    assert.ok(m, 'a mention email went out');
+    assert.match(m.subject, /^Lead mentioned you: /);
+    assert.ok(!m.subject.includes('@') && !m.text.includes('lead@agency.test'));
+    for (const [k, q] of S._taskMail) { clearTimeout(q.timer); S._taskMail.delete(k); }
+});
 
 console.log('phase 70 :: what each kind of work is for (header.js)');
 const header = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'header.js'), 'utf8');

@@ -13,7 +13,7 @@ const {
     mailSettings, markAgencyOwner, ownClientFor, rateLimit, sendErr, sendMail, supabase, trialDaysSetting,
     userRole
 } = S;
-Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName, sniffImage });
+Object.assign(S, { missingTable, oneLine, peopleById, personName, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName, sniffImage });
 
 // ===========================================================================
 // PHASE 32 :: THE CLIENT'S TASK BOARD
@@ -192,6 +192,18 @@ async function peopleById(ids) {
     return Object.fromEntries((data || []).map(u => [u.id, { id: u.id, email: u.email, name: u.full_name || null }]));
 }
 
+/**
+ * Phase 72: how a person is named where they are mentioned — the profile name,
+ * never the address. With no name on the profile, the part before the @ stands
+ * in, made readable ("yousuf.outreach951" → "Yousuf Outreach").
+ */
+function personName(p) {
+    const full = String((p && (p.name ?? p.full_name)) || '').trim();
+    if (full && !full.includes('@')) return full;
+    const local = String((p && p.email) || full).split('@')[0].replace(/\d+/g, ' ').replace(/[._+-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return local ? local.replace(/(^|\s)\S/g, c => c.toUpperCase()) : 'Teammate';
+}
+
 async function taskCommentCounts(taskIds) {
     if (!taskIds.length) return {};
     const { data, error } = await supabase.from('client_task_comments').select('task_id').in('task_id', taskIds);
@@ -341,7 +353,7 @@ async function taskMailRecipients(ids, actorId) {
 async function taskMailActor(actorId) {
     if (!actorId) return 'Someone';
     const p = (await peopleById([actorId]))[actorId];
-    return (p && (p.name || p.email)) || 'Someone';
+    return p ? personName(p) : 'Someone';
 }
 
 function taskMailText(first, t, clientName, lines) {
@@ -611,10 +623,11 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
         for (const id of Object.keys(people)) roles[id] = await userRole(id);
         const forClient = ctx.profile?.role === 'client';
         // Phase 70: the team gets who can be mentioned; an owner reads mentions as plain names.
+        // Phase 72: by profile name only — the picker never shows an address.
         let mentionable = [];
         if (!forClient) {
             const { data: cl } = await supabase.from('clients').select('id, owner_user_id').eq('id', t.client_id).maybeSingle();
-            if (cl) mentionable = (await clientPeople(cl)).map(p => ({ id: p.id, name: p.name, email: p.email }));
+            if (cl) mentionable = (await clientPeople(cl)).map(p => ({ id: p.id, name: personName(p) }));
         }
         res.json({
             people: mentionable,

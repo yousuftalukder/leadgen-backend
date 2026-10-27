@@ -247,6 +247,14 @@
     // Phase 70: a mention is @[Name](user:<id>); it shows as the name, highlighted.
     const RICH_TOKEN = /!\[[^\]]{0,80}\]\(media:([0-9a-f-]{36})\)|@\[([^\]\n]{1,80})\]\(user:([0-9a-f-]{36})\)/gi;
     const mentionHtml = (name, uid) => `<span class="tk-mention" data-uid="${esc(uid)}" data-name="${esc(name)}" contenteditable="false">@${esc(name)}</span>`;
+    // Phase 72: a mention names the person by their profile name, never their address
+    // (the server sends names only; this covers a list that still has addresses in it).
+    const mentionName = p => {
+        const full = String(p.name || '').trim();
+        if (full && !full.includes('@')) return full;
+        const local = String(p.email || full).split('@')[0].replace(/\d+/g, ' ').replace(/[._+-]+/g, ' ').replace(/\s+/g, ' ').trim();
+        return local ? local.replace(/(^|\s)\S/g, c => c.toUpperCase()) : 'Teammate';
+    };
     const linkify = html => html.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)"'])/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
     function richHtml(text, media = {}, { links = false } = {}) {
         const out = []; let last = 0; const src = String(text || '');
@@ -410,13 +418,13 @@
         };
         const draw = () => {
             menu.innerHTML = list.map((p, i) => `<button type="button" role="option" class="${i === at ? 'is-on' : ''}" data-i="${i}" aria-selected="${i === at}">
-                <span class="el-avatar">${esc(initials(p.name || p.email))}</span><span><b>${esc(p.name || p.email)}</b>${p.name ? `<small>${esc(p.email)}</small>` : ''}</span></button>`).join('');
+                <span class="el-avatar">${esc(initials(mentionName(p)))}</span><span><b>${esc(mentionName(p))}</b></span></button>`).join('');
             menu.querySelectorAll('[data-i]').forEach(b => b.addEventListener('mousedown', e => { e.preventDefault(); pick(list[Number(b.dataset.i)]); }));
         };
         const pick = p => {
             if (!p || !range) return close();
             range.deleteContents();
-            const tmp = document.createElement('span'); tmp.innerHTML = mentionHtml(p.name || p.email.split('@')[0], p.id);
+            const tmp = document.createElement('span'); tmp.innerHTML = mentionHtml(mentionName(p), p.id);
             const chip = tmp.firstChild, space = document.createTextNode('\u00a0');
             range.insertNode(space); range.insertNode(chip);
             const sel = window.getSelection(); const r = document.createRange();
@@ -426,7 +434,7 @@
         box.addEventListener('input', () => {
             const hit = query(); const people = getPeople() || [];
             if (!hit || !people.length) return close();
-            list = people.filter(p => `${p.name || ''} ${p.email || ''}`.toLowerCase().includes(hit.q)).slice(0, 6);
+            list = people.filter(p => mentionName(p).toLowerCase().includes(hit.q)).slice(0, 6);
             range = hit.range; at = 0;
             if (!list.length) return close();
             menu.hidden = false; draw();
