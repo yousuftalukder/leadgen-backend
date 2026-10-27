@@ -493,7 +493,10 @@ const MERGE_TABLES = [
     // phase 53: the content calendar and its picks, and the assistant's chats (they were left behind)
     'content_posts', 'content_picks', 'xp_ai_conversations',
     // phase 60: the invoices made for it
-    'invoices'
+    'invoices',
+    // phase 69: the workbook the team types in: plan, ledger, stock, replies and their pictures
+    'client_content_entries', 'client_products', 'client_ad_creatives', 'client_ad_runs',
+    'client_message_templates', 'client_template_media'
 ];
 S.MERGE_TABLES = MERGE_TABLES;
 /**

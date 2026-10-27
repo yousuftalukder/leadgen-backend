@@ -13,7 +13,7 @@ const {
     mailSettings, markAgencyOwner, ownClientFor, rateLimit, sendErr, sendMail, supabase, trialDaysSetting,
     userRole
 } = S;
-Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName });
+Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName, sniffImage });
 
 // ===========================================================================
 // PHASE 32 :: THE CLIENT'S TASK BOARD
