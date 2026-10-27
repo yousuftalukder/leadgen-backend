@@ -882,6 +882,18 @@ app.patch('/api/admin/settings', async (req, res) => {
                 if (pw && pw.length < 8) return res.status(400).json({ error: 'That app password looks too short — Google shows it as four groups of four characters.' });
                 writes.push({ key: 'mail_app_password', value: pw ? encryptSecret(pw) : '' });
             }
+            // Phase 71: Resend. A key, sealed like the app password; and the address it sends from.
+            if (m.resendKey !== undefined) {
+                const key = String(m.resendKey || '').trim();
+                if (key && !/^re_[A-Za-z0-9_]{10,}$/.test(key)) return res.status(400).json({ error: 'That does not look like a Resend API key. It starts with re_ (resend.com → API Keys).' });
+                writes.push({ key: 'mail_resend_key', value: key ? encryptSecret(key) : '' });
+            }
+            if (m.resendFrom !== undefined) {
+                const rf = String(m.resendFrom || '').trim().toLowerCase().slice(0, 120);
+                if (rf && !EMAIL_RE.test(rf)) return res.status(400).json({ error: 'The Resend sending address does not look like an email address.' });
+                if (/@(gmail|googlemail|yahoo|outlook|hotmail)\./.test(rf)) return res.status(400).json({ error: 'Resend cannot send from a Gmail, Yahoo or Outlook address. Use an address on a domain you verified at resend.com/domains, or leave it empty to use onboarding@resend.dev for testing.' });
+                writes.push({ key: 'mail_resend_from', value: rf });
+            }
             S._mailTransport = null;
         }
         if (!writes.length) return res.status(400).json({ error: 'Nothing to change.' });
@@ -904,12 +916,12 @@ app.post('/api/admin/mail/test', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
         const s = await mailSettings();
-        if (!s.configured) return res.status(400).json({ ok: false, error: 'Save a Gmail address and an app password first.' });
+        if (!s.configured) return res.status(400).json({ ok: false, error: 'Save a Resend API key, or a Gmail address and an app password, first.' });
         const to = String(req.body?.to || '').trim().toLowerCase() || s.notifyTo;
         const r = await sendMail({
             to,
             subject: 'EdgeLead can send email',
-            text: `This is the test message from EdgeLead, sent from ${s.from} at ${new Date().toISOString()}.\n\n` +
+            text: `This is the test message from EdgeLead, sent ${s.provider === 'resend' ? 'through Resend' : 'through Gmail'} from ${s.sender} at ${new Date().toISOString()}.\n\n` +
                   'If you are reading it, new trials and requests to continue will reach this address, and clients will hear when you activate them.'
         });
         res.status(r.ok ? 200 : 502).json({ ...r, to });
