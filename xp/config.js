@@ -47,6 +47,8 @@ module.exports = {
   gemini: {
     apiKey: env('GEMINI_API_KEY', null),
     model: env('XP_GEMINI_MODEL', env('GEMINI_MODEL', 'gemini-3.5-flash')),
+    // EdgeLead (phase 76): the model an answer moves to when the main one is overloaded (503). 'none' = no fallback.
+    fallbackModel: env('GEMINI_FALLBACK_MODEL', 'gemini-3.5-flash'),
     thinkingBudget: process.env.GEMINI_THINKING_BUDGET === undefined || process.env.GEMINI_THINKING_BUDGET === ''
       ? null : parseInt(process.env.GEMINI_THINKING_BUDGET, 10),
     thinkingLevel: process.env.GEMINI_THINKING_LEVEL || null

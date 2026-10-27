@@ -40,6 +40,8 @@ function publicChatError(e) {
   if (e && e.code === 'CHAT_TIMEOUT') return 'That answer took too long. Please ask again, or ask about a shorter period.';
   // Phase 74: the AI never started answering (a busy key); saying so beats two minutes of "Thinking…".
   if (e && e.code === 'TURN_STALLED') return 'The AI is slow to respond right now. Please ask again in a moment.';
+  // Phase 76: both models were overloaded, after a retry on each.
+  if (e && e.code === 'AI_BUSY') return 'The AI is busy right now. Please try again in a minute.';
   if (/\b429\b|RESOURCE_EXHAUSTED|quota|rate limit/i.test(String((e && e.message) || ''))) return 'The assistant is busy right now. Please try again in a minute.';
   return 'Something went wrong while reading your numbers. Please try again in a moment.';
 }
