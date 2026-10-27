@@ -141,11 +141,104 @@
     const waitingPosts = () => data.posts.filter(p => p.status === 'idea');
     const unpaid = () => ((data.billing && data.billing.invoices) || []).filter(v => v.status === 'unpaid');
 
+    const toolsFor = () => [
+        (me.engines || []).includes('leadgen') ? ['leads', 'Find customers', 'client-leads.html'] : null,
+        (me.engines || []).includes('fb_community') ? ['demand', 'Local demand', 'client-community.html'] : null
+    ].filter(Boolean);
+
+    // ---- the bar (phase 75) ------------------------------------------------------------
+    // In Edge Meta AI everything sits in the left bar, as in the Owner Assistant: the to-dos
+    // to tick off right there, the reports folded open under their own heading, then the rest.
+    const ICON = {
+        todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>',
+        report: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>',
+        posts: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>',
+        work: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="9"/></svg>',
+        numbers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+        tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+        billing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>',
+        chev: '<svg class="side-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+        tick: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>'
+    };
+    const OPEN_KEY = 'el-ai-side-open';
+    let openSecs = { todos: true, reports: false };
+    try { openSecs = { ...openSecs, ...JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') }; } catch { /* private mode */ }
+    let sideMode = false;
+    const SIDE_TODOS = 5, SIDE_REPORTS = 8;
+
+    async function tick(t) {
+        const to = t.status === 'done' ? 'todo' : 'done';
+        await EL.api(`/api/client/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body: { status: to } });
+        t.status = to; t.completedAt = to === 'done' ? new Date().toISOString() : null;
+        EL.toast(to === 'done' ? 'Done. Your agency sees it.' : 'Marked not done.');
+    }
+
+    function drawSide() {
+        const tools = toolsFor();
+        const list = data.tasks.filter(t => t.yours && (t.status !== 'done' || recentDone(t)))
+            .sort((a, b) => (a.status === 'done') - (b.status === 'done') || (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+        const open = todos().length;
+        const sec = (k, icon, label, n, hot, body) => `<section class="side-sec${openSecs[k] ? ' is-open' : ''}" data-sec="${k}">
+            <button type="button" class="side-sec-h" data-fold="${k}" aria-expanded="${!!openSecs[k]}">${icon}<span>${label}</span><span class="side-n${hot ? ' is-hot' : ''}">${n || ''}</span>${ICON.chev}</button>
+            <div class="side-body">${body}</div></section>`;
+        const todoRows = list.slice(0, SIDE_TODOS).map(t => `<div class="side-todo${t.status === 'done' ? ' is-done' : ''}">
+                <button type="button" class="side-tick${t.status === 'done' ? ' is-done' : ''}" role="checkbox" aria-checked="${t.status === 'done'}" aria-label="Done: ${esc(t.title)}" data-tick="${esc(t.id)}">${ICON.tick}</button>
+                <button type="button" class="side-todo-t" data-side-go data-task="${esc(t.id)}">${esc(t.title)}${taskLine(t) ? `<small>${taskLine(t)}</small>` : ''}</button></div>`).join('');
+        const todosBody = (list.length ? todoRows : '<p class="side-empty">Nothing is waiting on you. When your agency needs something, it shows up here.</p>')
+            + (list.length > SIDE_TODOS ? `<button type="button" class="side-link side-more" data-side-go data-hub="todos"><span>See all ${list.length}</span></button>` : '');
+        const reportsBody = (data.reports.length
+            ? data.reports.slice(0, SIDE_REPORTS).map(r => `<button type="button" class="side-link" data-side-go data-rep="${esc(r.id)}"><span>${esc(r.title)}${r.handle ? ' · @' + esc(String(r.handle).replace(/^@/, '')) : ''}</span><small>${esc(shortDay(r.date))}</small></button>`).join('')
+            : '<p class="side-empty">No reports yet. Your agency’s reports for you appear here.</p>')
+            + (data.reports.length > SIDE_REPORTS ? `<button type="button" class="side-link side-more" data-side-go data-hub="reports"><span>See all ${data.reports.length}</span></button>` : '')
+            + ((me.engines || []).includes('report') ? '<button type="button" class="side-act" data-side-go data-hub="checkup">New check-up</button>' : '');
+        const nav = (k, icon, label, n, hot) => `<button type="button" class="side-sec-h" data-side-go data-hub="${k}">${icon}<span>${label}</span><span class="side-n${hot ? ' is-hot' : ''}">${n || ''}</span></button>`;
+        host.innerHTML = (loadFailed ? '<button type="button" class="side-sec-h" data-hub="retry"><span>Couldn’t load your updates · Retry</span></button>' : '')
+            + sec('todos', ICON.todo, 'To-dos', open, open > 0, todosBody)
+            + sec('reports', ICON.report, 'Reports', data.reports.length, false, reportsBody)
+            + `<div class="side-nav">
+                ${nav('posts', ICON.posts, 'Posts to approve', waitingPosts().length, waitingPosts().length > 0)}
+                ${nav('work', ICON.work, 'Working on', working().length, false)}
+                ${data.growth && data.growth.connected ? nav('numbers', ICON.numbers, 'Daily numbers', 0, false) : ''}
+                ${tools.map(([k, l]) => nav('tool-' + k, ICON.tool, esc(l), 0, false)).join('')}
+                ${data.billing && (data.billing.agreement || (data.billing.invoices || []).length) ? nav('billing', ICON.billing, 'Billing', unpaid().length, unpaid().length > 0 || !!data.billing.needsSignature) : ''}
+            </div>`;
+        host.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => {
+            const k = b.dataset.fold; openSecs[k] = !openSecs[k];
+            try { localStorage.setItem(OPEN_KEY, JSON.stringify(openSecs)); } catch { /* private mode */ }
+            const s = b.closest('.side-sec'); s.classList.toggle('is-open', openSecs[k]); b.setAttribute('aria-expanded', String(openSecs[k]));
+        }));
+        host.querySelectorAll('[data-tick]').forEach(b => b.addEventListener('click', async () => {
+            const t = data.tasks.find(x => x.id === b.dataset.tick); if (!t) return;
+            b.disabled = true;
+            try { await tick(t); draw(); }
+            catch (err) { b.disabled = false; if (!err.handled) EL.toast(err.message, 'bad'); }
+        }));
+        host.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
+        host.querySelectorAll('[data-rep]').forEach(b => b.addEventListener('click', () => openReport(b.dataset.rep)));
+        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => go(b.dataset.hub, tools)));
+    }
+
+    function go(k, tools) {
+        if (k === 'retry') { load().catch(() => {}); return; }
+        if (k === 'todos') openTodos();
+        else if (k === 'work') openWork();
+        else if (k === 'posts') openPosts();
+        else if (k === 'reports') openReports();
+        else if (k === 'numbers') openNumbers();
+        else if (k === 'checkup') openCheckup();
+        else if (k === 'billing') openBilling();
+        else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
+    }
+
     function draw() {
-        const tools = [
-            (me.engines || []).includes('leadgen') ? ['leads', 'Find customers', 'client-leads.html'] : null,
-            (me.engines || []).includes('fb_community') ? ['demand', 'Local demand', 'client-community.html'] : null
-        ].filter(Boolean);
+        if (sideMode) drawSide(); else drawRow();
+        const n = todos().length + waitingPosts().length;
+        const badge = document.getElementById('hub-badge');
+        if (badge) { badge.textContent = n ? String(n) : ''; badge.hidden = !n; }
+    }
+
+    function drawRow() {
+        const tools = toolsFor();
         const chip = (k, label, n, hot) => `<button type="button" class="hub-chip${hot ? ' is-hot' : ''}" data-hub="${k}">${label}${n ? `<b>${n}</b>` : ''}</button>`;
         host.innerHTML = `<div class="hub-row" role="toolbar" aria-label="Updates from your agency">
             ${chip('todos', 'To-dos', todos().length, todos().length > 0)}
@@ -158,21 +251,7 @@
             ${data.billing && (data.billing.agreement || (data.billing.invoices || []).length) ? chip('billing', 'Billing', unpaid().length, unpaid().length > 0 || !!data.billing.needsSignature) : ''}
             ${loadFailed ? '<button type="button" class="hub-chip is-hot" data-hub="retry">Couldn’t load your updates · Retry</button>' : ''}
         </div>`;
-        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => {
-            const k = b.dataset.hub;
-            if (k === 'retry') { load().catch(() => {}); return; }
-            if (k === 'todos') openTodos();
-            else if (k === 'work') openWork();
-            else if (k === 'posts') openPosts();
-            else if (k === 'reports') openReports();
-            else if (k === 'numbers') openNumbers();
-            else if (k === 'checkup') openCheckup();
-            else if (k === 'billing') openBilling();
-            else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
-        }));
-        const n = todos().length + waitingPosts().length;
-        const badge = document.getElementById('hub-badge');
-        if (badge) { badge.textContent = n ? String(n) : ''; badge.hidden = !n; }
+        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => go(b.dataset.hub, tools)));
     }
 
     // ---- to-dos and the agency's work ----------------------------------------------
@@ -460,8 +539,8 @@
     }
 
     /** Mount under the app bar. `onAsk` lets a sheet hand a question to the chat. */
-    function mount(user, hostEl) {
-        me = user; host = hostEl;
+    function mount(user, hostEl, opts = {}) {
+        me = user; host = hostEl; sideMode = !!opts.side;
         host.innerHTML = '';
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });

@@ -666,6 +666,27 @@
             return OWNER_APP_BY_HOST[location.hostname] || new URL('ai/', document.baseURI).href;
         },
 
+        /** Opened from the home screen, as an app (phase 75). */
+        isStandalone() { return isStandalone(); },
+
+        /**
+         * Put an app on the home screen, from a menu (phase 75): the browser's own prompt where it gave
+         * one (Chrome, Edge, Android), else the taps written out (Safari on iPhone).
+         */
+        async installApp(key) {
+            const A = APPS[key] || EDGELEAD_APP;
+            if (_installEvt) {
+                const evt = _installEvt; _installEvt = null;
+                try {
+                    evt.prompt();
+                    const choice = await evt.userChoice;
+                    if (choice && choice.outcome === 'accepted') return true;
+                } catch { /* fall through to the written steps */ }
+            }
+            showInstallHow(A);
+            return false;
+        },
+
         /** Boots the header. Resolves with /api/me, or blocks the page and never resolves. */
         async init(options = {}) {
             const { engine = 'leadgen', page, requireAdmin = false, app = null } = options;
