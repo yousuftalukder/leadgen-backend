@@ -870,6 +870,10 @@ function modelConfig(base) {
 // One streamed model turn. Returns the assembled model content (parts with thought signatures
 // intact), the function calls it made, and the text — and pushes text deltas to onDelta as they
 // arrive. A part that turns out to be a function call is never streamed as text.
+// EdgeLead (phase 74): a turn that has sent nothing at all after this long is dropped, so a stalled
+// request (a busy free key) moves to the next key or ends in words, instead of "Thinking…" until the
+// whole answer's 120 s deadline.
+const FIRST_CHUNK_MS = 45000;
 async function streamTurn(ai, contents, config, onDelta) {
   const parts = [];
   let text = '', usage = null, finishReason = null;
@@ -878,28 +882,51 @@ async function streamTurn(ai, contents, config, onDelta) {
     if (p.text !== undefined && last && last.text !== undefined && !last.thought && !p.thought && !last.thoughtSignature && !p.thoughtSignature) last.text += p.text;
     else parts.push({ ...p });
   };
-  let stream;
+  // This turn's own controller: the answer's (Stop, page closed, deadline) ends it, and so does silence.
+  const ctl = new AbortController();
+  const outer = config.abortSignal;
+  const onOuter = () => ctl.abort();
+  if (outer) { if (outer.aborted) ctl.abort(); else outer.addEventListener('abort', onOuter, { once: true }); }
+  let stalled = false, first = false;
+  const watchdog = setTimeout(() => { if (!first) { stalled = true; ctl.abort(); } }, FIRST_CHUNK_MS);
+  const started = Date.now();
+  const stall = (e) => {
+    const err = new Error(`The AI did not start answering within ${Math.round(FIRST_CHUNK_MS / 1000)} s.`);
+    err.code = 'TURN_STALLED'; err.cause = e;
+    return err;
+  };
   try {
-    stream = await ai.models.generateContentStream({ model: cfg.gemini.model, contents, config });
-  } catch (e) {
-    // A model that rejects thinkingConfig must not take the chat down with it.
-    if (config.thinkingConfig && /think/i.test(e.message || '')) {
-      console.warn('[chat] thinkingConfig rejected by model, retrying without:', e.message);
-      const { thinkingConfig, ...rest } = config;
-      return streamTurn(ai, contents, rest, onDelta);
+    let stream;
+    try {
+      stream = await ai.models.generateContentStream({ model: cfg.gemini.model, contents, config: { ...config, abortSignal: ctl.signal } });
+    } catch (e) {
+      if (stalled) throw stall(e);
+      // A model that rejects thinkingConfig must not take the chat down with it.
+      if (config.thinkingConfig && /think/i.test(e.message || '')) {
+        console.warn('[chat] thinkingConfig rejected by model, retrying without:', e.message);
+        const { thinkingConfig, ...rest } = config;
+        return await streamTurn(ai, contents, rest, onDelta);
+      }
+      throw e;
     }
-    throw e;
-  }
-  for await (const chunk of stream) {
-    usage = chunk.usageMetadata || usage;
-    const cand = chunk.candidates?.[0];
-    finishReason = cand?.finishReason || finishReason;
-    for (const p of cand?.content?.parts || []) {
-      push(p);
-      if (p.text && !p.thought) { text += p.text; if (onDelta) onDelta(p.text); }
-    }
+    try {
+      for await (const chunk of stream) {
+        if (!first) { first = true; clearTimeout(watchdog); }
+        usage = chunk.usageMetadata || usage;
+        const cand = chunk.candidates?.[0];
+        finishReason = cand?.finishReason || finishReason;
+        for (const p of cand?.content?.parts || []) {
+          push(p);
+          if (p.text && !p.thought) { text += p.text; if (onDelta) onDelta(p.text); }
+        }
+      }
+    } catch (e) { throw stalled ? stall(e) : e; }
+  } finally {
+    clearTimeout(watchdog);
+    if (outer) outer.removeEventListener('abort', onOuter);
   }
   const calls = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
+  console.log(`[chat] turn ${Date.now() - started} ms · ${calls.length ? calls.map((c) => c.name).join(',') : 'answer'} · thinking ${usage?.thoughtsTokenCount || 0} tok`);
   return { content: { role: 'model', parts }, calls, text, usage, finishReason };
 }
 
@@ -967,9 +994,11 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
         report(keys[ki], 'ok');
         return t;
       } catch (e) {
-        const trouble = keyTrouble(e);
+        // Phase 74: a stalled key is passed over like a rate-limited one, but not benched for it.
+        const trouble = e.code === 'TURN_STALLED' ? 'stalled' : keyTrouble(e);
+        console.warn(`[chat] key ${ki + 1}/${keys.length} (${keys[ki].source || 'pool'}) failed: ${e.message}`);
         if (!trouble || shown || ki >= keys.length - 1 || (abortSignal && abortSignal.aborted)) throw e;
-        report(keys[ki], trouble, e.message);
+        if (trouble !== 'stalled') report(keys[ki], trouble, e.message);
         ki += 1;
         ai = new GoogleGenAI({ apiKey: keys[ki].key });
       }
