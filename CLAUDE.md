@@ -13,7 +13,7 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
   and `frontend/signup.html`. The Render deploy's `SUPABASE_URL` is this same
   project.
 - The schema lives in `sql/*.sql`, applied in phase order. The live database
-  matches it through phase 31.
+  matches it through phase 62.
 - **Do not use `rxrgrrxwxkqiclwbvock`.** That is a different Supabase project
   (the one the Claude Supabase connector may point at) and is unrelated to this
   app.
