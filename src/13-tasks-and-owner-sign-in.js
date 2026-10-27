@@ -381,11 +381,17 @@ async function mailTaskAssigned(t, actorId, clientName) {
     } catch (e) { logger.warn('task_mail_failed', { taskId: t.id, message: e.message }); }
 }
 
-/** A change to a task: queued per person, sent as one email after the window. */
-async function queueTaskMail(t, actorId, line, clientName) {
+/** Who follows a task (phase 70): whoever holds it, whoever raised it, and everyone on the team who has commented on it. */
+async function taskWatchers(t) {
+    const { data } = await supabase.from('client_task_comments').select('author_user_id').eq('task_id', t.id).limit(500);
+    return [t.assignee_user_id, t.created_by, ...(data || []).map(r => r.author_user_id)];
+}
+
+/** A change to a task: queued per person, sent as one email after the window. `skip`: people told already (a mention). */
+async function queueTaskMail(t, actorId, line, clientName, skip = []) {
     if (!taskEmailsOn() || !t || !line) return;
     try {
-        const people = await taskMailRecipients([t.assignee_user_id, t.created_by], actorId);
+        const people = (await taskMailRecipients(await taskWatchers(t), actorId)).filter(u => !skip.includes(u.id));
         for (const u of people) {
             const key = `${t.id}:${u.id}`;
             const q = _taskMail.get(key) || { lines: [] };
@@ -433,9 +439,44 @@ function taskChangeLines(before, after, by) {
     return out;
 }
 
+// ---- phase 70: @mentions in comments ------------------------------------------
+//
+// A mention is written into the comment as @[Name](user:<id>), like a picture is
+// ![image](media:<id>). Only people on the client can be mentioned; any other id
+// is kept as plain text. The person mentioned is emailed at once. A business
+// owner reads mentions as plain "@Name", and cannot make them.
+const MENTION_RE = /@\[([^\]\n]{1,80})\]\(user:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)/gi;
+const mentionIds = body => [...new Set([...String(body || '').matchAll(MENTION_RE)].map(m => m[2].toLowerCase()))];
+/** Mentions as plain "@Name". */
+const mentionPlain = body => String(body || '').replace(MENTION_RE, (_, name) => '@' + name);
+/** Keep the mentions of these people; any other becomes plain text. */
+const mentionKeep = (body, ids) => String(body || '').replace(MENTION_RE, (all, name, id) => (ids.includes(id.toLowerCase()) ? all : '@' + name));
+
+/** Someone was mentioned in a comment: told at once, by name, with what was said. */
+async function mailTaskMentioned(t, actorId, ids, body, clientName) {
+    if (!taskEmailsOn() || !t || !ids.length) return [];
+    const told = [];
+    try {
+        const people = await taskMailRecipients(ids, actorId);
+        if (!people.length) return [];
+        const by = await taskMailActor(actorId);
+        const name = await taskClientName(t, clientName);
+        for (const u of people) {
+            const r = await S.sendMail({
+                to: u.email,
+                subject: `${by} mentioned you: ${t.title}`,
+                text: taskMailText(String(u.full_name || '').split(' ')[0], t, name, [`${by} mentioned you in a comment:`, '', `"${commentExcerpt(body)}"`])
+            });
+            if (r.ok) told.push(u.id);
+            else if (!r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+        }
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t.id, message: e.message }); }
+    return told;
+}
+
 /** What a comment says, for an email: pictures named, spaces folded, kept short. */
 function commentExcerpt(body) {
-    const text = String(body || '').replace(/!\[[^\]]{0,80}\]\(media:[0-9a-f-]{36}\)/gi, '[picture]').replace(/\s+/g, ' ').trim();
+    const text = mentionPlain(body).replace(/!\[[^\]]{0,80}\]\(media:[0-9a-f-]{36}\)/gi, '[picture]').replace(/\s+/g, ' ').trim();
     return text.length > 280 ? text.slice(0, 277) + '...' : text;
 }
 
@@ -444,7 +485,8 @@ function afterTaskWrite(fn) {
     setImmediate(() => { Promise.resolve().then(fn).catch(e => logger.warn('task_mail_failed', { message: e.message })); });
 }
 
-Object.assign(S, { taskChangeLines, taskLink, mailTaskAssigned, queueTaskMail, flushTaskMail, taskEmailsOn, commentExcerpt, afterTaskWrite, _taskMail, TASK_MAIL_DELAY_MS });
+Object.assign(S, { taskChangeLines, taskLink, mailTaskAssigned, queueTaskMail, flushTaskMail, taskEmailsOn, commentExcerpt, afterTaskWrite, _taskMail, TASK_MAIL_DELAY_MS,
+    mentionIds, mentionPlain, mentionKeep, mailTaskMentioned, taskWatchers });
 
 app.post('/api/clients/:id/tasks', async (req, res) => {
     try {
@@ -568,7 +610,14 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
         const roles = {};
         for (const id of Object.keys(people)) roles[id] = await userRole(id);
         const forClient = ctx.profile?.role === 'client';
+        // Phase 70: the team gets who can be mentioned; an owner reads mentions as plain names.
+        let mentionable = [];
+        if (!forClient) {
+            const { data: cl } = await supabase.from('clients').select('id, owner_user_id').eq('id', t.client_id).maybeSingle();
+            if (cl) mentionable = (await clientPeople(cl)).map(p => ({ id: p.id, name: p.name, email: p.email }));
+        }
         res.json({
+            people: mentionable,
             media: await taskMediaUrls(t.client_id, rows.map(r => r.body)),
             comments: rows.map(r => {
                 const p = people[r.author_user_id] || {};
@@ -577,7 +626,7 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
                 const author = fromClient
                     ? { kind: 'client', name: p.name || 'Client', ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) }
                     : { kind: 'team', name: p.name || (forClient ? 'Your agency team' : (p.email || 'Team')), ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) };
-                return { id: r.id, author, mine: r.author_user_id === ctx.user.id, body: r.body, createdAt: r.created_at };
+                return { id: r.id, author, mine: r.author_user_id === ctx.user.id, body: forClient ? mentionPlain(r.body) : r.body, createdAt: r.created_at };
             })
         });
     } catch (err) { sendErr(res, err); }
@@ -589,8 +638,17 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
         const t = await taskForReader(ctx, req.params.taskId);
         if (t === TASK_MISSING) return migrationNeeded(res);
         if (!t) return res.status(404).json({ error: 'Task not found.' });
-        const body = String(req.body?.body ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+        let body = String(req.body?.body ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
         if (!body) return res.status(400).json({ error: 'Write something first.' });
+        // Phase 70: mentions stand only for people on the client; an owner's are plain text.
+        let mentioned = [];
+        if (ctx.profile?.role === 'client') body = mentionPlain(body);
+        else if (mentionIds(body).length) {
+            const { data: cl } = await supabase.from('clients').select('id, owner_user_id').eq('id', t.client_id).maybeSingle();
+            const onClient = cl ? (await clientPeople(cl)).map(p => p.id) : [];
+            mentioned = mentionIds(body).filter(id => onClient.includes(id));
+            body = mentionKeep(body, mentioned);
+        }
         if (body.length > TASK_COMMENT_MAX) return res.status(400).json({ error: `Keep a comment under ${TASK_COMMENT_MAX.toLocaleString('en-US')} characters.` });
         const { data, error } = await supabase.from('client_task_comments')
             .insert([{ task_id: t.id, client_id: t.client_id, author_user_id: ctx.user.id, body, created_at: new Date().toISOString() }])
@@ -598,11 +656,12 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
         if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
         await linkTaskMedia(t, [body]);
         await supabase.from('client_tasks').update({ updated_at: new Date().toISOString() }).eq('id', t.id);
-        res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at } });
+        res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at }, mentioned });
         afterTaskWrite(async () => {                                                         // phase 68
             const who = await taskMailActor(ctx.user.id);
             const by = ctx.profile?.role === 'client' ? `${who} (the client)` : who;
-            await queueTaskMail(t, ctx.user.id, `${by} commented: "${commentExcerpt(body)}"`, null);
+            const told = await mailTaskMentioned(t, ctx.user.id, mentioned, body, null);          // phase 70: at once
+            await queueTaskMail(t, ctx.user.id, `${by} commented: "${commentExcerpt(body)}"`, null, told);
         });
     } catch (err) { sendErr(res, err); }
 });
