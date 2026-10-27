@@ -190,10 +190,18 @@
     // Phase 57: a sign-in link from the agency carries its token as #th=. It is traded for a session here,
     // in whichever browser or installed app opened it, and dropped from the address bar at once.
     const th = hash.get('th');
-    if (linkError || th) history.replaceState(null, '', location.pathname + location.search);
     let sb;
     try { sb = EL.authClient(); }
     catch { offline(); return; }
+    // Phase 73: owners have their own address (ai.edgelead.online). Opened anywhere else (the
+    // workspace's /ai/, an older email), a sign-in link or someone not signed in goes there, link and
+    // all; someone already signed in here, the team, stays.
+    const home = EL.ownerAppHref();
+    if (new URL(home).origin !== location.origin) {
+        const here = !th && !!(await sb.auth.getSession().catch(() => ({ data: {} }))).data.session;
+        if (!here) { location.replace(home + location.search + location.hash); return; }
+    }
+    if (linkError || th) history.replaceState(null, '', location.pathname + location.search);
     if (th) {
         const { error } = await sb.auth.verifyOtp({ token_hash: th, type: 'magiclink' }).catch(e => ({ error: e }));
         if (error) linkError = 'otp_expired';

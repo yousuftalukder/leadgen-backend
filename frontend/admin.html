@@ -1254,7 +1254,7 @@
             out.innerHTML = '<p class="ws-note">Inviting…</p>';
             try {
                 const res = await EL.api(`/api/clients/${encodeURIComponent(r.clientId)}/portal-invite`, { method: 'POST', body: { email, name: q('#mi-name').value.trim() || null } });
-                const app = new URL('ai/', location.href).href;
+                const app = EL.ownerAppHref();
                 out.innerHTML = res.link
                     ? `<p class="ws-note is-good"><b>Send this link to the owner.</b> ${esc(res.note || '')}</p><p><code style="overflow-wrap:anywhere">${esc(res.link)}</code></p>
                        <p class="el-muted">The link opens Edge Meta AI at <code>${esc(app)}</code>. They add it to the home screen from there; next time they sign in with an emailed code.</p>`

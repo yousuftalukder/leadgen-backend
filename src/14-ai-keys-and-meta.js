@@ -412,7 +412,9 @@ app.get('/api/meta/oauth/callback', async (req, res) => {
         : q;
     const back = (q0) => {
         const q = forOwner(q0);
-        const base = FRONTEND_URL ? `${FRONTEND_URL}/${landing}` : `/${landing}`;
+        // Phase 73: an owner goes back to their own app address (ai.edgelead.online) when it is set.
+        const base = landing === 'ai/' && S.ownerAppUrl() ? S.ownerAppUrl()
+            : FRONTEND_URL ? `${FRONTEND_URL}/${landing}` : `/${landing}`;
         res.redirect(`${base}?${new URLSearchParams(q).toString()}`);
     };
     try {
