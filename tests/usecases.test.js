@@ -2521,6 +2521,43 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
 });
+// Phase 76: Gemini's "model is experiencing high demand" (503) is waited out once, then the answer moves
+// to the fallback model; the owner hears "busy" only when that one is overloaded too.
+const BUSY = '{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}';
+test('an overloaded model is retried once after a short wait, on the same model', async () => {
+    XP.script = [{ throw: BUSY }, { parts: [{ text: 'Back now.' }] }];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test one' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.reply, 'Back now.');
+    assert.deepStrictEqual(XP.requests.map(q => q.model), [xp.cfg.gemini.model, xp.cfg.gemini.model]);
+});
+test('still overloaded: the answer comes from the fallback model, and is saved as its answer', async () => {
+    const fb = 'gemini-fallback-test', before = xp.cfg.gemini.fallbackModel;
+    xp.cfg.gemini.fallbackModel = fb;
+    try {
+        XP.script = [{ throw: BUSY }, { throw: BUSY }, { parts: [{ text: 'Answered by the backup.' }] }];
+        XP.requests.length = 0;
+        const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test two' } });
+        assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+        assert.strictEqual(r.body.reply, 'Answered by the backup.');
+        assert.deepStrictEqual(XP.requests.map(q => q.model), [xp.cfg.gemini.model, xp.cfg.gemini.model, fb]);
+        const saved = tbl('xp_ai_messages').filter(m => m.role === 'assistant').pop();
+        assert.strictEqual(saved.model, fb, 'the message records the model that wrote it');
+    } finally { xp.cfg.gemini.fallbackModel = before; }
+});
+test('both models overloaded: the owner is told the AI is busy, in words', async () => {
+    const before = xp.cfg.gemini.fallbackModel;
+    xp.cfg.gemini.fallbackModel = 'gemini-fallback-test';
+    try {
+        XP.script = [{ throw: BUSY }, { throw: BUSY }, { throw: BUSY }, { throw: BUSY }];
+        XP.requests.length = 0;
+        const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test three' } });
+        assert.strictEqual(r.statusCode, 500);
+        assert.strictEqual(r.body.error, 'The AI is busy right now. Please try again in a minute.');
+        assert.strictEqual(XP.requests.length, 4, 'two tries on each model, no more');
+    } finally { xp.cfg.gemini.fallbackModel = before; XP.script.length = 0; }
+});
 test('a business with no Meta connection is answered without numbers, and has nothing to read', async () => {
     // Phase 50: the chat works before Meta, but only the agency's work is offered — never a numbers tool.
     XP.script = [{ parts: [{ text: 'Connect Facebook and Instagram and I can answer that.' }] }];

@@ -874,7 +874,7 @@ function modelConfig(base) {
 // request (a busy free key) moves to the next key or ends in words, instead of "Thinking…" until the
 // whole answer's 120 s deadline.
 const FIRST_CHUNK_MS = 45000;
-async function streamTurn(ai, contents, config, onDelta) {
+async function streamTurn(ai, contents, config, onDelta, model = cfg.gemini.model) {
   const parts = [];
   let text = '', usage = null, finishReason = null;
   const push = (p) => {
@@ -898,14 +898,14 @@ async function streamTurn(ai, contents, config, onDelta) {
   try {
     let stream;
     try {
-      stream = await ai.models.generateContentStream({ model: cfg.gemini.model, contents, config: { ...config, abortSignal: ctl.signal } });
+      stream = await ai.models.generateContentStream({ model, contents, config: { ...config, abortSignal: ctl.signal } });
     } catch (e) {
       if (stalled) throw stall(e);
       // A model that rejects thinkingConfig must not take the chat down with it.
       if (config.thinkingConfig && /think/i.test(e.message || '')) {
         console.warn('[chat] thinkingConfig rejected by model, retrying without:', e.message);
         const { thinkingConfig, ...rest } = config;
-        return await streamTurn(ai, contents, rest, onDelta);
+        return await streamTurn(ai, contents, rest, onDelta, model);
       }
       throw e;
     }
@@ -926,7 +926,7 @@ async function streamTurn(ai, contents, config, onDelta) {
     if (outer) outer.removeEventListener('abort', onOuter);
   }
   const calls = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
-  console.log(`[chat] turn ${Date.now() - started} ms · ${calls.length ? calls.map((c) => c.name).join(',') : 'answer'} · thinking ${usage?.thoughtsTokenCount || 0} tok`);
+  console.log(`[chat] turn ${Date.now() - started} ms · ${model} · ${calls.length ? calls.map((c) => c.name).join(',') : 'answer'} · thinking ${usage?.thoughtsTokenCount || 0} tok`);
   return { content: { role: 'model', parts }, calls, text, usage, finishReason };
 }
 
@@ -969,6 +969,21 @@ const keyTrouble = (e) => {
   if (/API key not valid|API_KEY_INVALID|PERMISSION_DENIED|\b403\b|\b401\b/i.test(m)) return 'invalid';
   return null;
 };
+// EdgeLead (phase 76): the model itself is overloaded ("experiencing high demand", 503). Every key
+// gets the same answer from it, so this is waited out and then answered by the fallback model.
+const overloaded = (e) => /\b503\b|UNAVAILABLE|overloaded|high demand/i.test(String((e && (e.status || e.code)) || '') + ' ' + String((e && e.message) || ''));
+const OVERLOAD_WAIT_MS = 2000;
+const fallbackModel = () => {
+  const f = String(cfg.gemini.fallbackModel || '').trim();
+  return f && f.toLowerCase() !== 'none' && f !== cfg.gemini.model ? f : null;
+};
+/** A pause the answer's own controller can cut short. */
+const pause = (ms, signal) => new Promise((resolve) => {
+  if (signal && signal.aborted) return resolve();
+  const t = setTimeout(done, ms);
+  function done() { clearTimeout(t); if (signal) signal.removeEventListener('abort', done); resolve(); }
+  if (signal) signal.addEventListener('abort', done, { once: true });
+});
 async function chatKeys() {
   if (keySource) {
     const list = await keySource.list();
@@ -986,14 +1001,28 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   let ai = new GoogleGenAI({ apiKey: keys[0].key });
   const report = (k, outcome, detail) => { if (keySource && keySource.report && k && k.id) Promise.resolve(keySource.report(k.id, outcome, detail)).catch(() => {}); };
   // One model turn on the current key; a key problem before any text was shown moves to the next key.
+  // Phase 76: an overloaded model is retried once after a short wait, then the answer moves to the
+  // fallback model (for the rest of its turns), retried once too; only then is the owner told it is busy.
+  let model = cfg.gemini.model;
+  let overloadTries = 0;
   const turnOn = async (cts, conf, onDelta) => {
     for (;;) {
       let shown = false;
       try {
-        const t = await streamTurn(ai, cts, conf, (d) => { shown = true; if (onDelta) onDelta(d); });
+        const t = await streamTurn(ai, cts, conf, (d) => { shown = true; if (onDelta) onDelta(d); }, model);
         report(keys[ki], 'ok');
+        overloadTries = 0;
         return t;
       } catch (e) {
+        if (overloaded(e) && !shown && !(abortSignal && abortSignal.aborted)) {
+          console.warn(`[chat] ${model} overloaded (try ${overloadTries + 1}): ${String(e.message || '').slice(0, 120)}`);
+          if (overloadTries === 0) { overloadTries = 1; await pause(OVERLOAD_WAIT_MS, abortSignal); continue; }
+          const fb = fallbackModel();
+          if (fb && model !== fb) { console.warn(`[chat] answering with ${fb} instead of ${model}`); model = fb; overloadTries = 0; continue; }
+          const busy = new Error('The AI is busy right now.');
+          busy.code = 'AI_BUSY'; busy.cause = e;
+          throw busy;
+        }
         // Phase 74: a stalled key is passed over like a rate-limited one, but not benched for it.
         const trouble = e.code === 'TURN_STALLED' ? 'stalled' : keyTrouble(e);
         console.warn(`[chat] key ${ki + 1}/${keys.length} (${keys[ki].source || 'pool'}) failed: ${e.message}`);
@@ -1115,10 +1144,10 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   let charts = [];
   try { charts = panelsFor(toolLog, toolResults, { question: message }); } catch (e) { console.error('[chat] panels failed:', e.message); }
 
-  await q(supabase.from('xp_ai_messages').insert({ conversation_id: conv.id, role: 'assistant', content: text, tool_calls: toolLog, tool_results: toolResults, model: cfg.gemini.model, tokens_in: spent.input || null, tokens_out: (spent.output + spent.thinking) || null }), 'save assistant');
+  await q(supabase.from('xp_ai_messages').insert({ conversation_id: conv.id, role: 'assistant', content: text, tool_calls: toolLog, tool_results: toolResults, model, tokens_in: spent.input || null, tokens_out: (spent.output + spent.thinking) || null }), 'save assistant');
   await q(supabase.from('xp_ai_conversations').update({ updated_at: new Date().toISOString() }).eq('id', conv.id), 'touch conv').catch(() => {});
 
-  return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model: cfg.gemini.model, usage: spent };
+  return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model, usage: spent };
 }
 
-module.exports = { convVisible, agencyOnlyPrompt, setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { convVisible, agencyOnlyPrompt, setKeySource, keyTrouble, overloaded, fallbackModel, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
