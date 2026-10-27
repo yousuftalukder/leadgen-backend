@@ -909,6 +909,11 @@ body.el-drawer-open { overflow: hidden; }
 .el-chip.is-warn { background: rgba(251,191,36,0.12); color: var(--warn); border-color: transparent; }
 .el-chip.is-bad { background: rgba(248,113,113,0.12); color: var(--danger); border-color: transparent; }
 .el-work-g { display: flex; flex-direction: column; gap: 8px; }
+/* phase 70: what each kind of work is for, and the kinds folded away for a client on Meta */
+.el-work-note { margin: 0; font-size: 0.8rem; color: var(--text-muted); line-height: 1.45; }
+.el-work-fold > summary { cursor: pointer; list-style: revert; }
+.el-work-fold > summary span { color: var(--text-muted); font-weight: 500; }
+.el-work-fold[open] { gap: 8px; }
 .el-work, .el-pick-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; text-decoration: none; cursor: pointer;
     padding: 12px 14px; border-radius: 12px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.025); font: inherit; color: inherit; }
 .el-work:hover, .el-pick-row:hover { border-color: var(--accent-solid); }
@@ -1890,3 +1895,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); b
 .wb-thumb { position: relative; width: 84px; height: 84px; }
 .wb-thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; display: block; }
 .wb-thumb .el-iconbtn { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.7); }
+
+/* ---- phase 70: @mentions in task comments (ui.js mentionPicker) ---- */
+.tk-mention { display: inline-block; padding: 0 6px; border-radius: 6px; background: rgba(24,106,255,0.18); color: #9cc3ff; font-weight: 700; white-space: nowrap; }
+.tk-mentions { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; padding: 4px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--surface-2, #151517); max-width: 360px; }
+.tk-mentions[hidden] { display: none; }
+.tk-mentions button { display: flex; gap: 10px; align-items: center; text-align: left; border: 0; background: transparent; color: var(--text-primary); padding: 6px 8px; border-radius: 8px; cursor: pointer; font: inherit; }
+.tk-mentions button span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.tk-mentions button small { color: var(--text-muted); font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; }
+.tk-mentions button.is-on, .tk-mentions button:hover { background: var(--accent-dim); }
+.tk-mentions .el-avatar { width: 26px; height: 26px; font-size: 0.7rem; flex: none; }

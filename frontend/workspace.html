@@ -82,8 +82,9 @@
     if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { location.replace('clients.html'); return; }
 
     // Phase 69: the content plan, the ad ledger (with products and stock) and message templates, typed in by the team.
-    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['reports', 'Reports'], ['content', 'Content plan'], ['ledger', 'Ad ledger'],
-        ['replies', 'Message templates'], ['leads', 'Leads'], ['meta', 'Meta'],
+    // Phase 70: their own numbers (Meta) and the team's work first; what the public-data tools made after.
+    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['meta', 'Meta'], ['content', 'Content plan'], ['ledger', 'Ad ledger'],
+        ['replies', 'Message templates'], ['reports', 'Reports'], ['leads', 'Leads'],
         ['ask', 'Assistant'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
     let tab = TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'overview';
 
@@ -329,13 +330,18 @@
     }
 
     // ---- reports ----------------------------------------------------------------
-    let reportFilter = 'all';
+    let reportFilter = 'all', reportSource = 'all';
+    // Phase 70: where a report's numbers came from, said first: their Meta, the public-data tools, or built from other reports.
+    const SOURCES = [['meta', 'Their Meta'], ['public', 'Public data · tools'], ['reports', 'Built from reports']];
     async function tabReports(body) {
         const tl = timeline || await loadTimeline();
         const reps = tl.reports || [];
-        const types = [...new Set(reps.map(r => r.report_type))];
+        const bySource = r => reportSource === 'all' || UI.sourceOf(r.report_type) === reportSource;
+        const types = [...new Set(reps.filter(bySource).map(r => r.report_type))];
+        if (reportFilter !== 'all' && !types.includes(reportFilter)) reportFilter = 'all';
         const running = (tl.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status));
-        const list = reps.filter(r => reportFilter === 'all' || r.report_type === reportFilter);
+        const list = reps.filter(r => bySource(r) && (reportFilter === 'all' || r.report_type === reportFilter));
+        const srcCount = k => reps.filter(r => UI.sourceOf(r.report_type) === k).length;
         if (!reps.length && !running.length) {
             body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No reports yet</h3><p>Reports appear here as soon as work for ${esc(c.name)} finishes, whoever on the team ran it.</p>${canEdit() ? `<button class="ws-btn is-gold" type="button" data-newwork>${ic('plus')}New work</button>` : ''}</div>`;
             body.querySelectorAll('[data-newwork]').forEach(b => b.addEventListener('click', () => EL.newWork(c.id)));
@@ -343,10 +349,13 @@
         }
         body.innerHTML = `
             ${running.length ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Running now</h2></div><div class="ws-rows">${running.map(j => `<div class="ws-row"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(UI.jobName(j.type))}</div><div class="ws-m">${esc(UI.jobState(j.status))} · ${j.progress || 0}% · started ${esc(UI.ago(j.created_at))}</div></div></div>`).join('')}</div></section>` : ''}
-            <div class="ws-filters"><button type="button" data-f="all" aria-pressed="${reportFilter === 'all'}">All <span class="ws-num">${reps.length}</span></button>${types.map(t => `<button type="button" data-f="${esc(t)}" aria-pressed="${reportFilter === t}">${esc(UI.TYPE_LABEL[t] || t)}</button>`).join('')}</div>
+            <div class="ws-filters"><button type="button" data-src="all" aria-pressed="${reportSource === 'all'}">Everything <span class="ws-num">${reps.length}</span></button>${SOURCES.filter(([k]) => srcCount(k)).map(([k, l]) => `<button type="button" data-src="${k}" aria-pressed="${reportSource === k}">${l} <span class="ws-num">${srcCount(k)}</span></button>`).join('')}</div>
+            ${liveConns().length && srcCount('public') ? `<p class="el-muted" style="margin:-4px 0 12px;font-size:0.84rem">${esc(c.name)}’s Meta is connected, so its own numbers come from Meta. Public-data reports are for content ideas and comparing with rivals.</p>` : ''}
+            ${types.length > 1 ? `<div class="ws-filters"><button type="button" data-f="all" aria-pressed="${reportFilter === 'all'}">All kinds</button>${types.map(t => `<button type="button" data-f="${esc(t)}" aria-pressed="${reportFilter === t}">${esc(UI.TYPE_LABEL[t] || t)}</button>`).join('')}</div>` : ''}
             <div class="ws-table-wrap"><table class="ws-table"><thead><tr><th>Report</th><th>About</th><th>Date</th><th>Result</th><th>Source</th></tr></thead>
             <tbody>${list.map(r => { const { subject, result } = reportLine(r); return `<tr class="is-link" data-open="${esc(r.id)}" tabindex="0"><td class="t ws-nowrap">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</td><td>${esc(subject || '—')}${r.ai_summary ? `<div class="s">${esc(r.ai_summary.slice(0, 140))}</div>` : ''}</td><td class="ws-nowrap">${esc(UI.day(r.created_at))}</td><td class="ws-nowrap">${esc(result || '—')}</td><td>${UI.srcChip(UI.sourceOf(r.report_type))}</td></tr>`; }).join('')}</tbody></table></div>`;
         body.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { reportFilter = b.dataset.f; tabReports(body); }));
+        body.querySelectorAll('[data-src]').forEach(b => b.addEventListener('click', () => { reportSource = b.dataset.src; reportFilter = 'all'; tabReports(body); }));
         wireOpen(body);
     }
 

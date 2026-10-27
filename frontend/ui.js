@@ -244,12 +244,16 @@
     // A description is plain text with pictures in it as ![image](media:<id>). Nothing
     // else is ever turned into markup, so what one person types cannot run in another's page.
     const MEDIA_TOKEN = /!\[[^\]]{0,80}\]\(media:([0-9a-f-]{36})\)/gi;
+    // Phase 70: a mention is @[Name](user:<id>); it shows as the name, highlighted.
+    const RICH_TOKEN = /!\[[^\]]{0,80}\]\(media:([0-9a-f-]{36})\)|@\[([^\]\n]{1,80})\]\(user:([0-9a-f-]{36})\)/gi;
+    const mentionHtml = (name, uid) => `<span class="tk-mention" data-uid="${esc(uid)}" data-name="${esc(name)}" contenteditable="false">@${esc(name)}</span>`;
     const linkify = html => html.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)"'])/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
     function richHtml(text, media = {}, { links = false } = {}) {
         const out = []; let last = 0; const src = String(text || '');
         const textPart = t => { const h = esc(t).replace(/\n/g, '<br>'); return links ? linkify(h) : h; };
-        for (const m of src.matchAll(MEDIA_TOKEN)) {
+        for (const m of src.matchAll(RICH_TOKEN)) {
             out.push(textPart(src.slice(last, m.index)));
+            if (m[3]) { out.push(mentionHtml(m[2], m[3].toLowerCase())); last = m.index + m[0].length; continue; }
             const id = m[1].toLowerCase(), url = media[id];
             out.push(url ? `<img class="tk-img" data-media="${esc(id)}" src="${esc(url)}" alt="Picture" loading="lazy">`
                 : `<span class="tk-img-missing" data-media="${esc(id)}" contenteditable="false">Picture</span>`);
@@ -266,6 +270,7 @@
             if (n.nodeType === 3) { out += n.nodeValue.replace(/ /g, ' '); return; }
             if (n.nodeType !== 1) return;
             if (n.dataset && n.dataset.media) { if (out && !out.endsWith('\n')) out += '\n'; out += `![image](media:${n.dataset.media})\n`; return; }
+            if (n.dataset && n.dataset.uid) { out += `@[${String(n.dataset.name || '').replace(/[\[\]\n]/g, ' ').slice(0, 80)}](user:${n.dataset.uid})`; return; }
             if (n.tagName === 'BR') { out += '\n'; return; }
             const block = BLOCK.test(n.tagName);
             if (block && out && !out.endsWith('\n')) out += '\n';
@@ -382,6 +387,59 @@
      * the facts — status, priority, who, labels, due, whether the client sees
      * it, who raised it and when. `task` null means a new one.
      */
+    /**
+     * Phase 70: type @ in a comment to mention someone on the client. A list of
+     * names opens under the box; arrows and Enter (or a click) pick one, and the
+     * name goes in as a chip the server turns into an email to them.
+     */
+    function mentionPicker(box, getPeople) {
+        const menu = document.createElement('div');
+        menu.className = 'tk-mentions'; menu.hidden = true; menu.setAttribute('role', 'listbox');
+        box.insertAdjacentElement('afterend', menu);
+        let list = [], at = 0, range = null;
+        const close = () => { menu.hidden = true; list = []; range = null; };
+        const query = () => {
+            const sel = window.getSelection();
+            if (!sel || !sel.rangeCount || !sel.isCollapsed || !box.contains(sel.anchorNode) || sel.anchorNode.nodeType !== 3) return null;
+            const text = sel.anchorNode.nodeValue.slice(0, sel.anchorOffset);
+            const m = /(^|\s)@([^\s@]{0,30})$/.exec(text);
+            if (!m) return null;
+            const r = document.createRange();
+            r.setStart(sel.anchorNode, sel.anchorOffset - m[2].length - 1); r.setEnd(sel.anchorNode, sel.anchorOffset);
+            return { q: m[2].toLowerCase(), range: r };
+        };
+        const draw = () => {
+            menu.innerHTML = list.map((p, i) => `<button type="button" role="option" class="${i === at ? 'is-on' : ''}" data-i="${i}" aria-selected="${i === at}">
+                <span class="el-avatar">${esc(initials(p.name || p.email))}</span><span><b>${esc(p.name || p.email)}</b>${p.name ? `<small>${esc(p.email)}</small>` : ''}</span></button>`).join('');
+            menu.querySelectorAll('[data-i]').forEach(b => b.addEventListener('mousedown', e => { e.preventDefault(); pick(list[Number(b.dataset.i)]); }));
+        };
+        const pick = p => {
+            if (!p || !range) return close();
+            range.deleteContents();
+            const tmp = document.createElement('span'); tmp.innerHTML = mentionHtml(p.name || p.email.split('@')[0], p.id);
+            const chip = tmp.firstChild, space = document.createTextNode('\u00a0');
+            range.insertNode(space); range.insertNode(chip);
+            const sel = window.getSelection(); const r = document.createRange();
+            r.setStartAfter(space); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+            close(); box.focus();
+        };
+        box.addEventListener('input', () => {
+            const hit = query(); const people = getPeople() || [];
+            if (!hit || !people.length) return close();
+            list = people.filter(p => `${p.name || ''} ${p.email || ''}`.toLowerCase().includes(hit.q)).slice(0, 6);
+            range = hit.range; at = 0;
+            if (!list.length) return close();
+            menu.hidden = false; draw();
+        });
+        box.addEventListener('keydown', e => {
+            if (menu.hidden) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); at = (at + (e.key === 'ArrowDown' ? 1 : list.length - 1)) % list.length; draw(); }
+            else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); pick(list[at]); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+        }, true);
+        box.addEventListener('blur', () => setTimeout(close, 150));
+    }
+
     function openTask(task, ctx = {}) {
         const isNew = !task;
         let t = task || { title: '', notes: '', status: ctx.status || 'todo', priority: 'medium', dueDate: null, labels: [...(ctx.labels || [])], checklist: [], assignee: EL.me ? { kind: 'person', id: EL.me.id } : null, visibleToClient: false };
@@ -425,7 +483,7 @@
                         ${isNew ? '' : `<section class="tk-sec"><h3>Activity</h3>
                             <div id="tk-comments" class="tk-comments"><p class="el-muted">Loading…</p></div>
                             <div class="tk-compose">
-                                <div id="tk-cbox" class="tk-editor is-small" contenteditable="true" role="textbox" aria-label="Write a comment" data-placeholder="${t.visibleToClient ? 'The client reads the comments on this task. Write to them and the team here; pictures can be pasted too.' : 'Write a comment. Only your team sees it. Pictures can be pasted here too.'}"></div>
+                                <div id="tk-cbox" class="tk-editor is-small" contenteditable="true" role="textbox" aria-label="Write a comment" data-placeholder="${t.visibleToClient ? 'The client reads the comments on this task. Write to them and the team here; type @ to mention a teammate.' : 'Write a comment. Only your team sees it. Type @ to mention someone; pictures can be pasted here too.'}"></div>
                                 <div class="tk-tools"><label class="ws-btn is-sm is-quiet tk-attach">${ic('plus')}Picture<input type="file" id="tk-cfile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
                                     <button class="ws-btn is-sm is-gold" type="button" id="tk-csend">Comment</button></div>
                             </div></section>`}
@@ -569,10 +627,12 @@
                 });
 
                 const cmedia = {};
+                let mentionable = people;
                 const drawComments = async () => {
                     try {
                         const r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`);
                         Object.assign(cmedia, r.media || {});
+                        if ((r.people || []).length) mentionable = r.people.filter(p => !EL.me || p.id !== EL.me.id);
                         $('tk-comments').innerHTML = (r.comments || []).length ? r.comments.map(m => `
                             <div class="ws-comment"><span class="el-avatar">${esc(initials(m.author.name || m.author.email))}</span>
                                 <div class="body"><div class="meta">${esc(m.author.kind === 'client' ? (m.author.name || 'Client') + ' · client' : (m.author.name || m.author.email || 'Team'))} · ${esc(ago(m.createdAt))}</div><div class="tk-rich">${richHtml(m.body, cmedia, { links: true })}</div></div></div>`).join('')
@@ -581,11 +641,16 @@
                 };
                 drawComments();
                 const cbox = pictureEditor($('tk-cbox'), { clientId: t.clientId || ctx.clientId, media: cmedia, onState: busy => { $('tk-csend').disabled = busy > 0; } });
+                mentionPicker($('tk-cbox'), () => mentionable);
                 $('tk-cfile').addEventListener('change', e => { $('tk-cbox').focus(); cbox.addFiles([...e.target.files]); e.target.value = ''; });
                 const send = async () => {
                     const v = cbox.text(); if (!v || cbox.busy()) return;
                     $('tk-csend').disabled = true;
-                    try { await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`, { method: 'POST', body: { body: v } }); $('tk-cbox').innerHTML = ''; drawComments(); if (ctx.onSaved) ctx.onSaved(); }
+                    try {
+                        const r = await EL.api(`/api/tasks/${encodeURIComponent(t.id)}/comments`, { method: 'POST', body: { body: v } });
+                        $('tk-cbox').innerHTML = ''; drawComments(); if (ctx.onSaved) ctx.onSaved();
+                        if ((r.mentioned || []).length) EL.toast(`Comment added. ${r.mentioned.length === 1 ? 'The person you mentioned' : r.mentioned.length + ' people you mentioned'} will get an email.`);
+                    }
                     catch (err) { EL.toast(err.message, 'bad'); }
                     finally { $('tk-csend').disabled = false; }
                 };
