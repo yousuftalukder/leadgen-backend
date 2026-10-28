@@ -903,6 +903,37 @@ function contentPostOwnerView(p) {
     };
 }
 
+/**
+ * Phase 78: a post the team typed into the content plan, as the owner reads it beside the planned
+ * posts: the same card, the same Approve / Ask for changes / Skip. Its first line is the hook, the
+ * rest of the description what it shows. Undecided and still planned, it waits for their OK.
+ */
+function contentEntryOwnerView(e) {
+    const lines = String(e.idea || '').split('\n').map(x => x.trim()).filter(Boolean);
+    const status = e.status === 'made' || e.status === 'posted' ? e.status
+        : e.owner_decision === 'approved' ? 'approved' : e.owner_decision === 'changes' ? 'changes' : 'idea';
+    return {
+        id: e.id, source: 'plan', plannedOn: e.planned_on || null, time: null,
+        format: [e.post_type, e.platform].filter(Boolean).join(' · ') || null,
+        hook: lines[0] || (e.caption ? String(e.caption).split('\n')[0].slice(0, 160) : null),
+        caption: e.caption || null, shot: lines.slice(1).join(' ') || null, why: null,
+        status, statusName: status === 'idea' ? 'Waiting for your OK' : cpStatusName(status),
+        yourNote: e.owner_note || null, postedUrl: e.posted_url || null
+    };
+}
+S.contentEntryOwnerView = contentEntryOwnerView;
+
+/** The team's typed posts the owner sees: from two weeks back, not skipped by anyone. [] before phase 78. */
+async function contentEntriesForOwner(clientId, since) {
+    if (!S.wbP78Ready || !(await S.wbP78Ready())) return [];
+    const { data, error } = await supabase.from('client_content_entries').select('*').eq('client_id', clientId).limit(1000);
+    if (error) return [];
+    // An undated post is still to come; a dated one from two weeks back.
+    return (data || []).filter(e => e.status !== 'skipped' && e.owner_decision !== 'skipped' && (!e.planned_on || e.planned_on >= since))
+        .sort((a, b) => String(a.planned_on || '9999').localeCompare(String(b.planned_on || '9999'))).slice(0, 60);
+}
+S.contentEntriesForOwner = contentEntriesForOwner;
+
 /** Who makes an approved post: a staff member who can still edit the client, or nobody. */
 async function contentPostAssignee(p) {
     const candidates = [];
@@ -1143,13 +1174,18 @@ app.get('/api/client/content', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
-        if (!(await contentPostsReady())) return res.json({ posts: [] });
         const own = await ownClientFor(ctx);
         if (!own) return res.json({ posts: [] });
         const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-        const { data } = await supabase.from('content_posts').select('*').eq('client_id', own.id).gte('planned_on', since)
-            .neq('status', 'skipped').order('planned_on', { ascending: true }).limit(60);
-        const posts = (data || []).map(contentPostOwnerView);
+        // The planned posts from the tool, and (phase 78) the posts the team typed in, in date order.
+        const [{ data }, typed] = await Promise.all([
+            (await contentPostsReady())
+                ? supabase.from('content_posts').select('*').eq('client_id', own.id).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(60)
+                : { data: [] },
+            contentEntriesForOwner(own.id, since)
+        ]);
+        const posts = [...(data || []).map(contentPostOwnerView), ...typed.map(contentEntryOwnerView)]
+            .sort((a, b) => String(a.plannedOn || '9999').localeCompare(String(b.plannedOn || '9999')));
         res.json({ posts, waiting: posts.filter(p => p.status === 'idea').length });
     } catch (err) { sendErr(res, err); }
 });
@@ -1158,18 +1194,32 @@ app.post('/api/client/content/:id/decision', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
         if (ctx.profile?.role !== 'client') return res.status(403).json({ error: 'This is the business owner’s view.' });
-        if (!(await contentPostsReady())) return contentPostsMissing(res);
         const own = await ownClientFor(ctx);
         if (!own || !UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Post not found.' });
-        const { data: p } = await supabase.from('content_posts').select('*').eq('id', req.params.id).eq('client_id', own.id).maybeSingle();
-        if (!p) return res.status(404).json({ error: 'Post not found.' });
         const to = { approve: 'approved', changes: 'changes', skip: 'skipped' }[String(req.body?.decision || '')];
         if (!to) return res.status(400).json({ error: 'Choose approve, changes or skip.' });
-        if (['made', 'posted'].includes(p.status)) return res.status(409).json({ error: 'This post is already made.' });
         const note = req.body?.note ? String(req.body.note).trim().slice(0, 2000) : null;
         if (to === 'changes' && !note) return res.status(400).json({ error: 'Say what you would like changed.' });
-        const row = await contentPostMove(p, to, { by: 'owner', note });
-        res.json({ post: contentPostOwnerView(row) });
+        const { data: p } = (await contentPostsReady())
+            ? await supabase.from('content_posts').select('*').eq('id', req.params.id).eq('client_id', own.id).maybeSingle()
+            : { data: null };
+        if (p) {
+            if (['made', 'posted'].includes(p.status)) return res.status(409).json({ error: 'This post is already made.' });
+            const row = await contentPostMove(p, to, { by: 'owner', note });
+            return res.json({ post: contentPostOwnerView(row) });
+        }
+        // Phase 78: a post the team typed in. The owner's answer is kept beside the team's own status;
+        // skipping it takes it off the plan.
+        if (!S.wbP78Ready || !(await S.wbP78Ready())) return res.status(404).json({ error: 'Post not found.' });
+        const { data: e } = await supabase.from('client_content_entries').select('*').eq('id', req.params.id).eq('client_id', own.id).maybeSingle();
+        if (!e || e.status === 'skipped') return res.status(404).json({ error: 'Post not found.' });
+        if (['made', 'posted'].includes(e.status)) return res.status(409).json({ error: 'This post is already made.' });
+        const now = new Date().toISOString();
+        const patch = { owner_decision: to, owner_note: to === 'changes' ? note : (note || null), decided_at: now, updated_at: now };
+        if (to === 'skipped') patch.status = 'skipped';
+        const { data: saved, error } = await supabase.from('client_content_entries').update(patch).eq('id', e.id).eq('client_id', own.id).select().maybeSingle();
+        if (error) throw error;
+        res.json({ post: contentEntryOwnerView(saved || { ...e, ...patch }) });
     } catch (err) { sendErr(res, err); }
 });
 

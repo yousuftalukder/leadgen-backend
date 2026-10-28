@@ -179,6 +179,8 @@
         ]
     };
     const CONTENT_STATUS = [['planned', 'Planned'], ['made', 'Made'], ['posted', 'Posted'], ['skipped', 'Skipped']];
+    // Phase 78: the business owner's answer to a typed post, from "Posts to approve" in Edge Meta AI.
+    const OWNER_SAID = { approved: 'Owner approved', changes: 'Owner asked for changes', skipped: 'Owner skipped it' };
     function mapSheet(kind, rows) {
         if (rows.length < 2) return { cols: [], items: [], skipped: 0 };
         const head = rows[0];
@@ -292,18 +294,39 @@
         } catch (err) { host.innerHTML = migrationNote(err) || `<div class="ws-empty">${ic('alert')}<p>${esc(err.message)}</p></div>`; return; }
         const reload = async () => { const d = await load(id, 'content'); rows = d.content || []; draw(); };
 
+        // Phase 78: a saved post can become an ad creative in the ad ledger, linked to it, so it is
+        // entered once. The owner's answer from "Posts to approve" shows above the fields.
+        const linkBox = row => {
+            if (!row || !row.id) return '';
+            if (row.creative) return `<div class="wb-link-box">${ic('check')}<span>In the ad ledger as <b>${esc(row.creative.title)}</b>. Its spend and results go on that creative.</span></div>`;
+            return canEdit ? `<div class="wb-link-box"><span>Running this post as an ad? Make it a creative in the ad ledger, filled from this post and linked to it.</span><button class="ws-btn is-sm" type="button" id="cp-creative">Use as ad creative</button></div>` : '';
+        };
+        const ownerBox = row => !row || !row.owner_decision ? ''
+            : `<div class="wb-owner is-${esc(row.owner_decision)}"><b>${esc(OWNER_SAID[row.owner_decision] || row.owner_decision)}</b>${row.owner_note ? `<span>“${esc(row.owner_note)}”</span>` : ''}</div>`;
         const open = (row, start) => openForm({
             title: row ? 'Edit post' : 'Add a post', sub: ctx.clientName, fields: contentFields(), row: row || start || null, canEdit,
+            top: ownerBox(row) + linkBox(row),
             bottom: plans.length ? `<details class="wb-more wb-ref"><summary>Ideas from the data, for reference</summary>${ideaCards(plans, { use: canEdit })}</details>` : '',
-            wire: d => d.el.querySelectorAll('[data-use]').forEach(b => b.addEventListener('click', () => {
-                const [pi, bi] = b.dataset.use.split(':').map(Number);
-                const s = ideaToRow(plans[pi].briefs[bi]);
-                for (const [k, v] of Object.entries(s)) {
-                    const el = d.el.querySelector(`[name="${k}"]`); if (!el || !v) continue;
-                    el.value = el.value.trim() && k === 'idea' ? `${el.value.trim()}\n\n${v}` : (el.value.trim() || v);
-                }
-                EL.toast('Copied into the form. Change it as you like.');
-            })),
+            wire: d => {
+                d.el.querySelectorAll('[data-use]').forEach(b => b.addEventListener('click', () => {
+                    const [pi, bi] = b.dataset.use.split(':').map(Number);
+                    const s = ideaToRow(plans[pi].briefs[bi]);
+                    for (const [k, v] of Object.entries(s)) {
+                        const el = d.el.querySelector(`[name="${k}"]`); if (!el || !v) continue;
+                        el.value = el.value.trim() && k === 'idea' ? `${el.value.trim()}\n\n${v}` : (el.value.trim() || v);
+                    }
+                    EL.toast('Copied into the form. Change it as you like.');
+                }));
+                const mk = d.el.querySelector('#cp-creative');
+                if (mk) mk.addEventListener('click', async () => {
+                    mk.disabled = true; mk.textContent = 'Making it…';
+                    try {
+                        const r = await EL.api(`${base(id)}/workbook/content/${encodeURIComponent(row.id)}/creative`, { method: 'POST' });
+                        EL.toast(r.existing ? 'It is already in the ad ledger.' : 'Added to the ad ledger, under Creatives. Log its ads there.');
+                        d.close(); await reload();
+                    } catch (err) { mk.disabled = false; mk.textContent = 'Use as ad creative'; EL.toast(err.message, 'bad'); }
+                });
+            },
             onSave: async data => { if (row) await editRow(id, 'content', row.id, data); else await addRow(id, 'content', data); EL.toast('Saved.'); await reload(); },
             onDelete: async () => { await dropRow(id, 'content', row.id); EL.toast('Deleted.'); await reload(); }
         });
@@ -334,7 +357,7 @@
                             ${list.map(r => `<tr class="is-link" data-row="${esc(r.id)}" tabindex="0">
                                 <td class="ws-nowrap ${isPast(r) && r.status === 'planned' ? 'wb-bad' : ''}">${esc(dayName(r.planned_on) || 'No date')}</td>
                                 <td>${esc(r.platform || '—')}</td><td>${esc(r.post_type || '—')}</td>
-                                <td><div class="t">${esc(clip(firstLine(r.idea || r.caption), 140)) || '—'}</div>${rest(r) ? `<div class="s">${esc(clip(rest(r), 110))}</div>` : ''}${r.posted_url ? `<div class="s"><a class="ws-link" href="${esc(r.posted_url)}" target="_blank" rel="noopener" data-stop>Open the post</a></div>` : ''}</td>
+                                <td><div class="t">${esc(clip(firstLine(r.idea || r.caption), 140)) || '—'}</div>${rest(r) ? `<div class="s">${esc(clip(rest(r), 110))}</div>` : ''}${r.posted_url ? `<div class="s"><a class="ws-link" href="${esc(r.posted_url)}" target="_blank" rel="noopener" data-stop>Open the post</a></div>` : ''}${(r.owner_decision || r.creative) ? `<div class="wb-tags">${r.owner_decision ? `<span class="el-chip ${r.owner_decision === 'approved' ? 'is-jade' : 'is-warn'}" title="${esc(r.owner_note || '')}">${esc(OWNER_SAID[r.owner_decision] || r.owner_decision)}</span>` : ''}${r.creative ? '<span class="el-chip">Ad creative</span>' : ''}</div>` : ''}</td>
                                 <td data-stop>${canEdit ? `<select class="wb-status is-${esc(r.status)}" data-status="${esc(r.id)}" aria-label="Status">${CONTENT_STATUS.map(([k, l]) => `<option value="${k}" ${k === r.status ? 'selected' : ''}>${l}</option>`).join('')}</select>` : `<span class="wb-status is-${esc(r.status)}">${esc((CONTENT_STATUS.find(s => s[0] === r.status) || [, r.status])[1])}</span>`}</td></tr>`).join('')}
                         </tbody></table></div>`
                         : `<div class="ws-empty">${ic('doc')}<h3>${filter === 'past' ? 'Nothing in the past' : 'Nothing planned yet'}</h3><p>${canEdit ? 'Add a post, or copy your content sheet (date, platform, type of post, description, with its header row) and use Paste from a sheet.' : 'The team has not planned any posts here yet.'}</p></div>`}
@@ -435,6 +458,8 @@
             const chosen = new Set((row && row.product_ids) || []);
             openForm({
                 title: row ? 'Edit creative' : 'Add a creative', sub: ctx.clientName, row, canEdit,
+                // Phase 78: made from a content-plan post; the post keeps its own page in the Content plan tab.
+                top: row && row.content_entry_id ? `<div class="wb-link-box">${ic('check')}<span>Made from a post in the content plan${row.posted_on ? `, dated ${esc(dayName(row.posted_on))}` : ''}. When that post gets its link, this creative gets it too.</span></div>` : '',
                 fields: [
                     { k: 'title', l: 'Creative name', full: true, ph: 'e.g. Reel | Combo 4+6' },
                     { k: 'format', l: 'Format', t: 'select', opts: FORMATS }, { k: 'angle', l: 'Angle', t: 'select', opts: ANGLES },

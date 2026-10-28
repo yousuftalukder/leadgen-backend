@@ -2521,6 +2521,76 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
 });
+// Phase 78: a content-plan post becomes its ad creative once, linked; and the owner approves the posts
+// the team typed in, from the same "Posts to approve" as the tool's planned posts.
+const p78 = {};
+test('"Use as ad creative" makes the creative from the post, linked, and only once', async () => {
+    const day = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: {
+        planned_on: day, platform: 'Instagram', post_type: 'Video reel', idea: 'Combo 4+6 unboxing\nShow both boxes, then the price card', caption: 'Two boxes, one price.' } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    p78.entry = add.body.row.id;
+    const r = await call('POST', `/api/clients/${state.C}/workbook/content/${p78.entry}/creative`, { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    const c = r.body.row;
+    assert.strictEqual(c.content_entry_id, p78.entry);
+    assert.strictEqual(c.title, 'Combo 4+6 unboxing', 'named after the first line of the description');
+    assert.strictEqual(c.format, 'Reel', 'a video reel is a Reel in the ad ledger');
+    assert.strictEqual(c.posted_on, day);
+    assert.ok(/Two boxes, one price\./.test(c.notes) && /Platform: Instagram/.test(c.notes));
+    const again = await call('POST', `/api/clients/${state.C}/workbook/content/${p78.entry}/creative`, { token: 't-admin' });
+    assert.strictEqual(again.body.existing, true);
+    assert.strictEqual(again.body.row.id, c.id, 'the same creative, not a second one');
+    const wb = await call('GET', `/api/clients/${state.C}/workbook`, { token: 't-admin', query: { parts: 'content' } });
+    assert.strictEqual(wb.body.content.find(x => x.id === p78.entry).creative.id, c.id, 'the post says which creative was made from it');
+    p78.creative = c.id;
+});
+test('the post going out hands its link to the creative made from it', async () => {
+    const r = await call('PATCH', `/api/clients/${state.C}/workbook/content/${p78.entry}`, { token: 't-admin', body: { status: 'posted', posted_url: 'https://www.instagram.com/reel/ABC123/' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(tbl('client_ad_creatives').find(x => x.id === p78.creative).link, 'https://www.instagram.com/reel/ABC123/');
+});
+test('the owner sees the team\'s typed posts in Posts to approve, and approves or asks for changes', async () => {
+    const day = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: { planned_on: day, post_type: 'Carousel', idea: 'Five dishes under 300 taka\nOne slide each' } });
+    const id = add.body.row.id;
+    const list = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.strictEqual(list.statusCode, 200, JSON.stringify(list.body));
+    const mine = list.body.posts.find(p => p.id === id);
+    assert.ok(mine, 'the typed post is in the owner\'s list');
+    assert.strictEqual(mine.source, 'plan');
+    assert.strictEqual(mine.status, 'idea', 'undecided: it waits for their OK');
+    assert.strictEqual(mine.hook, 'Five dishes under 300 taka');
+    const no = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'changes' } });
+    assert.strictEqual(no.statusCode, 400, 'changes need a note');
+    const ch = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'changes', note: 'Use the new menu photos' } });
+    assert.strictEqual(ch.statusCode, 200, JSON.stringify(ch.body));
+    assert.strictEqual(ch.body.post.status, 'changes');
+    const row = tbl('client_content_entries').find(x => x.id === id);
+    assert.strictEqual(row.owner_decision, 'changes');
+    assert.strictEqual(row.owner_note, 'Use the new menu photos');
+    assert.strictEqual(row.status, 'planned', 'the team\'s own status stays the team\'s');
+    const ok = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'approve' } });
+    assert.strictEqual(ok.body.post.status, 'approved');
+    // Made by the team, it is past deciding.
+    await call('PATCH', `/api/clients/${state.C}/workbook/content/${id}`, { token: 't-admin', body: { status: 'made' } });
+    const late = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'skip' } });
+    assert.strictEqual(late.statusCode, 409);
+});
+test('a typed post the owner skips leaves their list and the plan', async () => {
+    const day = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: { planned_on: day, idea: 'Staff birthday post' } });
+    const id = add.body.row.id;
+    const r = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'skip' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(tbl('client_content_entries').find(x => x.id === id).status, 'skipped');
+    const list = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.ok(!list.body.posts.some(p => p.id === id));
+});
+test('another business\'s owner cannot decide on this business\'s typed post', async () => {
+    const other = await call('POST', `/api/client/content/${p78.entry}/decision`, { token: 't-admin', body: { decision: 'approve' } });
+    assert.strictEqual(other.statusCode, 403, 'staff do not decide as the owner');
+});
 // Phase 77: an answer about the agency's work comes with follow-ups about that work, as a numbers answer
 // does. The overview of the work is the Overview sheet in the bar, never a panel in the chat.
 test('an answer about the agency\'s work comes with follow-ups about that work, and no panel in the chat', async () => {
@@ -3437,9 +3507,12 @@ test('staff put a plan on the calendar once; the owner sees what waits for them,
     assert.strictEqual(again.body.added, 0, 'pressing it twice doubled the calendar');
     const own = await call('GET', '/api/client/content', { token: 't-client' });
     assert.strictEqual(own.statusCode, 200, JSON.stringify(own.body));
-    assert.ok(own.body.posts.length >= 2 && own.body.waiting === own.body.posts.length);
-    assert.strictEqual(own.body.posts[0].statusName, 'Waiting for your OK');
-    for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy']) assert.ok(!(k in own.body.posts[0]), `the owner was sent ${k}`);
+    // The planned posts from the tool; since phase 78 the team's typed posts are in the same list, marked source 'plan'.
+    const planned = own.body.posts.filter(p => p.source !== 'plan');
+    assert.ok(planned.length >= 2 && planned.every(p => p.status === 'idea'));
+    assert.strictEqual(own.body.waiting, own.body.posts.filter(p => p.status === 'idea').length);
+    assert.strictEqual(planned[0].statusName, 'Waiting for your OK');
+    for (const p of own.body.posts) for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy', 'client_id', 'owner_decision', 'notes']) assert.ok(!(k in p), `the owner was sent ${k}`);
     state.cpPosts = put.body.posts;
 });
 test('the owner approves one (it goes on the board), asks for changes on another, and the team sees why', async () => {

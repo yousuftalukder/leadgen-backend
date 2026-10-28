@@ -223,7 +223,11 @@ test('every column the server writes is in the SQL', () => {
     for (const k of Object.values(WB_KINDS)) {
         const block = sql.slice(sql.indexOf(`public.${k.table} (`));
         const body = block.slice(0, block.indexOf(');'));
-        for (const col of Object.keys(k.fields)) assert.ok(new RegExp(`\\n\\s+${col}\\s`).test(body), `${k.table}.${col}`);
+        // A column a later phase added (phase 78: content_entry_id) is in that phase's SQL instead.
+        const later = fs.readdirSync(path.join(root, 'sql')).filter(n => /^schema-phase\d+\.sql$/.test(n) && Number(n.match(/\d+/)[0]) > 69)
+            .map(n => fs.readFileSync(path.join(root, 'sql', n), 'utf8')).join('\n');
+        for (const col of Object.keys(k.fields)) assert.ok(new RegExp(`\\n\\s+${col}\\s`).test(body)
+            || new RegExp(`alter table public\\.${k.table}\\s+add column if not exists ${col}\\s`).test(later), `${k.table}.${col}`);
     }
 });
 test('a merged client brings its workbook along', () => {
