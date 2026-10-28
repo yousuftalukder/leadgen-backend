@@ -397,9 +397,11 @@ const REPORT_NAMES = { ig_report: 'Instagram audit', deep_audit: 'Competitor che
   meta_monthly: 'Monthly report', public_monthly: 'Monthly report', meta_insights: 'Owner numbers report', content_plan: 'Content plan', fb_community: 'Local demand report' };
 async function agencyWork(clientId) {
   const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-  const [tasks, posts, reports] = await Promise.all([
+  const [tasks, posts, typed, reports] = await Promise.all([
     supabase.from('client_tasks').select('*').eq('client_id', clientId).eq('visible_to_client', true).limit(200),
     supabase.from('content_posts').select('planned_on, format, hook, status, posted_url').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
+    // EdgeLead (phase 78): the posts the team typed into the content plan, as the owner sees them.
+    supabase.from('client_content_entries').select('*').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
     // Phase 51: only reports the agency shared with the owner (an owner's own check-ups are shared at birth).
     supabase.from('reports').select('report_type, snapshot_date, created_at').eq('client_id', clientId).eq('visible_to_client', true).order('created_at', { ascending: false }).limit(6)
   ]);
@@ -411,7 +413,15 @@ async function agencyWork(clientId) {
     your_todos: rows.filter((t) => t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, due: t.due_date || null, priority: t.priority || 'medium', details: strip(t.notes) || null })),
     agency_working_on: rows.filter((t) => !t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, state: STATE[t.status] || t.status, due: t.due_date || null, priority: t.priority || 'medium' })),
     finished_last_30_days: rows.filter((t) => t.status === 'done').map((t) => ({ title: t.title, done_on: String(t.completed_at || '').slice(0, 10) })),
-    planned_posts: ((posts && posts.data) || []).map((p) => ({ on: p.planned_on, format: p.format || null, idea: p.hook || null, state: p.status === 'idea' ? 'waiting for your OK' : p.status, link: p.posted_url || null })),
+    planned_posts: [
+      ...((posts && posts.data) || []).map((p) => ({ on: p.planned_on, format: p.format || null, idea: p.hook || null, state: p.status === 'idea' ? 'waiting for your OK' : p.status, link: p.posted_url || null })),
+      // Before phase 78 the owner is not shown these, so neither is the chat: the column says it has run.
+      ...((typed && !typed.error && typed.data) || []).filter((e) => 'owner_decision' in e && e.owner_decision !== 'skipped').map((e) => ({
+        on: e.planned_on, format: e.post_type || null, idea: String(e.idea || e.caption || '').split('\n').map((x) => x.trim()).find(Boolean) || null,
+        state: ['made', 'posted'].includes(e.status) ? e.status : e.owner_decision === 'approved' ? 'approved' : e.owner_decision === 'changes' ? 'changes asked' : 'waiting for your OK',
+        link: e.posted_url || null
+      }))
+    ].sort((a, b) => String(a.on || '').localeCompare(String(b.on || ''))),
     latest_reports: ((reports && reports.data) || []).map((r) => ({ name: REPORT_NAMES[r.report_type] || 'Report', date: r.snapshot_date || String(r.created_at || '').slice(0, 10) })),
     note: 'Approvals, ticking off to-dos and opening reports are done in the Updates panel at the top of the app.'
   };

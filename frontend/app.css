@@ -1861,6 +1861,16 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); b
 .wb-status.is-made { color: var(--warn); }
 .wb-status.is-posted { color: var(--jade); }
 .wb-status.is-skipped { color: var(--text-muted); }
+/* Phase 78: a post linked to its ad creative, and the owner's answer to it */
+.wb-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.wb-link-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); font-size: .86rem; color: var(--text-secondary); }
+.wb-link-box > span { flex: 1 1 260px; }
+.wb-link-box > svg { width: 16px; height: 16px; color: var(--jade); flex: none; }
+.wb-owner { display: grid; gap: 4px; margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; font-size: .86rem; border: 1px solid var(--card-border); }
+.wb-owner.is-approved { border-color: rgba(52,211,153,.4); background: rgba(52,211,153,.07); }
+.wb-owner.is-changes, .wb-owner.is-skipped { border-color: rgba(251,191,36,.4); background: rgba(251,191,36,.07); }
+.wb-owner span { color: var(--text-secondary); }
 .wb-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; }
 @media (max-width: 640px) { .wb-fields { grid-template-columns: minmax(0, 1fr); } }
 .wb-fields .wb-full { grid-column: 1 / -1; }

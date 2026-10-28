@@ -103,7 +103,9 @@ const WB_KINDS = {
             product_ids: { ...f.ids(30, 'products'), label: 'Products shown' },
             hook: { ...f.text(1000), label: 'Hook' },
             link: { ...f.url(), label: 'Post link' },
-            notes: { ...f.text(2000), label: 'Notes' }
+            notes: { ...f.text(2000), label: 'Notes' },
+            // Phase 78: the content-plan post it was made from ("Use as ad creative").
+            content_entry_id: { ...f.id('content'), label: 'Content-plan post', p78: true }
         }
     },
     ads: {
@@ -146,7 +148,57 @@ const WB_KINDS = {
 };
 S.WB_KINDS = WB_KINDS;
 // What a reference points at: products and creatives of the same client, its template pictures.
-const WB_REF_TABLE = { products: 'client_products', creatives: 'client_ad_creatives', media: 'client_template_media' };
+const WB_REF_TABLE = { products: 'client_products', creatives: 'client_ad_creatives', media: 'client_template_media', content: 'client_content_entries' };
+
+// ---- phase 78: the content plan, linked to the ad ledger and to the owner ----------
+// The columns arrive with sql/schema-phase78.sql. Until it has run, everything else keeps working:
+// a creative is saved without the link, and the team's posts are not offered to the owner.
+const P78_RECHECK_MS = 60000;
+let _p78 = { ok: false, at: 0 };
+async function wbP78Ready() {
+    if (_p78.ok || Date.now() - _p78.at < P78_RECHECK_MS) return _p78.ok;
+    const [a, b] = await Promise.all([
+        supabase.from('client_ad_creatives').select('content_entry_id').limit(1),
+        supabase.from('client_content_entries').select('owner_decision').limit(1)
+    ]);
+    _p78 = { ok: !a.error && !b.error, at: Date.now() };
+    return _p78.ok;
+}
+S.wbP78Ready = wbP78Ready;
+function wbP78Missing(res) {
+    return res.status(503).json({
+        error: 'Linking the content plan to the ad ledger needs the phase-78 database update. Run sql/schema-phase78.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+/** Before phase 78, the new columns are left out of what is written; a value in one cannot be kept. */
+async function wbP78Strip(kind, rows, res) {
+    const cols = Object.entries(WB_KINDS[kind].fields).filter(([, s]) => s.p78).map(([c]) => c);
+    if (!cols.length || await wbP78Ready()) return true;
+    for (const r of rows) for (const c of cols) {
+        if (r[c] !== null && r[c] !== undefined) { wbP78Missing(res); return false; }
+        delete r[c];
+    }
+    return true;
+}
+
+/** The first line of a description, for a name or a hook. */
+const wbFirstLine = s => String(s || '').split('\n').map(x => x.trim()).find(Boolean) || '';
+// A content-plan type of post, as the ad ledger names its formats.
+const WB_FORMAT_OF = { 'static': 'Image', 'image': 'Image', 'video reel': 'Reel', 'reel': 'Reel', 'video': 'Video', 'carousel': 'Carousel', 'story': 'Story', 'live': 'Live' };
+/** A creative made from a content-plan post: what the post already says, nothing invented. */
+function wbCreativeFromEntry(e) {
+    const day = e.planned_on || null;
+    const first = wbFirstLine(e.idea) || wbFirstLine(e.caption);
+    const title = (first || [e.post_type, day].filter(Boolean).join(' · ') || 'Post from the content plan').slice(0, 200);
+    const notes = [e.platform ? `Platform: ${e.platform}` : null, e.caption ? `Caption:\n${e.caption}` : null].filter(Boolean).join('\n\n').slice(0, 2000) || null;
+    return {
+        title, format: WB_FORMAT_OF[String(e.post_type || '').trim().toLowerCase()] || null,
+        posted_on: day, hook: e.idea ? String(e.idea).slice(0, 1000) : null, link: e.posted_url || null, notes,
+        content_entry_id: e.id
+    };
+}
+S.wbCreativeFromEntry = wbCreativeFromEntry;
 
 function wbFail(message, statusCode = 400) { const e = new Error(message); e.statusCode = statusCode; return e; }
 
@@ -368,6 +420,12 @@ app.get('/api/clients/:id/workbook', async (req, res) => {
             if (error) { if (missingTable(error)) return wbMigration(res); throw error; }
             out[p] = p === 'templates' ? await wbTemplateViews(c.id, data || []) : (data || []);
         }
+        // Phase 78: each content-plan post says which creative was made from it.
+        if (out.content && await wbP78Ready()) {
+            const { data: made } = await supabase.from('client_ad_creatives').select('id, title, content_entry_id').eq('client_id', c.id).limit(WB_ROW_CAP);
+            const byEntry = new Map((made || []).filter(m => m.content_entry_id).map(m => [m.content_entry_id, { id: m.id, title: m.title }]));
+            out.content = out.content.map(r => ({ ...r, creative: byEntry.get(r.id) || null }));
+        }
         res.json(out);
     } catch (err) { sendErr(res, err); }
 });
@@ -389,6 +447,7 @@ app.post('/api/clients/:id/workbook/:kind', async (req, res) => {
             catch (e) { if (e.statusCode !== 400) throw e; problems.push(many ? `Row ${i + 1}: ${e.message}` : e.message); }
         });
         if (problems.length) return res.status(400).json({ error: problems[0], problems: problems.slice(0, 20) });
+        if (!(await wbP78Strip(req.params.kind, rows, res))) return;
         await wbCheckRefs(req.params.kind, c.id, rows);
 
         const { count, error: ce } = await supabase.from(k.table).select('id', { count: 'exact', head: true }).eq('client_id', c.id);
@@ -412,6 +471,7 @@ app.patch('/api/clients/:id/workbook/:kind/:rowId', async (req, res) => {
         const { c } = got;
         if (!UUID_RE.test(String(req.params.rowId))) return res.status(404).json({ error: `That ${k.label} is not on this client.` });
         const patch = wbClean(req.params.kind, req.body || {});
+        if (!(await wbP78Strip(req.params.kind, [patch], res))) return;
         const { data: cur, error: re } = await supabase.from(k.table).select('*').eq('id', req.params.rowId).eq('client_id', c.id).maybeSingle();
         if (re) { if (missingTable(re)) return wbMigration(res); throw re; }
         if (!cur) return res.status(404).json({ error: `That ${k.label} is not on this client.` });
@@ -428,6 +488,13 @@ app.patch('/api/clients/:id/workbook/:kind/:rowId', async (req, res) => {
             const gone = (cur.media_ids || []).filter(id => !(data.media_ids || []).includes(id));
             await wbRemoveMedia(c.id, await wbUnheld(c.id, gone));
             return res.json({ row: (await wbTemplateViews(c.id, [data]))[0] });
+        }
+        // Phase 78: a post that goes out hands its link to the creative made from it, if that has none yet.
+        if (req.params.kind === 'content' && data.posted_url && data.posted_url !== cur.posted_url && await wbP78Ready()) {
+            const { data: made } = await supabase.from('client_ad_creatives').select('id, link').eq('client_id', c.id).eq('content_entry_id', data.id);
+            for (const m of (made || []).filter(m => !m.link)) {
+                await supabase.from('client_ad_creatives').update({ link: data.posted_url, updated_at: new Date().toISOString() }).eq('id', m.id).eq('client_id', c.id);
+            }
         }
         res.json({ row: data });
     } catch (err) { sendErr(res, err); }
@@ -451,6 +518,33 @@ app.delete('/api/clients/:id/workbook/:kind/:rowId', async (req, res) => {
             }
         }
         res.json({ success: true });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Phase 78: "Use as ad creative". A content-plan post becomes a creative in the ad ledger, filled from
+ * what the post says, and linked to it. A post that already has its creative gets that one back: the
+ * post is entered once.
+ */
+app.post('/api/clients/:id/workbook/content/:rowId/creative', async (req, res) => {
+    try {
+        const got = await wbClient(req, res, 'editor'); if (!got) return;
+        const { ctx, c } = got;
+        if (!UUID_RE.test(String(req.params.rowId))) return res.status(404).json({ error: 'That post is not on this client.' });
+        if (!(await wbP78Ready())) return wbP78Missing(res);
+        const { data: e, error: ee } = await supabase.from('client_content_entries').select('*').eq('id', req.params.rowId).eq('client_id', c.id).maybeSingle();
+        if (ee) { if (missingTable(ee)) return wbMigration(res); throw ee; }
+        if (!e) return res.status(404).json({ error: 'That post is not on this client.' });
+        const { data: had } = await supabase.from('client_ad_creatives').select('*').eq('client_id', c.id).eq('content_entry_id', e.id).limit(1);
+        if ((had || []).length) return res.json({ row: had[0], existing: true });
+        const { count } = await supabase.from('client_ad_creatives').select('id', { count: 'exact', head: true }).eq('client_id', c.id);
+        if ((count || 0) >= WB_ROW_CAP) return res.status(400).json({ error: `A client holds ${WB_ROW_CAP} creatives at most. Delete old ones first.` });
+        const now = new Date().toISOString();
+        const row = wbClean('creatives', wbCreativeFromEntry(e), { create: true });
+        const { data, error } = await supabase.from('client_ad_creatives')
+            .insert([{ ...row, client_id: c.id, created_by: ctx.user.id, created_at: now, updated_at: now }]).select().maybeSingle();
+        if (error) throw error;
+        res.status(201).json({ row: data, existing: false });
     } catch (err) { sendErr(res, err); }
 });
 
