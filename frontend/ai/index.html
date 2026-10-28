@@ -28,7 +28,7 @@
     -->
     <base href="../">
     <!-- Phase 83: English or বাংলা, set before anything is drawn. -->
-    <script src="ai/i18n.js?v=1"></script>
+    <script src="ai/i18n.js?v=2"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
@@ -121,6 +121,12 @@
     .acct-txt small { display: block; color: var(--lime); font-size: 0.72rem; }
     .ai-page .acct-menu { position: absolute; left: 10px; right: 10px; bottom: calc(100% - 4px); top: auto; width: auto; z-index: 80; }
     .acct-menu [hidden] { display: none; }
+    .acct-sep { height: 1px; margin: 4px 2px; background: rgba(var(--ink), 0.08); }
+    .acct-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 6px 6px 11px; font-size: 0.84rem; color: var(--text-primary); }
+    .acct-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: rgba(var(--ink), 0.06); border: 1px solid rgba(var(--ink), 0.08); }
+    .oa-menu .acct-seg button { width: auto; padding: 4px 10px; font-size: 0.78rem; border-radius: 6px; color: var(--text-muted); }
+    .oa-menu .acct-seg button[aria-checked="true"] { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+    .acct-seg [lang="bn"] { font-family: 'Anek Bangla', var(--font-body, sans-serif); }
     .oa-side-toggle { position: relative; display: inline-grid; place-items: center; padding: 6px 8px; }
     .side-badge { position: absolute; top: -6px; right: -7px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; display: grid; place-items: center;
         background: var(--accent-solid); color: #000; font-size: 0.66rem; font-weight: 800; }
@@ -269,10 +275,25 @@
             <div class="side-acct">
                 <div id="ai-menu" role="menu" aria-label="Account" class="oa-menu acct-menu hidden">
                     <button type="button" role="menuitem" id="acct-profile">Profile</button>
+                    <div class="acct-sep"></div>
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
-                    <button type="button" role="menuitem" id="acct-theme">Light theme</button>
-                    <button type="button" role="menuitem" id="acct-lang" data-no-i18n lang="bn">বাংলা</button>
                     <button type="button" role="menuitem" id="acct-help">Help</button>
+                    <!-- Phase 84, as in the Owner Assistant: Theme and Language as rows, each showing what is chosen -->
+                    <div class="acct-row">
+                        <span>Theme</span>
+                        <span class="acct-seg" role="group" aria-label="Theme">
+                            <button type="button" role="menuitemradio" data-theme-pick="dark" aria-checked="true">Dark</button>
+                            <button type="button" role="menuitemradio" data-theme-pick="light" aria-checked="false">Light</button>
+                        </span>
+                    </div>
+                    <div class="acct-row">
+                        <span>Language</span>
+                        <span class="acct-seg" role="group" aria-label="Language" data-no-i18n>
+                            <button type="button" role="menuitemradio" data-lang-pick="en" lang="en" aria-checked="true">English</button>
+                            <button type="button" role="menuitemradio" data-lang-pick="bn" lang="bn" aria-checked="false">বাংলা</button>
+                        </span>
+                    </div>
+                    <div class="acct-sep"></div>
                     <button type="button" role="menuitem" data-signout>Sign out</button>
                 </div>
                 <button class="acct-btn" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu">
@@ -322,6 +343,7 @@
 <script id="chartjs" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" defer></script>
 <script src="report-view.js"></script>
 <script src="meta-ai.js"></script>
+<script src="phone-codes.js"></script>
 <script src="owner-hub.js"></script>
 <script>
 (async function () {
@@ -491,17 +513,24 @@
         const install = $('acct-install');
         install.hidden = EL.isStandalone();
         install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });
-        // Phase 81: the item names the theme it switches to; the menu stays open so the change is seen.
-        // Phase 83: the item names the other language in its own script; leaving Bangla reloads the page.
-        const langBtn = $('acct-lang');
-        const other = () => (ELLang.current() === 'bn' ? 'en' : 'bn');
-        const langLabel = () => { langBtn.textContent = ELLang.LANGS[other()].name; langBtn.lang = other(); };
-        langLabel();
-        langBtn.addEventListener('click', () => { closeMenu(); ELLang.set(other()); langLabel(); });
-        const themeBtn = $('acct-theme');
-        const themeLabel = () => { themeBtn.textContent = EMATheme.current() === 'light' ? 'Dark theme' : 'Light theme'; };
-        themeLabel();
-        themeBtn.addEventListener('click', e => { e.stopPropagation(); EMATheme.set(EMATheme.current() === 'light' ? 'dark' : 'light'); themeLabel(); });
+        // Phase 84, as in the Owner Assistant: Theme (Dark | Light, kept on this device) and Language (English |
+        // বাংলা, kept on the account so it follows the owner to every device). The menu stays open for the theme.
+        const mark = (sel, on) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-checked', String(on(b))));
+        const syncPicks = () => {
+            mark('[data-theme-pick]', b => b.dataset.themePick === EMATheme.current());
+            mark('[data-lang-pick]', b => b.dataset.langPick === ELLang.current());
+        };
+        syncPicks();
+        document.querySelectorAll('[data-theme-pick]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); EMATheme.set(b.dataset.themePick); syncPicks(); }));
+        const chooseLang = async (l) => {
+            if (l === ELLang.current()) return;
+            // saved on the account first: leaving Bangla reloads the page, and the reload must find the new choice
+            await EL.api('/api/me/profile', { method: 'POST', body: { ui_language: l } }).then(() => { me.ui_language = l; }).catch(() => { /* this device still keeps it */ });
+            ELLang.set(l); syncPicks();
+        };
+        document.querySelectorAll('[data-lang-pick]').forEach(b => b.addEventListener('click', () => { closeMenu(); chooseLang(b.dataset.langPick); }));
+        // After signing in, the account's own choice wins over this device's (as in the Owner Assistant).
+        if (me.ui_language && ELLang.LANGS[me.ui_language] && me.ui_language !== ELLang.current()) ELLang.set(me.ui_language);
         $('acct-help').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('help'); });
 
         const menu = $('ai-menu'), more = $('ai-more');

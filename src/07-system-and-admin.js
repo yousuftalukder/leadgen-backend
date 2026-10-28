@@ -7,6 +7,7 @@
  */
 'use strict';
 const S = require('./shared');
+const PHONE = require('../frontend/phone-codes.js');   // phase 84: one set of phone rules for the page and the server
 const {
     ALERT_WEBHOOK, APIFY_CYCLE_CREDIT, APIFY_MEMORY_MB, APIFY_TIMEOUT_SECS, APP_VERSION, ApifyClient,
     BOOT_TS, BUDGET_MODE, COST_PER_1K_FB_POSTS, COST_PER_1K_POSTS, COST_PER_1K_PROFILE, EMAIL_RE, ENC_KEY,
@@ -419,7 +420,9 @@ app.get('/api/me', async (req, res) => {
         // Phase 82: the profile. phone and the photo are null until the phase-82 database update.
         full_name: ctx.profile.full_name || null,
         phone: ctx.profile.phone || null,
-        avatar_url: await avatarUrl(ctx.profile.avatar_path)
+        avatar_url: await avatarUrl(ctx.profile.avatar_path),
+        // Phase 84: the language chosen for Edge Meta AI, on the account so it follows them. Null: not chosen yet.
+        ui_language: ctx.profile.ui_language || null
     };
 
     // Only a client needs a window and an allowance on screen. An employee
@@ -442,7 +445,11 @@ app.get('/api/me', async (req, res) => {
 
     if (ctx.profile.role === 'client') {
         const own = await S.ownClientFor(ctx).catch(() => null);
-        body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
+        // Phase 84: with what the agency has (shown, not editable) and what the owner told it, for the Profile.
+        body.business = own ? {
+            id: own.id, name: own.name, ig_handle: own.ig_handle || null, fb_page: own.fb_page || null,
+            niche: own.niche || null, location: own.location || null, details: ownerDetails(own.owner_details)
+        } : null;
         // An owner login the agency made: no trial clock, and no business means access has ended.
         body.agency_owner = ctx.profile.agency_owner === true;
         // Phase 56: why there is no business — a trial that ran out says so, with the date.
@@ -492,7 +499,6 @@ const AVATAR_BUCKET = process.env.AVATAR_BUCKET || 'avatars';
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_TTL_SECS = 24 * 3600;
 const AVATAR_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
-const PHONE_RE = /^[+0-9 ()\-]{6,40}$/;
 let _avatarBucket = null;
 
 /** A missing phone or avatar_path column: the phase-82 SQL has not been run. */
@@ -556,16 +562,25 @@ app.post('/api/me/profile', rateLimit({ windowMs: 60000, max: 20, key: bearerId 
             patch.full_name = name;
         }
         if (b.phone !== undefined) {
-            const phone = String(b.phone || '').replace(/\s+/g, ' ').trim();
-            if (phone && !PHONE_RE.test(phone)) return res.status(400).json({ error: 'A phone number is digits, with + ( ) - or spaces if you like.' });
-            patch.phone = phone || null;
+            // Phase 84: a country code and the number, checked as the page checks it ("+880 1712345678")
+            const ph = PHONE.normalize(b.phone);
+            if (!ph.ok) return res.status(400).json({ error: ph.error });
+            patch.phone = ph.value;
+        }
+        if (b.ui_language !== undefined) {
+            if (!UI_LANGUAGES.includes(b.ui_language)) return res.status(400).json({ error: 'That language is not offered.' });
+            patch.ui_language = b.ui_language;
         }
         if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change.' });
         patch.updated_at = new Date().toISOString();
         const { error } = await supabase.from('app_users').update(patch).eq('id', ctx.user.id);
-        if (error) { if (missing82(error)) return migration82(res); throw error; }
+        if (error) { if (missing84(error)) return migration84(res); if (missing82(error)) return migration82(res); throw error; }
         invalidateAuth(ctx.user.id);
-        res.json({ success: true, full_name: patch.full_name ?? ctx.profile.full_name ?? null, phone: 'phone' in patch ? patch.phone : (ctx.profile.phone || null) });
+        res.json({
+            success: true, full_name: patch.full_name ?? ctx.profile.full_name ?? null,
+            phone: 'phone' in patch ? patch.phone : (ctx.profile.phone || null),
+            ui_language: patch.ui_language || ctx.profile.ui_language || null
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -609,6 +624,69 @@ app.delete('/api/me/avatar', rateLimit({ windowMs: 60000, max: 10, key: bearerId
         await removeAvatarObject(ctx.profile.avatar_path);
         invalidateAuth(ctx.user.id);
         res.json({ success: true, avatar_url: null });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 84 :: THE OWNER'S SETTINGS, AS IN THE OWNER ASSISTANT
+//
+// The language is kept on the account (app_users.ui_language), through
+// /api/me/profile above. The business: what the owner tells the agency about
+// it, from their Profile (clients.owner_details). The agency's own fields
+// (name, what they do, where, its notes) are not touched here; the agency
+// reads these on the client's Settings tab.
+// ===========================================================================
+const UI_LANGUAGES = ['en', 'bn'];
+const OWNER_DETAIL_LIMITS = { phone: 40, website: 200, address: 200, hours: 300, notes: 1000 };
+
+/** A missing ui_language or owner_details column: the phase-84 SQL has not been run. */
+function missing84(err) {
+    return !!err && (err.code === 'PGRST204' || err.code === '42703') && /ui_language|owner_details/i.test(String(err.message || ''));
+}
+function migration84(res) {
+    return res.status(503).json({
+        error: 'This needs the phase-84 database update. Run sql/schema-phase84.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+
+/** The stored details: only the known fields, as strings. */
+function ownerDetails(d) {
+    const out = {};
+    for (const k of Object.keys(OWNER_DETAIL_LIMITS)) out[k] = d && typeof d[k] === 'string' ? d[k] : '';
+    return out;
+}
+
+/** The owner's own business: phone, website, address, opening hours, anything the agency should know. */
+app.post('/api/me/business', rateLimit({ windowMs: 60000, max: 20, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile.role !== 'client') return res.status(403).json({ error: 'Only a business owner has a business here.' });
+        const own = await S.ownClientFor(ctx).catch(() => null);
+        if (!own) return res.status(404).json({ error: 'There is no business on this account.' });
+        const b = req.body && req.body.details;
+        if (!b || typeof b !== 'object' || Array.isArray(b)) return res.status(400).json({ error: 'Send the details.' });
+        const details = {};
+        for (const [k, max] of Object.entries(OWNER_DETAIL_LIMITS)) {
+            // a note and the hours keep their lines; the rest is one line
+            const raw = String(b[k] ?? '');
+            const v = (k === 'notes' || k === 'hours' ? raw.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n') : raw.replace(/\s+/g, ' ')).trim();
+            if (v.length > max) return res.status(400).json({ error: `That is too long: ${max} letters at most.` });
+            details[k] = v;
+        }
+        if (details.phone) {
+            const ph = PHONE.normalize(details.phone);
+            if (!ph.ok) return res.status(400).json({ error: ph.error });
+            details.phone = ph.value;
+        }
+        if (details.website && !/^(https?:\/\/)?[^\s/]+\.[^\s]{2,}/i.test(details.website)) {
+            return res.status(400).json({ error: 'That website does not look right. For example: www.yourbusiness.com' });
+        }
+        const empty = Object.values(details).every(v => !v);
+        const { error } = await supabase.from('clients')
+            .update({ owner_details: empty ? null : { ...details, updated_at: new Date().toISOString() } }).eq('id', own.id);
+        if (error) { if (missing84(error)) return migration84(res); throw error; }
+        res.json({ success: true, details });
     } catch (err) { sendErr(res, err); }
 });
 

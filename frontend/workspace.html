@@ -39,6 +39,11 @@
     #rv-frame { flex: 1; width: 100%; border: 0; background: var(--bg-color); }
     body.rvw-open { overflow: hidden; }
     @media (max-width: 720px) { .rvw-panel { inset: 0; border-radius: 0; } }
+    /* phase 84: what the owner filled in */
+    .ws-owner-dl { display: grid; grid-template-columns: minmax(120px, 180px) 1fr; gap: 8px 16px; margin: 12px 0 0; font-size: 0.9rem; }
+    .ws-owner-dl dt { color: var(--text-muted); }
+    .ws-owner-dl dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+    @media (max-width: 560px) { .ws-owner-dl { grid-template-columns: 1fr; gap: 2px; } .ws-owner-dl dd { margin-bottom: 8px; } }
 </style>
 </head>
 <body>
@@ -725,6 +730,22 @@
     }
 
     // ---- settings ---------------------------------------------------------------
+    // Phase 84: what the owner told the agency from Edge Meta AI's Profile. Read only here: it is theirs.
+    function ownerDetailsCard(d) {
+        if (!d || typeof d !== 'object') return '';
+        const site = d.website ? (/^https?:\/\//i.test(d.website) ? d.website : 'https://' + d.website) : '';
+        const rows = [
+            ['Phone', d.phone ? `<a href="tel:${esc(String(d.phone).replace(/\s+/g, ''))}">${esc(d.phone)}</a>` : ''],
+            ['Website', site ? `<a href="${EL.safeUrl(site)}" target="_blank" rel="noopener noreferrer">${esc(d.website)}</a>` : ''],
+            ['Address', esc(d.address || '')],
+            ['Opening hours', esc(d.hours || '').replace(/\n/g, '<br>')],
+            ['Anything we should know', esc(d.notes || '').replace(/\n/g, '<br>')]
+        ].filter(([, v]) => v);
+        if (!rows.length) return '';
+        return `<section class="ws-card"><h2>From the owner</h2>
+            <p class="el-muted">What ${esc(c.name)}’s owner filled in on their Profile in Edge Meta AI${d.updated_at ? `, last on ${esc(UI.day(d.updated_at))}` : ''}. Only they can change it.</p>
+            <dl class="ws-owner-dl">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></section>`;
+    }
     async function tabSettings(body) {
         const all = (await EL.clients(true)).filter(x => x.id !== c.id && !x.archived && ['owner', 'admin'].includes(x.access));
         const dis = canEdit() ? '' : 'disabled';
@@ -753,6 +774,7 @@
                     <div id="r-progress"></div><div id="r-found"></div>
                 </section>
             </div>
+            ${ownerDetailsCard(c.owner_details)}
             ${isOwner() ? `<section class="ws-card"><h2>Archive, merge or delete</h2>
                 <p class="el-muted">Archiving hides the client and keeps everything. Merging moves everything from another client into this one and archives the other — for duplicates. Deleting removes the client; its reports stay but lose their link to it.</p>
                 <div class="ws-actions">

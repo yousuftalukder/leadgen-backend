@@ -62,7 +62,7 @@ test('the page loads the language before anything is drawn, and names Bangla in 
     const html = fs.readFileSync(path.join(ROOT, 'frontend', 'ai', 'index.html'), 'utf8');
     const head = html.slice(0, html.indexOf('</head>'));
     assert.ok(head.indexOf('<base href="../">') < head.indexOf('src="ai/i18n.js'), 'i18n.js after <base>, in the head');
-    assert.match(html, /id="acct-lang" data-no-i18n lang="bn">বাংলা</);
+    assert.match(html, /data-lang-pick="bn" lang="bn" aria-checked="false">বাংলা</);
     assert.match(html, /html\.i18n-wait body \{ visibility: hidden; \}/);
 });
 

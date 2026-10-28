@@ -381,8 +381,34 @@
         cv.getContext('2d').drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
         return new Promise((ok, no) => cv.toBlob(b => (b ? ok(b) : no(new Error('That picture could not be read.'))), 'image/jpeg', 0.88));
     }
+    // Phase 84, as in the Owner Assistant's Profile: the phone is a country code and the number, checked here as the
+    // server checks it (phone-codes.js); "Your business" is what the owner tells the agency (phone, website, address,
+    // hours, anything else), beside what the agency has; "Sign-in" shows the email and signs out every device.
+    const PH = () => window.PHONE || null;
+    function phoneField(id, value) {
+        const P = PH(), p = P ? P.parse(value) : { iso: 'BD', national: String(value || '') };
+        const list = P ? P.COUNTRIES : [['BD', 'Bangladesh', '880']];
+        const c = list.find(x => x[0] === p.iso) || list[0];
+        return `<div class="hub-phone">
+                <span class="hub-cc"><select id="${id}-cc" aria-label="Country code">${list.map(([iso, name, code]) => `<option value="${iso}"${iso === c[0] ? ' selected' : ''}>${esc(name)} (+${code})</option>`).join('')}</select><span aria-hidden="true" data-no-i18n>${c[0]} +${c[2]}</span></span>
+                <input id="${id}" type="tel" inputmode="tel" autocomplete="tel-national" maxlength="20" placeholder="Phone number" value="${esc(p.national)}">
+            </div>`;
+    }
+    function phoneCheck(root, id) {
+        const P = PH(), iso = root.querySelector(`#${id}-cc`).value, raw = root.querySelector('#' + id).value;
+        return P ? P.check(iso, raw) : { ok: true, value: raw.trim() || null };
+    }
+    function wirePhone(root, id, onInput) {
+        const sel = root.querySelector(`#${id}-cc`), show = sel.nextElementSibling;
+        sel.addEventListener('change', () => { const c = (PH() ? PH().COUNTRIES : []).find(x => x[0] === sel.value); if (c) show.textContent = `${c[0]} +${c[2]}`; onInput(); });
+        root.querySelector('#' + id).addEventListener('input', onInput);
+    }
+    const say = (el, text, kind) => { el.textContent = text || ''; el.className = 'hub-err' + (kind ? ' is-' + kind : ''); };
+
     function openProfile() {
-        const s = sheet('Profile', 'How you show up to your agency', openProfile);
+        const s = sheet('Profile', 'You, your business and how you sign in', openProfile);
+        const biz = (me && me.business) || null, d = (biz && biz.details) || {};
+        const agencyLine = biz ? [biz.niche, biz.location, biz.ig_handle ? '@' + biz.ig_handle : ''].filter(Boolean).map(esc).join(' · ') : '';
         s.body.innerHTML = `<div class="hub-prof">
                 <div class="hub-prof-av" id="pf-av"></div>
                 <div class="hub-prof-pic">
@@ -391,17 +417,40 @@
                 </div>
             </div>
             <p class="hub-err" id="pf-pmsg" role="alert"></p>
+            <section class="hub-card"><h3>Your details</h3>
             <div class="hub-form">
                 <label for="pf-name">Your name</label>
                 <input id="pf-name" autocomplete="name" maxlength="80" value="${esc((me && me.full_name) || '')}">
                 <label for="pf-phone">Phone <span class="hub-opt">(if you like)</span></label>
-                <input id="pf-phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="40" value="${esc((me && me.phone) || '')}">
-                <label>Email</label>
-                <p class="hub-prof-mail">${esc((me && me.email) || '')}</p>
-                <p class="hub-tip">You sign in with this email. To use another one, ask your agency: they can change it for you.</p>
+                ${phoneField('pf-phone', me && me.phone)}
                 <button class="btn-primary" type="button" id="pf-save" disabled>Save</button>
                 <p class="hub-err" id="pf-msg" role="alert"></p>
-            </div>`;
+            </div></section>
+            ${biz ? `<section class="hub-card"><h3>Your business</h3>
+            <div class="hub-biz"><b>${esc(biz.name)}</b>${agencyLine ? `<span>${agencyLine}</span>` : ''}</div>
+            <div class="hub-form">
+                <label for="bz-phone">Business phone</label>
+                ${phoneField('bz-phone', d.phone)}
+                <label for="bz-website">Website</label>
+                <input id="bz-website" inputmode="url" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="www.yourbusiness.com" value="${esc(d.website || '')}">
+                <label for="bz-address">Address</label>
+                <input id="bz-address" autocomplete="street-address" maxlength="200" value="${esc(d.address || '')}">
+                <label for="bz-hours">Opening hours</label>
+                <textarea id="bz-hours" rows="2" maxlength="300" placeholder="Sat–Thu 10am–10pm, Fri closed">${esc(d.hours || '')}</textarea>
+                <label for="bz-notes">Anything your agency should know</label>
+                <textarea id="bz-notes" rows="3" maxlength="1000" placeholder="Offers coming up, what you want more of, what to avoid">${esc(d.notes || '')}</textarea>
+                <p class="hub-tip">Your agency sees these. To change the business name or what you do, ask your agency.</p>
+                <button class="btn-primary" type="button" id="bz-save" disabled>Save</button>
+                <p class="hub-err" id="bz-msg" role="alert"></p>
+            </div></section>` : ''}
+            <section class="hub-card"><h3>Sign-in</h3>
+            <div class="hub-form">
+                <label>Email</label>
+                <p class="hub-prof-mail">${esc((me && me.email) || '')}</p>
+                <p class="hub-tip">You sign in with a code sent to this email, so there is no password to remember. To use another email, ask your agency: they can change it for you.</p>
+                <button class="btn-secondary" type="button" id="pf-out-all">Sign out on every device</button>
+                <p class="hub-err" id="pf-out-msg" role="alert"></p>
+            </div></section>`;
         const $ = id => s.body.querySelector('#' + id);
         const drawAv = () => {
             const url = me && me.avatar_url;
@@ -409,23 +458,69 @@
             $('pf-rm').hidden = !url;
         };
         drawAv();
-        const dirty = () => $('pf-name').value.trim() !== ((me && me.full_name) || '') || $('pf-phone').value.trim() !== ((me && me.phone) || '');
+
+        // your details
+        const phoneNow = () => { const r = phoneCheck(s.body, 'pf-phone'); return r.ok ? (r.value || '') : null; };
+        const dirty = () => $('pf-name').value.trim() !== ((me && me.full_name) || '') || phoneNow() !== ((me && me.phone) || '');
         const ready = () => { $('pf-save').disabled = !dirty() || !$('pf-name').value.trim(); };
-        $('pf-name').addEventListener('input', ready); $('pf-phone').addEventListener('input', ready);
+        $('pf-name').addEventListener('input', ready);
+        wirePhone(s.body, 'pf-phone', ready);
         const save = async () => {
             if ($('pf-save').disabled) return;
-            $('pf-save').disabled = true; $('pf-msg').textContent = ''; $('pf-msg').className = 'hub-err';
+            const ph = phoneCheck(s.body, 'pf-phone');
+            if (!ph.ok) return say($('pf-msg'), ph.error);
+            $('pf-save').disabled = true; say($('pf-msg'), '');
             try {
-                const r = await EL.api('/api/me/profile', { method: 'POST', body: { full_name: $('pf-name').value, phone: $('pf-phone').value } });
+                const r = await EL.api('/api/me/profile', { method: 'POST', body: { full_name: $('pf-name').value, phone: ph.value || '' } });
                 Object.assign(me, { full_name: r.full_name, phone: r.phone });
-                $('pf-name').value = r.full_name || ''; $('pf-phone').value = r.phone || '';
-                $('pf-msg').textContent = 'Saved.'; $('pf-msg').className = 'hub-err is-good';
+                $('pf-name').value = r.full_name || '';
+                if (PH()) $('pf-phone').value = PH().parse(r.phone).national;   // as it was kept: "1812000000"
+                say($('pf-msg'), 'Saved.', 'good');
                 drawAv(); changed();
-            } catch (err) { $('pf-msg').textContent = err.message; }
+            } catch (err) { say($('pf-msg'), err.message); }
             ready();
         };
         $('pf-save').addEventListener('click', save);
         [$('pf-name'), $('pf-phone')].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') save(); }));
+
+        // your business
+        if (biz) {
+            const FIELDS = ['website', 'address', 'hours', 'notes'];
+            const bizNow = () => {
+                const ph = phoneCheck(s.body, 'bz-phone');
+                const out = { phone: ph.ok ? (ph.value || '') : null };
+                for (const k of FIELDS) out[k] = $('bz-' + k).value.trim();
+                return out;
+            };
+            const bizReady = () => { const n = bizNow(); $('bz-save').disabled = ['phone', ...FIELDS].every(k => n[k] === (d[k] || '')); };
+            FIELDS.forEach(k => $('bz-' + k).addEventListener('input', bizReady));
+            wirePhone(s.body, 'bz-phone', bizReady);
+            $('bz-save').addEventListener('click', async () => {
+                const ph = phoneCheck(s.body, 'bz-phone');
+                if (!ph.ok) return say($('bz-msg'), ph.error);
+                $('bz-save').disabled = true; say($('bz-msg'), '');
+                try {
+                    const r = await EL.api('/api/me/business', { method: 'POST', body: { details: { ...bizNow(), phone: ph.value || '' } } });
+                    Object.assign(d, r.details); biz.details = d;
+                    if (PH()) $('bz-phone').value = PH().parse(d.phone).national;
+                    say($('bz-msg'), 'Saved. Your agency sees it now.', 'good');
+                } catch (err) { say($('bz-msg'), err.message); }
+                bizReady();
+            });
+        }
+
+        // sign-in: every session of this login ends, this one too
+        $('pf-out-all').addEventListener('click', async () => {
+            if (!confirm('Sign out on every device, this one too? You sign in again with a code sent to your email.')) return;
+            $('pf-out-all').disabled = true; say($('pf-out-msg'), 'Signing out…', 'muted');
+            try {
+                const { error } = await EL.supabase.auth.signOut({ scope: 'global' });
+                if (error) throw error;
+                EL.signOut();
+            } catch (err) { $('pf-out-all').disabled = false; say($('pf-out-msg'), 'That did not go through. Please try again.'); }
+        });
+
+        // the photo
         $('pf-file').addEventListener('change', async () => {
             const file = $('pf-file').files[0]; $('pf-file').value = '';
             if (!file) return;
@@ -453,17 +548,41 @@
     // How the app works, in the owner's words, from the account menu.
     function openHelp() {
         const s = sheet('Help', 'How Edge Meta AI works', openHelp);
-        const part = (title, html) => `<section class="help-part"><h3>${title}</h3>${html}</section>`;
+        // Phase 84, as in the Owner Assistant: questions in groups, each opening to its answer. What does not apply
+        // here is left out (Add to Home Screen when the app already runs from there).
+        const q = (title, html, open = false) => `<details class="help-q"${open ? ' open' : ''}><summary>${title}</summary><div class="help-a">${html}</div></details>`;
+        const group = (title, qs) => `<section class="help-group"><h3>${title}</h3>${qs.join('')}</section>`;
         s.body.innerHTML = `<div class="help">
-            ${part('Ask anything', `<p>Type a question at the bottom, or tap the microphone and say it. The words appear in the box first, so you can check them before you send.</p>
-                <ul><li>“How are we doing this month so far?”</li><li>“Which post did best last month?”</li><li>“What are you working on for us?”</li><li>“When is our next post?”</li></ul>
-                <p>Answers come from your own Instagram and Facebook numbers and from what your agency shares with you. Charts and follow-up questions appear under an answer when they help.</p>`)}
-            ${part('Your updates, in the bar on the left', `<p><b>Overview</b> shows all of your agency’s work at once. <b>To-dos</b> are what your agency needs from you: tick one off right there. <b>Reports</b> opens every report your agency shared, and a new check-up. <b>Posts to approve</b> is where you approve a planned post, ask for changes, or skip it.</p>
-                <p>On a phone, the bar opens from the button at the top left. The number on it is how many things wait for you.</p>`)}
-            ${part('Your numbers', `<p>Your numbers update by themselves twice a day. The last day or two can still change while Meta finishes counting. Edge Meta AI only reads: nothing is ever posted, and no messages are read.</p>`)}
-            ${part('On your phone', `<p>Open the account menu at the bottom of the bar and choose <b>Add to Home Screen</b>. Edge Meta AI then opens full screen, like an app.</p>`)}
-            ${part('Signing in', `<p>There is no password. Each time, enter your email and the 6-digit code we send to it. Your agency can also send you a one-tap sign-in link, and can change the email you sign in with.</p>`)}
-            ${part('Something wrong?', `<p>Ask your agency: they see the same work and reports you do, and can fix a to-do, a post or a report for you.</p>`)}
+            <p class="help-lead">Edge Meta AI answers questions about your business’s Instagram and Facebook, from your own numbers, and keeps your agency’s work for you in one place. Tap a question to read the answer.</p>
+            ${group('Asking questions', [
+                q('What can I ask?', `<p>Type a question at the bottom, or tap the microphone and say it. The words appear in the box first, so you can check them before you send.</p>
+                    <ul><li>“How are we doing this month so far?”</li><li>“Which post did best last month?”</li><li>“What are you working on for us?”</li><li>“When is our next post?”</li></ul>
+                    <p>Answers come from your own Instagram and Facebook numbers and from what your agency shares with you. Charts and follow-up questions appear under an answer when they help.</p>`, true),
+                q('Where do the numbers come from?', `<p>Your numbers update by themselves twice a day. The last day or two can still change while Meta finishes counting. Edge Meta AI only reads: nothing is ever posted, and no messages are read.</p>`),
+                q('Asking in Bangla', `<p>Account menu → <b>Language</b> → <b>বাংলা</b>. The app’s words and the answers are then in Bangla; names and figures stay as Meta gives them. Your choice is kept on your account, so every device you use follows it.</p>`)
+            ])}
+            ${group('Chats', [
+                q('Finding, renaming or deleting a chat', `<p>Your chats are kept under <b>Recent chats</b> in the bar. Tap one to carry on where you left off. To rename or delete one, tap its <b>⋯</b> button.</p>`),
+                q('Starting again', `<p>Tap <b>New chat</b> in the bar. Your earlier chats stay in the list.</p>`)
+            ])}
+            ${group('Your agency’s work', [
+                q('Your updates, in the bar on the left', `<p><b>Overview</b> shows all of your agency’s work at once. <b>To-dos</b> are what your agency needs from you: tick one off right there. <b>Reports</b> opens every report your agency shared, and a new check-up. <b>Posts to approve</b> is where you approve a planned post, ask for changes, or skip it.</p>
+                    <p>On a phone, the bar opens from the button at the top left. The number on it is how many things wait for you.</p>`),
+                q('Something wrong?', `<p>Ask your agency: they see the same work and reports you do, and can fix a to-do, a post or a report for you.</p>`)
+            ])}
+            ${group('Your account', [
+                q('Changing your name, photo or phone', `<p>Account menu → <b>Profile</b>: your photo, your name and phone, your business’s details for your agency (phone, website, address, opening hours, anything they should know), and how you sign in.</p>`),
+                q('Signing in', `<p>There is no password. Each time, enter your email and the 6-digit code we send to it. Your agency can also send you a one-tap sign-in link, and can change the email you sign in with.</p>`),
+                q('Lost a phone, or signed in somewhere else?', `<p>Profile → <b>Sign out on every device</b>. Every device is signed out, this one too; sign in again with a code.</p>`)
+            ])}
+            ${group('The app', [
+                q('Light or dark', `<p>Account menu → <b>Theme</b>: Dark or Light. The choice is kept on this device.</p>`),
+                ...(EL.isStandalone() ? [] : [q('On your phone', `<p>Open the account menu at the bottom of the bar and choose <b>Add to Home Screen</b>. Edge Meta AI then opens full screen, like an app.</p>`)])
+            ])}
+            ${group('Privacy', [
+                q('Who can see my chats?', `<p>Only you. Your agency sees the work and reports it shares with you, not your chats.</p>`),
+                q('Can an answer be wrong?', `<p>Answers are written by AI from your own numbers, and AI can make mistakes. Check anything important in Meta Business Suite, or ask your agency.</p>`)
+            ])}
         </div>`;
     }
 
