@@ -226,7 +226,7 @@
         if (m < 2) return 'just now';
         if (m < 60) return `${m} min ago`;
         const h = Math.round(m / 60);
-        return h < 36 ? `${h} h ago` : new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return h < 36 ? `${h} h ago` : new Date(iso).toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric' });
     }
     function renderState() {
         const s = xpStatus;
@@ -472,7 +472,7 @@
         abortCtl = new AbortController();
         const signal = abortCtl.signal;
         try {
-            const body = JSON.stringify({ message, clientId: activeClient.id, conversationId });
+            const body = JSON.stringify({ message, clientId: activeClient.id, conversationId, lang: window.ELLang ? ELLang.current() : 'en' });
             const res = await authFetch('/api/xp/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, body, signal });
             if (res.status >= 400 && res.status < 500) {
                 const data = await res.json().catch(() => ({}));
@@ -796,7 +796,7 @@
             closeConvMenu();
             if (!list.length) { host.innerHTML = '<p class="oa-note" style="text-align:left;margin:0 4px">No chats yet.</p>'; return; }
             host.innerHTML = list.map((c) => {
-                const when = new Date(c.updated_at || c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const when = new Date(c.updated_at || c.created_at).toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric' });
                 return `<div class="conv-item">
                     <button type="button" class="conv-row${c.id === conversationId ? ' on' : ''}" data-conv="${escHtml(c.id)}" title="${escHtml(c.title || '')}">
                         <span data-name>${escHtml(c.title || 'Conversation')}</span><span class="conv-when">${escHtml(when)}</span></button>

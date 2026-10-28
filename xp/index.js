@@ -381,7 +381,7 @@ function mount(app, d) {
     const gate = await chatLimitCheck(isAdmin(a.ctx), a.clientId);
     if (!gate.ok) return res.status(429).json({ error: gate.error, limit: gate.quota.limit, remaining: 0 });
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, lang: req.body.lang });
       res.json({ ...out, remaining: leftAfter(gate.quota) });
     } catch (e) {
       log.error ? log.error('xp_chat_failed', { message: e.message }) : console.error('[xp chat]', e);
@@ -405,7 +405,7 @@ function mount(app, d) {
     const send = (type, data) => { if (!res.writableEnded) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
     const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, lang: req.body.lang, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
       send('done', { conversationId: out.conversationId, reply: out.reply, suggestions: out.suggestions, charts: out.charts || [], remaining: leftAfter(gate.quota) });
     } catch (e) {
       if (e.code === 'CHAT_CANCELLED') return;
