@@ -15,8 +15,17 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
+const Module = require('module');
+
 const ROOT = path.join(__dirname, '..');
+// The chat module makes a Supabase client as it loads; on a Node without a WebSocket (CI) the real one throws.
+const realLoad = Module._load;
+Module._load = function (req, ...rest) {
+    if (req === '@supabase/supabase-js') return { createClient: () => ({ from: () => ({}), storage: {}, auth: {} }) };
+    return realLoad.call(this, req, ...rest);
+};
 const chat = require(path.join(ROOT, 'xp', 'ai', 'chat.js'));
+Module._load = realLoad;
 global.window = {};
 require(path.join(ROOT, 'frontend', 'ai', 'i18n-bn.js'));
 const BN = global.window.I18N_DICTS.bn;
