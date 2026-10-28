@@ -111,7 +111,8 @@
     .side-acct { position: relative; padding: 10px 10px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--card-border); }
     .acct-btn { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 12px; border: 0; background: none; color: var(--text-muted); font: inherit; cursor: pointer; text-align: left; }
     .acct-btn:hover { background: rgba(var(--ink), 0.05); }
-    .acct-av { width: 32px; height: 32px; flex: none; border-radius: 999px; display: grid; place-items: center; background: var(--av-bg, #1d2230); border: 1px solid rgba(var(--ink), 0.1); color: var(--text-primary); font-size: 0.78rem; font-weight: 700; }
+    .acct-av { width: 32px; height: 32px; flex: none; border-radius: 999px; display: grid; place-items: center; background: var(--av-bg, #1d2230); border: 1px solid rgba(var(--ink), 0.1); color: var(--text-primary); font-size: 0.78rem; font-weight: 700; position: relative; overflow: hidden; }
+    .acct-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
     .acct-txt { flex: 1; min-width: 0; line-height: 1.25; }
     .acct-txt b { display: block; color: var(--text-primary); font-size: 0.86rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .acct-txt small { display: block; color: var(--lime); font-size: 0.72rem; }
@@ -264,6 +265,7 @@
             </div>
             <div class="side-acct">
                 <div id="ai-menu" role="menu" aria-label="Account" class="oa-menu acct-menu hidden">
+                    <button type="button" role="menuitem" id="acct-profile">Profile</button>
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
                     <button type="button" role="menuitem" id="acct-theme">Light theme</button>
                     <button type="button" role="menuitem" id="acct-help">Help</button>
@@ -464,11 +466,24 @@
         // A choice in the bar on a phone (a chat, a to-do, a report) closes it, so the chat or the sheet is in view.
         side.addEventListener('click', e => { if (phone.matches && e.target.closest('[data-conv], #oa-new, [data-side-go]')) side.classList.remove('is-open'); });
 
-        // The account: name, business, Add to Home Screen, Sign out.
-        const name = String(me.full_name || '').trim() || String(me.email || '').split('@')[0];
-        $('acct-name').textContent = name || 'You';
-        $('acct-av').textContent = (name || '·').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+        // The account: name, photo, business, Add to Home Screen, Sign out. Phase 82: the Profile sheet
+        // changes the name and photo, and says so with 'el-profile'.
+        const showAccount = () => {
+            const name = String(me.full_name || '').trim() || String(me.email || '').split('@')[0];
+            $('acct-name').textContent = name || 'You';
+            const av = $('acct-av');
+            av.textContent = (name || '·').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+            if (me.avatar_url) {
+                const img = document.createElement('img');
+                img.src = me.avatar_url; img.alt = '';
+                img.addEventListener('error', () => img.remove());   // a link that has run out: the initials stay
+                av.appendChild(img);
+            }
+        };
+        showAccount();
+        document.addEventListener('el-profile', showAccount);
         $('acct-sub').textContent = (me.business && me.business.name) || 'Your account';
+        $('acct-profile').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('profile'); });
         const install = $('acct-install');
         install.hidden = EL.isStandalone();
         install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });

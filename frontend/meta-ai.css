@@ -292,6 +292,16 @@ body.el-has-plan .oa-side { top: 132px; }
 .hub-form .btn-primary { margin-top: 14px; }
 .hub-err { min-height: 18px; font-size: 0.86rem; color: var(--danger); margin: 6px 0 0; }
 .hub-err.is-quota { color: var(--tone-warn, #fcd34d); }
+.hub-err.is-good { color: var(--success); }
+.hub-err.is-muted { color: var(--text-muted); }
+/* phase 82: the profile */
+.hub-prof { display: flex; align-items: center; gap: 16px; }
+.hub-prof-av { width: 76px; height: 76px; flex: none; border-radius: 999px; overflow: hidden; display: grid; place-items: center;
+    background: var(--av-bg, #1d2230); border: 1px solid rgba(var(--ink), 0.12); color: var(--text-primary); font-size: 1.5rem; font-weight: 700; }
+.hub-prof-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hub-prof-pic { display: flex; gap: 8px; flex-wrap: wrap; }
+.hub-prof-up { display: inline-flex; align-items: center; margin: 0; color: var(--text-primary); text-transform: none; letter-spacing: 0; font-size: 0.83rem; font-weight: 600; }
+.hub-prof-mail { margin: 0; font-size: 0.95rem; color: var(--text-primary); overflow-wrap: anywhere; }
 .hub-prog { margin-top: 8px; }
 .hub-track { height: 6px; border-radius: 999px; background: rgba(var(--ink), 0.09); overflow: hidden; }
 .hub-track i { display: block; height: 100%; width: 0; background: var(--accent-glow, var(--accent-solid)); transition: width .3s; }

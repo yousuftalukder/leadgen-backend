@@ -366,6 +366,89 @@
         s.body.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
     }
 
+    // ---- profile (phase 82, as in the Owner Assistant) ------------------------------------------
+    // Name, phone and photo, from the account menu. The email is how they sign in, so it is shown and not
+    // changed here: the agency changes it (phase 79). A change tells the page with 'el-profile', so the
+    // account button picks it up.
+    const initials = n => String(n || '·').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '·';
+    const changed = () => document.dispatchEvent(new CustomEvent('el-profile', { detail: me }));
+    /** A square photo, 320 px, JPEG: a phone's 5 MB picture becomes a few dozen KB before it leaves. */
+    async function squarePhoto(file) {
+        const bmp = await createImageBitmap(file);
+        const side = Math.min(bmp.width, bmp.height), size = Math.min(320, side);
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = size;
+        cv.getContext('2d').drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+        return new Promise((ok, no) => cv.toBlob(b => (b ? ok(b) : no(new Error('That picture could not be read.'))), 'image/jpeg', 0.88));
+    }
+    function openProfile() {
+        const s = sheet('Profile', 'How you show up to your agency', openProfile);
+        s.body.innerHTML = `<div class="hub-prof">
+                <div class="hub-prof-av" id="pf-av"></div>
+                <div class="hub-prof-pic">
+                    <label class="btn-secondary hub-prof-up">Change photo<input type="file" id="pf-file" accept="image/png,image/jpeg,image/webp,image/heic,image/*" hidden></label>
+                    <button class="btn-secondary" type="button" id="pf-rm">Remove</button>
+                </div>
+            </div>
+            <p class="hub-err" id="pf-pmsg" role="alert"></p>
+            <div class="hub-form">
+                <label for="pf-name">Your name</label>
+                <input id="pf-name" autocomplete="name" maxlength="80" value="${esc((me && me.full_name) || '')}">
+                <label for="pf-phone">Phone <span class="hub-opt">(if you like)</span></label>
+                <input id="pf-phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="40" value="${esc((me && me.phone) || '')}">
+                <label>Email</label>
+                <p class="hub-prof-mail">${esc((me && me.email) || '')}</p>
+                <p class="hub-tip">You sign in with this email. To use another one, ask your agency: they can change it for you.</p>
+                <button class="btn-primary" type="button" id="pf-save" disabled>Save</button>
+                <p class="hub-err" id="pf-msg" role="alert"></p>
+            </div>`;
+        const $ = id => s.body.querySelector('#' + id);
+        const drawAv = () => {
+            const url = me && me.avatar_url;
+            $('pf-av').innerHTML = url ? `<img src="${esc(url)}" alt="">` : esc(initials((me && me.full_name) || (me && me.email || '').split('@')[0]));
+            $('pf-rm').hidden = !url;
+        };
+        drawAv();
+        const dirty = () => $('pf-name').value.trim() !== ((me && me.full_name) || '') || $('pf-phone').value.trim() !== ((me && me.phone) || '');
+        const ready = () => { $('pf-save').disabled = !dirty() || !$('pf-name').value.trim(); };
+        $('pf-name').addEventListener('input', ready); $('pf-phone').addEventListener('input', ready);
+        const save = async () => {
+            if ($('pf-save').disabled) return;
+            $('pf-save').disabled = true; $('pf-msg').textContent = ''; $('pf-msg').className = 'hub-err';
+            try {
+                const r = await EL.api('/api/me/profile', { method: 'POST', body: { full_name: $('pf-name').value, phone: $('pf-phone').value } });
+                Object.assign(me, { full_name: r.full_name, phone: r.phone });
+                $('pf-name').value = r.full_name || ''; $('pf-phone').value = r.phone || '';
+                $('pf-msg').textContent = 'Saved.'; $('pf-msg').className = 'hub-err is-good';
+                drawAv(); changed();
+            } catch (err) { $('pf-msg').textContent = err.message; }
+            ready();
+        };
+        $('pf-save').addEventListener('click', save);
+        [$('pf-name'), $('pf-phone')].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') save(); }));
+        $('pf-file').addEventListener('change', async () => {
+            const file = $('pf-file').files[0]; $('pf-file').value = '';
+            if (!file) return;
+            $('pf-pmsg').className = 'hub-err is-muted'; $('pf-pmsg').textContent = 'Uploading…';
+            try {
+                const blob = await squarePhoto(file).catch(() => { throw new Error('That picture could not be read. Try a JPEG or PNG.'); });
+                const res = await fetch(`${EL.backendUrl()}/api/me/avatar`, {
+                    method: 'POST', headers: { Authorization: `Bearer ${await EL.token()}`, 'Content-Type': 'image/jpeg' }, body: blob
+                });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(d.error || 'The photo did not upload.');
+                me.avatar_url = d.avatar_url; drawAv(); changed();
+                $('pf-pmsg').textContent = '';
+            } catch (err) { $('pf-pmsg').className = 'hub-err'; $('pf-pmsg').textContent = err.message; }
+        });
+        $('pf-rm').addEventListener('click', async () => {
+            $('pf-rm').disabled = true; $('pf-pmsg').textContent = '';
+            try { await EL.api('/api/me/avatar', { method: 'DELETE' }); me.avatar_url = null; drawAv(); changed(); }
+            catch (err) { $('pf-pmsg').className = 'hub-err'; $('pf-pmsg').textContent = err.message; }
+            $('pf-rm').disabled = false;
+        });
+    }
+
     // ---- help (phase 80, as in the Owner Assistant) ---------------------------------------------
     // How the app works, in the owner's words, from the account menu.
     function openHelp() {
@@ -600,5 +683,5 @@
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, help: openHelp, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, profile: openProfile, help: openHelp, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
 })();
