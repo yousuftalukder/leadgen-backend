@@ -36,6 +36,31 @@
     <link rel="stylesheet" href="meta-ai.css">
     <link rel="manifest" href="ai/manifest.webmanifest">
     <meta name="theme-color" content="#000000">
+    <script>
+    // Phase 81, as in the Owner Assistant: dark or light, chosen in the account menu and kept on this device.
+    // Set here, before anything is drawn, so a light page never flashes dark. The menu calls EMATheme.set.
+    window.EMATheme = (function () {
+        var KEY = 'ema_theme', root = document.documentElement;
+        function apply(t) {
+            root.setAttribute('data-theme', t);
+            root.style.colorScheme = t;
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', t === 'light' ? '#f5f6f8' : '#000000');
+        }
+        var t = 'dark';
+        try { t = localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'; } catch (e) { /* private mode: dark */ }
+        apply(t);
+        return {
+            current: function () { return root.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; },
+            set: function (n) {
+                n = n === 'light' ? 'light' : 'dark';
+                try { localStorage.setItem(KEY, n); } catch (e) { /* private mode: this visit only */ }
+                apply(n);
+                document.dispatchEvent(new CustomEvent('el-theme', { detail: n }));
+            }
+        };
+    })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -72,7 +97,7 @@
     .ai-page { height: 100dvh; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
     .ai-page .oa-wrap { flex: 1; min-height: 0; grid-template-columns: 290px minmax(0, 1fr); gap: 0; align-items: stretch; transition: grid-template-columns .2s ease; }
     .ai-page .oa-side { position: relative; top: 0; height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0;
-        border-right: 1px solid var(--card-border); background: #070708; }
+        border-right: 1px solid var(--card-border); background: var(--side-bg, #070708); }
     .ai-page .oa-main { min-height: 0; height: 100%; padding: 0 16px; }
 
     /* ---- the sidebar (phase 75) ---- */
@@ -80,13 +105,13 @@
     .side-head .ai-title .oa-by { color: var(--text-secondary); }
     .side-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 10px 16px; }
     .side-new { width: 100%; display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border-radius: 12px; cursor: pointer;
-        border: 1px solid var(--card-border); background: rgba(255,255,255,0.02); color: var(--text-primary); font: inherit; font-size: 0.88rem; font-weight: 600; }
-    .side-new:hover { background: rgba(255,255,255,0.06); }
+        border: 1px solid var(--card-border); background: rgba(var(--ink), 0.02); color: var(--text-primary); font: inherit; font-size: 0.88rem; font-weight: 600; }
+    .side-new:hover { background: rgba(var(--ink), 0.06); }
     .side-new svg { color: var(--text-muted); }
     .side-acct { position: relative; padding: 10px 10px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--card-border); }
     .acct-btn { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 12px; border: 0; background: none; color: var(--text-muted); font: inherit; cursor: pointer; text-align: left; }
-    .acct-btn:hover { background: rgba(255,255,255,0.05); }
-    .acct-av { width: 32px; height: 32px; flex: none; border-radius: 999px; display: grid; place-items: center; background: #1d2230; border: 1px solid rgba(255,255,255,0.1); color: var(--text-primary); font-size: 0.78rem; font-weight: 700; }
+    .acct-btn:hover { background: rgba(var(--ink), 0.05); }
+    .acct-av { width: 32px; height: 32px; flex: none; border-radius: 999px; display: grid; place-items: center; background: var(--av-bg, #1d2230); border: 1px solid rgba(var(--ink), 0.1); color: var(--text-primary); font-size: 0.78rem; font-weight: 700; }
     .acct-txt { flex: 1; min-width: 0; line-height: 1.25; }
     .acct-txt b { display: block; color: var(--text-primary); font-size: 0.86rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .acct-txt small { display: block; color: var(--lime); font-size: 0.72rem; }
@@ -105,20 +130,20 @@
     }
 
     /* the updates in the bar */
-    .side-sec { margin-bottom: 10px; border: 1px solid var(--card-border); border-radius: 14px; background: rgba(255,255,255,0.02); }
+    .side-sec { margin-bottom: 10px; border: 1px solid var(--card-border); border-radius: 14px; background: rgba(var(--ink), 0.02); }
     .side-sec-h { width: 100%; display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 0.86rem; font-weight: 700; cursor: pointer; text-align: left; border-radius: 14px; }
-    .side-sec-h:hover { background: rgba(255,255,255,0.04); }
+    .side-sec-h:hover { background: rgba(var(--ink), 0.04); }
     .side-sec-h svg { width: 16px; height: 16px; color: var(--text-muted); flex: none; }
     .side-sec-h .side-chev { margin-left: 4px; transition: transform .15s ease; }
     .side-sec.is-open .side-chev { transform: rotate(90deg); }
-    .side-n { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: grid; place-items: center; font-size: 0.7rem; font-weight: 800; background: rgba(255,255,255,0.08); color: var(--text-primary); }
+    .side-n { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: grid; place-items: center; font-size: 0.7rem; font-weight: 800; background: rgba(var(--ink), 0.08); color: var(--text-primary); }
     .side-n.is-hot { background: var(--accent-solid); color: #000; }
     .side-n:empty { display: none; }
     .side-body { padding: 0 6px 8px; }
     .side-sec:not(.is-open) .side-body { display: none; }
     .side-todo { display: flex; align-items: flex-start; gap: 9px; padding: 7px 6px; border-radius: 10px; }
-    .side-todo:hover { background: rgba(255,255,255,0.03); }
-    .side-tick { width: 18px; height: 18px; margin-top: 1px; flex: none; border-radius: 6px; border: 1.5px solid rgba(255,255,255,0.3); background: none; cursor: pointer; display: grid; place-items: center; color: #000; padding: 0; }
+    .side-todo:hover { background: rgba(var(--ink), 0.03); }
+    .side-tick { width: 18px; height: 18px; margin-top: 1px; flex: none; border-radius: 6px; border: 1.5px solid rgba(var(--ink), 0.3); background: none; cursor: pointer; display: grid; place-items: center; color: var(--on-lime, #000); padding: 0; }
     .side-tick.is-done { background: var(--lime); border-color: var(--lime); }
     .side-tick svg { width: 12px; height: 12px; }
     .side-tick:not(.is-done) svg { visibility: hidden; }
@@ -126,18 +151,18 @@
     .side-todo-t small { display: block; color: var(--text-muted); font-size: 0.72rem; margin-top: 2px; }
     .side-todo.is-done .side-todo-t { color: var(--text-muted); text-decoration: line-through; }
     .side-link { width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 6px; border: 0; border-radius: 10px; background: none; color: var(--text-secondary); font: inherit; font-size: 0.83rem; text-align: left; cursor: pointer; }
-    .side-link:hover { background: rgba(255,255,255,0.04); color: var(--text-primary); }
+    .side-link:hover { background: rgba(var(--ink), 0.04); color: var(--text-primary); }
     .side-link span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .side-link small { color: var(--text-muted); font-size: 0.72rem; flex: none; }
     .side-more { color: var(--accent-solid); font-weight: 600; }
     .side-empty { margin: 2px 6px 6px; color: var(--text-muted); font-size: 0.8rem; line-height: 1.45; }
-    .side-act { width: calc(100% - 4px); margin: 6px 2px 2px; padding: 8px 10px; border-radius: 10px; border: 0; background: rgba(255,255,255,0.92); color: #0b0b0c; font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
-    .side-act:hover { background: #fff; }
+    .side-act { width: calc(100% - 4px); margin: 6px 2px 2px; padding: 8px 10px; border-radius: 10px; border: 0; background: rgba(var(--ink), 0.92); color: var(--on-ink, #0b0b0c); font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+    .side-act:hover { background: rgba(var(--ink), 1); }
     .side-nav { display: grid; gap: 2px; margin: 4px 0 2px; }
     .side-nav .side-sec-h { border-radius: 12px; font-weight: 600; color: var(--text-secondary); }
     .side-nav .side-sec-h:hover { color: var(--text-primary); }
     .ai-page .oa-head { margin: 0 -16px; padding: max(10px, env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--card-border); flex-wrap: nowrap;
-        background: rgba(0,0,0,0.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+        background: var(--head-bg, rgba(0,0,0,0.92)); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
     .ai-page .oa-scroll { min-height: 0; padding-top: 18px; }
     .ai-page .oa-form { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
     .ai-page .oa-to-bottom { bottom: 120px; }
@@ -240,6 +265,7 @@
             <div class="side-acct">
                 <div id="ai-menu" role="menu" aria-label="Account" class="oa-menu acct-menu hidden">
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
+                    <button type="button" role="menuitem" id="acct-theme">Light theme</button>
                     <button type="button" role="menuitem" id="acct-help">Help</button>
                     <button type="button" role="menuitem" data-signout>Sign out</button>
                 </div>
@@ -446,6 +472,11 @@
         const install = $('acct-install');
         install.hidden = EL.isStandalone();
         install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });
+        // Phase 81: the item names the theme it switches to; the menu stays open so the change is seen.
+        const themeBtn = $('acct-theme');
+        const themeLabel = () => { themeBtn.textContent = EMATheme.current() === 'light' ? 'Dark theme' : 'Light theme'; };
+        themeLabel();
+        themeBtn.addEventListener('click', e => { e.stopPropagation(); EMATheme.set(EMATheme.current() === 'light' ? 'dark' : 'light'); themeLabel(); });
         $('acct-help').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('help'); });
 
         const menu = $('ai-menu'), more = $('ai-more');
