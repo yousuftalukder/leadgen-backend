@@ -1474,3 +1474,94 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
         });
     } catch (err) { sendErr(res, err); }
 });
+
+/**
+ * Phase 79: change the email a business owner signs in to Edge Meta AI with, from the client's page.
+ * The same people as a new sign-in link (editors on the client), for a login that is this business's
+ * owner login and no other business's: moving a login another business also uses would move that
+ * business's owner too. Everything is checked before anything is written. The new address gets a
+ * sign-in link; the old one is told, so a change nobody meant does not go unnoticed.
+ */
+app.post('/api/clients/:id/owner-email', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const userId = String(req.body?.userId || '');
+        if (!UUID_RE.test(userId)) return res.status(400).json({ error: 'Choose the owner login.' });
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        if (!EMAIL_RE.test(email) || email.length > 254) return res.status(400).json({ error: 'Enter the new email address.' });
+
+        const { data: u } = await supabase.from('app_users').select('id, email, full_name, role, is_active').eq('id', userId).maybeSingle();
+        let onIt = false;
+        if (u && u.role === 'client') {
+            const { data: m } = await supabase.from('client_members').select('user_id').eq('client_id', c.id).eq('user_id', u.id).maybeSingle();
+            onIt = !!m || c.owner_user_id === u.id;
+        }
+        if (!u || u.role !== 'client' || !onIt) return res.status(404).json({ error: 'That login is not this business’s owner login.' });
+        const oldEmail = String(u.email || '').toLowerCase();
+        if (email === oldEmail) return res.status(400).json({ error: 'That is already their email.' });
+
+        // Another live business on the same login: not this page's to move.
+        const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', u.id);
+        const elsewhere = (mem || []).map(m => m.client_id).filter(x => x !== c.id);
+        const { data: owns } = await supabase.from('clients').select('id').eq('owner_user_id', u.id).neq('id', c.id);
+        const otherIds = [...new Set([...elsewhere, ...(owns || []).map(o => o.id)])];
+        const { data: others } = otherIds.length ? await supabase.from('clients').select('id, archived').in('id', otherIds) : { data: [] };
+        if ((others || []).some(o => !o.archived)) return res.status(409).json({ error: 'This login is also another business’s owner login, so it cannot be changed from here. An admin can change it under Team & settings → People.' });
+
+        // The new address must be nobody's yet: not an owner's, not someone on the team's.
+        const { data: taken } = await supabase.from('app_users').select('id').eq('email', email).maybeSingle();
+        if (taken) return res.status(409).json({ error: 'That email already has a login. Use another address, or ask an admin to merge the two.' });
+
+        const { error: ae } = await supabase.auth.admin.updateUserById(u.id, { email, email_confirm: true });
+        if (ae) {
+            if (/already|registered|exists|unique/i.test(ae.message || '')) return res.status(409).json({ error: 'That email already has a login. Use another address, or ask an admin to merge the two.' });
+            throw ae;
+        }
+        const { error: pe } = await supabase.from('app_users').update({ email }).eq('id', u.id);
+        if (pe) {
+            // The sign-in and the account must not disagree: put the sign-in back.
+            await supabase.auth.admin.updateUserById(u.id, { email: oldEmail, email_confirm: true }).catch(() => {});
+            throw pe;
+        }
+        // Codes sent to the old address no longer sign anyone in.
+        await supabase.from('owner_login_codes').delete().eq('email', oldEmail).then(() => {}, () => {});
+        _roleCache.delete(u.id);
+
+        const mailReady = (await mailSettings()).configured;
+        let link = null, emailed = false;
+        if (u.is_active !== false) {
+            try { link = await ownerSignInLink(email, S.ownerAppUrl()); }
+            catch (e) { logger.warn('owner_email_link_failed', { clientId: c.id, message: e.message }); }
+        }
+        if (mailReady) {
+            const first = String(u.full_name || '').split(' ')[0];
+            if (link) {
+                const sent = await sendMail({
+                    to: email, subject: `Your Edge Meta AI sign-in for ${c.name}`,
+                    text: [`${first ? 'Hi ' + first + ',' : 'Hello,'}`, '',
+                        `Your agency changed the email you sign in to Edge Meta AI with, for ${c.name}, to this one.`, '',
+                        `Open it here (one tap signs you in): ${link}`, '',
+                        `Next time, open ${S.ownerAppUrl() || 'Edge Meta AI'} and sign in with a code we email to this address.`, '— EdgeLead'].join('\n')
+                });
+                emailed = !!sent.ok;
+            }
+            await sendMail({
+                to: oldEmail, subject: `Your Edge Meta AI sign-in email was changed`,
+                text: [`${first ? 'Hi ' + first + ',' : 'Hello,'}`, '',
+                    `Your agency changed the email you sign in to Edge Meta AI with, for ${c.name}, to ${email}. This address no longer signs in.`, '',
+                    'If you did not ask for this, reply to your agency.', '— EdgeLead'].join('\n')
+            }).catch(() => {});
+        }
+        logger.info('owner_email_changed', { clientId: c.id, ownerId: u.id, by: ctx.user.id, emailed });
+        res.json({
+            success: true, owner: { id: u.id, email }, emailed,
+            link: emailed || !link ? null : link,
+            note: emailed ? `Changed to ${email}. A sign-in link went to the new address, and the old one was told.`
+                : link ? `Changed to ${email}. Email is not set up, so send this link to the owner yourself. One tap signs them in; it works once and expires within the hour.`
+                : `Changed to ${email}. They sign in with a code emailed to the new address.`
+        });
+    } catch (err) { sendErr(res, err); }
+});
