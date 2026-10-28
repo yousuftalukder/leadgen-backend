@@ -12,10 +12,10 @@
  *   - Offline fallback: the last good copy of the page, else the dashboard
  *     (or, inside the Edge Meta AI app, the chat).
  */
-const VERSION = 'el-shell-v10';   // v10: phase 84 (the phone rules, the new Bangla words)
+const VERSION = 'el-shell-v11';   // v11: phase 86 (reloading the app; the new Bangla words)
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
     'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
-    'ai/', 'ai/manifest.webmanifest', 'vendor/supabase-js-2.116.0.js', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js', 'ai/i18n.js?v=2', 'ai/i18n-bn.js?v=2', 'phone-codes.js'];
+    'ai/', 'ai/manifest.webmanifest', 'vendor/supabase-js-2.116.0.js', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js', 'ai/i18n.js?v=3', 'ai/i18n-bn.js?v=3', 'phone-codes.js'];
 
 self.addEventListener('install', event => {
     self.skipWaiting();

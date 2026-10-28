@@ -28,7 +28,7 @@
     -->
     <base href="../">
     <!-- Phase 83: English or বাংলা, set before anything is drawn. -->
-    <script src="ai/i18n.js?v=2"></script>
+    <script src="ai/i18n.js?v=3"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
@@ -208,6 +208,14 @@
     html.is-phone .ai-page .oa-head .oa-side-toggle { display: inline-grid; }
     /* No double-tap zoom on a phone, and no grey flash on a tap. */
     html.is-phone, html.is-phone body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    /* phase 86: reloading an app that has no browser bar */
+    .ai-update[hidden], .ai-pull[hidden] { display: none; }
+    .ai-update { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0 0; padding: 10px 12px 10px 14px;
+        border-radius: 12px; border: 1px solid rgba(var(--ink), 0.12); background: var(--surface-1); font-size: 0.88rem; color: var(--text-primary); }
+    .ai-update .btn-primary { width: auto; margin: 0; padding: 7px 14px; font-size: 0.84rem; }
+    .oa-main { position: relative; }
+    .ai-pull { position: absolute; left: 50%; top: 64px; z-index: 30; transform: translate(-50%, 0); padding: 6px 12px; border-radius: 999px;
+        background: var(--surface-2, #1d2230); border: 1px solid rgba(var(--ink), 0.12); color: var(--text-secondary); font-size: 0.8rem; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -278,6 +286,7 @@
                     <div class="acct-sep"></div>
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
                     <button type="button" role="menuitem" id="acct-help">Help</button>
+                    <button type="button" role="menuitem" id="acct-reload">Reload the app</button>
                     <!-- Phase 84, as in the Owner Assistant: Theme and Language as rows, each showing what is chosen -->
                     <div class="acct-row">
                         <span>Theme</span>
@@ -316,6 +325,8 @@
                 <span class="oa-state" id="oa-state"></span>
             </div>
             <div id="ai-nudge"></div>
+            <div class="ai-update" id="ai-update" role="status" hidden><span>A new version of Edge Meta AI is ready.</span><button type="button" class="btn-primary" id="ai-update-go">Reload</button></div>
+            <div class="ai-pull" id="ai-pull" aria-hidden="true" hidden>Pull down to reload</div>
             <div id="chat-scroll" class="oa-scroll"><div id="chat-box" class="oa-box"></div></div>
             <button type="button" id="to-bottom" class="oa-to-bottom hidden" aria-label="Jump to the latest">↓</button>
             <form id="chat-form" class="oa-form">
@@ -542,6 +553,56 @@
             if (!menu.classList.contains('hidden')) { closeMenu(); more.focus(); }
             else if (side.classList.contains('is-open') && phone.matches) side.classList.remove('is-open');
         });
+
+        // Phase 86: an app on the home screen has no reload button, and on an iPhone no pull-to-refresh.
+        // Three ways to get the newest version, none of which brings zooming back:
+        //   the account menu's "Reload the app"; pulling the chat down from its top on a phone; and a bar
+        //   that offers it when the site has changed since this page was opened (checked when the app
+        //   comes back to the front, and every 30 minutes).
+        const reloadApp = async () => {
+            try { const r = await navigator.serviceWorker?.getRegistration(); if (r) await r.update(); } catch { /* reload anyway */ }
+            location.reload();
+        };
+        $('acct-reload').addEventListener('click', () => { closeMenu(); reloadApp(); });
+
+        const pull = $('ai-pull'), scroller = $('chat-scroll');
+        let y0 = null, dy = 0;
+        scroller.addEventListener('touchstart', e => { y0 = phone.matches && scroller.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; dy = 0; }, { passive: true });
+        scroller.addEventListener('touchmove', e => {
+            if (y0 === null) return;
+            dy = e.touches[0].clientY - y0;
+            if (dy <= 0 || scroller.scrollTop > 0) { pull.hidden = true; return; }
+            pull.hidden = false;
+            pull.textContent = dy > 90 ? 'Release to reload' : 'Pull down to reload';
+            pull.style.transform = `translate(-50%, ${Math.min(dy, 120) / 2}px)`;
+        }, { passive: true });
+        scroller.addEventListener('touchend', () => {
+            if (y0 !== null && dy > 90 && scroller.scrollTop <= 0) { pull.textContent = 'Reloading…'; reloadApp(); }
+            else pull.hidden = true;
+            y0 = null;
+        }, { passive: true });
+
+        // The page and the files it is made of: a change to any of them is a new version.
+        const parts = ['ai/', 'meta-ai.js', 'owner-hub.js', 'meta-ai.css', 'ai/i18n-bn.js'].map(p => new URL(p, document.baseURI).href);
+        const stamp = async () => {
+            try {
+                const tags = await Promise.all(parts.map(async u => {
+                    const r = await fetch(u, { method: 'HEAD', cache: 'no-store' });
+                    return r.ok ? (r.headers.get('etag') || r.headers.get('last-modified') || '') : '';
+                }));
+                return tags.every(Boolean) ? tags.join('|') : null;
+            } catch { return null; }
+        };
+        let first = null;
+        stamp().then(s => { first = s; });
+        const checkNew = async () => {
+            if (!first || document.hidden || !$('ai-update').hidden) return;
+            const now = await stamp();
+            if (now && now !== first) $('ai-update').hidden = false;
+        };
+        document.addEventListener('visibilitychange', checkNew);
+        setInterval(checkNew, 30 * 60 * 1000);
+        $('ai-update-go').addEventListener('click', reloadApp);
 
         MetaAI.start(me, { app: true });
         // The business's name sits at the top of the bar too, once the chat has found it.
