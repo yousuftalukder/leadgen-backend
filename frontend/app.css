@@ -345,7 +345,7 @@ body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; 
    These were copy-pasted into some pages and missing from others, so an
    input looked different depending on which screen you were on. */
 input:not([type]), input[type="text"], input[type="email"], input[type="password"],
-input[type="number"], input[type="search"], input[type="url"],
+input[type="number"], input[type="search"], input[type="url"], input[type="tel"],
 input[type="date"], select, textarea {
     width: 100%;
     padding: 13px 15px;

@@ -415,7 +415,11 @@ app.get('/api/me', async (req, res) => {
         email: ctx.user.email,
         role: ctx.profile.role,
         engines: ctx.profile.role === 'admin' ? ENGINES : (access || []).map(a => a.engine),
-        state
+        state,
+        // Phase 82: the profile. phone and the photo are null until the phase-82 database update.
+        full_name: ctx.profile.full_name || null,
+        phone: ctx.profile.phone || null,
+        avatar_url: await avatarUrl(ctx.profile.avatar_path)
     };
 
     // Only a client needs a window and an allowance on screen. An employee
@@ -473,6 +477,139 @@ app.get('/api/me', async (req, res) => {
     }
 
     res.json(body);
+});
+
+// ===========================================================================
+// PHASE 82 :: A PROFILE OF ONE'S OWN
+//
+// Name, phone and photo, set by the person themself (Edge Meta AI's Profile
+// sheet). The email is not here: it is how they sign in, and for an owner the
+// agency changes it (phase 79). The photo is an object in the private
+// "avatars" bucket, made on the first upload, and only ever handed out as a
+// signed link; what it is comes from its bytes, never the browser's header.
+// ===========================================================================
+const AVATAR_BUCKET = process.env.AVATAR_BUCKET || 'avatars';
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_TTL_SECS = 24 * 3600;
+const AVATAR_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+const PHONE_RE = /^[+0-9 ()\-]{6,40}$/;
+let _avatarBucket = null;
+
+/** A missing phone or avatar_path column: the phase-82 SQL has not been run. */
+function missing82(err) {
+    return !!err && (err.code === 'PGRST204' || err.code === '42703') && /phone|avatar_path/i.test(String(err.message || ''));
+}
+function migration82(res) {
+    return res.status(503).json({
+        error: 'The profile needs the phase-82 database update. Run sql/schema-phase82.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+
+async function ensureAvatarBucket() {
+    if (!supabase.storage) return false;
+    if (!_avatarBucket) {
+        _avatarBucket = (async () => {
+            try {
+                const { data } = await supabase.storage.getBucket(AVATAR_BUCKET);
+                if (data) return true;
+                const { error } = await supabase.storage.createBucket(AVATAR_BUCKET, {
+                    public: false, fileSizeLimit: AVATAR_MAX_BYTES, allowedMimeTypes: Object.keys(AVATAR_TYPES)
+                });
+                if (error && !/exist/i.test(error.message || '')) throw error;
+                return true;
+            } catch (err) {
+                logger.warn('avatar_bucket_unavailable', { message: err.message });
+                _avatarBucket = null;
+                return false;
+            }
+        })();
+    }
+    return _avatarBucket;
+}
+
+/** A day's signed link to a photo, or null. Never fails the caller: a page without the photo shows initials. */
+async function avatarUrl(p) {
+    if (!p || !supabase.storage) return null;
+    try {
+        const { data, error } = await supabase.storage.from(AVATAR_BUCKET).createSignedUrl(p, AVATAR_TTL_SECS);
+        return error ? null : (data && data.signedUrl) || null;
+    } catch { return null; }
+}
+
+async function removeAvatarObject(p) {
+    if (!p || !supabase.storage) return;
+    const { error } = await supabase.storage.from(AVATAR_BUCKET).remove([p]).catch(e => ({ error: e }));
+    if (error) logger.warn('avatar_remove_failed', { message: error.message });
+}
+
+/** Name and phone. Either may be sent alone; an empty phone clears it, an empty name is refused. */
+app.post('/api/me/profile', rateLimit({ windowMs: 60000, max: 20, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+        const b = req.body || {};
+        const patch = {};
+        if (b.full_name !== undefined) {
+            const name = String(b.full_name || '').replace(/\s+/g, ' ').trim();
+            if (!name) return res.status(400).json({ error: 'Type your name.' });
+            if (name.length > 80) return res.status(400).json({ error: 'That name is too long: 80 letters at most.' });
+            patch.full_name = name;
+        }
+        if (b.phone !== undefined) {
+            const phone = String(b.phone || '').replace(/\s+/g, ' ').trim();
+            if (phone && !PHONE_RE.test(phone)) return res.status(400).json({ error: 'A phone number is digits, with + ( ) - or spaces if you like.' });
+            patch.phone = phone || null;
+        }
+        if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change.' });
+        patch.updated_at = new Date().toISOString();
+        const { error } = await supabase.from('app_users').update(patch).eq('id', ctx.user.id);
+        if (error) { if (missing82(error)) return migration82(res); throw error; }
+        invalidateAuth(ctx.user.id);
+        res.json({ success: true, full_name: patch.full_name ?? ctx.profile.full_name ?? null, phone: 'phone' in patch ? patch.phone : (ctx.profile.phone || null) });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** The photo. The body is the picture itself (PNG, JPEG or WebP, 2 MB at most); the page makes it small first. */
+app.post('/api/me/avatar',
+    rateLimit({ windowMs: 60000, max: 10, key: bearerId }),
+    S.express.raw({ type: Object.keys(AVATAR_TYPES), limit: AVATAR_MAX_BYTES }),
+    async (req, res) => {
+        try {
+            const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+            if (!('avatar_path' in ctx.profile)) return migration82(res);
+            const buf = Buffer.isBuffer(req.body) ? req.body : null;
+            if (!buf || !buf.length) return res.status(400).json({ error: 'Send a picture: PNG, JPEG or WebP.' });
+            const type = S.sniffImage(buf);
+            if (!AVATAR_TYPES[type]) return res.status(400).json({ error: 'That is not a PNG, JPEG or WebP picture.' });
+            if (!(await ensureAvatarBucket())) return res.status(503).json({ error: 'Photo storage is not available right now. Try again in a minute.' });
+            const p = `${ctx.user.id}/${crypto.randomUUID()}.${AVATAR_TYPES[type]}`;
+            const { error: ue } = await supabase.storage.from(AVATAR_BUCKET).upload(p, buf, { contentType: type, upsert: false, cacheControl: '86400' });
+            if (ue) throw ue;
+            const { error } = await supabase.from('app_users').update({ avatar_path: p, updated_at: new Date().toISOString() }).eq('id', ctx.user.id);
+            if (error) {
+                await removeAvatarObject(p);
+                if (missing82(error)) return migration82(res);
+                throw error;
+            }
+            await removeAvatarObject(ctx.profile.avatar_path);
+            invalidateAuth(ctx.user.id);
+            res.status(201).json({ success: true, avatar_url: await avatarUrl(p) });
+        } catch (err) {
+            if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That picture is over 2 MB. Use a smaller one.' });
+            sendErr(res, err);
+        }
+    });
+
+app.delete('/api/me/avatar', rateLimit({ windowMs: 60000, max: 10, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+        if (!ctx.profile.avatar_path) return res.json({ success: true, avatar_url: null });
+        const { error } = await supabase.from('app_users').update({ avatar_path: null, updated_at: new Date().toISOString() }).eq('id', ctx.user.id);
+        if (error) { if (missing82(error)) return migration82(res); throw error; }
+        await removeAvatarObject(ctx.profile.avatar_path);
+        invalidateAuth(ctx.user.id);
+        res.json({ success: true, avatar_url: null });
+    } catch (err) { sendErr(res, err); }
 });
 
 /**
