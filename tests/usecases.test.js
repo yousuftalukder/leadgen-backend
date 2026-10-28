@@ -4095,6 +4095,60 @@ test('staff make a new sign-in link for the owner on their business, and only fo
     const owner = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-owner@kitesurf.test', body: { userId: ownerId } });
     assert.ok(owner.statusCode === 403 || owner.statusCode === 404, 'an owner made a sign-in link: ' + owner.statusCode);
 });
+// Phase 79: the team changes the email an owner signs in to Edge Meta AI with, from the client's page.
+test('staff change the owner\'s sign-in email: both places change, the new address gets a link, the old one is told', async () => {
+    const row = tbl('app_users').find(u => u.email === 'owner@kitesurf.test');
+    const authCalls = [];
+    const real = fakeSupabase.auth.admin.updateUserById;
+    fakeSupabase.auth.admin.updateUserById = async (id, attrs) => { authCalls.push([id, attrs]); return { data: {}, error: null }; };
+    try {
+        tbl('owner_login_codes').push({ id: crypto.randomUUID(), email: 'owner@kitesurf.test', code_hash: 'x', created_at: new Date().toISOString() });
+        MAIL.sent.length = 0;
+        const r = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: ' Owner.New@KiteSurf.test ' } });
+        assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+        assert.strictEqual(r.body.owner.email, 'owner.new@kitesurf.test', 'trimmed and lower-cased');
+        assert.strictEqual(row.email, 'owner.new@kitesurf.test', 'the account record changed');
+        assert.deepStrictEqual(authCalls[0], [row.id, { email: 'owner.new@kitesurf.test', email_confirm: true }], 'the sign-in itself changed, confirmed');
+        assert.ok(!tbl('owner_login_codes').some(x => x.email === 'owner@kitesurf.test'), 'codes sent to the old address no longer sign in');
+        const toNew = MAIL.sent.find(m => m.msg.to === 'owner.new@kitesurf.test');
+        assert.ok(toNew && /type=magiclink|#th=/.test(toNew.msg.text), 'the new address got a sign-in link');
+        const toOld = MAIL.sent.find(m => m.msg.to === 'owner@kitesurf.test');
+        assert.ok(toOld && /changed .* to owner\.new@kitesurf\.test/.test(toOld.msg.text), 'the old address was told');
+        assert.strictEqual(r.body.link, null, 'with email set up the link goes to the inbox, not the page');
+    } finally {
+        // Put it back for the tests after this one.
+        row.email = 'owner@kitesurf.test';
+        fakeSupabase.auth.admin.updateUserById = real;
+    }
+});
+test('the email change is refused, before anything is written, for a taken address, a team login, another business or a viewer', async () => {
+    const row = tbl('app_users').find(u => u.email === 'owner@kitesurf.test');
+    const same = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'owner@kitesurf.test' } });
+    assert.strictEqual(same.statusCode, 400, 'the same address');
+    const bad = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'not an email' } });
+    assert.strictEqual(bad.statusCode, 400);
+    const taken = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: EMP.email } });
+    assert.strictEqual(taken.statusCode, 409, 'an address someone on the team signs in with');
+    const team = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: EMP.id, email: 'fresh@kitesurf.test' } });
+    assert.strictEqual(team.statusCode, 404, 'a team login is not an owner login');
+    const other = await call('POST', `/api/clients/${state.D}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+    assert.strictEqual(other.statusCode, 404, 'not this business\'s owner login');
+    const owner = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-owner@kitesurf.test', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+    assert.ok(owner.statusCode === 403 || owner.statusCode === 404, 'an owner changed a login: ' + owner.statusCode);
+    assert.strictEqual(row.email, 'owner@kitesurf.test', 'nothing was written');
+    // A login another live business also uses is not this page's to move.
+    const extra = { id: crypto.randomUUID(), name: 'Kite Two', owner_user_id: null, archived: false, created_at: new Date().toISOString() };
+    tbl('clients').push(extra);
+    tbl('client_members').push({ client_id: extra.id, user_id: row.id, role: 'editor' });
+    try {
+        const both = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+        assert.strictEqual(both.statusCode, 409, JSON.stringify(both.body));
+        assert.strictEqual(row.email, 'owner@kitesurf.test');
+    } finally {
+        tbl('client_members').splice(tbl('client_members').findIndex(m => m.client_id === extra.id), 1);
+        tbl('clients').splice(tbl('clients').findIndex(c => c.id === extra.id), 1);
+    }
+});
 test('when the agency closes the business, the owner\'s access ends: no made-up business, no code, a clear refusal', async () => {
     const before = tbl('clients').length;
     const T = tbl('clients').find(c => c.id === state.T);

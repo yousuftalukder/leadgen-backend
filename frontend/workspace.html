@@ -630,7 +630,7 @@
                 <section class="ws-card"><div class="ws-card-h"><h2>Business owner’s app</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
                     <p class="el-muted">The business owner’s login to Edge Meta AI, for ${esc(c.name)} only: their numbers, the tasks you share with them, their planned posts to approve and their reports, all in one chat app. They sign in with a code emailed to them; no password. Never your costs, keys or other clients.</p>
                     ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
-                        ${canEdit() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button>` : ''}${isOwner() ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
+                        ${canEdit() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button><button class="ws-btn is-sm is-quiet" type="button" data-email="${esc(o.user_id)}" data-current="${esc(o.email)}">Change email</button>` : ''}${isOwner() ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
                     ${canEdit() ? `<div class="ws-form">
                         <div class="ws-form two"><div><label for="o-email">Owner’s email</label><input id="o-email" type="email" placeholder="owner@business.com"></div><div><label for="o-name">Their name</label><input id="o-name" placeholder="Optional"></div></div>
                         <div class="ws-hint">An owner login never runs out. It works for as long as ${esc(c.name)} is one of your clients.</div>
@@ -687,6 +687,31 @@
                 out.querySelectorAll('[data-copy]').forEach(x => x.addEventListener('click', () => copy(x.dataset.copy)));
             } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
             b.disabled = false;
+        }));
+        // Phase 79: the email the owner signs in to Edge Meta AI with. The new address gets a sign-in link
+        // and the old one is told; the result shows here, as an invite's does.
+        body.querySelectorAll('[data-email]').forEach(b => b.addEventListener('click', () => {
+            const out = $('o-result');
+            out.innerHTML = `<div class="ws-form wsc-banner"><div><label for="oe-email">New email for ${esc(b.dataset.current)}</label>
+                <input id="oe-email" type="email" placeholder="owner@business.com" autocomplete="off"></div>
+                <div class="ws-hint">They sign in with the new address from now on. A sign-in link goes to it, and the old address is told.</div>
+                <div class="ws-actions"><button class="ws-btn" type="button" id="oe-cancel">Cancel</button><button class="ws-btn is-gold" type="button" id="oe-save">Change email</button></div>
+                <div class="ws-note" id="oe-note"></div></div>`;
+            const input = $('oe-email'); input.focus();
+            $('oe-cancel').addEventListener('click', () => { out.innerHTML = ''; });
+            const save = async () => {
+                const email = input.value.trim(), note = $('oe-note');
+                if (!email) { note.className = 'ws-note is-bad'; note.textContent = 'Enter the new email.'; return; }
+                $('oe-save').disabled = true; note.className = 'ws-note'; note.textContent = 'Changing…';
+                try {
+                    const r = await EL.api(`/api/clients/${id}/owner-email`, { method: 'POST', body: { userId: b.dataset.email, email } });
+                    await refreshDetail();
+                    accessFlash = `<div class="wsc-banner">${inviteHtml(r)}</div>`;
+                    render();
+                } catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; $('oe-save').disabled = false; }
+            };
+            $('oe-save').addEventListener('click', save);
+            input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
         }));
         body.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
         body.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
