@@ -209,7 +209,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
   const tz = acct.timezone_name || 'UTC';
   const today = DateTime.now().setZone(tz).startOf('day');
   const firstSync = !acct.last_synced_at;
-  const known = await q(supabase.from('xp_meta_ads').select('ad_id,client_id,page_id,ig_user_id,campaign_id,lookup_error').eq('ad_account_id', acct.ad_account_id), 'ads known');
+  const known = await q(supabase.from('xp_meta_ads').select('ad_id,client_id,page_id,ig_user_id,campaign_id,adset_id,lookup_error').eq('ad_account_id', acct.ad_account_id), 'ads known');
   const ads = new Map(known.map((a) => [a.ad_id, a]));
 
   // Ads with no business are matched again, since a client added later may own them. Ads whose
@@ -307,6 +307,18 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
     }
     if (campaigns.size) await syncCampaigns(g, acct, campaigns, rows, run);
 
+    // 5b. Phase 85: the ad sets behind them, how each was set up, and its last 90 days split by
+    //     audience, region and placement. Ad sets of the businesses' ads not stored yet are read too,
+    //     so ads from before this phase are covered once.
+    const adsets = new Map();   // adset_id → Set(client_id)
+    const own = (sid, cid) => { if (!sid || !cid) return; if (!adsets.has(sid)) adsets.set(sid, new Set()); adsets.get(sid).add(cid); };
+    for (const r of mine) own(r.adset_id ? String(r.adset_id) : ads.get(String(r.ad_id)).adset_id, ads.get(String(r.ad_id)).client_id);
+    try {
+      const stored = new Set((await q(supabase.from('xp_meta_ad_sets').select('adset_id').eq('ad_account_id', acct.ad_account_id), 'adsets known')).map((x) => x.adset_id));
+      for (const a of ads.values()) if (a.client_id && a.adset_id && !stored.has(a.adset_id)) own(a.adset_id, a.client_id);
+      if (adsets.size) await syncAdSets(g, acct, adsets, run);
+    } catch (e) { run.err('ad sets', e); }
+
     // 6. An account whose ads ALL belong to one business is that business's. One ad for another
     //    Page (an agency account) and it belongs to none; an ad whose creative could not be read
     //    does not count either way.
@@ -364,6 +376,73 @@ async function syncCampaigns(g, acct, campaigns, rows, run) {
   await upsertChunked('xp_meta_ad_campaigns', upserts, 'campaign_id');
 }
 
+// ---------------------------------------------------------------- ad sets (phase 85)
+const ADSET_FIELDS = 'id,name,campaign_id,effective_status,optimization_goal,billing_event,bid_strategy,bid_amount,daily_budget,lifetime_budget,destination_type,promoted_object,targeting,start_time,end_time';
+const BREAKDOWN_DAYS = 90;
+const BREAKDOWNS = { age_gender: 'age,gender', region: 'region', placement: 'publisher_platform,platform_position' };
+const BREAKDOWN_FIELDS = 'adset_id,account_currency,spend,impressions,reach,inline_link_clicks,actions,action_values';
+// Meta sends budgets and bids in the currency's smallest unit: cents for most, whole units for these.
+const NO_CENTS = new Set(['CLP', 'COP', 'CRC', 'HUF', 'ISK', 'IDR', 'JPY', 'KRW', 'PYG', 'TWD', 'VND']);
+const fromMinor = (v, currency) => { const n = money(v); return n === null ? null : NO_CENTS.has(String(currency || '').toUpperCase()) ? n : Math.round(n) / 100; };
+
+// One breakdown row's segment: '25-34|female', 'Dhaka Division', 'instagram|reels'.
+function segmentOf(dimension, r) {
+  if (dimension === 'age_gender') return `${r.age || 'unknown'}|${r.gender || 'unknown'}`;
+  if (dimension === 'region') return String(r.region || 'unknown');
+  return `${r.publisher_platform || 'unknown'}|${r.platform_position || 'unknown'}`;
+}
+
+/** adsets: Map(adset_id → Set(client_id)). An ad set showing several businesses' ads belongs to none. */
+async function syncAdSets(g, acct, adsets, run) {
+  const owned = [...adsets].filter(([, cs]) => cs.size === 1).map(([id, cs]) => [id, [...cs][0]]);
+  if (!owned.length) return;
+  const ts = nowIso(), cur = acct.currency || null;
+  const ids = owned.map(([id]) => id), clientOf = new Map(owned);
+  const rows = [];
+  for (const part of chunk(ids, 50)) {
+    const res = await g.batch(part.map((id) => ({ key: id, relative_url: `${id}?fields=${encodeURIComponent(ADSET_FIELDS)}` })));
+    for (const id of part) {
+      const r = res.get(id);
+      if (!r || !r.ok) { run.err('ad set lookup', (r && r.error) || new Error('no response')); continue; }
+      const b = r.body || {};
+      rows.push({
+        adset_id: id, ad_account_id: acct.ad_account_id, campaign_id: b.campaign_id ? String(b.campaign_id) : null, client_id: clientOf.get(id),
+        name: b.name || null, status: b.effective_status || null, optimization_goal: b.optimization_goal || null,
+        billing_event: b.billing_event || null, bid_strategy: b.bid_strategy || null, bid_amount: fromMinor(b.bid_amount, cur),
+        daily_budget: fromMinor(b.daily_budget, cur), lifetime_budget: fromMinor(b.lifetime_budget, cur), currency: cur,
+        destination_type: b.destination_type || null, promoted_object: b.promoted_object || null, targeting: b.targeting || null,
+        start_time: b.start_time || null, end_time: b.end_time || null, updated_at: ts
+      });
+    }
+  }
+  if (rows.length) await upsertChunked('xp_meta_ad_sets', rows, 'adset_id');
+
+  // The last 90 days, one split at a time, replacing what was there.
+  const tz = acct.timezone_name || 'UTC';
+  const until = DateTime.now().setZone(tz).toISODate(), since = DateTime.now().setZone(tz).minus({ days: BREAKDOWN_DAYS - 1 }).toISODate();
+  for (const [dimension, breakdowns] of Object.entries(BREAKDOWNS)) {
+    for (const part of chunk(ids, 50)) {
+      let got;
+      try {
+        got = await g.paginate(`${acct.ad_account_id}/insights`, {
+          level: 'adset', breakdowns, time_range: JSON.stringify({ since, until }), fields: BREAKDOWN_FIELDS,
+          filtering: JSON.stringify([{ field: 'adset.id', operator: 'IN', value: part }]), use_unified_attribution_setting: true, limit: 500
+        });
+      } catch (e) { run.err(`breakdown ${dimension}`, e); continue; }
+      const out = got.filter((r) => clientOf.has(String(r.adset_id))).map((r) => ({
+        adset_id: String(r.adset_id), dimension, segment: segmentOf(dimension, r).slice(0, 120), client_id: clientOf.get(String(r.adset_id)),
+        period_from: since, period_to: until, currency: r.account_currency || cur,
+        spend: money(r.spend), impressions: int(r.impressions), reach: int(r.reach), link_clicks: int(r.inline_link_clicks),
+        messages_started: firstAction(r.actions, ACTIONS.messages_started), leads: firstAction(r.actions, ACTIONS.leads),
+        purchases: firstAction(r.actions, ACTIONS.purchases), purchase_value: money(firstAction(r.action_values, ACTIONS.purchases)), updated_at: ts
+      }));
+      if (out.length) await upsertChunked('xp_ad_breakdowns', out, 'adset_id,dimension,segment');
+      // a segment that had nothing in the last 90 days is gone
+      await q(supabase.from('xp_ad_breakdowns').delete().eq('dimension', dimension).in('adset_id', part).lt('updated_at', ts), 'breakdowns old').catch((e) => run.err('breakdown cleanup', e));
+    }
+  }
+}
+
 // ---------------------------------------------------------------- entry point
 let running = null;
 async function syncAds({ triggeredBy = 'manual', days = null } = {}) {
@@ -398,4 +477,4 @@ async function syncAds({ triggeredBy = 'manual', days = null } = {}) {
   try { return await running; } finally { running = null; }
 }
 
-module.exports = { syncAds, snapshotRow, matchAd, pageOf, igOf, firstAction, slices, ACTIONS, OPEN_DAYS, FIRST_SYNC_DAYS };
+module.exports = { syncAds, snapshotRow, matchAd, pageOf, igOf, firstAction, slices, ACTIONS, OPEN_DAYS, FIRST_SYNC_DAYS, syncAdSets, segmentOf, fromMinor };
