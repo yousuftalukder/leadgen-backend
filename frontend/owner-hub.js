@@ -366,6 +366,24 @@
         s.body.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
     }
 
+    // ---- help (phase 80, as in the Owner Assistant) ---------------------------------------------
+    // How the app works, in the owner's words, from the account menu.
+    function openHelp() {
+        const s = sheet('Help', 'How Edge Meta AI works', openHelp);
+        const part = (title, html) => `<section class="help-part"><h3>${title}</h3>${html}</section>`;
+        s.body.innerHTML = `<div class="help">
+            ${part('Ask anything', `<p>Type a question at the bottom, or tap the microphone and say it. The words appear in the box first, so you can check them before you send.</p>
+                <ul><li>“How are we doing this month so far?”</li><li>“Which post did best last month?”</li><li>“What are you working on for us?”</li><li>“When is our next post?”</li></ul>
+                <p>Answers come from your own Instagram and Facebook numbers and from what your agency shares with you. Charts and follow-up questions appear under an answer when they help.</p>`)}
+            ${part('Your updates, in the bar on the left', `<p><b>Overview</b> shows all of your agency’s work at once. <b>To-dos</b> are what your agency needs from you: tick one off right there. <b>Reports</b> opens every report your agency shared, and a new check-up. <b>Posts to approve</b> is where you approve a planned post, ask for changes, or skip it.</p>
+                <p>On a phone, the bar opens from the button at the top left. The number on it is how many things wait for you.</p>`)}
+            ${part('Your numbers', `<p>Your numbers update by themselves twice a day. The last day or two can still change while Meta finishes counting. Edge Meta AI only reads: nothing is ever posted, and no messages are read.</p>`)}
+            ${part('On your phone', `<p>Open the account menu at the bottom of the bar and choose <b>Add to Home Screen</b>. Edge Meta AI then opens full screen, like an app.</p>`)}
+            ${part('Signing in', `<p>There is no password. Each time, enter your email and the 6-digit code we send to it. Your agency can also send you a one-tap sign-in link, and can change the email you sign in with.</p>`)}
+            ${part('Something wrong?', `<p>Ask your agency: they see the same work and reports you do, and can fix a to-do, a post or a report for you.</p>`)}
+        </div>`;
+    }
+
     // ---- planned posts -------------------------------------------------------------------
     function openPosts() {
         const s = sheet('Posts planned for you', 'Approve the ones you like; your agency makes them', openPosts);
@@ -582,5 +600,5 @@
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, help: openHelp, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
 })();

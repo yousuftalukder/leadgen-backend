@@ -2,7 +2,19 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!-- Phase 80, as in the Owner Assistant: a phone or tablet does not zoom, in the browser or the installed app;
+         computers ignore these two settings and still zoom. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <script>
+    // A phone always gets the phone layout, told by the device and not the page's width: a touch screen whose
+    // short side is under 600 px. That holds when the browser asks for the "Desktop site" and when the phone is
+    // turned sideways. It only marks the page; the styles and the bar read the mark.
+    (function () {
+        var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        var side = Math.min(screen.width || 0, screen.height || 0);
+        if (coarse && side && side < 600) document.documentElement.classList.add('is-phone');
+    })();
+    </script>
     <!--
         Edge Meta AI as an app of its own (phase 47). The same chat as
         client-assistant.html (meta-ai.js / meta-ai.css), with nothing of
@@ -149,7 +161,18 @@
         .side-todo { padding: 9px 6px; }
         .side-link, .side-sec-h { min-height: 42px; }
     }
-    @media (min-width: 941px) { .ai-scrim { display: none; } }
+    @media (min-width: 941px) { html:not(.is-phone) .ai-scrim { display: none; } }
+    /* Phase 80: a phone at any width (the "Desktop site", sideways) is laid out as a phone. */
+    html.is-phone .ai-page .oa-wrap { grid-template-columns: minmax(0, 1fr); }
+    html.is-phone .ai-page .oa-side { display: flex; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(86vw, 330px);
+        transform: translateX(-102%); transition: transform .22s ease; box-shadow: 20px 0 50px rgba(0,0,0,0.5); visibility: visible; }
+    html.is-phone .ai-page .oa-side.is-open { transform: none; }
+    html.is-phone .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); }
+    html.is-phone .ai-page .oa-state { display: none; }
+    html.is-phone .ai-page .oa-head .oa-side-toggle, html.is-phone .ai-page .oa-head .head-mark, html.is-phone .ai-page .oa-head .oa-brand { display: revert; }
+    html.is-phone .ai-page .oa-head .oa-side-toggle { display: inline-grid; }
+    /* No double-tap zoom on a phone, and no grey flash on a tap. */
+    html.is-phone, html.is-phone body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     </style>
 </head>
 <body>
@@ -217,6 +240,7 @@
             <div class="side-acct">
                 <div id="ai-menu" role="menu" aria-label="Account" class="oa-menu acct-menu hidden">
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
+                    <button type="button" role="menuitem" id="acct-help">Help</button>
                     <button type="button" role="menuitem" data-signout>Sign out</button>
                 </div>
                 <button class="acct-btn" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu">
@@ -244,6 +268,9 @@
             <form id="chat-form" class="oa-form">
                 <div class="composer">
                     <textarea id="chat-input" rows="1" maxlength="2000" placeholder="Ask about your numbers…" aria-label="Your question"></textarea>
+                    <button type="button" id="mic-btn" class="mic-btn" aria-label="Speak your question" aria-pressed="false" title="Speak your question" hidden>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+                    </button>
                     <button type="submit" id="send-btn" class="send-btn" aria-label="Send" disabled></button>
                 </div>
                 <p id="composer-hint" class="oa-hint">Answers come from your own Instagram and Facebook data. The most recent days can still change.</p>
@@ -386,7 +413,10 @@
         // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.
         const side = $('oa-side'), scrim = $('ai-scrim');
         // On a phone the drawer is off-screen when closed, and out of reach of the keyboard too (phase 57).
-        const phone = matchMedia('(max-width: 940px)');
+        // A phone by its width, or (phase 80) by the device itself, whatever width the browser draws at.
+        const narrow = matchMedia('(max-width: 940px)');
+        const isPhoneDevice = document.documentElement.classList.contains('is-phone');
+        const phone = { get matches() { return isPhoneDevice || narrow.matches; }, addEventListener: (t, f) => narrow.addEventListener(t, f) };
         const syncSide = () => {
             const open = side.classList.contains('is-open');
             scrim.hidden = !open;
@@ -416,6 +446,7 @@
         const install = $('acct-install');
         install.hidden = EL.isStandalone();
         install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });
+        $('acct-help').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('help'); });
 
         const menu = $('ai-menu'), more = $('ai-more');
         const closeMenu = () => { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); };

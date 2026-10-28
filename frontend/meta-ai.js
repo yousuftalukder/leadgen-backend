@@ -102,6 +102,7 @@
         $('oa-new').addEventListener('click', newChat);
         $('oa-side-toggle').addEventListener('click', () => $('oa-side').classList.toggle('is-open'));
         $('chat-form').addEventListener('submit', handleChatSubmit);
+        setupVoice();
         input.addEventListener('input', autoGrow);
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch()) handleChatSubmit(e); });
         $('to-bottom').addEventListener('click', () => scrollToBottom(true));
@@ -327,6 +328,61 @@
         ask(text);
     }
     // Phase 50: without Meta the answers come from the agency's work, so the line says so.
+    // ---- speaking a question (phase 80, as in the Owner Assistant) ------------------------
+    // The browser's own speech recognition (Chrome, Edge, Android, Safari on iPhone). The words go into the
+    // box as they are heard, never straight to an answer: the owner reads them and sends. Where the browser
+    // has none (Firefox), the microphone is not shown. Bangla is heard when the app is in Bangla.
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let voice = null;
+    const voiceLang = () => (window.ELLang && ELLang.current && ELLang.current() === 'bn') ? 'bn-BD' : (navigator.language || 'en-US');
+    function voiceHint(text, warn) {
+        const hint = $('composer-hint'); if (!hint) return;
+        if (text) { hint.textContent = text; hint.classList.toggle('warn', !!warn); hint.dataset.voice = '1'; }
+        else if (hint.dataset.voice) { delete hint.dataset.voice; hint.classList.remove('warn'); hint.textContent = hintDefault(); }
+    }
+    function voiceStop() { if (voice) { voice.stopping = true; try { voice.r.stop(); } catch { /* already ended */ } } }
+    function voiceStart() {
+        const mic = $('mic-btn');
+        let r;
+        try { r = new SR(); } catch { voiceHint('This browser cannot listen. Please type your question.', true); return; }
+        r.lang = voiceLang(); r.interimResults = true; r.continuous = !isTouch(); r.maxAlternatives = 1;
+        const base = input.value.trim();
+        const v = voice = { r, base, heard: '', stopping: false };
+        mic.classList.add('is-on'); mic.setAttribute('aria-pressed', 'true'); mic.setAttribute('aria-label', 'Stop listening');
+        voiceHint('Listening… tap the microphone again when you are done.');
+        r.onresult = (e) => {
+            let said = '';
+            for (let i = 0; i < e.results.length; i++) said += (e.results[i][0] && e.results[i][0].transcript) || '';
+            v.heard = said.replace(/\s+/g, ' ').trim();
+            input.value = [v.base, v.heard].filter(Boolean).join(' ');
+            autoGrow();
+        };
+        r.onerror = (e) => {
+            const why = e && e.error;
+            v.error = why === 'not-allowed' || why === 'service-not-allowed' ? 'Allow the microphone for this site in your browser settings, then tap the microphone again.'
+                : why === 'no-speech' ? 'Nothing was heard. Tap the microphone and speak, or type your question.'
+                : why === 'audio-capture' ? 'No microphone was found on this device. Please type your question.'
+                : why === 'network' ? 'Listening needs a connection. Please type your question, or try again.'
+                : why === 'aborted' ? '' : 'Listening stopped. Tap the microphone to try again, or type your question.';
+        };
+        r.onend = () => {
+            if (voice !== v) return;
+            voice = null;
+            mic.classList.remove('is-on'); mic.setAttribute('aria-pressed', 'false'); mic.setAttribute('aria-label', 'Speak your question');
+            if (v.error) voiceHint(v.error, true);
+            else { voiceHint(''); if (v.heard) { input.focus(); const n = input.value.length; try { input.setSelectionRange(n, n); } catch { /* not focusable */ } } }
+        };
+        try { r.start(); } catch { voice = null; mic.classList.remove('is-on'); voiceHint('Listening could not start. Please type your question.', true); }
+    }
+    function setupVoice() {
+        const mic = $('mic-btn'); if (!mic) return;
+        if (!SR) { mic.hidden = true; return; }
+        mic.hidden = false;
+        mic.addEventListener('click', () => { if (voice) voiceStop(); else if (!chatBusy) voiceStart(); });
+        // A question being sent ends the listening, so late words do not land in the next one.
+        $('chat-form').addEventListener('submit', voiceStop, true);
+    }
+
     const hintDefault = () => (xpStatus && xpStatus.phase === 'not_connected'
         ? 'Answers come from what your agency shares with you. Connect Facebook and Instagram to ask about your numbers.'
         : 'Answers come from your own Instagram and Facebook data. The most recent days can still change.');
