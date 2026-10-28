@@ -141,6 +141,29 @@ body { padding-bottom: 0; }
 .fallback-bars { display: flex; align-items: flex-end; gap: 2px; height: 100%; }
 .fallback-bars i { flex: 1; border-radius: 3px 3px 0 0; display: block; }
 .panel-note { margin-top: 10px; font-size: 0.74rem; color: var(--text-muted); }
+/* Phase 77: the Overview sheet, opened from the bar */
+.work-counts { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin-bottom: 6px; }
+.work-count { display: block; width: 100%; text-align: left; font: inherit; cursor: pointer; color: inherit; }
+.work-count .tile-label, .work-count .tile-value { display: block; }
+.work-count:hover { border-color: rgba(255,255,255,0.18); }
+.work-count.is-hot { border-color: rgba(24,106,255,0.55); background: rgba(24,106,255,0.1); }
+.work-count.is-hot .tile-value { color: var(--accent-solid); }
+.work-sec { margin-top: 18px; }
+.work-h { display: flex; align-items: center; gap: 8px; margin: 0 2px 8px; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); }
+.work-h i { width: 8px; height: 8px; border-radius: 999px; background: var(--text-muted); }
+.work-sec.is-yours .work-h i { background: var(--accent-solid); }
+.work-sec.is-doing .work-h i { background: #fbbf24; }
+.work-sec.is-posts .work-h i { background: #f472b6; }
+.work-sec.is-done .work-h i { background: #34d399; }
+.work-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.work-row { width: 100%; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 3px 12px; padding: 10px 12px; border-radius: 10px;
+    border: 0; background: rgba(255,255,255,0.03); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.work-row:hover { background: rgba(255,255,255,0.06); }
+.work-row.is-wait { box-shadow: inset 2px 0 0 #f472b6; }
+.work-t { min-width: 0; flex: 1 1 220px; font-size: 0.88rem; color: var(--text-primary); line-height: 1.35; }
+.work-m { flex: none; font-size: 0.74rem; color: var(--text-muted); }
+.work-m.is-late { color: #fda4af; }
+.work-sec.is-done .work-t { color: var(--text-secondary); }
 
 /* ---- composer ---- */
 .oa-form { position: sticky; bottom: 0; padding: 10px 0 14px; background: linear-gradient(to top, var(--bg-color) 70%, transparent); }
