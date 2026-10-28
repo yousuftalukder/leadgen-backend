@@ -122,8 +122,8 @@ const test = (name, fn) => tests.push([name, fn]);
 test('name and phone are saved, tidied, on their own row only', async () => {
     const r = await call('POST', '/api/me/profile', { body: { full_name: '  Rahim   Uddin ', phone: ' +880 1711-000000 ' } });
     assert.strictEqual(r.code, 200, JSON.stringify(r.body));
-    assert.deepStrictEqual([me().full_name, me().phone], ['Rahim Uddin', '+880 1711-000000']);
-    assert.deepStrictEqual([r.body.full_name, r.body.phone], ['Rahim Uddin', '+880 1711-000000']);
+    assert.deepStrictEqual([me().full_name, me().phone], ['Rahim Uddin', '+880 1711000000']);
+    assert.deepStrictEqual([r.body.full_name, r.body.phone], ['Rahim Uddin', '+880 1711000000']);
     const other = tbl('app_users').find(u => u.id === OTHER);
     assert.deepStrictEqual([other.full_name, other.phone], ['Other', '017']);
 });
@@ -164,7 +164,7 @@ test('/api/me shows the name, phone and a signed photo link', async () => {
     await call('POST', '/api/me/profile', { body: { phone: '01711000000' } });
     const r = await call('GET', '/api/me');
     assert.strictEqual(r.body.full_name, 'Rahim Uddin');
-    assert.strictEqual(r.body.phone, '01711000000');
+    assert.strictEqual(r.body.phone, '+880 1711000000', 'phase 84: kept with its country code');
     assert.strictEqual(r.body.avatar_url, 'https://signed/' + me().avatar_path);
 });
 test('the photo can be removed', async () => {

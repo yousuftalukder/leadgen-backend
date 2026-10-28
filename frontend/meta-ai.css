@@ -147,6 +147,19 @@ body { padding-bottom: 0; }
 .help-part p { margin: 0 0 8px; font-size: 0.9rem; line-height: 1.6; color: var(--text-secondary); }
 .help-part ul { margin: 0 0 8px; padding-left: 18px; font-size: 0.9rem; line-height: 1.7; color: var(--text-secondary); }
 .help-part b { color: var(--text-primary); }
+/* phase 84: grouped questions that open, as in the Owner Assistant */
+.help { gap: 18px; }
+.help-lead { margin: 0; font-size: 0.92rem; line-height: 1.6; color: var(--text-secondary); }
+.help-group h3 { margin: 0 0 6px; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.help-q { border: 1px solid rgba(var(--ink), 0.08); border-radius: 10px; background: rgba(var(--ink), 0.02); margin-bottom: 6px; }
+.help-q summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 11px 14px; font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
+.help-q summary::-webkit-details-marker { display: none; }
+.help-q summary::after { content: ''; flex: none; width: 7px; height: 7px; border-right: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted); transform: rotate(45deg); transition: transform .15s; margin-top: -3px; }
+.help-q[open] summary::after { transform: rotate(-135deg); margin-top: 3px; }
+.help-a { padding: 0 14px 10px; }
+.help-a p { margin: 0 0 8px; font-size: 0.88rem; line-height: 1.6; color: var(--text-secondary); }
+.help-a ul { margin: 0 0 8px; padding-left: 18px; font-size: 0.88rem; line-height: 1.7; color: var(--text-secondary); }
+.help-a b { color: var(--text-primary); }
 /* Phase 77: the Overview sheet, opened from the bar */
 .work-counts { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin-bottom: 6px; }
 .work-count { display: block; width: 100%; text-align: left; font: inherit; cursor: pointer; color: inherit; }
@@ -302,6 +315,20 @@ body.el-has-plan .oa-side { top: 132px; }
 .hub-prof-pic { display: flex; gap: 8px; flex-wrap: wrap; }
 .hub-prof-up { display: inline-flex; align-items: center; margin: 0; color: var(--text-primary); text-transform: none; letter-spacing: 0; font-size: 0.83rem; font-weight: 600; }
 .hub-prof-mail { margin: 0; font-size: 0.95rem; color: var(--text-primary); overflow-wrap: anywhere; }
+/* phase 84: the profile in cards, a phone with its country code, the business as the agency has it */
+.hub-card { margin-top: 16px; padding: 14px 16px 12px; border-radius: 12px; border: 1px solid rgba(var(--ink), 0.08); background: rgba(var(--ink), 0.02); }
+.hub-card h3 { margin: 0; font-size: 0.95rem; font-weight: 700; color: var(--text-primary); }
+.hub-card .hub-form > label:first-child { margin-top: 12px; }
+.hub-card .btn-secondary { align-self: flex-start; margin-top: 10px; }
+.hub-phone { display: flex; gap: 8px; }
+.hub-phone input { flex: 1; min-width: 0; }
+.hub-cc { position: relative; flex: none; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(var(--ink), 0.12);
+    background: rgba(var(--ink), 0.03); color: var(--text-primary); font-size: 0.86rem; font-weight: 600; white-space: nowrap; }
+.hub-cc:focus-within { border-color: var(--accent-solid, #186aff); }
+.hub-cc select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 16px; }
+.hub-biz { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.hub-biz b { font-size: 0.92rem; color: var(--text-primary); }
+.hub-biz span { font-size: 0.8rem; color: var(--text-muted); }
 .hub-prog { margin-top: 8px; }
 .hub-track { height: 6px; border-radius: 999px; background: rgba(var(--ink), 0.09); overflow: hidden; }
 .hub-track i { display: block; height: 100%; width: 0; background: var(--accent-glow, var(--accent-solid)); transition: width .3s; }
