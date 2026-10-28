@@ -569,7 +569,9 @@ const SUGGESTIONS = {
   get_ad_performance: (ctx) => (ctx.adsConnected
     ? ['Which campaign cost the least per result?', 'How does ad spend compare to last month?', 'How much of our Facebook views were paid?']
     : ['How much of our Facebook views were paid?', 'How did Facebook do this month?']),
-  get_influencer_posts: () => ['Which creator brought the most views?', 'How do their posts compare with our own reels?', 'What did people say in the comments?']
+  get_influencer_posts: () => ['Which creator brought the most views?', 'How do their posts compare with our own reels?', 'What did people say in the comments?'],
+  // EdgeLead (phase 77): the agency's work gets follow-ups too, as a numbers answer does.
+  get_agency_work: () => ['What do you need from me?', 'When is our next post?', 'Which reports do I have?', 'What did you finish this month?']
 };
 
 // v2.8: questions about THIS answer's numbers come first — the platform and figure that moved most,
@@ -694,6 +696,19 @@ const SPECIFIC_SUGGESTIONS = {
   get_influencer_posts: (r) => {
     const top = (r && Array.isArray(r.posts) ? r.posts : []).find((p) => sugNum(p.views) !== null);
     return top ? [`Is ${top.creator}'s post still gaining views?`] : [];
+  },
+  // EdgeLead (phase 77): about the work the answer just listed: the owner's own first to-do, a post
+  // waiting for their OK, the piece of work due soonest.
+  get_agency_work: (r) => {
+    const out = [];
+    const mine = (r.your_todos || [])[0];
+    const q1 = mine && sugQuote(mine.title, 40);
+    if (q1) out.push(`What exactly do you need for "${q1}"?`);
+    if ((r.planned_posts || []).some((p) => p.state === 'waiting for your OK')) out.push('Which posts are waiting for my OK?');
+    const soon = (r.agency_working_on || []).filter((t) => t.due).sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
+    const q2 = soon && sugQuote(soon.title, 40);
+    if (q2) out.push(`When will "${q2}" be ready?`);
+    return out;
   },
   get_ad_performance: (r) => {
     if (!r || !r.connected) return [];

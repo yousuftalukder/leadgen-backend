@@ -14,6 +14,7 @@
 //   ranking   get_top_posts         the ranked posts
 //   summary + ranking   get_ad_performance   ads (v2.8): spend, ad views, results, return; campaigns by
 //             spend. With a comparison period, a compare panel instead of the summary.
+//   work      get_agency_work       EdgeLead (phase 77): the counts, then the to-dos, the work, the posts
 //
 // null stays null: a missing bar means "not tracked", as it does in the text (rule 2). Instagram
 // first, Facebook second (rule 6). Nothing is ever added across platforms.
@@ -390,8 +391,46 @@ function adsPanels(r, args = {}) {
   return out.length ? out : null;
 }
 
+// ---------------------------------------------------------------- the agency's work (get_agency_work)
+// EdgeLead (phase 77): an answer about the agency's work gets a panel too, as a numbers answer does:
+// the counts first, then what waits on the owner, what the agency is doing, the posts coming up and
+// what was finished lately. All of it is the tool's own rows; nothing is worked out here but dates.
+const todayIso = () => new Date().toISOString().slice(0, 10);
+function workDue(due, done) {
+  if (!isDate(due) || done) return null;
+  return { label: due < todayIso() ? `overdue since ${dayLabel(due)}` : `due ${dayLabel(due)}`, late: due < todayIso() };
+}
+const PRIORITY = { highest: 'Highest priority', high: 'High priority' };
+function workPanel(r) {
+  if (!r || typeof r !== 'object' || r.error) return null;
+  const yours = Array.isArray(r.your_todos) ? r.your_todos : [];
+  const doing = Array.isArray(r.agency_working_on) ? r.agency_working_on : [];
+  const posts = Array.isArray(r.planned_posts) ? r.planned_posts : [];
+  const done = Array.isArray(r.finished_last_30_days) ? r.finished_last_30_days : [];
+  if (!yours.length && !doing.length && !posts.length && !done.length) return null;
+  const waitingPosts = posts.filter((p) => p.state === 'waiting for your OK');
+  const item = (title, bits, due) => ({ text: snippet(title, 90) || 'Untitled', meta: [...bits, due && due.label].filter(Boolean).join(' · '), late: !!(due && due.late) });
+  const sections = [
+    { key: 'yours', name: 'Waiting on you', items: yours.slice(0, 6).map((t) => item(t.title, [PRIORITY[t.priority]], workDue(t.due))) },
+    { key: 'doing', name: 'We are working on', items: doing.slice(0, 6).map((t) => item(t.title, [t.state && t.state.charAt(0).toUpperCase() + t.state.slice(1), PRIORITY[t.priority]], workDue(t.due))) },
+    { key: 'posts', name: 'Planned posts', items: posts.slice(0, 6).map((p) => ({ ...item(p.idea || `${formatOne(p.format)} post`, [dayLabel(p.on), p.format ? formatOne(p.format) : null, p.state]), wait: p.state === 'waiting for your OK' })) },
+    { key: 'done', name: 'Finished in the last 30 days', items: done.slice(0, 5).map((t) => item(t.title, [isDate(t.done_on) ? `done ${dayLabel(t.done_on)}` : null])) }
+  ].filter((s) => s.items.length);
+  return {
+    kind: 'work', title: 'Your agency’s work', subtitle: 'As it stands today',
+    counts: [
+      { key: 'yours', label: 'Waiting on you', value: yours.length, hot: yours.length > 0 },
+      { key: 'doing', label: 'In progress', value: doing.length },
+      { key: 'posts', label: 'Posts for your OK', value: waitingPosts.length, hot: waitingPosts.length > 0 },
+      { key: 'done', label: 'Finished, 30 days', value: done.length }
+    ],
+    sections
+  };
+}
+
 // ---------------------------------------------------------------- selection
 const BUILDERS = {
+  get_agency_work: (r) => workPanel(r),
   get_ad_performance: adsPanels,
   compare_periods: (r) => comparePanel(r),
   get_daily_series: dailyPanel,
@@ -432,4 +471,4 @@ function panelsFor(toolLog, toolResults, opts = {}) {
   return (specific.length ? specific : built).slice(0, MAX_PANELS).map((b) => b.panel);
 }
 
-module.exports = { panelsFor, periodLabel, summaryPanel, comparePanel, dailyPanel, followersPanel, formatsPanel, patternPanel, rankingPanel, adsPanels };
+module.exports = { panelsFor, periodLabel, summaryPanel, comparePanel, dailyPanel, followersPanel, formatsPanel, patternPanel, rankingPanel, adsPanels, workPanel };

@@ -2521,6 +2521,31 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
 });
+// Phase 77: an answer about the agency's work comes with its panel and follow-ups, as a numbers answer does.
+test('an answer about the agency\'s work comes with the work panel and follow-ups about that work', async () => {
+    const soon = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+    tbl('client_tasks').push(
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Send us 5 photos of the new menu', status: 'todo', visible_to_client: true, assigned_to_client: true, due_date: soon, priority: 'high' },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Raw video editing', status: 'doing', visible_to_client: true, assigned_to_client: false, due_date: soon },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Internal only, never shown', status: 'doing', visible_to_client: false, assigned_to_client: false });
+    XP.script = [
+        { parts: [{ functionCall: { name: 'get_agency_work', args: {} } }] },
+        { parts: [{ text: 'We are editing your raw video, and we need menu photos from you.' }] }
+    ];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'What are you working on for us?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    const work = (r.body.charts || []).find(p => p.kind === 'work');
+    assert.ok(work, 'no work panel: ' + JSON.stringify(r.body.charts));
+    const count = k => (work.counts.find(c => c.key === k) || {}).value;
+    assert.ok(count('yours') >= 1 && count('doing') >= 1, 'counts: ' + JSON.stringify(work.counts));
+    assert.strictEqual(work.counts.find(c => c.key === 'yours').hot, true, 'something waiting on the owner is highlighted');
+    const texts = work.sections.flatMap(s => s.items.map(i => i.text));
+    assert.ok(texts.includes('Send us 5 photos of the new menu') && texts.includes('Raw video editing'));
+    assert.ok(!texts.includes('Internal only, never shown'), 'work the owner may not see stays out');
+    assert.ok((r.body.suggestions || []).some(s => /^What exactly do you need for ".+"\?$/.test(s)), 'a follow-up about their own to-do: ' + JSON.stringify(r.body.suggestions));
+    assert.ok((r.body.suggestions || []).some(s => s.includes('Raw video editing')), 'a follow-up about the work due soonest');
+});
 // Phase 76: Gemini's "model is experiencing high demand" (503) is waited out once, then the answer moves
 // to the fallback model; the owner hears "busy" only when that one is overloaded too.
 const BUSY = '{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}';

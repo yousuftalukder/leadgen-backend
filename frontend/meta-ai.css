@@ -141,6 +141,23 @@ body { padding-bottom: 0; }
 .fallback-bars { display: flex; align-items: flex-end; gap: 2px; height: 100%; }
 .fallback-bars i { flex: 1; border-radius: 3px 3px 0 0; display: block; }
 .panel-note { margin-top: 10px; font-size: 0.74rem; color: var(--text-muted); }
+/* Phase 77: the agency's work under an answer about it */
+.work-counts { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin-bottom: 4px; }
+.work-count.is-hot { border-color: rgba(24,106,255,0.55); background: rgba(24,106,255,0.1); }
+.work-count.is-hot .tile-value { color: var(--accent-solid); }
+.work-sec { margin-top: 16px; }
+.work-sec .plat i { background: var(--text-muted); }
+.work-sec.is-yours .plat i { background: var(--accent-solid); }
+.work-sec.is-doing .plat i { background: #fbbf24; }
+.work-sec.is-posts .plat i { background: #f472b6; }
+.work-sec.is-done .plat i { background: #34d399; }
+.work-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.work-list li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; padding: 8px 10px; border-radius: 9px; background: rgba(255,255,255,0.025); }
+.work-list li.is-wait { box-shadow: inset 2px 0 0 #f472b6; }
+.work-t { min-width: 0; flex: 1 1 220px; font-size: 0.86rem; color: var(--text-primary); line-height: 1.35; }
+.work-m { flex: none; font-size: 0.74rem; color: var(--text-muted); }
+.work-m.is-late { color: #fda4af; }
+.work-sec.is-done .work-t { color: var(--text-secondary); }
 
 /* ---- composer ---- */
 .oa-form { position: sticky; bottom: 0; padding: 10px 0 14px; background: linear-gradient(to top, var(--bg-color) 70%, transparent); }
