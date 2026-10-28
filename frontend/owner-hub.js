@@ -20,7 +20,7 @@
 (function () {
     'use strict';
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const shortDay = iso => (iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
+    const shortDay = iso => (iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
     const today = () => new Date().toISOString().slice(0, 10);
     const ago = iso => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 2 ? 'just now' : m < 60 ? `${m} min ago` : m < 2160 ? `${Math.round(m / 60)} h ago` : shortDay(iso); };
     const STATE = { todo: 'Planned', doing: 'In progress', waiting: 'Waiting on you', done: 'Done' };

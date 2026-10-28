@@ -506,6 +506,13 @@ RULES:
 3. Keep it short: a few sentences or a short list.`;
 }
 
+// EdgeLead (phase 83), as in the Owner Assistant: the owner reads the app in Bangla, so the answer is in
+// Bangla too. The page sends lang with the question; anything but 'bn' is English, and adds nothing.
+const LANGUAGE_RULE = {
+  bn: '\nLANGUAGE. The owner reads Edge Meta AI in Bangla. Write the whole answer in clear, natural Bangla (বাংলা) as spoken in Bangladesh, including any notes and headings. Keep names, page names, platform names (Facebook, Instagram) and every figure exactly as the tools return them, with the same digits.'
+};
+const languageRule = (lang) => (Object.prototype.hasOwnProperty.call(LANGUAGE_RULE, lang) ? LANGUAGE_RULE[lang] : '');
+
 function systemPrompt(client, tz, cov) {
   const d = resolvedDates(tz);
   return `You are Owner Assistant, powered by XPulse.inc, the analytics assistant for "${client.client_name}". Talk like a sharp human assistant who knows the numbers: direct, precise, no filler. Speak to the owner as "you" and about "your" posts, pages and followers.
@@ -1018,7 +1025,7 @@ async function chatKeys() {
   return cfg.gemini.apiKey ? [{ id: null, key: cfg.gemini.apiKey, source: 'env' }] : [];
 }
 
-async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal, who }) {
+async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal, who, lang }) {
   const keys = await chatKeys();
   if (!keys.length) throw new Error('GEMINI_API_KEY is not configured.');
   const { GoogleGenAI } = require('@google/genai');
@@ -1082,7 +1089,7 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   const offered = metaLess
     ? declarations().filter((d) => d.name === 'get_agency_work')
     : declarations().filter((d) => (adsQuestion || d.name !== 'get_ad_performance') && (influencerQuestion || d.name !== 'get_influencer_posts'));
-  const config = modelConfig({ systemInstruction: metaLess ? agencyOnlyPrompt(client, tz) : systemPrompt(client, tz, cov), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
+  const config = modelConfig({ systemInstruction: (metaLess ? agencyOnlyPrompt(client, tz) : systemPrompt(client, tz, cov)) + languageRule(lang), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
   const gate = adsNoteGate(!adsQuestion, (t) => emit({ type: 'delta', text: t }));
   const toolLog = [], toolResults = [];
   let text = '';
@@ -1175,4 +1182,4 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model, usage: spent };
 }
 
-module.exports = { convVisible, agencyOnlyPrompt, setKeySource, keyTrouble, overloaded, fallbackModel, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { convVisible, agencyOnlyPrompt, languageRule, setKeySource, keyTrouble, overloaded, fallbackModel, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };

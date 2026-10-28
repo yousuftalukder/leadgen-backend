@@ -27,6 +27,8 @@
         service worker.
     -->
     <base href="../">
+    <!-- Phase 83: English or বাংলা, set before anything is drawn. -->
+    <script src="ai/i18n.js?v=1"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
@@ -72,6 +74,7 @@
     html, body { height: 100%; }
     body { margin: 0; padding: 0 !important; overflow: hidden; background: var(--bg-color); }
     [hidden] { display: none !important; }
+    html.i18n-wait body { visibility: hidden; }
 
     /* ---- sign in ---- */
     .ai-gate { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); overflow-y: auto; }
@@ -268,6 +271,7 @@
                     <button type="button" role="menuitem" id="acct-profile">Profile</button>
                     <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
                     <button type="button" role="menuitem" id="acct-theme">Light theme</button>
+                    <button type="button" role="menuitem" id="acct-lang" data-no-i18n lang="bn">বাংলা</button>
                     <button type="button" role="menuitem" id="acct-help">Help</button>
                     <button type="button" role="menuitem" data-signout>Sign out</button>
                 </div>
@@ -488,6 +492,12 @@
         install.hidden = EL.isStandalone();
         install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });
         // Phase 81: the item names the theme it switches to; the menu stays open so the change is seen.
+        // Phase 83: the item names the other language in its own script; leaving Bangla reloads the page.
+        const langBtn = $('acct-lang');
+        const other = () => (ELLang.current() === 'bn' ? 'en' : 'bn');
+        const langLabel = () => { langBtn.textContent = ELLang.LANGS[other()].name; langBtn.lang = other(); };
+        langLabel();
+        langBtn.addEventListener('click', () => { closeMenu(); ELLang.set(other()); langLabel(); });
         const themeBtn = $('acct-theme');
         const themeLabel = () => { themeBtn.textContent = EMATheme.current() === 'light' ? 'Dark theme' : 'Light theme'; };
         themeLabel();
