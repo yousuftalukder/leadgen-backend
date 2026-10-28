@@ -2521,8 +2521,9 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
 });
-// Phase 77: an answer about the agency's work comes with its panel and follow-ups, as a numbers answer does.
-test('an answer about the agency\'s work comes with the work panel and follow-ups about that work', async () => {
+// Phase 77: an answer about the agency's work comes with follow-ups about that work, as a numbers answer
+// does. The overview of the work is the Overview sheet in the bar, never a panel in the chat.
+test('an answer about the agency\'s work comes with follow-ups about that work, and no panel in the chat', async () => {
     const soon = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
     tbl('client_tasks').push(
         { id: crypto.randomUUID(), client_id: state.C, title: 'Send us 5 photos of the new menu', status: 'todo', visible_to_client: true, assigned_to_client: true, due_date: soon, priority: 'high' },
@@ -2535,14 +2536,12 @@ test('an answer about the agency\'s work comes with the work panel and follow-up
     XP.requests.length = 0;
     const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'What are you working on for us?' } });
     assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
-    const work = (r.body.charts || []).find(p => p.kind === 'work');
-    assert.ok(work, 'no work panel: ' + JSON.stringify(r.body.charts));
-    const count = k => (work.counts.find(c => c.key === k) || {}).value;
-    assert.ok(count('yours') >= 1 && count('doing') >= 1, 'counts: ' + JSON.stringify(work.counts));
-    assert.strictEqual(work.counts.find(c => c.key === 'yours').hot, true, 'something waiting on the owner is highlighted');
-    const texts = work.sections.flatMap(s => s.items.map(i => i.text));
-    assert.ok(texts.includes('Send us 5 photos of the new menu') && texts.includes('Raw video editing'));
-    assert.ok(!texts.includes('Internal only, never shown'), 'work the owner may not see stays out');
+    assert.deepStrictEqual(r.body.charts || [], [], 'the work is in the bar, not under the answer');
+    const fr = XP.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse).functionResponse.response.result;
+    const shown = [...fr.your_todos, ...fr.agency_working_on].map(t => t.title);
+    assert.ok(shown.includes('Send us 5 photos of the new menu') && shown.includes('Raw video editing'));
+    assert.ok(!shown.includes('Internal only, never shown'), 'work the owner may not see never reaches the model');
+    assert.ok(!(r.body.suggestions || []).some(s => s.includes('Internal only')));
     assert.ok((r.body.suggestions || []).some(s => /^What exactly do you need for ".+"\?$/.test(s)), 'a follow-up about their own to-do: ' + JSON.stringify(r.body.suggestions));
     assert.ok((r.body.suggestions || []).some(s => s.includes('Raw video editing')), 'a follow-up about the work due soonest');
 });

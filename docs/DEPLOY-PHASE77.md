@@ -1,4 +1,4 @@
-# Phase 77 — agency answers get a panel and follow-ups
+# Phase 77 — agency answers get follow-ups; the work has an Overview in the bar
 
 ## Run
 
@@ -6,21 +6,22 @@ There's no SQL. Deploy the server (Render does this by itself on merge) and the 
 
 ## Why
 
-Answers about the owner's numbers came with chart panels and follow-up questions, as in the Owner Assistant. Answers about the agency's work came back as bare text. That includes the three questions the app itself suggests: "What are you working on for us?", "What do you need from me?" and "When is our next post?". `get_agency_work` had no panel builder and no follow-ups.
+Answers about the owner's numbers came with follow-up questions, as in the Owner Assistant. Answers about the agency's work came back with none. That includes the three questions the app itself suggests: "What are you working on for us?", "What do you need from me?" and "When is our next post?". The bar also had no single place showing everything the agency is doing.
 
 ## What changed
 
-- **A work panel** sits under every answer that read the agency's work:
-  - **The counts:** waiting on you, in progress, posts for your OK, finished in 30 days. Anything waiting on the owner is highlighted.
-  - **The lists:** waiting on you, we are working on, planned posts (the ones waiting for an OK marked) and finished lately. Due dates are shown, and overdue ones in red.
-  - It is built from the tool's own rows. Work not shared with the owner never appears.
-- **Follow-ups** about that work:
+- **Follow-ups for agency answers,** about the work just listed:
   - "What exactly do you need for "<their first to-do>"?"
   - "Which posts are waiting for my OK?"
   - "When will "<work due soonest>" be ready?"
-  - After those, the general questions not already asked.
-- **Reopened chats** rebuild both, as they do for numbers answers.
+  - Then the general questions not yet asked.
+- **The chat itself is unchanged.** The answer stays a conversation, with no work panel in it.
+- **Overview**, first in the left bar, opens a sheet with all of the agency's work for the owner:
+  - **Counts:** waiting on you, in progress, posts for your OK, reports. Anything waiting on the owner is highlighted. Each count opens its own sheet.
+  - **Lists:** waiting on you, we are working on, planned posts (the ones waiting for an OK marked) and finished in the last 30 days. Due dates are shown, and overdue ones in red. Each row opens that to-do or task, or the posts sheet; Back returns to the Overview.
+  - It is built from what the bar already loaded, so it opens at once, with no extra request or AI call.
 
 ## Check after deploy
 
-Ask Edge Meta AI "What are you working on for us?". Under the answer there is the "Your agency's work" panel, and up to three follow-up buttons.
+1. Ask Edge Meta AI "What are you working on for us?". Up to three follow-up buttons appear under the answer.
+2. Click **Overview** in the bar. The counts and lists match the to-dos, work and posts. Clicking a count or a row opens it.

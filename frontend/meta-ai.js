@@ -512,7 +512,6 @@
                 if (p.kind === 'summary') el.innerHTML = summaryHtml(p);
                 else if (p.kind === 'compare') el.innerHTML = compareHtml(p);
                 else if (p.kind === 'ranking') el.innerHTML = rankingHtml(p);
-                else if (p.kind === 'work') el.innerHTML = workHtml(p);
                 else if (p.kind === 'chart') el.innerHTML = chartShellHtml(p);
                 else continue;
                 host.appendChild(el);
@@ -600,13 +599,6 @@
                 <div class="rank-bar"><i style="width:${Math.max(2, Math.round(((it.value || 0) / max) * 100))}%;background:${platColor(it.platform).color}"></i></div>
                 <div class="rank-meta">${escHtml([it.name, it.format, it.date].filter(Boolean).join(' · '))}</div></div></li>`;
         }).join('')}</ol>`;
-    }
-    // Phase 77: the agency's work under an answer about it: the counts, then each list.
-    function workHtml(p) {
-        const counts = (p.counts || []).map((c) => `<div class="tile work-count${c.hot ? ' is-hot' : ''}"><div class="tile-label">${escHtml(c.label)}</div><div class="tile-value">${fmtN(c.value)}</div></div>`).join('');
-        return panelHead(p.title, p.subtitle) + `<div class="tiles work-counts">${counts}</div>` + (p.sections || []).map((sec) => `
-            <div class="sec work-sec is-${escHtml(sec.key)}"><div class="sec-head"><div class="plat"><i></i><span>${escHtml(sec.name)}</span></div></div>
-                <ul class="work-list">${sec.items.map((it) => `<li${it.wait ? ' class="is-wait"' : ''}><span class="work-t">${escHtml(it.text)}</span>${it.meta ? `<span class="work-m${it.late ? ' is-late' : ''}">${escHtml(it.meta)}</span>` : ''}</li>`).join('')}</ul></div>`).join('');
     }
     function chartShellHtml(p) {
         const faded = p.sections.some((s) => (s.faded || []).some(Boolean));

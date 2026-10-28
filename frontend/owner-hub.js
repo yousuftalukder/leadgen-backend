@@ -157,6 +157,7 @@
         numbers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
         tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
         billing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>',
+        overview: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
         chev: '<svg class="side-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
         tick: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>'
     };
@@ -193,6 +194,7 @@
             + ((me.engines || []).includes('report') ? '<button type="button" class="side-act" data-side-go data-hub="checkup">New check-up</button>' : '');
         const nav = (k, icon, label, n, hot) => `<button type="button" class="side-sec-h" data-side-go data-hub="${k}">${icon}<span>${label}</span><span class="side-n${hot ? ' is-hot' : ''}">${n || ''}</span></button>`;
         host.innerHTML = (loadFailed ? '<button type="button" class="side-sec-h" data-hub="retry"><span>Couldn’t load your updates · Retry</span></button>' : '')
+            + `<div class="side-nav side-top">${nav('overview', ICON.overview, 'Overview', 0, false)}</div>`
             + sec('todos', ICON.todo, 'To-dos', open, open > 0, todosBody)
             + sec('reports', ICON.report, 'Reports', data.reports.length, false, reportsBody)
             + `<div class="side-nav">
@@ -220,7 +222,8 @@
 
     function go(k, tools) {
         if (k === 'retry') { load().catch(() => {}); return; }
-        if (k === 'todos') openTodos();
+        if (k === 'overview') openOverview();
+        else if (k === 'todos') openTodos();
         else if (k === 'work') openWork();
         else if (k === 'posts') openPosts();
         else if (k === 'reports') openReports();
@@ -327,6 +330,40 @@
             catch (err) { if (!err.handled) EL.toast(err.message, 'bad'); }
             finally { send.disabled = false; }
         });
+    }
+
+    // ---- the overview (phase 77) -------------------------------------------------------------
+    // Everything the agency is doing for the owner on one sheet, opened from the bar: the counts,
+    // then what waits on them, the work, the posts coming up and what was finished lately. Built from
+    // what the bar already loaded, so it opens at once; every count and row opens its own sheet.
+    function openOverview() {
+        const s = sheet('Overview', 'Your agency’s work for you, as it stands', openOverview);
+        // One label per row ("In progress · due Oct 31"), red when the date has passed.
+        const due = (t, lead = '') => {
+            const late = !!t.dueDate && t.status !== 'done' && t.dueDate < today();
+            const when = t.dueDate && t.status !== 'done' ? `${late ? 'overdue since' : 'due'} ${shortDay(t.dueDate)}` : '';
+            const text = [lead, when].filter(Boolean).join(' · ');
+            return text ? `<span class="work-m${late ? ' is-late' : ''}">${esc(text)}</span>` : '';
+        };
+        const yours = todos(), doing = working().sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+        const upcoming = data.posts.filter(p => p.status !== 'skipped' && (!p.plannedOn || p.plannedOn >= today())).slice(0, 6);
+        const finished = data.tasks.filter(recentDone).sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt))).slice(0, 5);
+        const count = (k, label, n, hot) => `<button type="button" class="tile work-count${hot ? ' is-hot' : ''}" data-ov="${k}"><span class="tile-label">${label}</span><span class="tile-value">${n}</span></button>`;
+        const row = (attrs, title, meta, cls = '') => `<li><button type="button" class="work-row${cls}" ${attrs}><span class="work-t">${esc(title)}</span>${meta}</button></li>`;
+        const section = (k, name, rows, empty) => `<div class="work-sec is-${k}"><div class="work-h"><i></i>${name}</div>${rows.length ? `<ul class="work-list">${rows.join('')}</ul>` : `<p class="hub-empty">${empty}</p>`}</div>`;
+        s.body.innerHTML = `<div class="tiles work-counts">
+                ${count('todos', 'Waiting on you', yours.length, yours.length > 0)}
+                ${count('work', 'In progress', doing.length, false)}
+                ${count('posts', 'Posts for your OK', waitingPosts().length, waitingPosts().length > 0)}
+                ${count('reports', 'Reports', data.reports.length, false)}
+            </div>`
+            + section('yours', 'Waiting on you', yours.map(t => row(`data-task="${esc(t.id)}"`, t.title, due(t))), 'Nothing is waiting on you.')
+            + section('doing', 'We are working on', doing.map(t => row(`data-task="${esc(t.id)}"`, t.title, due(t, STATE[t.status] || ''))), 'Nothing open right now.')
+            + section('posts', 'Planned posts', upcoming.map(p => row('data-ov="posts"', p.hook || 'Planned post',
+                `<span class="work-m">${esc([shortDay(p.plannedOn), p.format, p.statusName].filter(Boolean).join(' · '))}</span>`, p.status === 'idea' ? ' is-wait' : '')), 'No posts planned yet.')
+            + (finished.length ? section('done', 'Finished in the last 30 days', finished.map(t => row(`data-task="${esc(t.id)}"`, t.title, `<span class="work-m">done ${esc(shortDay(t.completedAt))}</span>`)), '') : '');
+        s.body.querySelectorAll('[data-ov]').forEach(b => b.addEventListener('click', () => go(b.dataset.ov, toolsFor())));
+        s.body.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
     }
 
     // ---- planned posts -------------------------------------------------------------------
@@ -545,5 +582,5 @@
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
 })();
