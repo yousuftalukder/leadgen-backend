@@ -37,7 +37,7 @@ test('three ways to the newest version', () => {
     assert.match(html, /method: 'HEAD', cache: 'no-store'/, 'the check skips every cache');
 });
 test('a phone gets the new files, in both languages', () => {
-    assert.match(sw, /const VERSION = 'el-shell-v11'/);
+    assert.match(sw, /const VERSION = 'el-shell-v(1[1-9]|[2-9]\d)'/, 'phase 86 or later');
     assert.match(sw, /'ai\/i18n\.js\?v=3', 'ai\/i18n-bn\.js\?v=3'/);
     assert.match(html, /src="ai\/i18n\.js\?v=3"/);
     for (const k of ['Reload the app', 'A new version of Edge Meta AI is ready.', 'Reload', 'Pull down to reload', 'Release to reload', 'Reloading…', 'Getting the newest version']) assert.ok(BN[k], k);

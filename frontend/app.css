@@ -973,6 +973,8 @@ body.el-drawer-open { overflow: hidden; }
 .ws-row .ws-grow { flex: 1; min-width: 0; }
 .ws-row .ws-t { font-weight: 700; color: var(--text-primary); font-size: 0.92rem; overflow-wrap: anywhere; }
 .ws-row .ws-m { color: var(--text-muted); font-size: 0.82rem; line-height: 1.45; }
+/* On a phone, a row's buttons drop under its text instead of pushing the page wider. */
+@media (max-width: 560px) { .ws-row { flex-wrap: wrap; row-gap: 8px; } .ws-row .ws-grow { flex: 1 1 180px; } }
 .ws-row.is-link { cursor: pointer; text-decoration: none; color: inherit; }
 .ws-row.is-link:hover .ws-t { color: var(--lime); }
 .ws-sev { width: 4px; align-self: stretch; border-radius: 4px; background: rgba(var(--ink), 0.14); flex: none; }
@@ -1918,3 +1920,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); b
 .tk-mentions button small { color: var(--text-muted); font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; }
 .tk-mentions button.is-on, .tk-mentions button:hover { background: var(--accent-dim); }
 .tk-mentions .el-avatar { width: 26px; height: 26px; font-size: 0.7rem; flex: none; }
+
+/* ---- phones and touch screens (Oct 2026) ----------------------------------------------------
+   Nothing may make the page wider than the phone: one long link did, and then the row editor
+   (a fixed drawer) opened off-screen. Small buttons get a thumb-sized height on touch screens,
+   and the task board shows one column at a time, snapping as it scrolls. */
+@media (max-width: 560px) {
+    html, body { overflow-x: clip; }
+    .ws-board { grid-auto-columns: 86%; scroll-snap-type: x mandatory; }
+    .ws-board > .ws-col { scroll-snap-align: start; }
+}
+@media (pointer: coarse) {
+    .ws-btn.is-sm, .ws-chipbtn, .wb-status { min-height: 36px; }
+    .ws-row .ws-link, .ws-step .ws-link, .ws-step a { padding-block: 6px; }
+}
