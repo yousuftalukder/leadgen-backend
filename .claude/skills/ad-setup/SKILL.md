@@ -99,8 +99,9 @@ Work it out in this order, and write the reasoning down as you go:
    - Calls → Calls.
    - Shop visits → Awareness or reach, with a tight radius.
 2. **Target cost per result.** It must leave a profit:
-   - Per order: below the margin (customer price minus buying price, from Products), with room
-     for delivery and returns.
+   - Per order: below the break-even worked out as in `REVIEW.md` §1 (margin minus COD fee,
+     failed cash-on-delivery parcels and packing; less again with free delivery). Aim for about
+     half of break-even.
    - Per message: target cost per order × how often a conversation becomes an order. Ask the
      user that rate if it isn't in the ledger.
    - Check it against the client's own past cost per result, then the agency benchmark.
@@ -202,6 +203,16 @@ is the user's call, made in this file's hard rules.
   pop-ups unless the plan says so.
 - **Meta's policy** bans skin-whitening or bleaching claims. Write "glow" and "even tone", not
   whitening or fairer skin, and don't use before/after images.
+
+## Check-ins: running the account
+
+For "check the ads", every **Ads** check-in task, and before changing anything live, follow
+`REVIEW.md` in this folder:
+- §1 the break-even economics
+- §2 measuring orders (Create order in Messenger)
+- §3 the 3-day diagnostic chain
+- §4 the rules against overreacting
+- §5 the decision log
 
 ## Afterwards: document it
 
