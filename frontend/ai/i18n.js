@@ -170,7 +170,7 @@
     if (have) { compile(have); start(); return done && done(); }
     const s = document.createElement('script');
     // the page's <base> makes this the site's ai/ folder, wherever the page is opened from
-    s.src = `ai/i18n-${l}.js?v=2`;
+    s.src = `ai/i18n-${l}.js?v=3`;
     s.onload = () => { compile((window.I18N_DICTS || {})[l] || {}); start(); if (done) done(); };
     s.onerror = () => { ready = true; document.documentElement.classList.remove('i18n-wait'); };
     document.head.appendChild(s);

@@ -577,6 +577,7 @@
             ])}
             ${group('The app', [
                 q('Light or dark', `<p>Account menu → <b>Theme</b>: Dark or Light. The choice is kept on this device.</p>`),
+                q('Getting the newest version', `<p>Edge Meta AI updates itself. When a new version is out, a bar offers to <b>Reload</b>. You can also choose <b>Reload the app</b> in the account menu, or, on a phone, pull the chat down from its top.</p>`),
                 ...(EL.isStandalone() ? [] : [q('On your phone', `<p>Open the account menu at the bottom of the bar and choose <b>Add to Home Screen</b>. Edge Meta AI then opens full screen, like an app.</p>`)])
             ])}
             ${group('Privacy', [
