@@ -1,6 +1,6 @@
 ---
 name: ad-setup
-description: Plan a client's Meta (Facebook and Instagram) ad campaign and ad sets in the EdgeLead workspace, in the built-in browser. Use when the user says "let's set up ads", "set up an ad here", "plan an ad set", "make an ad plan for <client>", or opens a client's Ad brief & plan tab and asks for a plan. Reads the client's Ad brief, looks at their Page and Meta's Ad Library, researches the industry and location, fills in the brief, and saves a draft plan for the agency to approve. Read only on Meta; never spends money.
+description: Plan a client's Meta (Facebook and Instagram) ad campaign and ad sets in the EdgeLead workspace, in the built-in browser. Use when the user says "let's set up ads", "set up an ad here", "plan an ad set", "make an ad plan for <client>", "check the ads", or opens a client's Ad brief & plan tab and asks for a plan. Reads the client's Ad brief, looks at their Page and Meta's Ad Library, researches the industry and location, fills in the brief, and saves a draft plan for the agency to approve. Read only on Meta; never spends money.
 ---
 
 # Setting up ads for a client
@@ -161,6 +161,68 @@ Fill in:
 - **What this plan is based on:** the figures and sources.
 
 Click **Save as draft**. Fix any field the server names in its error message, and save again.
+
+## Ads Manager notes (so the plan matches what Meta allows)
+
+Learned on Arminabd, Oct 2026. Re-check anything that may have changed. These help write a plan
+that can actually be built. The rule above still applies: whether Claude changes anything in Meta
+is the user's call, made in this file's hard rules.
+
+- **The browser pane is too narrow for Ads Manager.** Give the tab a desktop viewport first
+  (`resize_window` 1440×900), and set it back to `desktop` when done. The tables' numbers are
+  hard to read, so take figures from the workspace's Ad brief (the ads sync), not the grid.
+- **Extend, don't rebuild, a winner.** An ad set's end date is on the ad set ("Schedule"); the
+  budget is on the campaign when it uses a campaign budget.
+  - Budget changes over about 20% at once, and changes to audience or optimisation, can restart
+    Meta's learning.
+- **A new test campaign** is easiest as **Duplicate** of the winner, which copies the proven
+  settings. When duplicating:
+  - Untick "Advantage+ creative" and "increase your budget".
+  - Leave "Turn on copies" unticked until the copy is set up.
+  - Delete the copied ads that belong to the original.
+- **Hard audience limits:** with Advantage+ audience, age and gender are only suggestions.
+  - Use "Further limit your audience" → "Reach a limited audience".
+  - Then untick **"Use as a suggestion"** under both Age and Gender.
+  - The publish preview should say "Targeting expansion: None".
+- **Message destinations:**
+  - WhatsApp needs a WhatsApp Business account on the number. Without one, keep Messenger only.
+  - Switching destinations can silently change the performance goal (it flipped to "leads
+    through messaging"). Re-check that it says **"Maximize number of messaging conversations"**
+    before publishing.
+- **An organic post can't go into a messaging campaign** ("creative incompatible with
+  objective"). Instead, **duplicate an existing messaging ad** that uses the post (e.g. a boost
+  with Send message) into the new ad set, under "Existing campaign" → "Existing ad set".
+- **Followers:** the "Page likes" goal no longer exists. Use the Engagement objective with
+  conversion location Facebook Page and the goal **"Maximize number of Facebook Page visits"**,
+  which reaches people likely to visit, follow or like the Page.
+- **Minimum budgets** in BDT were about **৳120–125 a day** per campaign or ad set (৳124.10 to
+  edit a running one). Small "৳30/day" lines aren't possible; run fewer campaigns, or shorter.
+- **Before every publish**, read the "Preview ad setup" dialog: budget, age and gender, targeting
+  expansion, goal, destination, end date, and the ads. Decline Meta's "increase your budget"
+  pop-ups unless the plan says so.
+- **Meta's policy** bans skin-whitening or bleaching claims. Write "glow" and "even tone", not
+  whitening or fairer skin, and don't use before/after images.
+
+## Afterwards: document it
+
+Whenever ads were changed (by the user, or by Claude when the user had it do so), leave the
+record where the next person, or the next Claude, looks first:
+1. **The plan:** update the saved plan so its summary describes what is live (and what differs
+   from the plan, and why). Put a review note saying who said to publish, and when.
+2. **Ad ledger:** add a row per running campaign: status running, campaign and ad names, the
+   audience, the budget, dates, and what was decided and why.
+3. **The brief:** add the new facts to "What worked" and "What we saw" (account limits found,
+   missing setup like Instagram, WhatsApp Business, Pixel or verification).
+4. **Tasks:** add check-ins on the client's board (label "Ads"):
+   - Day 3, for the first cuts.
+   - Week 1, to move winners.
+   - Before each sale day.
+   - When a campaign ends.
+   - Week 3.
+   - Month end, for next month's plan.
+
+   Each one gets the exact checks in its notes.
+5. Tell the user the check-in dates.
 
 ## Step 7: report back
 
