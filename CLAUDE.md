@@ -36,3 +36,19 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 
 - `npm run check` and `npm test` before every push; CI runs the same on every PR.
 - Each phase gets a `docs/DEPLOY-PHASEN.md` saying what to run and what changed.
+
+## Hosting
+
+- Pages: Netlify project **edgeleadworkspace** (prantoyousuf97's team), serving
+  `workspace.edgelead.online` and `ai.edgelead.online`. DNS for edgelead.online is on
+  Cloudflare. The team runs on credits: every production deploy (each merge to main)
+  uses some, so group changes into fewer merges.
+- Server: Render, deploys from main.
+
+## Setting up ads for a client
+
+When the user says "let's set up ads here" (or asks for an ad plan or ad set), follow
+`.claude/skills/ad-setup/SKILL.md`: work in the built-in browser on the client's
+**Ad brief & plan** tab, look at their Page and Meta's Ad Library, research the season and
+market, fill in the brief, and save a **draft** plan. The user signs in themself; nothing
+is ever changed in Meta, and the plan is approved by a person.
