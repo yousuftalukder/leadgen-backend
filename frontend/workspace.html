@@ -14,7 +14,8 @@
     .wsc-who { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
     .wsc-who h1 { font-size: 1.8rem; font-weight: 800; color: var(--text-primary); margin: 0; line-height: 1.15; text-wrap: balance; }
     .wsc-line { color: var(--text-secondary); display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 0.9rem; }
-    .wsc-line span { display: inline-flex; gap: 6px; align-items: center; }
+    .wsc-line span { display: inline-flex; gap: 6px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+    .wsc-line a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
     .wsc-line .el-svg { width: 15px; height: 15px; color: var(--text-muted); }
     .wsc-spark { width: 100%; height: auto; display: block; }
     .wsc-spark text { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
@@ -179,7 +180,9 @@
                         ${c.niche ? `<span>${ic('store')}${esc(c.niche)}</span>` : ''}
                         ${c.location ? `<span>${ic('target')}${esc(c.location)}</span>` : ''}
                         ${c.ig_handle ? `<span>@${esc(c.ig_handle)}</span>` : ''}
-                        ${c.fb_page ? `<span>${esc(c.fb_page)}</span>` : ''}
+                        ${c.fb_page ? (/^https?:\/\//i.test(c.fb_page)
+                            ? `<span><a href="${esc(c.fb_page)}" target="_blank" rel="noopener">Facebook Page</a></span>`
+                            : `<span>${esc(c.fb_page)}</span>`) : ''}
                     </div>
                     <div class="ws-chips">${meta}${portal}${c.archived ? '<span class="el-chip is-warn">Archived</span>' : ''}<span class="el-chip">${access}</span>
                         <span class="ws-avatars">${team().map(m => `<span class="el-avatar" title="${esc(m.email)} · ${esc(m.role)}">${esc(UI.initials(m.email))}</span>`).join('')}</span></div>
