@@ -1,6 +1,6 @@
 # Plan: the workspace as the ad manager's memory (proposed phase 87)
 
-**Status:** proposal, Oct 29, 2026. Nothing here is built yet.
+**Status:** built in phase 87 (Oct 30, 2026): see `docs/DEPLOY-PHASE87.md`. Kept as the reasoning behind it.
 
 ## Why
 
@@ -113,9 +113,8 @@ Each step ships on its own, in the usual order: SQL → server → pages.
 3. **87c:** the orders log and daily totals, plus a quick "add order" form for the team.
 4. **87d:** the decision log, the check-in endpoint and the page.
 
-## Until it's built
-- Check-ins use Ads Manager (columns listed in REVIEW.md §3), Products, and order counts asked from
-  the team.
-- Decisions go in the plan's review note and the Ad ledger.
-- Every order created in Messenger with **Create order** already flows into `ad_daily_snapshots`
-  as purchases.
+## Built (phase 87)
+- 87a–87d and the forecast are all in. The check-in is `GET /api/clients/:id/ad-checkin` and the
+  client's **Ads check-in** tab; orders are the **Orders** tab; the settings are **Delivery & costs**.
+- Daily business totals are computed by the server for the check-in rather than kept as a view.
+- Orders do not change stock: stock stays what the team types in Products.

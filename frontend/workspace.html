@@ -99,6 +99,7 @@
 <script src="ui.js"></script>
 <script src="client-tools.js"></script>
 <script src="ad-brief.js"></script>
+<script src="ad-ops.js"></script>
 <script>
 (async () => {
     'use strict';
@@ -116,7 +117,7 @@
 
     // Phase 69: the content plan, the ad ledger (with products and stock) and message templates, typed in by the team.
     // Phase 70: their own numbers (Meta) and the team's work first; what the public-data tools made after.
-    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['meta', 'Meta'], ['content', 'Content plan'], ['ledger', 'Ad ledger'], ['adbrief', 'Ad brief & plan'],
+    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['meta', 'Meta'], ['content', 'Content plan'], ['ledger', 'Ad ledger'], ['adbrief', 'Ad brief & plan'], ['checkin', 'Ads check-in'], ['orders', 'Orders'],
         ['replies', 'Message templates'], ['reports', 'Reports'], ['leads', 'Leads'],
         ['ask', 'Assistant'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
     let tab = TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'overview';
@@ -250,7 +251,7 @@
 
     function drawTab() {
         const body = $('wsc-body');
-        const f = { overview: tabOverview, tasks: tabTasks, reports: tabReports, content: tabContent, ledger: tabLedger, adbrief: tabAdBrief, replies: tabReplies,
+        const f = { overview: tabOverview, tasks: tabTasks, reports: tabReports, content: tabContent, ledger: tabLedger, adbrief: tabAdBrief, checkin: tabCheckin, orders: tabOrders, replies: tabReplies,
             leads: tabLeads, meta: tabMeta, ask: tabAsk, schedules: tabSchedules, access: tabAccess, settings: tabSettings }[tab];
         body.innerHTML = '<div class="ws-empty"><p>Loading…</p></div>';
         Promise.resolve(f(body)).catch(err => { body.innerHTML = `<div class="ws-empty">${ic('alert')}<p>${esc(err.message)}</p></div>`; });
@@ -427,11 +428,15 @@
     });
 
     // ---- the workbook (phase 69): client-tools.js draws these ----------------------
-    const toolCtx = () => ({ clientId: c.id, clientName: c.name });
+    // Phase 87: the month's results report opens on its own page, to print or save as a PDF.
+    const toolCtx = () => ({ clientId: c.id, clientName: c.name, resultsPage: 'results.html' });
     function tabContent(body) { return Tools.contentPlan(body, toolCtx()); }
     function tabLedger(body) { return Tools.adLedger(body, toolCtx()); }
     // Phase 85: everything needed to plan the next ad set, on one page, and the plans made from it.
     function tabAdBrief(body) { return AdBrief.mount(body, toolCtx()); }
+    // Phase 87: the check-in every three days, and the orders log behind it.
+    function tabCheckin(body) { return AdOps.checkin(body, toolCtx()); }
+    function tabOrders(body) { return AdOps.orders(body, toolCtx()); }
     function tabReplies(body) { return Tools.templates(body, toolCtx()); }
 
     // ---- leads ------------------------------------------------------------------

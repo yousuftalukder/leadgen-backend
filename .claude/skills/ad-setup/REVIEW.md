@@ -47,9 +47,18 @@ Meta counts messages. The business lives on delivered orders.
   total ad spend. Meta takes credit for some sales that would have happened anyway. If Meta's
   numbers improve but total orders don't, believe the totals.
 - **Log every order's outcome** (delivered, failed, returned) and whether the buyer is new or
-  returning. Until the system holds this, ask the team for counts at each check-in.
+  returning. The client's **Orders** tab holds this (phase 87); when it is empty, ask the team for counts.
 
 ## 3. The check-in: every 3 days, the same chain
+
+**Start from the workspace (phase 87).** `GET /api/clients/<id>/ad-checkin?from=<yyyy-mm-dd>&to=<yyyy-mm-dd>`
+(default: the last 3 days), or the client's **Ads check-in** tab and its **Copy as text**, already
+walks this chain per ad and ad set, flags the first broken step against the plan's numbers, and puts
+stock, spend against the budget, the forecast, unplanned campaigns, account health, the whole
+business day by day and the decisions due beside it. Its "could not see" list says what is missing.
+Use Ads Manager below only for what it lists as missing, or to double-check a surprising figure.
+Plan thresholds live in the plan: target cost per message and per order, highest CPM, lowest
+stop-scroll %, highest 7-day frequency, the month's forecast, and the Meta campaign ids.
 
 Pull these per ad for the period since the last check, and for the ad's life so far:
 
@@ -103,6 +112,11 @@ Also check at every check-in:
   and stock 10+), and refresh (frequency over 3 with cost up 30% on its first week).
 
 ## 5. The decision log and the learning library
+
+In the workspace (phase 87): log each change with **Log a decision** on the Ads check-in tab
+(`POST /api/clients/<id>/ad-decisions`), and grade the ones the check-in lists as due
+(`PATCH …/ad-decisions/<decisionId>` with `outcome`, `lesson`, `idea_type`, `idea`). Lessons from
+every client you can open are at `GET /api/ad-lessons?client=<id>`. Read them before a new plan.
 
 Every change gets a line in the plan's review note, or the Ad ledger's "What we learned":
 

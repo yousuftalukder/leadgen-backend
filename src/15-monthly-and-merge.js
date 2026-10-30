@@ -496,7 +496,9 @@ const MERGE_TABLES = [
     'invoices',
     // phase 69: the workbook the team types in: plan, ledger, stock, replies and their pictures
     'client_content_entries', 'client_products', 'client_ad_creatives', 'client_ad_runs',
-    'client_message_templates', 'client_template_media'
+    'client_message_templates', 'client_template_media',
+    // phase 87: the orders log and the decision log
+    'client_orders', 'client_ad_decisions'
 ];
 S.MERGE_TABLES = MERGE_TABLES;
 /**
@@ -504,7 +506,8 @@ S.MERGE_TABLES = MERGE_TABLES;
  * where both records already hold that something. Each row moves on its own;
  * one the target already has stays with the archived record, which keeps it.
  */
-const MERGE_KEYED = ['content_topics', 'lead_pipeline', 'content_profiles', 'client_agreements'];   // phase 60: the target's own agreement wins
+const MERGE_KEYED = ['content_topics', 'lead_pipeline', 'content_profiles', 'client_agreements',   // phase 60: the target's own agreement wins
+    'client_ad_economics'];   // phase 87: one per client; the target's own settings win
 async function mergeKeyed(table, fromId, intoId) {
     const { data, error } = await supabase.from(table).select('*').eq('client_id', fromId);
     if (error) { if (missingTable(error)) return { moved: 0, kept: 0 }; throw error; }

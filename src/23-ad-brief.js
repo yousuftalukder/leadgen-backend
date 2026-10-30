@@ -10,7 +10,7 @@ const S = require('./shared');
 const {
     UUID_RE, app, auth, clientAccess, missingTable, rateLimit, bearerId, sendErr, staffOnly, supabase
 } = S;
-Object.assign(S, { cleanBrief, cleanPlan, targetingLines, median, benchmarkPeers });
+Object.assign(S, { cleanBrief, cleanPlan, targetingLines, median, benchmarkPeers, openableClients });
 
 // ===========================================================================
 // PHASE 85 :: THE AD BRIEF AND THE AD PLAN
@@ -130,7 +130,18 @@ const PLAN = {
     stop_rule: t.text('When to stop an ad set', 400),
     scale_rule: t.text('When to scale up', 400),
     check_after: t.line('First check after', 120),
-    sources: t.text('What this plan is based on', 1500)
+    sources: t.text('What this plan is based on', 1500),
+    // Phase 87: the numbers the check-in judges against, the month's forecast, and the Meta campaigns
+    // this plan became (so the check-in can tell a planned campaign from the owner's own boost).
+    target_cost_per_order: t.money('Target cost per order'),
+    max_cpm: t.money('Highest CPM'),
+    min_stop_scroll: t.int('Lowest stop-scroll %', 1, 100),
+    max_frequency: t.money('Highest 7-day frequency'),
+    forecast_spend: t.money('Expected spend this month'),
+    forecast_messages: t.int('Expected messages this month', 0, 1000000),
+    forecast_order_rate: t.int('Expected chats that become orders (%)', 1, 100),
+    forecast_orders: t.int('Expected orders this month', 0, 1000000),
+    meta_campaign_ids: t.line('Meta campaign ids', 400)
 };
 
 class Bad extends Error {}
@@ -207,6 +218,12 @@ function cleanPlan(body) {
     const p = cleanObject(PLAN, body);
     if (p.currency) p.currency = p.currency.toUpperCase();
     if (p.start_on && p.end_on && p.end_on < p.start_on) throw new Bad('End: it comes before the start.');
+    if (p.max_frequency !== undefined && (p.max_frequency < 1 || p.max_frequency > 20)) throw new Bad('Highest 7-day frequency: from 1 to 20.');
+    if (p.meta_campaign_ids !== undefined) {
+        const ids = p.meta_campaign_ids.split(/[\s,;]+/).filter(Boolean);
+        if (ids.some(x => !/^\d{5,30}$/.test(x))) throw new Bad('Meta campaign ids: the campaign ids from Ads Manager, digits, separated by commas.');
+        p.meta_campaign_ids = [...new Set(ids)].join(', ');
+    }
     for (const [i, a] of (p.ad_sets || []).entries()) {
         if (a.age_min && a.age_max && a.age_min > a.age_max) throw new Bad(`Ad sets ${i + 1}, Youngest age: it is above the oldest.`);
     }
@@ -307,7 +324,7 @@ async function readAll(build, label) {
 
 /** The businesses this person can open themself: an admin every one, anyone else their own and those shared with them. */
 async function openableClients(ctx) {
-    const cols = 'id, niche, location, archived';
+    const cols = 'id, name, niche, location, archived';   // the name is for the lessons library (phase 87); benchmarks never show it
     if (ctx.profile.role === 'admin') return readAll(supabase.from('clients').select(cols).limit(5000), 'clients');
     const [own, mem] = await Promise.all([
         readAll(supabase.from('clients').select(cols).eq('owner_user_id', ctx.user.id).limit(5000), 'own clients'),

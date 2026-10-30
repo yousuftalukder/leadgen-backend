@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
+<title>Results — EdgeLead</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anek+Bangla:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<style>
+    /* results.html — phase 87: a client's month as results. Shared rules live in app.css. */
+    .rs { max-width: 900px; margin: 0 auto; }
+    .rs-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+    .rs-bar input[type=month] { width: auto; }
+    .rs-paper { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 32px; display: grid; gap: 26px; }
+    .rs-top h1 { margin: 0; font-size: 1.7rem; color: var(--text-primary); }
+    .rs-top p { margin: 4px 0 0; color: var(--text-secondary); }
+    .rs-sec h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 10px; }
+    .rs-sec p, .rs-sec li { color: var(--text-secondary); line-height: 1.6; margin: 0; }
+    .rs-sec ul { margin: 0; padding-left: 18px; }
+    .rs-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .rs-kpis .ws-kpi .v { font-size: 1.35rem; }
+    .rs-words { font-size: 1.02rem; color: var(--text-primary) !important; }
+    @media (max-width: 560px) { .rs-paper { padding: 18px; } }
+    @media print { .rs-paper { border: 0; padding: 0; } .rs-bar { display: none; } }
+</style>
+</head>
+<body>
+<main class="el-page rs" id="rs"><div class="ws-empty"><p>Loading the results…</p></div></main>
+
+    <script src="vendor/supabase-js-2.116.0.js"></script>
+<script src="header.js"></script>
+<script src="ui.js"></script>
+<script>
+(async () => {
+    'use strict';
+    // Phase 87. A client's month as an agency should report it: what we spent, what it sold, and
+    // what is next. Opened from the client's Ads check-in; printed or saved as a PDF to send.
+    // Figures are read live from the ads sync and the orders log, so a month still running changes.
+    await EL.init({ engine: null, page: 'results.html' });
+    const esc = v => EL.esc(v);
+    const root = document.getElementById('rs');
+    const q = new URLSearchParams(location.search);
+    const id = q.get('client') || '';
+    if (!/^[0-9a-f-]{36}$/i.test(id)) { location.replace('clients.html'); return; }
+    let month = /^\d{4}-\d{2}$/.test(q.get('month') || '') ? q.get('month') : new Date().toISOString().slice(0, 7);
+
+    const SYM = { BDT: '৳', USD: '$', EUR: '€', GBP: '£', INR: '₹' };
+    const has = v => v !== null && v !== undefined && v !== '';
+    let cur = 'BDT';
+    const money = v => (has(v) ? `${SYM[cur] || cur + ' '}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—');
+    const num = v => (has(v) ? Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—');
+    const pct = v => (has(v) ? `${v}%` : '—');
+    const monthName = m => new Date(m + '-01T00:00:00Z').toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const day = v => (v ? UI.day(v) : '—');
+    // a change on last month; for costs, down is good
+    const delta = (v, lowerIsBetter) => (v === null || v === undefined ? '' : `<span class="d ${(v <= 0) === !!lowerIsBetter ? 'up' : 'down'}">${v > 0 ? '+' : ''}${v}% on last month</span>`);
+    const kpi = (l, v, d) => `<div class="ws-kpi"><span class="l">${esc(l)}</span><span class="v">${v}</span>${d || ''}</div>`;
+    const table = (head, rows) => `<div class="ws-table-wrap"><table class="ws-table ao-table"><thead><tr>${head.map(h => `<th${h.n ? ' class="ws-num"' : ''}>${esc(h.l || h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${head[i].n ? ' class="ws-num"' : ''}>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+    async function load() {
+        root.innerHTML = '<div class="ws-empty"><p>Loading the results…</p></div>';
+        let R;
+        try { R = await EL.api(`/api/clients/${encodeURIComponent(id)}/results-report?month=${month}`); }
+        catch (err) { root.innerHTML = `<div class="ws-empty">${EL.icon('alert')}<h3>The results could not be read</h3><p>${esc(err.message)}</p></div>`; return; }
+        cur = R.currency || 'BDT';
+        const N = R.spent_and_sold, C = R.change, O = R.orders, logged = R.orders_from === 'log';
+        document.title = `${R.client.name}: results for ${monthName(R.month)}`;
+        const OUT = { right: 'worked', wrong: 'did not work', too_early: 'too early to tell' };
+        root.innerHTML = `
+            <div class="rs-bar">
+                <a class="ws-btn is-quiet" href="workspace.html?client=${encodeURIComponent(id)}&tab=checkin">← Ads check-in</a>
+                <span style="flex:1"></span>
+                <input type="month" id="rs-month" value="${esc(R.month)}" aria-label="Month">
+                <button class="ws-btn is-gold" type="button" id="rs-print">${EL.icon('doc')}Print or save as PDF</button>
+            </div>
+            <article class="rs-paper">
+                <header class="rs-top"><h1>${esc(R.client.brand || R.client.name)}</h1><p>Ad results for ${esc(monthName(R.month))}</p></header>
+                <section class="rs-sec"><h2>In short</h2>
+                    ${R.summary.length ? R.summary.map(s => `<p class="rs-words">${esc(s)}</p>`).join('') : '<p>No ad spend or orders this month.</p>'}</section>
+                <section class="rs-sec"><h2>What we spent</h2><div class="rs-kpis">
+                    ${kpi('Ad spend', money(N.spend), delta(C.spend))}
+                    ${kpi('Conversations started', num(N.messages), delta(C.messages))}
+                    ${kpi('Cost per conversation', money(N.cost_per_message), delta(C.cost_per_message, true))}
+                </div></section>
+                <section class="rs-sec"><h2>What it sold</h2><div class="rs-kpis">
+                    ${kpi(logged ? 'Orders' : 'Purchases (Meta)', num(N.orders), delta(C.orders))}
+                    ${logged ? kpi('Delivered', num(N.delivered)) : ''}
+                    ${kpi(logged ? 'Delivered sales' : 'Sales value (Meta)', money(N.delivered_value), delta(C.delivered_value))}
+                    ${kpi('Return on ad spend', has(N.mer) ? `${N.mer}×` : '—', delta(C.mer))}
+                    ${kpi(logged ? 'Ad cost per delivered order' : 'Ad cost per purchase', money(N.cost_per_order))}
+                    ${kpi('Conversations that ordered', pct(N.chat_to_order))}
+                </div>
+                ${logged && O ? `<p style="margin-top:12px">${num(O.from_ads)} orders came from ads, ${num(O.organic)} without an ad and ${num(O.repeat)} from repeat buyers. ${num(O.new_buyers)} new and ${num(O.returning_buyers)} returning buyers. ${num(O.failed)} parcels failed or came back${O.cancelled ? `; ${num(O.cancelled)} orders were cancelled` : ''}.</p>` : ''}
+                ${!logged ? '<p style="margin-top:12px">Orders are Meta’s purchase events. Logging every order in the workspace adds delivered sales, failed parcels and repeat buyers.</p>' : ''}
+                </section>
+                ${R.top_ads.length ? `<section class="rs-sec"><h2>The ads that worked best</h2>${table(['Ad', { l: 'Spent', n: 1 }, { l: 'Conversations', n: 1 }, { l: 'Orders', n: 1 }, { l: 'Cost per order', n: 1 }],
+                    R.top_ads.map(a => [`<span class="t">${esc(a.name || 'Ad ' + a.ad_id)}</span>`, money(a.spend), num(a.messages), num(a.orders), money(a.cost_per_order)]))}</section>` : ''}
+                ${R.top_products.length ? `<section class="rs-sec"><h2>What sold</h2>${table(['Product', { l: 'Units', n: 1 }, { l: 'Value', n: 1 }], R.top_products.map(p => [`<span class="t">${esc(p.name)}</span>`, num(p.units), money(p.value)]))}</section>` : ''}
+                ${R.changes.length ? `<section class="rs-sec"><h2>What we changed, and what it did</h2><ul>${R.changes.map(x => `<li><b>${esc(day(x.on))}</b>: ${esc(x.change)}${x.expected ? ` (to move ${esc(x.expected)})` : ''}${x.outcome ? `: ${esc(OUT[x.outcome])}.` : '.'}${x.lesson ? ` ${esc(x.lesson)}` : ''}</li>`).join('')}</ul></section>` : ''}
+                <section class="rs-sec"><h2>What is next</h2>
+                    ${R.whats_next.plan ? `<p><b>${esc(R.whats_next.plan.title)}</b>${R.whats_next.plan.objective ? `, for ${esc(R.whats_next.plan.objective.toLowerCase())}` : ''}${has(R.whats_next.plan.budget) ? `, ${money(R.whats_next.plan.budget)}${R.whats_next.plan.budget_type === 'daily' ? ' a day' : ''}` : ''}.</p>${R.whats_next.plan.summary ? `<p>${esc(R.whats_next.plan.summary)}</p>` : ''}` : '<p>The next plan is being prepared.</p>'}
+                    <p>Next check of the ads: ${esc(day(R.whats_next.next_check))}.</p>
+                </section>
+            </article>`;
+        UI.cards(root);
+        document.getElementById('rs-print').addEventListener('click', () => window.print());
+        document.getElementById('rs-month').addEventListener('change', e => {
+            if (!/^\d{4}-\d{2}$/.test(e.target.value)) return;
+            month = e.target.value;
+            history.replaceState(null, '', `results.html?client=${encodeURIComponent(id)}&month=${month}`);
+            load();
+        });
+    }
+    await load();
+})();
+</script>
+</body>
+</html>

@@ -51,7 +51,9 @@ const f = {
     url: () => ({ t: 'url' }),
     oneOf: list => ({ t: 'enum', list }),
     id: ref => ({ t: 'id', ref }),
-    ids: (max, ref) => ({ t: 'ids', max, ref })
+    ids: (max, ref) => ({ t: 'ids', max, ref }),
+    // Phase 87: a combo's parts, [{ product_id, qty }]
+    parts: max => ({ t: 'parts', max, ref: 'products' })
 };
 
 /**
@@ -87,7 +89,9 @@ const WB_KINDS = {
             cost: { ...f.money(), label: 'Buying price' },
             price: { ...f.money(), label: 'Customer price' },
             combo_price: { ...f.money(), label: 'Combo price' },
-            notes: { ...f.text(2000), label: 'Notes' }
+            notes: { ...f.text(2000), label: 'Notes' },
+            // Phase 87: a combo made of other products; its buying cost and stock come from them.
+            components: { ...f.parts(20), label: 'Made of', p87: true }
         }
     },
     creatives: {
@@ -174,12 +178,37 @@ function wbP78Missing(res) {
 /** Before phase 78, the new columns are left out of what is written; a value in one cannot be kept. */
 async function wbP78Strip(kind, rows, res) {
     const cols = Object.entries(WB_KINDS[kind].fields).filter(([, s]) => s.p78).map(([c]) => c);
-    if (!cols.length || await wbP78Ready()) return true;
-    for (const r of rows) for (const c of cols) {
-        if (r[c] !== null && r[c] !== undefined) { wbP78Missing(res); return false; }
-        delete r[c];
+    if (cols.length && !(await wbP78Ready())) {
+        for (const r of rows) for (const c of cols) {
+            if (r[c] !== null && r[c] !== undefined) { wbP78Missing(res); return false; }
+            delete r[c];
+        }
+    }
+    // Phase 87, the same way: a combo's parts need its column.
+    const cols87 = Object.entries(WB_KINDS[kind].fields).filter(([, s]) => s.p87).map(([c]) => c);
+    if (cols87.length && !(await wbP87Ready())) {
+        for (const r of rows) for (const c of cols87) {
+            if (Array.isArray(r[c]) && r[c].length) { wbP87Missing(res); return false; }
+            delete r[c];
+        }
     }
     return true;
+}
+
+// ---- phase 87: a combo made of other products ---------------------------------------
+let _p87 = { ok: false, at: 0 };
+async function wbP87Ready() {
+    if (_p87.ok || Date.now() - _p87.at < P78_RECHECK_MS) return _p87.ok;
+    const { error } = await supabase.from('client_products').select('components').limit(1);
+    _p87 = { ok: !error, at: Date.now() };
+    return _p87.ok;
+}
+S.wbP87Ready = wbP87Ready;
+function wbP87Missing(res) {
+    return res.status(503).json({
+        error: 'A combo made of other products needs the phase-87 database update. Run sql/schema-phase87.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
 }
 
 /** The first line of a description, for a name or a hook. */
@@ -213,6 +242,20 @@ function wbNumber(v) {
 
 function wbValue(spec, v) {
     const blank = v === null || v === undefined || (typeof v === 'string' && !v.trim());
+    if (spec.t === 'parts') {
+        if (blank) return [];
+        if (!Array.isArray(v)) throw wbFail(`${spec.label}: send a list.`);
+        const qty = new Map();
+        for (const x of v) {
+            const id = String((x && x.product_id) || '').toLowerCase();
+            if (!UUID_RE.test(id)) throw wbFail(`${spec.label}: one of them is not a valid product.`);
+            const n = wbNumber(x.qty === undefined || x.qty === null || x.qty === '' ? 1 : x.qty);
+            if (!Number.isInteger(n) || n < 1 || n > 999) throw wbFail(`${spec.label}: each quantity is a whole number from 1 to 999.`);
+            qty.set(id, (qty.get(id) || 0) + n);
+        }
+        if (qty.size > spec.max) throw wbFail(`${spec.label}: ${spec.max} products at most.`);
+        return [...qty].map(([product_id, n]) => ({ product_id, qty: Math.min(n, 999) }));
+    }
     if (spec.t === 'ids') {
         if (blank) return [];
         if (!Array.isArray(v)) throw wbFail(`${spec.label}: send a list.`);
@@ -298,7 +341,7 @@ function wbClean(kind, body = {}, { create = false } = {}) {
 async function wbCheckRefs(kind, clientId, rows) {
     for (const [col, spec] of Object.entries(WB_KINDS[kind].fields)) {
         if (!spec.ref) continue;
-        const ids = [...new Set(rows.flatMap(r => (r[col] === undefined || r[col] === null) ? [] : [].concat(r[col])))];
+        const ids = [...new Set(rows.flatMap(r => (r[col] === undefined || r[col] === null) ? [] : [].concat(r[col]).map(x => (spec.t === 'parts' ? x.product_id : x))))];
         if (!ids.length) continue;
         const { data, error } = await supabase.from(WB_REF_TABLE[spec.ref]).select('id').eq('client_id', clientId).in('id', ids);
         if (error) throw error;
@@ -471,6 +514,9 @@ app.patch('/api/clients/:id/workbook/:kind/:rowId', async (req, res) => {
         const { c } = got;
         if (!UUID_RE.test(String(req.params.rowId))) return res.status(404).json({ error: `That ${k.label} is not on this client.` });
         const patch = wbClean(req.params.kind, req.body || {});
+        if (req.params.kind === 'products' && (patch.components || []).some(x => x.product_id === String(req.params.rowId).toLowerCase())) {
+            return res.status(400).json({ error: 'Made of: a product cannot be made of itself.' });
+        }
         if (!(await wbP78Strip(req.params.kind, [patch], res))) return;
         const { data: cur, error: re } = await supabase.from(k.table).select('*').eq('id', req.params.rowId).eq('client_id', c.id).maybeSingle();
         if (re) { if (missingTable(re)) return wbMigration(res); throw re; }
@@ -515,6 +561,13 @@ app.delete('/api/clients/:id/workbook/:kind/:rowId', async (req, res) => {
             const { data: held } = await supabase.from('client_ad_creatives').select('id, product_ids').eq('client_id', c.id).contains('product_ids', [data.id]);
             for (const cr of (held || [])) {
                 await supabase.from('client_ad_creatives').update({ product_ids: (cr.product_ids || []).filter(x => x !== data.id) }).eq('id', cr.id);
+            }
+            // Phase 87: and the combos made of it.
+            if (await wbP87Ready()) {
+                const { data: combos } = await supabase.from('client_products').select('id, components').eq('client_id', c.id).limit(WB_ROW_CAP);
+                for (const p of (combos || []).filter(p => (p.components || []).some(x => x.product_id === data.id))) {
+                    await supabase.from('client_products').update({ components: p.components.filter(x => x.product_id !== data.id) }).eq('id', p.id).eq('client_id', c.id);
+                }
             }
         }
         res.json({ success: true });
