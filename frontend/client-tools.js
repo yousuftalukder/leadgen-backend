@@ -366,6 +366,7 @@
                         <p class="el-muted wb-side-note">Built from the posts the tool read for ${esc(ctx.clientName)} and its rivals. For ideas only: nothing here goes into the plan unless you copy it.</p>
                         ${ideaCards(plans, { use: canEdit })}</details></aside>
                 </div>`;
+            UI.cards(host);
             host.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { filter = b.dataset.f; draw(); }));
             host.querySelectorAll('[data-stop]').forEach(el => el.addEventListener('click', e => e.stopPropagation()));
             host.querySelectorAll('[data-row]').forEach(tr => {
@@ -420,11 +421,14 @@
     async function adLedger(host, ctx) {
         const id = ctx.clientId;
         let P = [], C = [], A = [], canEdit = false, view = 'overview', adFilter = 'all', q = '';
+        // Phase 87: what each product can afford in ads (break-even and target), from Delivery & costs.
+        let E = new Map();
+        const econ = () => EL.api(`${base(id)}/economics`).then(r => new Map((r.products || []).map(p => [p.id, p]))).catch(() => new Map());
         try {
-            const d = await load(id, 'products,creatives,ads');
-            P = d.products || []; C = d.creatives || []; A = d.ads || []; canEdit = d.canEdit;
+            const [d, e] = await Promise.all([load(id, 'products,creatives,ads'), econ()]);
+            P = d.products || []; C = d.creatives || []; A = d.ads || []; canEdit = d.canEdit; E = e;
         } catch (err) { host.innerHTML = migrationNote(err) || `<div class="ws-empty">${ic('alert')}<p>${esc(err.message)}</p></div>`; return; }
-        const reload = async () => { const d = await load(id, 'products,creatives,ads'); P = d.products || []; C = d.creatives || []; A = d.ads || []; draw(); };
+        const reload = async () => { const [d, e] = await Promise.all([load(id, 'products,creatives,ads'), econ()]); P = d.products || []; C = d.creatives || []; A = d.ads || []; E = e; draw(); };
 
         const ran = () => A.filter(r => r.status !== 'planned');
         const prodName = pid => (P.find(p => p.id === pid) || {}).name || 'Removed product';
@@ -449,9 +453,21 @@
                 { k: 'in_order', l: 'In order', t: 'number', hint: 'Ordered from the supplier, not arrived yet.' },
                 { k: 'cost', l: 'Buying price (৳)', t: 'number' }, { k: 'price', l: 'Customer price (৳)', t: 'number' },
                 { k: 'combo_price', l: 'Combo price (৳)', t: 'number' },
+                // Phase 87: a combo made of other products. Its buying price and stock come from them when its own are empty.
+                { t: 'custom', k: 'components', html: (() => {
+                    const parts = new Map(((row && row.components) || []).map(x => [x.product_id, x.qty]));
+                    const others = P.filter(p => !row || p.id !== row.id);
+                    return `<div class="wb-full"><label>Made of (for a combo)</label><div class="wb-checks">${others.length ? others.map(p => `<label><input type="checkbox" data-part value="${esc(p.id)}" ${parts.has(p.id) ? 'checked' : ''} ${canEdit ? '' : 'disabled'}>${esc(p.name)} × <input class="wb-qty" data-part-qty="${esc(p.id)}" value="${esc(parts.get(p.id) || 1)}" inputmode="numeric" aria-label="How many of ${esc(p.name)}" ${canEdit ? '' : 'disabled'}></label>`).join('') : '<span class="el-muted">Add the single products first.</span>'}</div>
+                        <div class="ws-hint">Leave empty for a single product. A combo’s buying price and stock come from its parts when its own are left empty; stock is what the scarcest part allows.</div></div>`;
+                })() },
                 { k: 'notes', l: 'Notes', t: 'area', full: true }
             ],
-            onSave: async data => { if (row) await editRow(id, 'products', row.id, data); else await addRow(id, 'products', data); EL.toast('Saved.'); await reload(); },
+            onSave: async (data, d) => {
+                data.components = [...d.el.querySelectorAll('[data-part]:checked')].map(x => ({ product_id: x.value, qty: (d.el.querySelector(`[data-part-qty="${x.value}"]`) || {}).value || 1 }));
+                if (!row && !data.components.length) delete data.components;
+                if (row) await editRow(id, 'products', row.id, data); else await addRow(id, 'products', data);
+                EL.toast('Saved.'); await reload();
+            },
             onDelete: async () => { await dropRow(id, 'products', row.id); EL.toast('Deleted. Creatives that showed it no longer list it.'); await reload(); }
         });
         const creativeForm = row => {
@@ -561,15 +577,16 @@
         function productsView() {
             const list = P.filter(match);
             const out = P.filter(p => has(p.stock) && num(p.stock) === 0).length, low = P.filter(p => has(p.stock) && num(p.stock) > 0 && num(p.stock) <= LOW_STOCK).length;
-            return `${toolbar('Add a product', 'wb-add-p', '<button class="ws-btn" type="button" id="wb-paste-p">Paste from a sheet</button>')}
+            return `${toolbar('Add a product', 'wb-add-p', `${window.AdOps ? '<button class="ws-btn" type="button" id="wb-econ">Delivery &amp; costs</button>' : ''}<button class="ws-btn" type="button" id="wb-paste-p">Paste from a sheet</button>`)}
                 <p class="el-muted wb-gap">${P.length ? `${P.length} product${P.length === 1 ? '' : 's'} · ${out} stock out · ${low} low. ${canEdit ? 'Change the quantities right in the table; click a product for everything else.' : ''}` : ''}</p>
-                ${list.length ? `<div class="ws-table-wrap"><table class="ws-table wb-table"><thead><tr><th class="ws-num">SL</th><th>Product</th><th class="ws-num">In hand</th><th class="ws-num">In order</th><th class="ws-num">Buying</th><th class="ws-num">Customer</th><th class="ws-num">Combo</th><th class="ws-num">Margin</th><th class="ws-num">Creatives</th><th class="ws-num">Ad spend</th></tr></thead><tbody>
+                ${list.length ? `<div class="ws-table-wrap"><table class="ws-table wb-table"><thead><tr><th class="ws-num">SL</th><th>Product</th><th class="ws-num">In hand</th><th class="ws-num">In order</th><th class="ws-num">Buying</th><th class="ws-num">Customer</th><th class="ws-num">Combo</th><th class="ws-num">Margin</th><th class="ws-num">Break-even per order</th><th class="ws-num">Target per order</th><th class="ws-num">Creatives</th><th class="ws-num">Ad spend</th></tr></thead><tbody>
                     ${list.map(p => `<tr class="is-link" data-p="${esc(p.id)}" tabindex="0"><td class="ws-num">${P.indexOf(p) + 1}</td>
-                        <td><div class="t">${esc(p.name)}</div>${p.category || p.sku ? `<div class="s">${esc([p.category, p.sku].filter(Boolean).join(' · '))}</div>` : ''}</td>
+                        <td><div class="t">${esc(p.name)}</div>${p.category || p.sku ? `<div class="s">${esc([p.category, p.sku].filter(Boolean).join(' · '))}</div>` : ''}${(p.components || []).length ? `<div class="s">Combo: ${esc(p.components.map(x => `${x.qty}× ${prodName(x.product_id)}`).join(', '))}</div>` : ''}</td>
                         <td class="ws-num ws-nowrap" data-stop>${canEdit ? `<input class="wb-qty" data-qty="stock" data-id="${esc(p.id)}" value="${has(p.stock) ? esc(p.stock) : ''}" inputmode="numeric" aria-label="Quantity in hand">` : (has(p.stock) ? fmt(p.stock) : '—')} ${stockTag(p)}</td>
                         <td class="ws-num" data-stop>${canEdit ? `<input class="wb-qty" data-qty="in_order" data-id="${esc(p.id)}" value="${has(p.in_order) ? esc(p.in_order) : ''}" inputmode="numeric" aria-label="In order">` : (has(p.in_order) ? fmt(p.in_order) : '—')}</td>
                         <td class="ws-num">${has(p.cost) ? tk(p.cost) : '—'}</td><td class="ws-num">${has(p.price) ? tk(p.price) : '—'}</td><td class="ws-num">${has(p.combo_price) ? tk(p.combo_price) : '—'}</td>
                         <td class="ws-num">${has(p.price) && has(p.cost) ? tk(num(p.price) - num(p.cost)) : '—'}</td>
+                        ${(e => `<td class="ws-num ${e && e.loses_money ? 'wb-bad' : ''}" title="${e && e.free_delivery_break_even !== null ? `With free delivery: ${tk(e.free_delivery_break_even)}` : ''}">${e && e.break_even !== null ? tk(e.break_even) : '—'}</td><td class="ws-num">${e && e.target_cost_per_order !== null ? tk(e.target_cost_per_order) : '—'}</td>`)(E.get(p.id))}
                         <td class="ws-num">${C.filter(c => (c.product_ids || []).includes(p.id)).length}</td><td class="ws-num">${tk(prodSpend(p.id))}</td></tr>`).join('')}
                 </tbody></table></div>` : `<div class="ws-empty">${ic('store')}<h3>${q ? 'Nothing matches that search' : 'No products yet'}</h3><p>${canEdit && !q ? 'Add products one by one, or copy your stock sheet (product name, quantity, in order, buying, customer and combo price, with its header row) and paste it.' : ''}</p></div>`}`;
         }
@@ -606,6 +623,7 @@
                     <p class="ws-sub">Products and stock, the creatives, every ad run and what it brought in. Typed in by the team from Ads Manager and the shop; amounts in taka.</p></div></div>
                 <div class="ws-filters wb-views" role="tablist">${views.map(([k, l]) => `<button type="button" role="tab" data-view="${k}" aria-pressed="${view === k}">${l}</button>`).join('')}</div>
                 <div id="wb-view">${{ overview, products: productsView, creatives: creativesView, ads: adsView }[view]()}</div>`;
+            UI.cards(host);
             host.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => { view = b.dataset.view; q = ''; draw(); }));
             host.querySelectorAll('[data-af]').forEach(b => b.addEventListener('click', () => { adFilter = b.dataset.af; draw(); }));
             host.querySelectorAll('[data-stop]').forEach(el => el.addEventListener('click', e => e.stopPropagation()));
@@ -624,6 +642,7 @@
             });
             const on = (sel, fn) => { const el = host.querySelector(sel); if (el) el.addEventListener('click', fn); };
             on('#wb-add-p', () => productForm(null));
+            on('#wb-econ', () => window.AdOps.economicsForm(ctx, reload));
             on('#wb-add-c', () => creativeForm(null));
             on('#wb-add-a', () => adForm(null, { status: 'done', start_on: today() }));
             on('#wb-paste-p', () => pasteSheet({

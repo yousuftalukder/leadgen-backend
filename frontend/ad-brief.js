@@ -273,6 +273,21 @@
                         ${fld('What this plan is based on', `<textarea name="sources" class="wb-area" placeholder="The figures and notes from the brief it rests on" ${dis}>${v(p.sources)}</textarea>`, true)}
                         ${row ? fld('Review note', `<textarea name="review_note" class="wb-area" ${P.canDecide ? '' : 'disabled'}>${v(row.review_note)}</textarea>`, true) : ''}
                     </div>
+                    <h3 class="ab-h3">Numbers the check-in judges against <span class="el-muted">(phase 87: the Ads check-in tab reads these)</span></h3>
+                    <div class="wb-fields">
+                        ${fld('Target cost per order', `<input name="target_cost_per_order" inputmode="decimal" value="${v(p.target_cost_per_order)}" placeholder="half the product’s break-even" ${dis}>`)}
+                        ${fld('Highest CPM', `<input name="max_cpm" inputmode="decimal" value="${v(p.max_cpm)}" placeholder="empty: 1.5× the account’s" ${dis}>`)}
+                        ${fld('Lowest stop-scroll %', `<input name="min_stop_scroll" inputmode="numeric" value="${v(p.min_stop_scroll)}" placeholder="25" ${dis}>`)}
+                        ${fld('Highest 7-day frequency', `<input name="max_frequency" inputmode="decimal" value="${v(p.max_frequency)}" placeholder="3" ${dis}>`)}
+                        ${fld('Meta campaign ids', `<input name="meta_campaign_ids" value="${v(p.meta_campaign_ids)}" placeholder="from Ads Manager, once it is built" ${dis}>`, true)}
+                    </div>
+                    <h3 class="ab-h3">The month’s forecast</h3>
+                    <div class="wb-fields">
+                        ${fld('Expected spend', `<input name="forecast_spend" inputmode="decimal" value="${v(p.forecast_spend)}" ${dis}>`)}
+                        ${fld('Expected messages', `<input name="forecast_messages" inputmode="numeric" value="${v(p.forecast_messages)}" ${dis}>`)}
+                        ${fld('Chats that become orders (%)', `<input name="forecast_order_rate" inputmode="numeric" value="${v(p.forecast_order_rate)}" placeholder="e.g. 20" ${dis}>`)}
+                        ${fld('Expected orders', `<input name="forecast_orders" inputmode="numeric" value="${v(p.forecast_orders)}" ${dis}>`)}
+                    </div>
                 </form><div class="ws-note" id="ab-plan-note"></div>`,
                 foot: `${row && editable ? '<button class="ws-btn is-danger" type="button" id="ab-plan-del">Delete</button>' : ''}<span style="flex:1"></span>
                     ${row && P.canDecide ? `${row.status !== 'rejected' ? '<button class="ws-btn" type="button" data-status="rejected">Reject</button>' : ''}
@@ -284,7 +299,8 @@
             const group = sel => [...f.querySelectorAll(sel)].map(fs => { const o = {}; fs.querySelectorAll('[data-k]').forEach(el => { if (el.value.trim() !== '') o[el.dataset.k] = el.value.trim(); }); return o; });
             const read = () => {
                 const o = {};
-                ['objective', 'budget_type', 'total_budget', 'currency', 'start_on', 'end_on', 'summary', 'target_cost', 'check_after', 'stop_rule', 'scale_rule', 'sources']
+                ['objective', 'budget_type', 'total_budget', 'currency', 'start_on', 'end_on', 'summary', 'target_cost', 'check_after', 'stop_rule', 'scale_rule', 'sources',
+                    'target_cost_per_order', 'max_cpm', 'min_stop_scroll', 'max_frequency', 'meta_campaign_ids', 'forecast_spend', 'forecast_messages', 'forecast_order_rate', 'forecast_orders']
                     .forEach(k => { const el = f.querySelector(`[name="${k}"]`); if (el && el.value.trim() !== '') o[k] = el.value.trim(); });
                 o.ad_sets = group('[data-set]'); o.creatives = group('[data-cr]');
                 ['radius_km', 'age_min', 'age_max'].forEach(k => o.ad_sets.forEach(a => { if (a[k] !== undefined) a[k] = Number(a[k]); }));
@@ -344,6 +360,7 @@
                 </section>
                 ${briefPart()}${businessPart()}${productsPart()}${audiencePart()}${adsetsPart()}${splitsPart()}${ledgerPart()}${benchPart()}${plansPart()}
             </div>`;
+            UI.cards(host);
             const save = host.querySelector('#ab-save');
             if (save) save.addEventListener('click', async () => {
                 const form = host.querySelector('#ab-brief-form'), n = host.querySelector('#ab-note');

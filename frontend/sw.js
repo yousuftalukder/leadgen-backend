@@ -12,7 +12,7 @@
  *   - Offline fallback: the last good copy of the page, else the dashboard
  *     (or, inside the Edge Meta AI app, the chat).
  */
-const VERSION = 'el-shell-v12';   // v12: phone layout fixes (app.css)
+const VERSION = 'el-shell-v13';   // v13: phase 87, tables as cards on a phone (app.css)
 const SHELL = ['client.html', 'client-assistant.html', 'client-leads.html', 'client-community.html',
     'app.css', 'header.js', 'report-view.js', 'manifest.webmanifest', 'icons/icon-192.png?v=2',
     'ai/', 'ai/manifest.webmanifest', 'vendor/supabase-js-2.116.0.js', 'meta-ai.js', 'meta-ai.css', 'icons/ai-192.png?v=1', 'icons/logo-mark-lg.png?v=1', 'owner-hub.js', 'ai/i18n.js?v=3', 'ai/i18n-bn.js?v=3', 'phone-codes.js'];

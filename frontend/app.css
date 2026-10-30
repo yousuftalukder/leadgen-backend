@@ -1934,3 +1934,68 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent-solid); b
     .ws-btn.is-sm, .ws-chipbtn, .wb-status { min-height: 36px; }
     .ws-row .ws-link, .ws-step .ws-link, .ws-step a { padding-block: 6px; }
 }
+
+/* ---- phase 87: wide tables as cards on a phone ----------------------------------------------
+   UI.cards() labels every cell with its column (data-l) and marks the row's name (is-title).
+   Below 560px each row is a card: the name first, then one "label … value" line per column,
+   so the content plan, the ledger, products, orders and the check-in never scroll sideways. */
+@media (max-width: 560px) {
+    .ws-table-wrap:has(> .is-cards) { overflow: visible; border: 0; background: transparent; }
+    .ws-table.is-cards, .ws-table.is-cards tbody { display: block; width: 100%; }
+    .ws-table.is-cards thead { display: none; }
+    .ws-table.is-cards tr { display: flex; flex-direction: column; border: 1px solid var(--card-border); border-radius: var(--r-md);
+        background: var(--card-bg); padding: 10px 14px; margin-bottom: 10px; }
+    .ws-table.is-cards td { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 5px 0;
+        border: 0; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+    .ws-table.is-cards td::before { content: attr(data-l); color: var(--text-muted); font-size: 0.74rem; text-transform: uppercase;
+        letter-spacing: 0.06em; text-align: left; flex: none; max-width: 48%; }
+    .ws-table.is-cards td[data-l=""]::before { display: none; }
+    .ws-table.is-cards td.is-title { order: -1; display: block; text-align: left; padding: 0 0 6px; margin-bottom: 4px; border-bottom: 1px solid var(--card-border); }
+    .ws-table.is-cards td.is-title::before { display: none; }
+    .ws-table.is-cards td.ws-num { font-variant-numeric: tabular-nums; }
+    .ws-table.is-cards td > .wb-qty { max-width: 90px; }
+    .ws-table.is-cards .ab-tg { text-align: left; }
+}
+
+/* ---- phase 87: the ads check-in and the orders log ------------------------------------------ */
+.ao { display: grid; gap: 14px; }
+.ao-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.ao-head h2 { margin: 0; font-size: 1.1rem; color: var(--text-primary); }
+.ao-period { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ao-period input[type=date] { width: auto; }
+.ao-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.ao-kpis .ws-kpi .v { font-size: 1.25rem; }
+.ao-kpis .ws-kpi .d { font-weight: 600; }
+.ao-sub { margin: 4px 0 12px; }
+.ao-list { margin: 6px 0 0; padding-left: 18px; line-height: 1.6; color: var(--text-secondary); }
+.ao-ads { display: grid; gap: 10px; }
+.ao-ad { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.ao-ad.is-broken { border-color: rgba(248,113,113,0.45); }
+.ao-ad-h { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.ao-ad-h b { color: var(--text-primary); overflow-wrap: anywhere; }
+.ao-ad .s { color: var(--text-muted); font-size: 0.8rem; }
+.ao-chain { display: flex; gap: 4px; flex-wrap: wrap; list-style: none; padding: 0; margin: 0; }
+.ao-chain li { font-size: 0.72rem; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--card-border); color: var(--text-muted); white-space: nowrap; }
+.ao-chain li.is-ok { color: var(--jade); border-color: rgba(181,255,59,0.35); }
+.ao-chain li.is-broken { color: var(--danger); border-color: rgba(248,113,113,0.55); background: rgba(248,113,113,0.08); font-weight: 700; }
+.ao-chain li.is-too_early { color: var(--warn); border-style: dashed; }
+.ao-fix { border-left: 3px solid var(--danger); padding: 6px 10px; font-size: 0.86rem; color: var(--text-secondary); background: rgba(248,113,113,0.05); border-radius: 0 8px 8px 0; }
+.ao-fix b { color: var(--text-primary); }
+.ao-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px 14px; font-size: 0.82rem; }
+.ao-figs div { display: flex; flex-direction: column; min-width: 0; }
+.ao-figs span { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.ao-figs b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ao-figs i { color: var(--text-muted); font-style: normal; font-size: 0.74rem; }
+.ao-bar { height: 8px; border-radius: 999px; background: rgba(var(--ink), 0.08); overflow: hidden; margin: 8px 0 4px; position: relative; }
+.ao-bar > span { position: absolute; inset: 0 auto 0 0; background: var(--lime); border-radius: 999px; }
+.ao-bar > i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text-primary); }
+.ao-items { display: grid; gap: 8px; }
+.ao-item { display: grid; grid-template-columns: minmax(0, 1fr) 80px 110px auto; gap: 8px; align-items: end; }
+@media (max-width: 560px) { .ao-item { grid-template-columns: minmax(0, 1fr) 70px; } .ao-item > :nth-child(3) { grid-column: 1; } }
+.ao-zones { display: grid; gap: 8px; }
+.ao-zone { display: grid; grid-template-columns: minmax(0, 1fr) 120px 120px auto; gap: 8px; align-items: end; }
+@media (max-width: 560px) { .ao-zone { grid-template-columns: 1fr 1fr; } .ao-zone > :first-child { grid-column: 1 / -1; } }
+.ao-lesson { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 10px 12px; display: grid; gap: 4px; }
+.ao-lesson .s { color: var(--text-muted); font-size: 0.8rem; }
+.ao-lesson b { color: var(--text-primary); }
+@media print { .ao-noprint { display: none !important; } }

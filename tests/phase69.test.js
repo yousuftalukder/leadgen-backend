@@ -237,7 +237,7 @@ test('the routes are registered before the /api catch-all', () => {
     for (const r of ['GET /api/clients/:id/workbook', 'POST /api/clients/:id/workbook/:kind', 'PATCH /api/clients/:id/workbook/:kind/:rowId',
         'DELETE /api/clients/:id/workbook/:kind/:rowId', 'POST /api/clients/:id/template-media', 'GET /api/clients/:id/workbook-ideas']) assert.ok(routes.includes(r), r);
     const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
-    assert.ok(server.indexOf("require('./src/22-client-workbook')") < server.indexOf("require('./src/24-runtime')"));
+    assert.ok(server.indexOf("require('./src/22-client-workbook')") < server.indexOf("require('./src/25-runtime')"));
 });
 const page = fs.readFileSync(path.join(root, 'frontend', 'workspace.html'), 'utf8');
 test('the client page loads the tools and has the three tabs', () => {

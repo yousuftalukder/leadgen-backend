@@ -952,9 +952,25 @@
         }).catch(() => {});
     }
 
+    /**
+     * Phase 87: wide tables as cards on a phone. Each cell is labelled with its column's header
+     * (data-l), and the cell holding the row's name (a .t) leads the card. The CSS in app.css does
+     * the rest below 560px; on a wider screen the table is unchanged.
+     */
+    function cards(root, sel = 'table.wb-table, table.ab-table, table.ao-table') {
+        (root || document).querySelectorAll(sel).forEach(t => {
+            const heads = [...t.querySelectorAll('thead th')].map(th => th.textContent.trim());
+            t.classList.add('is-cards');
+            t.querySelectorAll('tbody tr').forEach(tr => [...tr.children].forEach((td, i) => {
+                if (!td.hasAttribute('data-l')) td.setAttribute('data-l', heads[i] || '');
+                if (td.querySelector(':scope > .t, :scope > b:first-child')) td.classList.add('is-title');
+            }));
+        });
+    }
+
     window.UI = {
         TYPE_LABEL, TYPE_PAGE, JOB_LABEL, jobName, jobState, sourceOf, srcChip, STATUS, STATUS_NAME, LABELS,
         initials, day, ago, today, isLate, labelChip, labelBar, hasLabel, LABEL_COLOR,
-        board, openTask, taskRow, addClient, askBox, answerHtml, richHtml, prioIcon
+        board, openTask, taskRow, addClient, askBox, answerHtml, richHtml, prioIcon, cards
     };
 })();

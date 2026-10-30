@@ -15,6 +15,9 @@
 //     closes and never changes (0022's guard). Closed rows are never sent again.
 //  5. Campaign names, objectives, status and lifetime totals. Reach is kept per campaign over its whole
 //     run: people are never added up across days or campaigns.
+//  6. Phase 87: ThruPlays and plays to the end per ad per day, each ad's last 7 days as one window
+//     (reach, impressions, frequency: frequency cannot be added up from days), and why Meta disabled
+//     an account. Before the phase-87 SQL these are left out and the rest is stored as before.
 // Return on ad spend is purchase value / spend, only where Meta recorded purchase value (fn_ad_summary).
 // Nothing here estimates revenue.
 const { DateTime } = require('luxon');
@@ -28,9 +31,15 @@ const SLICE_DAYS = 30;
 const INSIGHT_FIELDS = [
   'ad_id', 'ad_name', 'adset_id', 'campaign_id', 'campaign_name', 'objective', 'account_currency',
   'spend', 'impressions', 'reach', 'clicks', 'inline_link_clicks', 'actions', 'action_values', 'purchase_roas',
+  'video_thruplay_watched_actions', 'video_p100_watched_actions',
   'date_start', 'date_stop'
 ].join(',');
-const ACCOUNT_FIELDS = 'id,account_id,name,account_status,currency,timezone_name,business{name}';
+const ACCOUNT_FIELDS = 'id,account_id,name,account_status,disable_reason,currency,timezone_name,business{name}';
+// Phase 87: a 7-day window per ad, read as one figure from Meta.
+const WINDOW_DAYS = 7;
+const WINDOW_FIELDS = 'ad_id,adset_id,spend,impressions,reach,frequency,date_start,date_stop';
+// Columns the phase-87 SQL adds. A sync that runs before it leaves them out rather than failing.
+const P87_COLS = { xp_ad_daily_snapshots: ['thruplays', 'video_p100'], xp_meta_ad_accounts: ['disable_reason'] };
 const AD_FIELDS = 'id,name,campaign_id,adset_id,creative{id,effective_object_story_id,effective_instagram_media_id,object_story_spec,instagram_user_id}';
 const CAMPAIGN_FIELDS = 'id,name,objective,effective_status,start_time,stop_time';
 const LIFETIME_FIELDS = 'campaign_id,spend,impressions,reach,inline_link_clicks,date_start,date_stop';
@@ -59,6 +68,27 @@ function firstAction(list, types) {
     if (a) { const v = Number(a.value); return Number.isFinite(v) ? v : null; }
   }
   return 0;
+}
+
+/** A video figure (ThruPlays, plays to the end): Meta sends it as its own list of actions. */
+function videoAction(list) {
+  if (!Array.isArray(list)) return 0;
+  const a = list.find((x) => x && x.action_type === 'video_view') || list[0];
+  if (!a) return 0;
+  const v = Number(a.value);
+  return Number.isFinite(v) ? v : null;
+}
+
+/** Postgres or PostgREST saying a column is not there (the server is ahead of the SQL). */
+const missingColumn = (e) => !!e && (e.code === 'PGRST204' || e.code === '42703' || /column .* does not exist|could not find the .* column/i.test(String(e.message || '')));
+
+/** upsertChunked, and if a phase-87 column is missing, again without the phase-87 columns. */
+async function upsertP87(table, rows, onConflict) {
+  try { return await upsertChunked(table, rows, onConflict); } catch (e) {
+    if (!missingColumn(e) || !P87_COLS[table]) throw e;
+    const drop = P87_COLS[table];
+    return upsertChunked(table, rows.map((r) => { const o = { ...r }; drop.forEach((c) => delete o[c]); return o; }), onConflict);
+  }
 }
 
 // ---------------------------------------------------------------- matching an ad to a business
@@ -120,6 +150,8 @@ function snapshotRow(r, ad, acct) {
     leads: firstAction(r.actions, ACTIONS.leads),
     purchases: firstAction(r.actions, ACTIONS.purchases),
     purchase_value: money(firstAction(r.action_values, ACTIONS.purchases)),
+    thruplays: videoAction(r.video_thruplay_watched_actions),
+    video_p100: videoAction(r.video_p100_watched_actions),
     actions: Array.isArray(r.actions) ? r.actions : [],
     action_values: Array.isArray(r.action_values) ? r.action_values : [],
     raw: r
@@ -189,9 +221,10 @@ async function discoverAccounts(g, metaUserId) {
   const upserts = rows.map((a) => ({
     ad_account_id: String(a.id), name: a.name || null, currency: a.currency || null, timezone_name: a.timezone_name || null,
     account_status: a.account_status === undefined ? null : a.account_status, business_name: (a.business && a.business.name) || null,
+    disable_reason: a.disable_reason === undefined ? null : a.disable_reason,
     meta_user_id: metaUserId, last_seen_at: ts
   }));
-  if (upserts.length) await upsertChunked('xp_meta_ad_accounts', upserts, 'ad_account_id');
+  if (upserts.length) await upsertP87('xp_meta_ad_accounts', upserts, 'ad_account_id');
   return upserts.map((u) => u.ad_account_id);
 }
 
@@ -291,7 +324,7 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
       for (const f of finals) closed.add(`${f.ad_id}|${f.metric_date}`);
     }
     const snaps = mine.filter((r) => !closed.has(`${r.ad_id}|${r.date_start}`)).map((r) => snapshotRow(r, ads.get(String(r.ad_id)), acct));
-    if (snaps.length) run.written = await upsertChunked('xp_ad_daily_snapshots', snaps, 'ad_id,metric_date');
+    if (snaps.length) run.written = await upsertP87('xp_ad_daily_snapshots', snaps, 'ad_id,metric_date');
 
     // 4. Close the days Meta can no longer change.
     const cutoff = today.minus({ days: OPEN_DAYS }).toISODate();
@@ -318,6 +351,9 @@ async function syncAccount(g, acct, index, { triggeredBy, days }) {
       for (const a of ads.values()) if (a.client_id && a.adset_id && !stored.has(a.adset_id)) own(a.adset_id, a.client_id);
       if (adsets.size) await syncAdSets(g, acct, adsets, run);
     } catch (e) { run.err('ad sets', e); }
+
+    // 5c. Phase 87: each ad's last 7 days as one window, for frequency.
+    try { await syncReachWindows(g, acct, ads, run); } catch (e) { run.err('reach windows', e); }
 
     // 6. An account whose ads ALL belong to one business is that business's. One ad for another
     //    Page (an agency account) and it belongs to none; an ad whose creative could not be read
@@ -443,6 +479,36 @@ async function syncAdSets(g, acct, adsets, run) {
   }
 }
 
+// ---------------------------------------------------------------- 7-day windows (phase 87)
+/** One window row from one insights row, for an ad that belongs to a business. */
+function windowRow(r, ad, acct, ts) {
+  return {
+    ad_id: String(r.ad_id), client_id: ad.client_id, ad_account_id: acct.ad_account_id,
+    adset_id: r.adset_id ? String(r.adset_id) : ad.adset_id || null,
+    period_from: r.date_start, period_to: r.date_stop,
+    spend: money(r.spend), impressions: int(r.impressions), reach: int(r.reach),
+    frequency: r.frequency === undefined || r.frequency === null || r.frequency === '' ? null : Math.round(Number(r.frequency) * 100) / 100,
+    updated_at: ts
+  };
+}
+
+/** The last 7 days of every ad of the businesses that ran in them. An ad with nothing in them has no window. */
+async function syncReachWindows(g, acct, ads, run) {
+  const tz = acct.timezone_name || 'UTC';
+  const until = DateTime.now().setZone(tz).toISODate(), since = DateTime.now().setZone(tz).minus({ days: WINDOW_DAYS - 1 }).toISODate();
+  let got;
+  try {
+    got = await g.paginate(`${acct.ad_account_id}/insights`, {
+      level: 'ad', time_range: JSON.stringify({ since, until }), fields: WINDOW_FIELDS, limit: 500
+    });
+  } catch (e) { run.err('reach windows', e); return; }
+  const ts = nowIso();
+  const rows = got.filter((r) => { const a = ads.get(String(r.ad_id)); return a && a.client_id; }).map((r) => windowRow(r, ads.get(String(r.ad_id)), acct, ts));
+  if (rows.length) await upsertChunked('xp_ad_reach_windows', rows, 'ad_id');
+  // an ad that did not run in the last 7 days has no window
+  await q(supabase.from('xp_ad_reach_windows').delete().eq('ad_account_id', acct.ad_account_id).lt('updated_at', ts), 'reach windows old');
+}
+
 // ---------------------------------------------------------------- entry point
 let running = null;
 async function syncAds({ triggeredBy = 'manual', days = null } = {}) {
@@ -477,4 +543,5 @@ async function syncAds({ triggeredBy = 'manual', days = null } = {}) {
   try { return await running; } finally { running = null; }
 }
 
-module.exports = { syncAds, snapshotRow, matchAd, pageOf, igOf, firstAction, slices, ACTIONS, OPEN_DAYS, FIRST_SYNC_DAYS, syncAdSets, segmentOf, fromMinor };
+module.exports = { syncAds, snapshotRow, matchAd, pageOf, igOf, firstAction, slices, ACTIONS, OPEN_DAYS, FIRST_SYNC_DAYS, syncAdSets, segmentOf, fromMinor,
+  videoAction, windowRow, syncReachWindows, upsertP87, missingColumn, WINDOW_DAYS };
