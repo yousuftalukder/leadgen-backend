@@ -227,7 +227,10 @@
         m.innerHTML = items.map(it => it === '-' ? '<hr>' : `<button type="button" role="menuitem" data-k="${it[0]}">${it[1]}</button>`).join('');
         document.body.appendChild(m);
         const r = anchor.getBoundingClientRect();
-        const left = Math.max(8, Math.min(window.scrollX + r.right - m.offsetWidth, window.scrollX + document.documentElement.clientWidth - m.offsetWidth - 8));
+        // Never under the rail: a menu off the narrow New button used to hang left behind it.
+        const rail = document.querySelector('.el-sidebar');
+        const floor = window.scrollX + 8 + (rail && getComputedStyle(rail).display !== 'none' && rail.getBoundingClientRect().right > 0 ? rail.getBoundingClientRect().right : 0);
+        const left = Math.max(floor, Math.min(window.scrollX + r.right - m.offsetWidth, window.scrollX + document.documentElement.clientWidth - m.offsetWidth - 8));
         m.style.left = left + 'px'; m.style.top = (window.scrollY + r.bottom + 6) + 'px';
         return new Promise(res => {
             m.querySelectorAll('[data-k]').forEach(b => b.addEventListener('click', () => { closeMenus(); res(b.dataset.k); }));
@@ -239,9 +242,18 @@
 
     async function newMenu(anchor) {
         const k = await popup(anchor, [['client', '<b>Onboard a client</b><br><span class="el-muted">A business you have signed. Its owner’s login never runs out.</span>'],
-            ['trial', '<b>Start a trial</b><br><span class="el-muted">A business that is deciding. Edge Meta AI for a set number of days.</span>']]);
+            ['trial', '<b>Start a trial</b><br><span class="el-muted">A business that is deciding. Edge Meta AI for a set number of days.</span>'],
+            '-',
+            ['pages', '<b>Connect your Facebook Pages</b><br><span class="el-muted">Tick every Page you manage, then file each under its client here.</span>']]);
         if (k === 'client') UI.addClient();
         if (k === 'trial') startTrial();
+        // Phase 67: one login for every Page, filed by hand afterwards. With no client named, the
+        // server keeps a Page with the client that already has it and leaves the rest unfiled, so
+        // they land in "Pages you manage, not filed yet" with a picker each.
+        if (k === 'pages') {
+            try { const m = await EL.api('/api/meta/oauth/start', { scoped: false }); location.href = m.url; }
+            catch (err) { EL.toast(err.message, 'bad'); }
+        }
     }
     async function moreMenu(c, anchor) {
         const items = [['open', 'Open client']];
@@ -443,7 +455,10 @@
     await load();
     if (q.get('add') === '1' || q.get('new')) UI.addClient();
     if (q.get('trial') === '1') startTrial();
-    if (q.get('meta') === 'ok') EL.toast(`Meta connected (${q.get('pages') || 1} Page${q.get('pages') === '1' ? '' : 's'}). File them below.`);
+    if (q.get('meta') === 'ok') {
+        const n = Number(q.get('pages') || 1), waiting = Number(q.get('unfiled') || 0);
+        EL.toast(`Meta connected (${n} Page${n === 1 ? '' : 's'}).` + (waiting ? ` ${waiting} wait${waiting === 1 ? 's' : ''} below to be filed under a client.` : ' Every Page is already with its client.'));
+    }
     if (q.get('meta') === 'error') EL.toast('Meta connection failed: ' + (q.get('message') || 'no reason given'), 'bad');
 })();
 </script>

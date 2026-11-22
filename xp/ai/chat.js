@@ -397,9 +397,11 @@ const REPORT_NAMES = { ig_report: 'Instagram audit', deep_audit: 'Competitor che
   meta_monthly: 'Monthly report', public_monthly: 'Monthly report', meta_insights: 'Owner numbers report', content_plan: 'Content plan', fb_community: 'Local demand report' };
 async function agencyWork(clientId) {
   const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-  const [tasks, posts, reports] = await Promise.all([
+  const [tasks, posts, typed, reports] = await Promise.all([
     supabase.from('client_tasks').select('*').eq('client_id', clientId).eq('visible_to_client', true).limit(200),
     supabase.from('content_posts').select('planned_on, format, hook, status, posted_url').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
+    // EdgeLead (phase 78): the posts the team typed into the content plan, as the owner sees them.
+    supabase.from('client_content_entries').select('*').eq('client_id', clientId).gte('planned_on', since).neq('status', 'skipped').order('planned_on', { ascending: true }).limit(40),
     // Phase 51: only reports the agency shared with the owner (an owner's own check-ups are shared at birth).
     supabase.from('reports').select('report_type, snapshot_date, created_at').eq('client_id', clientId).eq('visible_to_client', true).order('created_at', { ascending: false }).limit(6)
   ]);
@@ -411,7 +413,15 @@ async function agencyWork(clientId) {
     your_todos: rows.filter((t) => t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, due: t.due_date || null, priority: t.priority || 'medium', details: strip(t.notes) || null })),
     agency_working_on: rows.filter((t) => !t.assigned_to_client && t.status !== 'done').map((t) => ({ title: t.title, state: STATE[t.status] || t.status, due: t.due_date || null, priority: t.priority || 'medium' })),
     finished_last_30_days: rows.filter((t) => t.status === 'done').map((t) => ({ title: t.title, done_on: String(t.completed_at || '').slice(0, 10) })),
-    planned_posts: ((posts && posts.data) || []).map((p) => ({ on: p.planned_on, format: p.format || null, idea: p.hook || null, state: p.status === 'idea' ? 'waiting for your OK' : p.status, link: p.posted_url || null })),
+    planned_posts: [
+      ...((posts && posts.data) || []).map((p) => ({ on: p.planned_on, format: p.format || null, idea: p.hook || null, state: p.status === 'idea' ? 'waiting for your OK' : p.status, link: p.posted_url || null })),
+      // Before phase 78 the owner is not shown these, so neither is the chat: the column says it has run.
+      ...((typed && !typed.error && typed.data) || []).filter((e) => 'owner_decision' in e && e.owner_decision !== 'skipped').map((e) => ({
+        on: e.planned_on, format: e.post_type || null, idea: String(e.idea || e.caption || '').split('\n').map((x) => x.trim()).find(Boolean) || null,
+        state: ['made', 'posted'].includes(e.status) ? e.status : e.owner_decision === 'approved' ? 'approved' : e.owner_decision === 'changes' ? 'changes asked' : 'waiting for your OK',
+        link: e.posted_url || null
+      }))
+    ].sort((a, b) => String(a.on || '').localeCompare(String(b.on || ''))),
     latest_reports: ((reports && reports.data) || []).map((r) => ({ name: REPORT_NAMES[r.report_type] || 'Report', date: r.snapshot_date || String(r.created_at || '').slice(0, 10) })),
     note: 'Approvals, ticking off to-dos and opening reports are done in the Updates panel at the top of the app.'
   };
@@ -496,6 +506,13 @@ RULES:
 3. Keep it short: a few sentences or a short list.`;
 }
 
+// EdgeLead (phase 83), as in the Owner Assistant: the owner reads the app in Bangla, so the answer is in
+// Bangla too. The page sends lang with the question; anything but 'bn' is English, and adds nothing.
+const LANGUAGE_RULE = {
+  bn: '\nLANGUAGE. The owner reads Edge Meta AI in Bangla. Write the whole answer in clear, natural Bangla (বাংলা) as spoken in Bangladesh, including any notes and headings. Keep names, page names, platform names (Facebook, Instagram) and every figure exactly as the tools return them, with the same digits.'
+};
+const languageRule = (lang) => (Object.prototype.hasOwnProperty.call(LANGUAGE_RULE, lang) ? LANGUAGE_RULE[lang] : '');
+
 function systemPrompt(client, tz, cov) {
   const d = resolvedDates(tz);
   return `You are Owner Assistant, powered by XPulse.inc, the analytics assistant for "${client.client_name}". Talk like a sharp human assistant who knows the numbers: direct, precise, no filler. Speak to the owner as "you" and about "your" posts, pages and followers.
@@ -569,7 +586,9 @@ const SUGGESTIONS = {
   get_ad_performance: (ctx) => (ctx.adsConnected
     ? ['Which campaign cost the least per result?', 'How does ad spend compare to last month?', 'How much of our Facebook views were paid?']
     : ['How much of our Facebook views were paid?', 'How did Facebook do this month?']),
-  get_influencer_posts: () => ['Which creator brought the most views?', 'How do their posts compare with our own reels?', 'What did people say in the comments?']
+  get_influencer_posts: () => ['Which creator brought the most views?', 'How do their posts compare with our own reels?', 'What did people say in the comments?'],
+  // EdgeLead (phase 77): the agency's work gets follow-ups too, as a numbers answer does.
+  get_agency_work: () => ['What do you need from me?', 'When is our next post?', 'Which reports do I have?', 'What did you finish this month?']
 };
 
 // v2.8: questions about THIS answer's numbers come first — the platform and figure that moved most,
@@ -694,6 +713,19 @@ const SPECIFIC_SUGGESTIONS = {
   get_influencer_posts: (r) => {
     const top = (r && Array.isArray(r.posts) ? r.posts : []).find((p) => sugNum(p.views) !== null);
     return top ? [`Is ${top.creator}'s post still gaining views?`] : [];
+  },
+  // EdgeLead (phase 77): about the work the answer just listed: the owner's own first to-do, a post
+  // waiting for their OK, the piece of work due soonest.
+  get_agency_work: (r) => {
+    const out = [];
+    const mine = (r.your_todos || [])[0];
+    const q1 = mine && sugQuote(mine.title, 40);
+    if (q1) out.push(`What exactly do you need for "${q1}"?`);
+    if ((r.planned_posts || []).some((p) => p.state === 'waiting for your OK')) out.push('Which posts are waiting for my OK?');
+    const soon = (r.agency_working_on || []).filter((t) => t.due).sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
+    const q2 = soon && sugQuote(soon.title, 40);
+    if (q2) out.push(`When will "${q2}" be ready?`);
+    return out;
   },
   get_ad_performance: (r) => {
     if (!r || !r.connected) return [];
@@ -870,7 +902,11 @@ function modelConfig(base) {
 // One streamed model turn. Returns the assembled model content (parts with thought signatures
 // intact), the function calls it made, and the text — and pushes text deltas to onDelta as they
 // arrive. A part that turns out to be a function call is never streamed as text.
-async function streamTurn(ai, contents, config, onDelta) {
+// EdgeLead (phase 74): a turn that has sent nothing at all after this long is dropped, so a stalled
+// request (a busy free key) moves to the next key or ends in words, instead of "Thinking…" until the
+// whole answer's 120 s deadline.
+const FIRST_CHUNK_MS = 45000;
+async function streamTurn(ai, contents, config, onDelta, model = cfg.gemini.model) {
   const parts = [];
   let text = '', usage = null, finishReason = null;
   const push = (p) => {
@@ -878,28 +914,51 @@ async function streamTurn(ai, contents, config, onDelta) {
     if (p.text !== undefined && last && last.text !== undefined && !last.thought && !p.thought && !last.thoughtSignature && !p.thoughtSignature) last.text += p.text;
     else parts.push({ ...p });
   };
-  let stream;
+  // This turn's own controller: the answer's (Stop, page closed, deadline) ends it, and so does silence.
+  const ctl = new AbortController();
+  const outer = config.abortSignal;
+  const onOuter = () => ctl.abort();
+  if (outer) { if (outer.aborted) ctl.abort(); else outer.addEventListener('abort', onOuter, { once: true }); }
+  let stalled = false, first = false;
+  const watchdog = setTimeout(() => { if (!first) { stalled = true; ctl.abort(); } }, FIRST_CHUNK_MS);
+  const started = Date.now();
+  const stall = (e) => {
+    const err = new Error(`The AI did not start answering within ${Math.round(FIRST_CHUNK_MS / 1000)} s.`);
+    err.code = 'TURN_STALLED'; err.cause = e;
+    return err;
+  };
   try {
-    stream = await ai.models.generateContentStream({ model: cfg.gemini.model, contents, config });
-  } catch (e) {
-    // A model that rejects thinkingConfig must not take the chat down with it.
-    if (config.thinkingConfig && /think/i.test(e.message || '')) {
-      console.warn('[chat] thinkingConfig rejected by model, retrying without:', e.message);
-      const { thinkingConfig, ...rest } = config;
-      return streamTurn(ai, contents, rest, onDelta);
+    let stream;
+    try {
+      stream = await ai.models.generateContentStream({ model, contents, config: { ...config, abortSignal: ctl.signal } });
+    } catch (e) {
+      if (stalled) throw stall(e);
+      // A model that rejects thinkingConfig must not take the chat down with it.
+      if (config.thinkingConfig && /think/i.test(e.message || '')) {
+        console.warn('[chat] thinkingConfig rejected by model, retrying without:', e.message);
+        const { thinkingConfig, ...rest } = config;
+        return await streamTurn(ai, contents, rest, onDelta, model);
+      }
+      throw e;
     }
-    throw e;
-  }
-  for await (const chunk of stream) {
-    usage = chunk.usageMetadata || usage;
-    const cand = chunk.candidates?.[0];
-    finishReason = cand?.finishReason || finishReason;
-    for (const p of cand?.content?.parts || []) {
-      push(p);
-      if (p.text && !p.thought) { text += p.text; if (onDelta) onDelta(p.text); }
-    }
+    try {
+      for await (const chunk of stream) {
+        if (!first) { first = true; clearTimeout(watchdog); }
+        usage = chunk.usageMetadata || usage;
+        const cand = chunk.candidates?.[0];
+        finishReason = cand?.finishReason || finishReason;
+        for (const p of cand?.content?.parts || []) {
+          push(p);
+          if (p.text && !p.thought) { text += p.text; if (onDelta) onDelta(p.text); }
+        }
+      }
+    } catch (e) { throw stalled ? stall(e) : e; }
+  } finally {
+    clearTimeout(watchdog);
+    if (outer) outer.removeEventListener('abort', onOuter);
   }
   const calls = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
+  console.log(`[chat] turn ${Date.now() - started} ms · ${model} · ${calls.length ? calls.map((c) => c.name).join(',') : 'answer'} · thinking ${usage?.thoughtsTokenCount || 0} tok`);
   return { content: { role: 'model', parts }, calls, text, usage, finishReason };
 }
 
@@ -942,6 +1001,21 @@ const keyTrouble = (e) => {
   if (/API key not valid|API_KEY_INVALID|PERMISSION_DENIED|\b403\b|\b401\b/i.test(m)) return 'invalid';
   return null;
 };
+// EdgeLead (phase 76): the model itself is overloaded ("experiencing high demand", 503). Every key
+// gets the same answer from it, so this is waited out and then answered by the fallback model.
+const overloaded = (e) => /\b503\b|UNAVAILABLE|overloaded|high demand/i.test(String((e && (e.status || e.code)) || '') + ' ' + String((e && e.message) || ''));
+const OVERLOAD_WAIT_MS = 2000;
+const fallbackModel = () => {
+  const f = String(cfg.gemini.fallbackModel || '').trim();
+  return f && f.toLowerCase() !== 'none' && f !== cfg.gemini.model ? f : null;
+};
+/** A pause the answer's own controller can cut short. */
+const pause = (ms, signal) => new Promise((resolve) => {
+  if (signal && signal.aborted) return resolve();
+  const t = setTimeout(done, ms);
+  function done() { clearTimeout(t); if (signal) signal.removeEventListener('abort', done); resolve(); }
+  if (signal) signal.addEventListener('abort', done, { once: true });
+});
 async function chatKeys() {
   if (keySource) {
     const list = await keySource.list();
@@ -951,7 +1025,7 @@ async function chatKeys() {
   return cfg.gemini.apiKey ? [{ id: null, key: cfg.gemini.apiKey, source: 'env' }] : [];
 }
 
-async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal, who }) {
+async function answerOnce({ clientId, message, conversationId, onEvent, abortSignal, who, lang }) {
   const keys = await chatKeys();
   if (!keys.length) throw new Error('GEMINI_API_KEY is not configured.');
   const { GoogleGenAI } = require('@google/genai');
@@ -959,17 +1033,33 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   let ai = new GoogleGenAI({ apiKey: keys[0].key });
   const report = (k, outcome, detail) => { if (keySource && keySource.report && k && k.id) Promise.resolve(keySource.report(k.id, outcome, detail)).catch(() => {}); };
   // One model turn on the current key; a key problem before any text was shown moves to the next key.
+  // Phase 76: an overloaded model is retried once after a short wait, then the answer moves to the
+  // fallback model (for the rest of its turns), retried once too; only then is the owner told it is busy.
+  let model = cfg.gemini.model;
+  let overloadTries = 0;
   const turnOn = async (cts, conf, onDelta) => {
     for (;;) {
       let shown = false;
       try {
-        const t = await streamTurn(ai, cts, conf, (d) => { shown = true; if (onDelta) onDelta(d); });
+        const t = await streamTurn(ai, cts, conf, (d) => { shown = true; if (onDelta) onDelta(d); }, model);
         report(keys[ki], 'ok');
+        overloadTries = 0;
         return t;
       } catch (e) {
-        const trouble = keyTrouble(e);
+        if (overloaded(e) && !shown && !(abortSignal && abortSignal.aborted)) {
+          console.warn(`[chat] ${model} overloaded (try ${overloadTries + 1}): ${String(e.message || '').slice(0, 120)}`);
+          if (overloadTries === 0) { overloadTries = 1; await pause(OVERLOAD_WAIT_MS, abortSignal); continue; }
+          const fb = fallbackModel();
+          if (fb && model !== fb) { console.warn(`[chat] answering with ${fb} instead of ${model}`); model = fb; overloadTries = 0; continue; }
+          const busy = new Error('The AI is busy right now.');
+          busy.code = 'AI_BUSY'; busy.cause = e;
+          throw busy;
+        }
+        // Phase 74: a stalled key is passed over like a rate-limited one, but not benched for it.
+        const trouble = e.code === 'TURN_STALLED' ? 'stalled' : keyTrouble(e);
+        console.warn(`[chat] key ${ki + 1}/${keys.length} (${keys[ki].source || 'pool'}) failed: ${e.message}`);
         if (!trouble || shown || ki >= keys.length - 1 || (abortSignal && abortSignal.aborted)) throw e;
-        report(keys[ki], trouble, e.message);
+        if (trouble !== 'stalled') report(keys[ki], trouble, e.message);
         ki += 1;
         ai = new GoogleGenAI({ apiKey: keys[ki].key });
       }
@@ -999,7 +1089,7 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   const offered = metaLess
     ? declarations().filter((d) => d.name === 'get_agency_work')
     : declarations().filter((d) => (adsQuestion || d.name !== 'get_ad_performance') && (influencerQuestion || d.name !== 'get_influencer_posts'));
-  const config = modelConfig({ systemInstruction: metaLess ? agencyOnlyPrompt(client, tz) : systemPrompt(client, tz, cov), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
+  const config = modelConfig({ systemInstruction: (metaLess ? agencyOnlyPrompt(client, tz) : systemPrompt(client, tz, cov)) + languageRule(lang), tools: [{ functionDeclarations: offered }], temperature: 0.2, abortSignal });
   const gate = adsNoteGate(!adsQuestion, (t) => emit({ type: 'delta', text: t }));
   const toolLog = [], toolResults = [];
   let text = '';
@@ -1086,10 +1176,10 @@ async function answerOnce({ clientId, message, conversationId, onEvent, abortSig
   let charts = [];
   try { charts = panelsFor(toolLog, toolResults, { question: message }); } catch (e) { console.error('[chat] panels failed:', e.message); }
 
-  await q(supabase.from('xp_ai_messages').insert({ conversation_id: conv.id, role: 'assistant', content: text, tool_calls: toolLog, tool_results: toolResults, model: cfg.gemini.model, tokens_in: spent.input || null, tokens_out: (spent.output + spent.thinking) || null }), 'save assistant');
+  await q(supabase.from('xp_ai_messages').insert({ conversation_id: conv.id, role: 'assistant', content: text, tool_calls: toolLog, tool_results: toolResults, model, tokens_in: spent.input || null, tokens_out: (spent.output + spent.thinking) || null }), 'save assistant');
   await q(supabase.from('xp_ai_conversations').update({ updated_at: new Date().toISOString() }).eq('id', conv.id), 'touch conv').catch(() => {});
 
-  return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model: cfg.gemini.model, usage: spent };
+  return { conversationId: conv.id, reply: text, response: text, answer: text, suggestions, charts, toolCalls: toolLog, model, usage: spent };
 }
 
-module.exports = { convVisible, agencyOnlyPrompt, setKeySource, keyTrouble, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };
+module.exports = { convVisible, agencyOnlyPrompt, languageRule, setKeySource, keyTrouble, overloaded, fallbackModel, fbSummaryViews, fbContentViews, postViews, fbCompareViews, fbDailyViews, fbSplitViews, answer, TOOLS, systemPrompt, coverage, adsCoverage, suggestionsFor, publicSettlement, publicConventions, publicBundle, publicFollowerDay, publicAds, adChanges, aboutAds, aboutInfluencers, stripAdsNote, adsNoteGate, toContents, pushTurn };

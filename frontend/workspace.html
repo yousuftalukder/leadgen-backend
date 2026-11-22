@@ -14,7 +14,8 @@
     .wsc-who { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
     .wsc-who h1 { font-size: 1.8rem; font-weight: 800; color: var(--text-primary); margin: 0; line-height: 1.15; text-wrap: balance; }
     .wsc-line { color: var(--text-secondary); display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 0.9rem; }
-    .wsc-line span { display: inline-flex; gap: 6px; align-items: center; }
+    .wsc-line span { display: inline-flex; gap: 6px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+    .wsc-line a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
     .wsc-line .el-svg { width: 15px; height: 15px; color: var(--text-muted); }
     .wsc-spark { width: 100%; height: auto; display: block; }
     .wsc-spark text { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
@@ -39,6 +40,37 @@
     #rv-frame { flex: 1; width: 100%; border: 0; background: var(--bg-color); }
     body.rvw-open { overflow: hidden; }
     @media (max-width: 720px) { .rvw-panel { inset: 0; border-radius: 0; } }
+    /* phase 84: what the owner filled in */
+    .ws-owner-dl { display: grid; grid-template-columns: minmax(120px, 180px) 1fr; gap: 8px 16px; margin: 12px 0 0; font-size: 0.9rem; }
+    .ws-owner-dl dt { color: var(--text-muted); }
+    .ws-owner-dl dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+    @media (max-width: 560px) { .ws-owner-dl { grid-template-columns: 1fr; gap: 2px; } .ws-owner-dl dd { margin-bottom: 8px; } }
+    /* phase 85: the ad brief */
+    .ab { display: grid; gap: 14px; }
+    .ab-top .ws-card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .ab-top .ws-card-h .ws-actions { display: flex; gap: 8px; }
+    .ab-sub { margin: 6px 0 12px; }
+    .ab-gaplist { margin: 6px 0 0; padding-left: 18px; line-height: 1.6; }
+    .ab-dl { display: grid; grid-template-columns: minmax(140px, 200px) 1fr; gap: 8px 16px; margin: 0; font-size: 0.9rem; }
+    .ab-dl dt { color: var(--text-muted); }
+    .ab-dl dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+    .ab-table td { vertical-align: top; }
+    .ab-table .s { color: var(--text-muted); font-size: 0.8rem; margin-top: 2px; }
+    .ab-tg { margin: 6px 0 0; padding-left: 16px; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
+    .ab-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+    .ab-aud h3, .ab-split h3 { font-size: 0.88rem; font-weight: 700; margin: 0 0 6px; color: var(--text-primary); }
+    .ab-split + .ab-split { margin-top: 16px; }
+    .ab-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .ab-kpis .ws-kpi .v { font-size: 1.2rem; }
+    .ab-plans { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+    .ab-plan { width: 100%; text-align: left; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; border-radius: var(--r-md);
+        border: 1px solid var(--card-border); background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
+    .ab-plan:hover { border-color: var(--text-muted); }
+    .ab-plan .s { flex-basis: 100%; color: var(--text-muted); font-size: 0.82rem; }
+    .ab-h3 { font-size: 0.95rem; font-weight: 800; margin: 20px 0 8px; }
+    .ab-fs { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 10px 14px 14px; margin: 0 0 10px; }
+    .ab-fs legend { font-weight: 700; font-size: 0.86rem; padding: 0 6px; }
+    @media (max-width: 560px) { .ab-dl { grid-template-columns: 1fr; gap: 2px; } .ab-dl dd { margin-bottom: 8px; } }
 </style>
 </head>
 <body>
@@ -65,6 +97,8 @@
     <script src="vendor/supabase-js-2.116.0.js"></script>
 <script src="header.js"></script>
 <script src="ui.js"></script>
+<script src="client-tools.js"></script>
+<script src="ad-brief.js"></script>
 <script>
 (async () => {
     'use strict';
@@ -80,7 +114,10 @@
     const id = q.get('client');
     if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { location.replace('clients.html'); return; }
 
-    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['reports', 'Reports'], ['leads', 'Leads'], ['meta', 'Meta'],
+    // Phase 69: the content plan, the ad ledger (with products and stock) and message templates, typed in by the team.
+    // Phase 70: their own numbers (Meta) and the team's work first; what the public-data tools made after.
+    const TABS = [['overview', 'Overview'], ['tasks', 'Tasks'], ['meta', 'Meta'], ['content', 'Content plan'], ['ledger', 'Ad ledger'], ['adbrief', 'Ad brief & plan'],
+        ['replies', 'Message templates'], ['reports', 'Reports'], ['leads', 'Leads'],
         ['ask', 'Assistant'], ['schedules', 'Schedules'], ['access', 'Access & sharing'], ['settings', 'Settings']];
     let tab = TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'overview';
 
@@ -143,7 +180,9 @@
                         ${c.niche ? `<span>${ic('store')}${esc(c.niche)}</span>` : ''}
                         ${c.location ? `<span>${ic('target')}${esc(c.location)}</span>` : ''}
                         ${c.ig_handle ? `<span>@${esc(c.ig_handle)}</span>` : ''}
-                        ${c.fb_page ? `<span>${esc(c.fb_page)}</span>` : ''}
+                        ${c.fb_page ? (/^https?:\/\//i.test(c.fb_page)
+                            ? `<span><a href="${esc(c.fb_page)}" target="_blank" rel="noopener">Facebook Page</a></span>`
+                            : `<span>${esc(c.fb_page)}</span>`) : ''}
                     </div>
                     <div class="ws-chips">${meta}${portal}${c.archived ? '<span class="el-chip is-warn">Archived</span>' : ''}<span class="el-chip">${access}</span>
                         <span class="ws-avatars">${team().map(m => `<span class="el-avatar" title="${esc(m.email)} · ${esc(m.role)}">${esc(UI.initials(m.email))}</span>`).join('')}</span></div>
@@ -211,7 +250,8 @@
 
     function drawTab() {
         const body = $('wsc-body');
-        const f = { overview: tabOverview, tasks: tabTasks, reports: tabReports, leads: tabLeads, meta: tabMeta, ask: tabAsk, schedules: tabSchedules, access: tabAccess, settings: tabSettings }[tab];
+        const f = { overview: tabOverview, tasks: tabTasks, reports: tabReports, content: tabContent, ledger: tabLedger, adbrief: tabAdBrief, replies: tabReplies,
+            leads: tabLeads, meta: tabMeta, ask: tabAsk, schedules: tabSchedules, access: tabAccess, settings: tabSettings }[tab];
         body.innerHTML = '<div class="ws-empty"><p>Loading…</p></div>';
         Promise.resolve(f(body)).catch(err => { body.innerHTML = `<div class="ws-empty">${ic('alert')}<p>${esc(err.message)}</p></div>`; });
     }
@@ -320,17 +360,23 @@
 
     // ---- tasks ------------------------------------------------------------------
     function tabTasks(body) {
-        UI.board(body, c.id, { label: new URLSearchParams(location.search).get('label') || '', onLoad: d => { tasks = d; } });
+        const qs = new URLSearchParams(location.search);
+        UI.board(body, c.id, { label: qs.get('label') || '', openTask: qs.get('task') || null, onLoad: d => { tasks = d; } });
     }
 
     // ---- reports ----------------------------------------------------------------
-    let reportFilter = 'all';
+    let reportFilter = 'all', reportSource = 'all';
+    // Phase 70: where a report's numbers came from, said first: their Meta, the public-data tools, or built from other reports.
+    const SOURCES = [['meta', 'Their Meta'], ['public', 'Public data · tools'], ['reports', 'Built from reports']];
     async function tabReports(body) {
         const tl = timeline || await loadTimeline();
         const reps = tl.reports || [];
-        const types = [...new Set(reps.map(r => r.report_type))];
+        const bySource = r => reportSource === 'all' || UI.sourceOf(r.report_type) === reportSource;
+        const types = [...new Set(reps.filter(bySource).map(r => r.report_type))];
+        if (reportFilter !== 'all' && !types.includes(reportFilter)) reportFilter = 'all';
         const running = (tl.jobs || []).filter(j => ['queued', 'running', 'paused_no_credit', 'interrupted'].includes(j.status));
-        const list = reps.filter(r => reportFilter === 'all' || r.report_type === reportFilter);
+        const list = reps.filter(r => bySource(r) && (reportFilter === 'all' || r.report_type === reportFilter));
+        const srcCount = k => reps.filter(r => UI.sourceOf(r.report_type) === k).length;
         if (!reps.length && !running.length) {
             body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No reports yet</h3><p>Reports appear here as soon as work for ${esc(c.name)} finishes, whoever on the team ran it.</p>${canEdit() ? `<button class="ws-btn is-gold" type="button" data-newwork>${ic('plus')}New work</button>` : ''}</div>`;
             body.querySelectorAll('[data-newwork]').forEach(b => b.addEventListener('click', () => EL.newWork(c.id)));
@@ -338,10 +384,13 @@
         }
         body.innerHTML = `
             ${running.length ? `<section class="ws-card" style="margin-bottom:16px"><div class="ws-card-h"><h2>Running now</h2></div><div class="ws-rows">${running.map(j => `<div class="ws-row"><span class="ws-sev is-gold"></span><div class="ws-grow"><div class="ws-t">${esc(UI.jobName(j.type))}</div><div class="ws-m">${esc(UI.jobState(j.status))} · ${j.progress || 0}% · started ${esc(UI.ago(j.created_at))}</div></div></div>`).join('')}</div></section>` : ''}
-            <div class="ws-filters"><button type="button" data-f="all" aria-pressed="${reportFilter === 'all'}">All <span class="ws-num">${reps.length}</span></button>${types.map(t => `<button type="button" data-f="${esc(t)}" aria-pressed="${reportFilter === t}">${esc(UI.TYPE_LABEL[t] || t)}</button>`).join('')}</div>
+            <div class="ws-filters"><button type="button" data-src="all" aria-pressed="${reportSource === 'all'}">Everything <span class="ws-num">${reps.length}</span></button>${SOURCES.filter(([k]) => srcCount(k)).map(([k, l]) => `<button type="button" data-src="${k}" aria-pressed="${reportSource === k}">${l} <span class="ws-num">${srcCount(k)}</span></button>`).join('')}</div>
+            ${liveConns().length && srcCount('public') ? `<p class="el-muted" style="margin:-4px 0 12px;font-size:0.84rem">${esc(c.name)}’s Meta is connected, so its own numbers come from Meta. Public-data reports are for content ideas and comparing with rivals.</p>` : ''}
+            ${types.length > 1 ? `<div class="ws-filters"><button type="button" data-f="all" aria-pressed="${reportFilter === 'all'}">All kinds</button>${types.map(t => `<button type="button" data-f="${esc(t)}" aria-pressed="${reportFilter === t}">${esc(UI.TYPE_LABEL[t] || t)}</button>`).join('')}</div>` : ''}
             <div class="ws-table-wrap"><table class="ws-table"><thead><tr><th>Report</th><th>About</th><th>Date</th><th>Result</th><th>Source</th></tr></thead>
             <tbody>${list.map(r => { const { subject, result } = reportLine(r); return `<tr class="is-link" data-open="${esc(r.id)}" tabindex="0"><td class="t ws-nowrap">${esc(UI.TYPE_LABEL[r.report_type] || r.report_type)}</td><td>${esc(subject || '—')}${r.ai_summary ? `<div class="s">${esc(r.ai_summary.slice(0, 140))}</div>` : ''}</td><td class="ws-nowrap">${esc(UI.day(r.created_at))}</td><td class="ws-nowrap">${esc(result || '—')}</td><td>${UI.srcChip(UI.sourceOf(r.report_type))}</td></tr>`; }).join('')}</tbody></table></div>`;
         body.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { reportFilter = b.dataset.f; tabReports(body); }));
+        body.querySelectorAll('[data-src]').forEach(b => b.addEventListener('click', () => { reportSource = b.dataset.src; reportFilter = 'all'; tabReports(body); }));
         wireOpen(body);
     }
 
@@ -376,6 +425,14 @@
         const btn = doc && (doc.getElementById('export-pdf') || doc.getElementById('export') || doc.getElementById('vault-export'));
         if (btn && !btn.closest('.hidden')) btn.click(); else if (w) w.print();
     });
+
+    // ---- the workbook (phase 69): client-tools.js draws these ----------------------
+    const toolCtx = () => ({ clientId: c.id, clientName: c.name });
+    function tabContent(body) { return Tools.contentPlan(body, toolCtx()); }
+    function tabLedger(body) { return Tools.adLedger(body, toolCtx()); }
+    // Phase 85: everything needed to plan the next ad set, on one page, and the plans made from it.
+    function tabAdBrief(body) { return AdBrief.mount(body, toolCtx()); }
+    function tabReplies(body) { return Tools.templates(body, toolCtx()); }
 
     // ---- leads ------------------------------------------------------------------
     async function tabLeads(body) {
@@ -610,7 +667,7 @@
                 <section class="ws-card"><div class="ws-card-h"><h2>Business owner’s app</h2>${owners.length ? '<span class="el-chip is-jade">Has a login</span>' : ''}</div>
                     <p class="el-muted">The business owner’s login to Edge Meta AI, for ${esc(c.name)} only: their numbers, the tasks you share with them, their planned posts to approve and their reports, all in one chat app. They sign in with a code emailed to them; no password. Never your costs, keys or other clients.</p>
                     ${owners.length ? `<div class="ws-rows">${owners.map(o => `<div class="ws-row"><span class="el-avatar">${esc(UI.initials(o.name || o.email))}</span><div class="ws-grow"><div class="ws-t">${esc(o.name || o.email)}</div><div class="ws-m">${esc(o.email)} · added ${esc(UI.day(o.created_at))}</div></div>
-                        ${canEdit() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button>` : ''}${isOwner() ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
+                        ${canEdit() ? `<button class="ws-btn is-sm" type="button" data-resend="${esc(o.user_id)}">New sign-in link</button><button class="ws-btn is-sm is-quiet" type="button" data-email="${esc(o.user_id)}" data-current="${esc(o.email)}">Change email</button>` : ''}${isOwner() ? `<button class="ws-btn is-sm is-quiet" type="button" data-rm="${esc(o.user_id)}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
                     ${canEdit() ? `<div class="ws-form">
                         <div class="ws-form two"><div><label for="o-email">Owner’s email</label><input id="o-email" type="email" placeholder="owner@business.com"></div><div><label for="o-name">Their name</label><input id="o-name" placeholder="Optional"></div></div>
                         <div class="ws-hint">An owner login never runs out. It works for as long as ${esc(c.name)} is one of your clients.</div>
@@ -668,6 +725,31 @@
             } catch (err) { out.innerHTML = `<p class="ws-note is-bad">${esc(err.message)}</p>`; }
             b.disabled = false;
         }));
+        // Phase 79: the email the owner signs in to Edge Meta AI with. The new address gets a sign-in link
+        // and the old one is told; the result shows here, as an invite's does.
+        body.querySelectorAll('[data-email]').forEach(b => b.addEventListener('click', () => {
+            const out = $('o-result');
+            out.innerHTML = `<div class="ws-form wsc-banner"><div><label for="oe-email">New email for ${esc(b.dataset.current)}</label>
+                <input id="oe-email" type="email" placeholder="owner@business.com" autocomplete="off"></div>
+                <div class="ws-hint">They sign in with the new address from now on. A sign-in link goes to it, and the old address is told.</div>
+                <div class="ws-actions"><button class="ws-btn" type="button" id="oe-cancel">Cancel</button><button class="ws-btn is-gold" type="button" id="oe-save">Change email</button></div>
+                <div class="ws-note" id="oe-note"></div></div>`;
+            const input = $('oe-email'); input.focus();
+            $('oe-cancel').addEventListener('click', () => { out.innerHTML = ''; });
+            const save = async () => {
+                const email = input.value.trim(), note = $('oe-note');
+                if (!email) { note.className = 'ws-note is-bad'; note.textContent = 'Enter the new email.'; return; }
+                $('oe-save').disabled = true; note.className = 'ws-note'; note.textContent = 'Changing…';
+                try {
+                    const r = await EL.api(`/api/clients/${id}/owner-email`, { method: 'POST', body: { userId: b.dataset.email, email } });
+                    await refreshDetail();
+                    accessFlash = `<div class="wsc-banner">${inviteHtml(r)}</div>`;
+                    render();
+                } catch (err) { note.className = 'ws-note is-bad'; note.textContent = err.message; $('oe-save').disabled = false; }
+            };
+            $('oe-save').addEventListener('click', save);
+            input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+        }));
         body.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copy(b.dataset.copy)));
         body.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', async () => {
             try { await EL.api(`/api/share/${b.dataset.revoke}`, { method: 'DELETE' }); EL.toast('Link turned off. Anyone opening it now sees nothing.'); tabAccess(body); }
@@ -680,6 +762,22 @@
     }
 
     // ---- settings ---------------------------------------------------------------
+    // Phase 84: what the owner told the agency from Edge Meta AI's Profile. Read only here: it is theirs.
+    function ownerDetailsCard(d) {
+        if (!d || typeof d !== 'object') return '';
+        const site = d.website ? (/^https?:\/\//i.test(d.website) ? d.website : 'https://' + d.website) : '';
+        const rows = [
+            ['Phone', d.phone ? `<a href="tel:${esc(String(d.phone).replace(/\s+/g, ''))}">${esc(d.phone)}</a>` : ''],
+            ['Website', site ? `<a href="${EL.safeUrl(site)}" target="_blank" rel="noopener noreferrer">${esc(d.website)}</a>` : ''],
+            ['Address', esc(d.address || '')],
+            ['Opening hours', esc(d.hours || '').replace(/\n/g, '<br>')],
+            ['Anything we should know', esc(d.notes || '').replace(/\n/g, '<br>')]
+        ].filter(([, v]) => v);
+        if (!rows.length) return '';
+        return `<section class="ws-card"><h2>From the owner</h2>
+            <p class="el-muted">What ${esc(c.name)}’s owner filled in on their Profile in Edge Meta AI${d.updated_at ? `, last on ${esc(UI.day(d.updated_at))}` : ''}. Only they can change it.</p>
+            <dl class="ws-owner-dl">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></section>`;
+    }
     async function tabSettings(body) {
         const all = (await EL.clients(true)).filter(x => x.id !== c.id && !x.archived && ['owner', 'admin'].includes(x.access));
         const dis = canEdit() ? '' : 'disabled';
@@ -708,6 +806,7 @@
                     <div id="r-progress"></div><div id="r-found"></div>
                 </section>
             </div>
+            ${ownerDetailsCard(c.owner_details)}
             ${isOwner() ? `<section class="ws-card"><h2>Archive, merge or delete</h2>
                 <p class="el-muted">Archiving hides the client and keeps everything. Merging moves everything from another client into this one and archives the other — for duplicates. Deleting removes the client; its reports stay but lose their link to it.</p>
                 <div class="ws-actions">

@@ -13,7 +13,7 @@ const {
     mailSettings, markAgencyOwner, ownClientFor, rateLimit, sendErr, sendMail, supabase, trialDaysSetting,
     userRole
 } = S;
-Object.assign(S, { missingTable, oneLine, peopleById, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName });
+Object.assign(S, { missingTable, oneLine, peopleById, personName, staffOnly, endOfColumn, openClientsFor, sniffDocument, cleanFileName, sniffImage });
 
 // ===========================================================================
 // PHASE 32 :: THE CLIENT'S TASK BOARD
@@ -192,6 +192,18 @@ async function peopleById(ids) {
     return Object.fromEntries((data || []).map(u => [u.id, { id: u.id, email: u.email, name: u.full_name || null }]));
 }
 
+/**
+ * Phase 72: how a person is named where they are mentioned — the profile name,
+ * never the address. With no name on the profile, the part before the @ stands
+ * in, made readable ("yousuf.outreach951" → "Yousuf Outreach").
+ */
+function personName(p) {
+    const full = String((p && (p.name ?? p.full_name)) || '').trim();
+    if (full && !full.includes('@')) return full;
+    const local = String((p && p.email) || full).split('@')[0].replace(/\d+/g, ' ').replace(/[._+-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return local ? local.replace(/(^|\s)\S/g, c => c.toUpperCase()) : 'Teammate';
+}
+
 async function taskCommentCounts(taskIds) {
     if (!taskIds.length) return {};
     const { data, error } = await supabase.from('client_task_comments').select('task_id').in('task_id', taskIds);
@@ -303,6 +315,191 @@ app.get('/api/clients/:id/tasks', async (req, res) => {
     } catch (err) { sendErr(res, err); }
 });
 
+// ===========================================================================
+// PHASE 68 :: TASK EMAILS
+//
+// Someone on the team hears about the tasks that are theirs without opening the
+// board: when a task is given to them, at once; when a task they hold or raised
+// changes (status, due date, title, priority, a comment, a file, the client
+// ticking it off), in one email a couple of minutes later. The wait is what
+// keeps a burst of edits, or a comment thread, from becoming a burst of mail:
+// every change to one task for one person inside the window goes in one message.
+//
+// Never the person who made the change, never a business owner (they have Edge
+// Meta AI), never a disabled login. Mail that is not set up, or fails, is logged
+// and dropped: a task save never waits on Gmail and never fails because of it.
+// TASK_EMAILS=off on Render switches all of it off. The queue lives in memory,
+// so a restart inside the window loses that one batch; the board still has it.
+// ===========================================================================
+const TASK_MAIL_DELAY_MS = 2 * 60 * 1000;
+const TASK_STATUS_NAME = { todo: 'To do', doing: 'In progress', waiting: 'Waiting on client', done: 'Done' };
+const _taskMail = new Map();          // `${taskId}:${userId}` -> { timer, lines, task, user, clientName }
+function taskEmailsOn() { return String(process.env.TASK_EMAILS || 'on').trim().toLowerCase() !== 'off'; }
+
+/** The task itself in the workspace: its client's board, with the task open. */
+function taskLink(t) {
+    const base = appUrl();
+    return base ? `${base}/workspace.html?client=${encodeURIComponent(t.client_id)}&tab=tasks&task=${encodeURIComponent(t.id)}` : '';
+}
+
+/** Staff who should hear, from a list of user ids: active, not a business owner, not the actor. */
+async function taskMailRecipients(ids, actorId) {
+    const want = [...new Set(ids.filter(id => id && id !== actorId))];
+    if (!want.length) return [];
+    const { data } = await supabase.from('app_users').select('id, email, full_name, role, is_active').in('id', want);
+    return (data || []).filter(u => u.role !== 'client' && u.is_active !== false && EMAIL_RE.test(String(u.email || '')));
+}
+
+async function taskMailActor(actorId) {
+    if (!actorId) return 'Someone';
+    const p = (await peopleById([actorId]))[actorId];
+    return p ? personName(p) : 'Someone';
+}
+
+function taskMailText(first, t, clientName, lines) {
+    const link = taskLink(t);
+    return [
+        first ? `Hi ${first},` : 'Hello,', '',
+        ...lines, '',
+        `Task: ${t.title}`,
+        `Client: ${clientName || 'a client'}`,
+        `Status: ${TASK_STATUS_NAME[t.status] || t.status}${t.due_date ? ` · due ${t.due_date}` : ''}`,
+        ...(link ? ['', `Open it: ${link}`] : []),
+        '', '— EdgeLead'
+    ].join('\n');
+}
+
+async function taskClientName(t, known) {
+    if (known) return known;
+    const { data } = await supabase.from('clients').select('name').eq('id', t.client_id).maybeSingle();
+    return (data && data.name) || null;
+}
+
+/** A task was given to someone. Sent at once, to them only. */
+async function mailTaskAssigned(t, actorId, clientName) {
+    if (!taskEmailsOn() || !t || !t.assignee_user_id) return;
+    try {
+        const [who] = await taskMailRecipients([t.assignee_user_id], actorId);
+        if (!who) return;
+        const by = await taskMailActor(actorId);
+        const name = await taskClientName(t, clientName);
+        const r = await S.sendMail({
+            to: who.email,
+            subject: `New task for you: ${t.title}`,
+            text: taskMailText(String(who.full_name || '').split(' ')[0], t, name,
+                [`${by} gave you a task${name ? ` for ${name}` : ''}.`])
+        });
+        if (!r.ok && !r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t.id, message: e.message }); }
+}
+
+/** Who follows a task (phase 70): whoever holds it, whoever raised it, and everyone on the team who has commented on it. */
+async function taskWatchers(t) {
+    const { data } = await supabase.from('client_task_comments').select('author_user_id').eq('task_id', t.id).limit(500);
+    return [t.assignee_user_id, t.created_by, ...(data || []).map(r => r.author_user_id)];
+}
+
+/** A change to a task: queued per person, sent as one email after the window. `skip`: people told already (a mention). */
+async function queueTaskMail(t, actorId, line, clientName, skip = []) {
+    if (!taskEmailsOn() || !t || !line) return;
+    try {
+        const people = (await taskMailRecipients(await taskWatchers(t), actorId)).filter(u => !skip.includes(u.id));
+        for (const u of people) {
+            const key = `${t.id}:${u.id}`;
+            const q = _taskMail.get(key) || { lines: [] };
+            q.task = t; q.user = u; q.clientName = clientName || q.clientName || null;
+            if (!q.lines.includes(line)) q.lines.push(line);
+            if (!q.timer) {
+                q.timer = setTimeout(() => flushTaskMail(key).catch(() => {}), TASK_MAIL_DELAY_MS);
+                if (q.timer.unref) q.timer.unref();
+            }
+            _taskMail.set(key, q);
+        }
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t && t.id, message: e.message }); }
+}
+
+async function flushTaskMail(key) {
+    const q = _taskMail.get(key);
+    _taskMail.delete(key);
+    if (!q || !q.lines.length) return;
+    if (q.timer) clearTimeout(q.timer);
+    const fresh = await loadTask(q.task.id).catch(() => null);
+    if (fresh === TASK_MISSING) return;
+    const t = fresh || null;                                      // deleted since: nothing to point at
+    if (!t) return;
+    const name = await taskClientName(t, q.clientName);
+    const r = await S.sendMail({
+        to: q.user.email,
+        subject: `Task updated: ${t.title}`,
+        text: taskMailText(String(q.user.full_name || '').split(' ')[0], t, name, q.lines.slice(0, 20))
+    });
+    if (!r.ok && !r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+}
+
+/** What changed between two versions of a task, in words, one line per change. */
+function taskChangeLines(before, after, by) {
+    const out = [];
+    if (after.status !== before.status) out.push(`${by} moved it from ${TASK_STATUS_NAME[before.status] || before.status} to ${TASK_STATUS_NAME[after.status] || after.status}.`);
+    if ((after.due_date || null) !== (before.due_date || null)) out.push(after.due_date ? `${by} set the due date to ${after.due_date}.` : `${by} removed the due date.`);
+    if (after.title !== before.title) out.push(`${by} renamed it (was "${String(before.title || '').slice(0, 120)}").`);
+    if ((after.priority || 'medium') !== (before.priority || 'medium')) out.push(`${by} changed the priority to ${after.priority}.`);
+    if ((after.notes || '') !== (before.notes || '')) out.push(`${by} edited the description.`);
+    const done = l => (l || []).filter(i => i && i.done).length;
+    if (JSON.stringify(after.checklist || []) !== JSON.stringify(before.checklist || [])) {
+        out.push(`${by} updated the checklist (${done(after.checklist)} of ${(after.checklist || []).length} done).`);
+    }
+    return out;
+}
+
+// ---- phase 70: @mentions in comments ------------------------------------------
+//
+// A mention is written into the comment as @[Name](user:<id>), like a picture is
+// ![image](media:<id>). Only people on the client can be mentioned; any other id
+// is kept as plain text. The person mentioned is emailed at once. A business
+// owner reads mentions as plain "@Name", and cannot make them.
+const MENTION_RE = /@\[([^\]\n]{1,80})\]\(user:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)/gi;
+const mentionIds = body => [...new Set([...String(body || '').matchAll(MENTION_RE)].map(m => m[2].toLowerCase()))];
+/** Mentions as plain "@Name". */
+const mentionPlain = body => String(body || '').replace(MENTION_RE, (_, name) => '@' + name);
+/** Keep the mentions of these people; any other becomes plain text. */
+const mentionKeep = (body, ids) => String(body || '').replace(MENTION_RE, (all, name, id) => (ids.includes(id.toLowerCase()) ? all : '@' + name));
+
+/** Someone was mentioned in a comment: told at once, by name, with what was said. */
+async function mailTaskMentioned(t, actorId, ids, body, clientName) {
+    if (!taskEmailsOn() || !t || !ids.length) return [];
+    const told = [];
+    try {
+        const people = await taskMailRecipients(ids, actorId);
+        if (!people.length) return [];
+        const by = await taskMailActor(actorId);
+        const name = await taskClientName(t, clientName);
+        for (const u of people) {
+            const r = await S.sendMail({
+                to: u.email,
+                subject: `${by} mentioned you: ${t.title}`,
+                text: taskMailText(String(u.full_name || '').split(' ')[0], t, name, [`${by} mentioned you in a comment:`, '', `"${commentExcerpt(body)}"`])
+            });
+            if (r.ok) told.push(u.id);
+            else if (!r.skipped) logger.warn('task_mail_failed', { taskId: t.id, message: r.error });
+        }
+    } catch (e) { logger.warn('task_mail_failed', { taskId: t.id, message: e.message }); }
+    return told;
+}
+
+/** What a comment says, for an email: pictures named, spaces folded, kept short. */
+function commentExcerpt(body) {
+    const text = mentionPlain(body).replace(/!\[[^\]]{0,80}\]\(media:[0-9a-f-]{36}\)/gi, '[picture]').replace(/\s+/g, ' ').trim();
+    return text.length > 280 ? text.slice(0, 277) + '...' : text;
+}
+
+/** After the response: a task save never waits on mail. */
+function afterTaskWrite(fn) {
+    setImmediate(() => { Promise.resolve().then(fn).catch(e => logger.warn('task_mail_failed', { message: e.message })); });
+}
+
+Object.assign(S, { taskChangeLines, taskLink, mailTaskAssigned, queueTaskMail, flushTaskMail, taskEmailsOn, commentExcerpt, afterTaskWrite, _taskMail, TASK_MAIL_DELAY_MS,
+    mentionIds, mentionPlain, mentionKeep, mailTaskMentioned, taskWatchers });
+
 app.post('/api/clients/:id/tasks', async (req, res) => {
     try {
         const ctx = await auth(req, res); if (!ctx) return;
@@ -342,6 +539,7 @@ app.post('/api/clients/:id/tasks', async (req, res) => {
         if (error) { if (missing48(error)) return migration48(res); if (missingTable(error)) return migrationNeeded(res); throw error; }
         await linkTaskMedia(data, [data.notes]);
         res.status(201).json({ task: taskView(data, await peopleById([data.assignee_user_id]), {}, c.name) });
+        afterTaskWrite(() => mailTaskAssigned(data, ctx.user.id, c.name));                // phase 68
     } catch (err) { sendErr(res, err); }
 });
 
@@ -385,6 +583,12 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
         if (patch.notes !== undefined) await linkTaskMedia(data, [data.notes]);
         await S.syncPostFromTask(data, t.status).catch(e => logger.warn('post_sync_failed', { taskId: t.id, message: e.message }));
         res.json({ task: taskView(data, await peopleById([data.assignee_user_id]), await taskCommentCounts([data.id]), c.name) });
+        // Phase 68: a new assignee hears at once; whoever holds or raised it hears what changed, batched.
+        afterTaskWrite(async () => {
+            if (data.assignee_user_id && data.assignee_user_id !== t.assignee_user_id) await mailTaskAssigned(data, ctx.user.id, c.name);
+            const by = await taskMailActor(ctx.user.id);
+            for (const line of taskChangeLines(t, data, by)) await queueTaskMail(data, ctx.user.id, line, c.name);
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -418,7 +622,15 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
         const roles = {};
         for (const id of Object.keys(people)) roles[id] = await userRole(id);
         const forClient = ctx.profile?.role === 'client';
+        // Phase 70: the team gets who can be mentioned; an owner reads mentions as plain names.
+        // Phase 72: by profile name only — the picker never shows an address.
+        let mentionable = [];
+        if (!forClient) {
+            const { data: cl } = await supabase.from('clients').select('id, owner_user_id').eq('id', t.client_id).maybeSingle();
+            if (cl) mentionable = (await clientPeople(cl)).map(p => ({ id: p.id, name: personName(p) }));
+        }
         res.json({
+            people: mentionable,
             media: await taskMediaUrls(t.client_id, rows.map(r => r.body)),
             comments: rows.map(r => {
                 const p = people[r.author_user_id] || {};
@@ -427,7 +639,7 @@ app.get('/api/tasks/:taskId/comments', async (req, res) => {
                 const author = fromClient
                     ? { kind: 'client', name: p.name || 'Client', ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) }
                     : { kind: 'team', name: p.name || (forClient ? 'Your agency team' : (p.email || 'Team')), ...(forClient ? {} : { id: r.author_user_id, email: p.email || null }) };
-                return { id: r.id, author, mine: r.author_user_id === ctx.user.id, body: r.body, createdAt: r.created_at };
+                return { id: r.id, author, mine: r.author_user_id === ctx.user.id, body: forClient ? mentionPlain(r.body) : r.body, createdAt: r.created_at };
             })
         });
     } catch (err) { sendErr(res, err); }
@@ -439,8 +651,17 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
         const t = await taskForReader(ctx, req.params.taskId);
         if (t === TASK_MISSING) return migrationNeeded(res);
         if (!t) return res.status(404).json({ error: 'Task not found.' });
-        const body = String(req.body?.body ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+        let body = String(req.body?.body ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
         if (!body) return res.status(400).json({ error: 'Write something first.' });
+        // Phase 70: mentions stand only for people on the client; an owner's are plain text.
+        let mentioned = [];
+        if (ctx.profile?.role === 'client') body = mentionPlain(body);
+        else if (mentionIds(body).length) {
+            const { data: cl } = await supabase.from('clients').select('id, owner_user_id').eq('id', t.client_id).maybeSingle();
+            const onClient = cl ? (await clientPeople(cl)).map(p => p.id) : [];
+            mentioned = mentionIds(body).filter(id => onClient.includes(id));
+            body = mentionKeep(body, mentioned);
+        }
         if (body.length > TASK_COMMENT_MAX) return res.status(400).json({ error: `Keep a comment under ${TASK_COMMENT_MAX.toLocaleString('en-US')} characters.` });
         const { data, error } = await supabase.from('client_task_comments')
             .insert([{ task_id: t.id, client_id: t.client_id, author_user_id: ctx.user.id, body, created_at: new Date().toISOString() }])
@@ -448,7 +669,13 @@ app.post('/api/tasks/:taskId/comments', async (req, res) => {
         if (error) { if (missingTable(error)) return migrationNeeded(res); throw error; }
         await linkTaskMedia(t, [body]);
         await supabase.from('client_tasks').update({ updated_at: new Date().toISOString() }).eq('id', t.id);
-        res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at } });
+        res.status(201).json({ comment: { id: data.id, mine: true, body: data.body, createdAt: data.created_at }, mentioned });
+        afterTaskWrite(async () => {                                                         // phase 68
+            const who = await taskMailActor(ctx.user.id);
+            const by = ctx.profile?.role === 'client' ? `${who} (the client)` : who;
+            const told = await mailTaskMentioned(t, ctx.user.id, mentioned, body, null);          // phase 70: at once
+            await queueTaskMail(t, ctx.user.id, `${by} commented: "${commentExcerpt(body)}"`, null, told);
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -743,6 +970,7 @@ app.post('/api/tasks/:taskId/files',
             const { data: signed } = await supabase.storage.from(TASK_FILE_BUCKET).createSignedUrl(path, TASK_FILE_TTL_SECS, { download: name });
             const people = await peopleById([ctx.user.id]);
             res.status(201).json({ file: fileView(row, (signed && signed.signedUrl) || null, people) });
+            afterTaskWrite(async () => queueTaskMail(t, ctx.user.id, `${await taskMailActor(ctx.user.id)} attached ${name}.`, null));   // phase 68
         } catch (err) {
             if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That file is over 20 MB. Use a smaller one.' });
             sendErr(res, err);
@@ -912,6 +1140,10 @@ app.patch('/api/client/tasks/:taskId', async (req, res) => {
         const { data, error } = await supabase.from('client_tasks').update(patch).eq('id', t.id).select().maybeSingle();
         if (error) throw error;
         res.json({ task: clientTaskView(data) });
+        if (status !== t.status) afterTaskWrite(async () => {                               // phase 68
+            const by = `${await taskMailActor(ctx.user.id)} (the client)`;
+            await queueTaskMail(data, ctx.user.id, status === 'done' ? `${by} marked it done.` : `${by} marked it not done.`, null);
+        });
     } catch (err) { sendErr(res, err); }
 });
 
@@ -1030,18 +1262,19 @@ app.post('/api/public/owner-verify', ownerCodeLimit, async (req, res) => {
 const OWNER_INVITE_ENGINES = ['meta_owned', 'report'];
 
 /**
- * A one-tap sign-in link for an owner (phase 57). It points at the app itself, /ai/#th=<token>, and
+ * A one-tap sign-in link for an owner (phase 57). It points at the app itself, <app>#th=<token>, and
  * the app trades the token for a session. Supabase's own link signed the owner in wherever it was
  * opened, which on an iPhone is Safari, never the app on the home screen; this one can also be pasted
  * into the installed app. Without a known site address, Supabase's link is used as before.
+ * Phase 73: <app> is ownerAppUrl(), the owners' own address (ai.edgelead.online) when it is set.
  */
-async function ownerSignInLink(email, base) {
+async function ownerSignInLink(email, app) {
     const { data: gl, error: ge } = await supabase.auth.admin.generateLink({
-        type: 'magiclink', email, ...(base ? { options: { redirectTo: `${base}/ai/` } } : {})
+        type: 'magiclink', email, ...(app ? { options: { redirectTo: app } } : {})
     });
     if (ge) throw ge;
     const hashed = gl?.properties?.hashed_token || null;
-    if (base && hashed) return `${base}/ai/#th=${encodeURIComponent(hashed)}`;
+    if (app && hashed) return `${app}#th=${encodeURIComponent(hashed)}`;
     return gl?.properties?.action_link || gl?.action_link || null;
 }
 
@@ -1138,14 +1371,14 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
         // existed it goes only to that person's inbox — handing someone
         // else's password link to whoever typed their address would let any
         // client's owner take over any business owner's account.
-        const base = appUrl();
+        const ownerApp = S.ownerAppUrl();
         const mailReady = (await mailSettings()).configured;
         let link = null;
         if (created || mailReady) {
             try {
                 // Phase 49: owners live in Edge Meta AI, signed in by email code. The
                 // invite is a one-tap sign-in straight into the app; no password is ever set.
-                link = await ownerSignInLink(email, base);
+                link = await ownerSignInLink(email, ownerApp);
             } catch (e) {
                 logger.warn('portal_invite_link_failed', { clientId: c.id, message: e.message });
             }
@@ -1165,7 +1398,7 @@ app.post('/api/clients/:id/portal-invite', async (req, res) => {
                     '',
                     ...(await S.agreementMailLines(c.id)),
                     'On your phone, add it to your home screen from there and it opens like an app.',
-                    `Next time, open ${base ? base + '/ai/' : 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
+                    `Next time, open ${ownerApp || 'Edge Meta AI'} and sign in with a code we email you. There is no password.`,
                     '— EdgeLead'
                 ].join('\n')
             });
@@ -1214,8 +1447,7 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
         if (c.trial_ends_at && Date.parse(c.trial_ends_at) <= Date.now()) return res.status(400).json({ error: 'This business’s trial has ended, so a link would only show that. Extend the trial first, or make them a client.' });
         if (u.is_active === false) return res.status(400).json({ error: 'That login is switched off. An admin can switch it back on first.' });
 
-        const base = appUrl();
-        const link = await ownerSignInLink(u.email, base);
+        const link = await ownerSignInLink(u.email, S.ownerAppUrl());
         if (!link) return res.status(502).json({ error: 'A sign-in link could not be made. Try again in a minute.' });
 
         let emailed = false;
@@ -1239,6 +1471,97 @@ app.post('/api/clients/:id/owner-link', async (req, res) => {
             link: emailed ? null : link,
             note: emailed ? `A new sign-in link was emailed to ${u.email}.`
                 : `Send this link to ${u.email} yourself. One tap signs them in to Edge Meta AI; it works once and expires within the hour.`
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/**
+ * Phase 79: change the email a business owner signs in to Edge Meta AI with, from the client's page.
+ * The same people as a new sign-in link (editors on the client), for a login that is this business's
+ * owner login and no other business's: moving a login another business also uses would move that
+ * business's owner too. Everything is checked before anything is written. The new address gets a
+ * sign-in link; the old one is told, so a change nobody meant does not go unnoticed.
+ */
+app.post('/api/clients/:id/owner-email', async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (!staffOnly(ctx, res)) return;
+        const c = await clientAccess(ctx.user.id, req.params.id, 'editor');
+        if (!c) return res.status(404).json({ error: 'Client not found, or you cannot edit it.' });
+        const userId = String(req.body?.userId || '');
+        if (!UUID_RE.test(userId)) return res.status(400).json({ error: 'Choose the owner login.' });
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        if (!EMAIL_RE.test(email) || email.length > 254) return res.status(400).json({ error: 'Enter the new email address.' });
+
+        const { data: u } = await supabase.from('app_users').select('id, email, full_name, role, is_active').eq('id', userId).maybeSingle();
+        let onIt = false;
+        if (u && u.role === 'client') {
+            const { data: m } = await supabase.from('client_members').select('user_id').eq('client_id', c.id).eq('user_id', u.id).maybeSingle();
+            onIt = !!m || c.owner_user_id === u.id;
+        }
+        if (!u || u.role !== 'client' || !onIt) return res.status(404).json({ error: 'That login is not this business’s owner login.' });
+        const oldEmail = String(u.email || '').toLowerCase();
+        if (email === oldEmail) return res.status(400).json({ error: 'That is already their email.' });
+
+        // Another live business on the same login: not this page's to move.
+        const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', u.id);
+        const elsewhere = (mem || []).map(m => m.client_id).filter(x => x !== c.id);
+        const { data: owns } = await supabase.from('clients').select('id').eq('owner_user_id', u.id).neq('id', c.id);
+        const otherIds = [...new Set([...elsewhere, ...(owns || []).map(o => o.id)])];
+        const { data: others } = otherIds.length ? await supabase.from('clients').select('id, archived').in('id', otherIds) : { data: [] };
+        if ((others || []).some(o => !o.archived)) return res.status(409).json({ error: 'This login is also another business’s owner login, so it cannot be changed from here. An admin can change it under Team & settings → People.' });
+
+        // The new address must be nobody's yet: not an owner's, not someone on the team's.
+        const { data: taken } = await supabase.from('app_users').select('id').eq('email', email).maybeSingle();
+        if (taken) return res.status(409).json({ error: 'That email already has a login. Use another address, or ask an admin to merge the two.' });
+
+        const { error: ae } = await supabase.auth.admin.updateUserById(u.id, { email, email_confirm: true });
+        if (ae) {
+            if (/already|registered|exists|unique/i.test(ae.message || '')) return res.status(409).json({ error: 'That email already has a login. Use another address, or ask an admin to merge the two.' });
+            throw ae;
+        }
+        const { error: pe } = await supabase.from('app_users').update({ email }).eq('id', u.id);
+        if (pe) {
+            // The sign-in and the account must not disagree: put the sign-in back.
+            await supabase.auth.admin.updateUserById(u.id, { email: oldEmail, email_confirm: true }).catch(() => {});
+            throw pe;
+        }
+        // Codes sent to the old address no longer sign anyone in.
+        await supabase.from('owner_login_codes').delete().eq('email', oldEmail).then(() => {}, () => {});
+        _roleCache.delete(u.id);
+
+        const mailReady = (await mailSettings()).configured;
+        let link = null, emailed = false;
+        if (u.is_active !== false) {
+            try { link = await ownerSignInLink(email, S.ownerAppUrl()); }
+            catch (e) { logger.warn('owner_email_link_failed', { clientId: c.id, message: e.message }); }
+        }
+        if (mailReady) {
+            const first = String(u.full_name || '').split(' ')[0];
+            if (link) {
+                const sent = await sendMail({
+                    to: email, subject: `Your Edge Meta AI sign-in for ${c.name}`,
+                    text: [`${first ? 'Hi ' + first + ',' : 'Hello,'}`, '',
+                        `Your agency changed the email you sign in to Edge Meta AI with, for ${c.name}, to this one.`, '',
+                        `Open it here (one tap signs you in): ${link}`, '',
+                        `Next time, open ${S.ownerAppUrl() || 'Edge Meta AI'} and sign in with a code we email to this address.`, '— EdgeLead'].join('\n')
+                });
+                emailed = !!sent.ok;
+            }
+            await sendMail({
+                to: oldEmail, subject: `Your Edge Meta AI sign-in email was changed`,
+                text: [`${first ? 'Hi ' + first + ',' : 'Hello,'}`, '',
+                    `Your agency changed the email you sign in to Edge Meta AI with, for ${c.name}, to ${email}. This address no longer signs in.`, '',
+                    'If you did not ask for this, reply to your agency.', '— EdgeLead'].join('\n')
+            }).catch(() => {});
+        }
+        logger.info('owner_email_changed', { clientId: c.id, ownerId: u.id, by: ctx.user.id, emailed });
+        res.json({
+            success: true, owner: { id: u.id, email }, emailed,
+            link: emailed || !link ? null : link,
+            note: emailed ? `Changed to ${email}. A sign-in link went to the new address, and the old one was told.`
+                : link ? `Changed to ${email}. Email is not set up, so send this link to the owner yourself. One tap signs them in; it works once and expires within the hour.`
+                : `Changed to ${email}. They sign in with a code emailed to the new address.`
         });
     } catch (err) { sendErr(res, err); }
 });

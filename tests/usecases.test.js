@@ -2255,6 +2255,24 @@ test('provisioning again changes nothing: one connection, two assets', async () 
     assert.strictEqual(tbl('xp_meta_connections').filter(x => x.client_id === state.C).length, 1);
     assert.strictEqual(tbl('xp_meta_assets').filter(x => x.client_id === state.C).length, 2);
 });
+// Phase 73: el_connection_id has only a partial unique index, which Postgres refuses as an ON CONFLICT
+// target ("no unique or exclusion constraint matching"). The test database cannot see that, so the
+// source is held to not asking for it.
+test('provisioning never upserts on el_connection_id, which the real database refuses', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'xp', 'index.js'), 'utf8');
+    assert.ok(!/onConflict:\s*'el_connection_id'/.test(src), 'xp_meta_connections is looked up, then updated or inserted');
+});
+test('owners\' links use their own address when OWNER_APP_URL is set, else the workspace\'s ai/', () => {
+    const shared = require(path.join(__dirname, '..', 'src', 'shared'));
+    const before = process.env.OWNER_APP_URL;
+    try {
+        process.env.OWNER_APP_URL = 'https://ai.edgelead.online/';
+        assert.strictEqual(shared.ownerAppUrl(), 'https://ai.edgelead.online/');
+        delete process.env.OWNER_APP_URL;
+        const base = shared.appUrl();
+        assert.strictEqual(shared.ownerAppUrl(), base ? base + '/ai/' : '');
+    } finally { if (before === undefined) delete process.env.OWNER_APP_URL; else process.env.OWNER_APP_URL = before; }
+});
 // Phase 47: reads are started by the server, not by a button. The tests have no Graph behind the
 // warehouse sync, so a recorder stands in for it and says what would have been read, and why.
 const XPREAD = { calls: [], ads: 0, hold: 30 };
@@ -2502,6 +2520,137 @@ test('a stranger is refused, another business\'s threads are not there, staff on
     assert.strictEqual(ask.statusCode, 403);
     const long = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'x'.repeat(2001) } });
     assert.strictEqual(long.statusCode, 400, JSON.stringify(long.body));
+});
+// Phase 78: a content-plan post becomes its ad creative once, linked; and the owner approves the posts
+// the team typed in, from the same "Posts to approve" as the tool's planned posts.
+const p78 = {};
+test('"Use as ad creative" makes the creative from the post, linked, and only once', async () => {
+    const day = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: {
+        planned_on: day, platform: 'Instagram', post_type: 'Video reel', idea: 'Combo 4+6 unboxing\nShow both boxes, then the price card', caption: 'Two boxes, one price.' } });
+    assert.strictEqual(add.statusCode, 201, JSON.stringify(add.body));
+    p78.entry = add.body.row.id;
+    const r = await call('POST', `/api/clients/${state.C}/workbook/content/${p78.entry}/creative`, { token: 't-admin' });
+    assert.strictEqual(r.statusCode, 201, JSON.stringify(r.body));
+    const c = r.body.row;
+    assert.strictEqual(c.content_entry_id, p78.entry);
+    assert.strictEqual(c.title, 'Combo 4+6 unboxing', 'named after the first line of the description');
+    assert.strictEqual(c.format, 'Reel', 'a video reel is a Reel in the ad ledger');
+    assert.strictEqual(c.posted_on, day);
+    assert.ok(/Two boxes, one price\./.test(c.notes) && /Platform: Instagram/.test(c.notes));
+    const again = await call('POST', `/api/clients/${state.C}/workbook/content/${p78.entry}/creative`, { token: 't-admin' });
+    assert.strictEqual(again.body.existing, true);
+    assert.strictEqual(again.body.row.id, c.id, 'the same creative, not a second one');
+    const wb = await call('GET', `/api/clients/${state.C}/workbook`, { token: 't-admin', query: { parts: 'content' } });
+    assert.strictEqual(wb.body.content.find(x => x.id === p78.entry).creative.id, c.id, 'the post says which creative was made from it');
+    p78.creative = c.id;
+});
+test('the post going out hands its link to the creative made from it', async () => {
+    const r = await call('PATCH', `/api/clients/${state.C}/workbook/content/${p78.entry}`, { token: 't-admin', body: { status: 'posted', posted_url: 'https://www.instagram.com/reel/ABC123/' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(tbl('client_ad_creatives').find(x => x.id === p78.creative).link, 'https://www.instagram.com/reel/ABC123/');
+});
+test('the owner sees the team\'s typed posts in Posts to approve, and approves or asks for changes', async () => {
+    const day = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: { planned_on: day, post_type: 'Carousel', idea: 'Five dishes under 300 taka\nOne slide each' } });
+    const id = add.body.row.id;
+    const list = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.strictEqual(list.statusCode, 200, JSON.stringify(list.body));
+    const mine = list.body.posts.find(p => p.id === id);
+    assert.ok(mine, 'the typed post is in the owner\'s list');
+    assert.strictEqual(mine.source, 'plan');
+    assert.strictEqual(mine.status, 'idea', 'undecided: it waits for their OK');
+    assert.strictEqual(mine.hook, 'Five dishes under 300 taka');
+    const no = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'changes' } });
+    assert.strictEqual(no.statusCode, 400, 'changes need a note');
+    const ch = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'changes', note: 'Use the new menu photos' } });
+    assert.strictEqual(ch.statusCode, 200, JSON.stringify(ch.body));
+    assert.strictEqual(ch.body.post.status, 'changes');
+    const row = tbl('client_content_entries').find(x => x.id === id);
+    assert.strictEqual(row.owner_decision, 'changes');
+    assert.strictEqual(row.owner_note, 'Use the new menu photos');
+    assert.strictEqual(row.status, 'planned', 'the team\'s own status stays the team\'s');
+    const ok = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'approve' } });
+    assert.strictEqual(ok.body.post.status, 'approved');
+    // Made by the team, it is past deciding.
+    await call('PATCH', `/api/clients/${state.C}/workbook/content/${id}`, { token: 't-admin', body: { status: 'made' } });
+    const late = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'skip' } });
+    assert.strictEqual(late.statusCode, 409);
+});
+test('a typed post the owner skips leaves their list and the plan', async () => {
+    const day = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+    const add = await call('POST', `/api/clients/${state.C}/workbook/content`, { token: 't-admin', body: { planned_on: day, idea: 'Staff birthday post' } });
+    const id = add.body.row.id;
+    const r = await call('POST', `/api/client/content/${id}/decision`, { token: 't-client', body: { decision: 'skip' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(tbl('client_content_entries').find(x => x.id === id).status, 'skipped');
+    const list = await call('GET', '/api/client/content', { token: 't-client' });
+    assert.ok(!list.body.posts.some(p => p.id === id));
+});
+test('another business\'s owner cannot decide on this business\'s typed post', async () => {
+    const other = await call('POST', `/api/client/content/${p78.entry}/decision`, { token: 't-admin', body: { decision: 'approve' } });
+    assert.strictEqual(other.statusCode, 403, 'staff do not decide as the owner');
+});
+// Phase 77: an answer about the agency's work comes with follow-ups about that work, as a numbers answer
+// does. The overview of the work is the Overview sheet in the bar, never a panel in the chat.
+test('an answer about the agency\'s work comes with follow-ups about that work, and no panel in the chat', async () => {
+    const soon = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+    tbl('client_tasks').push(
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Send us 5 photos of the new menu', status: 'todo', visible_to_client: true, assigned_to_client: true, due_date: soon, priority: 'high' },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Raw video editing', status: 'doing', visible_to_client: true, assigned_to_client: false, due_date: soon },
+        { id: crypto.randomUUID(), client_id: state.C, title: 'Internal only, never shown', status: 'doing', visible_to_client: false, assigned_to_client: false });
+    XP.script = [
+        { parts: [{ functionCall: { name: 'get_agency_work', args: {} } }] },
+        { parts: [{ text: 'We are editing your raw video, and we need menu photos from you.' }] }
+    ];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'What are you working on for us?' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.deepStrictEqual(r.body.charts || [], [], 'the work is in the bar, not under the answer');
+    const fr = XP.requests[1].contents.flatMap(c => c.parts || []).find(p => p.functionResponse).functionResponse.response.result;
+    const shown = [...fr.your_todos, ...fr.agency_working_on].map(t => t.title);
+    assert.ok(shown.includes('Send us 5 photos of the new menu') && shown.includes('Raw video editing'));
+    assert.ok(!shown.includes('Internal only, never shown'), 'work the owner may not see never reaches the model');
+    assert.ok(!(r.body.suggestions || []).some(s => s.includes('Internal only')));
+    assert.ok((r.body.suggestions || []).some(s => /^What exactly do you need for ".+"\?$/.test(s)), 'a follow-up about their own to-do: ' + JSON.stringify(r.body.suggestions));
+    assert.ok((r.body.suggestions || []).some(s => s.includes('Raw video editing')), 'a follow-up about the work due soonest');
+});
+// Phase 76: Gemini's "model is experiencing high demand" (503) is waited out once, then the answer moves
+// to the fallback model; the owner hears "busy" only when that one is overloaded too.
+const BUSY = '{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}';
+test('an overloaded model is retried once after a short wait, on the same model', async () => {
+    XP.script = [{ throw: BUSY }, { parts: [{ text: 'Back now.' }] }];
+    XP.requests.length = 0;
+    const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test one' } });
+    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.reply, 'Back now.');
+    assert.deepStrictEqual(XP.requests.map(q => q.model), [xp.cfg.gemini.model, xp.cfg.gemini.model]);
+});
+test('still overloaded: the answer comes from the fallback model, and is saved as its answer', async () => {
+    const fb = 'gemini-fallback-test', before = xp.cfg.gemini.fallbackModel;
+    xp.cfg.gemini.fallbackModel = fb;
+    try {
+        XP.script = [{ throw: BUSY }, { throw: BUSY }, { parts: [{ text: 'Answered by the backup.' }] }];
+        XP.requests.length = 0;
+        const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test two' } });
+        assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+        assert.strictEqual(r.body.reply, 'Answered by the backup.');
+        assert.deepStrictEqual(XP.requests.map(q => q.model), [xp.cfg.gemini.model, xp.cfg.gemini.model, fb]);
+        const saved = tbl('xp_ai_messages').filter(m => m.role === 'assistant').pop();
+        assert.strictEqual(saved.model, fb, 'the message records the model that wrote it');
+    } finally { xp.cfg.gemini.fallbackModel = before; }
+});
+test('both models overloaded: the owner is told the AI is busy, in words', async () => {
+    const before = xp.cfg.gemini.fallbackModel;
+    xp.cfg.gemini.fallbackModel = 'gemini-fallback-test';
+    try {
+        XP.script = [{ throw: BUSY }, { throw: BUSY }, { throw: BUSY }, { throw: BUSY }];
+        XP.requests.length = 0;
+        const r = await call('POST', '/api/xp/chat', { token: 't-client', body: { message: 'Busy test three' } });
+        assert.strictEqual(r.statusCode, 500);
+        assert.strictEqual(r.body.error, 'The AI is busy right now. Please try again in a minute.');
+        assert.strictEqual(XP.requests.length, 4, 'two tries on each model, no more');
+    } finally { xp.cfg.gemini.fallbackModel = before; XP.script.length = 0; }
 });
 test('a business with no Meta connection is answered without numbers, and has nothing to read', async () => {
     // Phase 50: the chat works before Meta, but only the agency's work is offered — never a numbers tool.
@@ -3051,7 +3200,9 @@ test('one group gets its own read: the score explained, no ranking table', async
 });
 
 section('\nphase 40 — who a lead is, and the pipeline');
-const igPost = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 120, commentsCount: 14, timestamp: '2026-09-20T12:00:00Z', url: `https://www.instagram.com/p/${sc}/`, ...extra });
+// Recent on any day the suite runs: lead fit gives points for a post in the last 30 days.
+const IG_POST_AT = new Date(Date.now() - 5 * 86400000).toISOString();
+const igPost = (owner, sc, caption, extra = {}) => ({ ownerUsername: owner, shortCode: sc, caption, likesCount: 120, commentsCount: 14, timestamp: IG_POST_AT, url: `https://www.instagram.com/p/${sc}/`, ...extra });
 test('a creator reviewing several places reads as an influencer, with the reasons', () => {
     const posts = [
         S.leadPostSignal(igPost('dhakafoodie', 'a1', 'Tried the smash burger here, honest review: 8/10 🍔', { locationId: 'L1', taggedUsers: [{ username: 'burgerhouse' }] }), 'm4', 'burgerhouse'),
@@ -3346,17 +3497,22 @@ test('briefs land on their own weekday where they name one, never two on a day, 
     assert.strictEqual(d[0].time, '19:00');
     assert.deepStrictEqual(S.cpParseSlot('Sat 11am'), { dow: 6, time: '11:00' });
 });
+// The owner's view shows posts from the last 14 days on, so the plan starts a few days before the run.
+const CP_START = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
 test('staff put a plan on the calendar once; the owner sees what waits for them, and nothing about the team', async () => {
-    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    const put = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: CP_START } });
     assert.strictEqual(put.statusCode, 201, JSON.stringify(put.body));
     assert.ok(put.body.added >= 2, JSON.stringify(put.body));
-    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: '2026-10-05' } });
+    const again = await call('POST', `/api/content-plan/${state.cpReport}/calendar`, { token: 't-emp', body: { start: CP_START } });
     assert.strictEqual(again.body.added, 0, 'pressing it twice doubled the calendar');
     const own = await call('GET', '/api/client/content', { token: 't-client' });
     assert.strictEqual(own.statusCode, 200, JSON.stringify(own.body));
-    assert.ok(own.body.posts.length >= 2 && own.body.waiting === own.body.posts.length);
-    assert.strictEqual(own.body.posts[0].statusName, 'Waiting for your OK');
-    for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy']) assert.ok(!(k in own.body.posts[0]), `the owner was sent ${k}`);
+    // The planned posts from the tool; since phase 78 the team's typed posts are in the same list, marked source 'plan'.
+    const planned = own.body.posts.filter(p => p.source !== 'plan');
+    assert.ok(planned.length >= 2 && planned.every(p => p.status === 'idea'));
+    assert.strictEqual(own.body.waiting, own.body.posts.filter(p => p.status === 'idea').length);
+    assert.strictEqual(planned[0].statusName, 'Waiting for your OK');
+    for (const p of own.body.posts) for (const k of ['planId', 'report_id', 'created_by', 'taskId', 'clientId', 'decidedBy', 'client_id', 'owner_decision', 'notes']) assert.ok(!(k in p), `the owner was sent ${k}`);
     state.cpPosts = put.body.posts;
 });
 test('the owner approves one (it goes on the board), asks for changes on another, and the team sees why', async () => {
@@ -3939,6 +4095,60 @@ test('staff make a new sign-in link for the owner on their business, and only fo
     const owner = await call('POST', `/api/clients/${state.T}/owner-link`, { token: 't-owner@kitesurf.test', body: { userId: ownerId } });
     assert.ok(owner.statusCode === 403 || owner.statusCode === 404, 'an owner made a sign-in link: ' + owner.statusCode);
 });
+// Phase 79: the team changes the email an owner signs in to Edge Meta AI with, from the client's page.
+test('staff change the owner\'s sign-in email: both places change, the new address gets a link, the old one is told', async () => {
+    const row = tbl('app_users').find(u => u.email === 'owner@kitesurf.test');
+    const authCalls = [];
+    const real = fakeSupabase.auth.admin.updateUserById;
+    fakeSupabase.auth.admin.updateUserById = async (id, attrs) => { authCalls.push([id, attrs]); return { data: {}, error: null }; };
+    try {
+        tbl('owner_login_codes').push({ id: crypto.randomUUID(), email: 'owner@kitesurf.test', code_hash: 'x', created_at: new Date().toISOString() });
+        MAIL.sent.length = 0;
+        const r = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: ' Owner.New@KiteSurf.test ' } });
+        assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
+        assert.strictEqual(r.body.owner.email, 'owner.new@kitesurf.test', 'trimmed and lower-cased');
+        assert.strictEqual(row.email, 'owner.new@kitesurf.test', 'the account record changed');
+        assert.deepStrictEqual(authCalls[0], [row.id, { email: 'owner.new@kitesurf.test', email_confirm: true }], 'the sign-in itself changed, confirmed');
+        assert.ok(!tbl('owner_login_codes').some(x => x.email === 'owner@kitesurf.test'), 'codes sent to the old address no longer sign in');
+        const toNew = MAIL.sent.find(m => m.msg.to === 'owner.new@kitesurf.test');
+        assert.ok(toNew && /type=magiclink|#th=/.test(toNew.msg.text), 'the new address got a sign-in link');
+        const toOld = MAIL.sent.find(m => m.msg.to === 'owner@kitesurf.test');
+        assert.ok(toOld && /changed .* to owner\.new@kitesurf\.test/.test(toOld.msg.text), 'the old address was told');
+        assert.strictEqual(r.body.link, null, 'with email set up the link goes to the inbox, not the page');
+    } finally {
+        // Put it back for the tests after this one.
+        row.email = 'owner@kitesurf.test';
+        fakeSupabase.auth.admin.updateUserById = real;
+    }
+});
+test('the email change is refused, before anything is written, for a taken address, a team login, another business or a viewer', async () => {
+    const row = tbl('app_users').find(u => u.email === 'owner@kitesurf.test');
+    const same = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'owner@kitesurf.test' } });
+    assert.strictEqual(same.statusCode, 400, 'the same address');
+    const bad = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'not an email' } });
+    assert.strictEqual(bad.statusCode, 400);
+    const taken = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: EMP.email } });
+    assert.strictEqual(taken.statusCode, 409, 'an address someone on the team signs in with');
+    const team = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: EMP.id, email: 'fresh@kitesurf.test' } });
+    assert.strictEqual(team.statusCode, 404, 'a team login is not an owner login');
+    const other = await call('POST', `/api/clients/${state.D}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+    assert.strictEqual(other.statusCode, 404, 'not this business\'s owner login');
+    const owner = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-owner@kitesurf.test', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+    assert.ok(owner.statusCode === 403 || owner.statusCode === 404, 'an owner changed a login: ' + owner.statusCode);
+    assert.strictEqual(row.email, 'owner@kitesurf.test', 'nothing was written');
+    // A login another live business also uses is not this page's to move.
+    const extra = { id: crypto.randomUUID(), name: 'Kite Two', owner_user_id: null, archived: false, created_at: new Date().toISOString() };
+    tbl('clients').push(extra);
+    tbl('client_members').push({ client_id: extra.id, user_id: row.id, role: 'editor' });
+    try {
+        const both = await call('POST', `/api/clients/${state.T}/owner-email`, { token: 't-admin', body: { userId: row.id, email: 'fresh@kitesurf.test' } });
+        assert.strictEqual(both.statusCode, 409, JSON.stringify(both.body));
+        assert.strictEqual(row.email, 'owner@kitesurf.test');
+    } finally {
+        tbl('client_members').splice(tbl('client_members').findIndex(m => m.client_id === extra.id), 1);
+        tbl('clients').splice(tbl('clients').findIndex(c => c.id === extra.id), 1);
+    }
+});
 test('when the agency closes the business, the owner\'s access ends: no made-up business, no code, a clear refusal', async () => {
     const before = tbl('clients').length;
     const T = tbl('clients').find(c => c.id === state.T);
@@ -4294,7 +4504,9 @@ test('an owner whose trial ended still gets a code, so signing in can tell them;
 test('the pages: sign-out lands on the app, not /ai/ai/; lists that cover every client are not narrowed to the last one opened', () => {
     const FRONT = path.join(__dirname, '..', 'frontend');
     const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
-    assert.ok(/new URL\(\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? 'ai\/' : 'index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
+    // Phase 73: an owner signs out to their app's own address; staff to index.html, against the page's base.
+    assert.ok(/\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? EL\.ownerAppHref\(\) : new URL\('index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
+    assert.ok(/new URL\('ai\/', document\.baseURI\)/.test(h), 'off EdgeLead\'s domains the app is ai/ against the base, never /ai/ai/');
     assert.ok(/opts\.scoped === false \? null : EL\.clientId\(\)/.test(h));
     assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'pipeline.html'), 'utf8')), 'the pipeline is still narrowed to the remembered client');
     assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'home.html'), 'utf8')));

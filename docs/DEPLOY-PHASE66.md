@@ -27,7 +27,7 @@ There's no SQL. Do these in order:
 - **Nothing is overwritten by accident.** If someone else published the same item since you opened it, your save is refused and the page reloads their version. A save that races another publish is rebuilt on top of it once.
 - **Images are shrunk in the browser** (JPEG, at most 1.3 MB), uploaded one at a time, and committed with the item they belong to. When an item stops using an image, or is removed, its images are deleted in the same commit.
 - **The server checks every field against the website's own rules** before committing. A mistake comes back as a message on the page instead of a failed website build.
-- **The server's runtime part moves** from `src/22-runtime.js` to `src/23-runtime.js`, so its catch-all 404 stays after the new routes in `src/22-website.js`.
+- **The server's runtime part moves** from `src/24-runtime.js` to `src/25-runtime.js`, so its catch-all 404 stays after the new routes in `src/24-website.js`. It must stay last.
 - **New routes**, all admin-only:
   - `GET /api/site/content`, `GET /api/site/status`
   - `POST /api/site/images`

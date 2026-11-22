@@ -46,6 +46,11 @@
     const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
     const BACKEND_URL = 'https://leadgen-backend-1-mgzc.onrender.com';
+    // Phase 73: business owners have an address of their own. ai.edgelead.online serves Edge Meta AI at /.
+    const OWNER_APP_BY_HOST = {
+        'workspace.edgelead.online': 'https://ai.edgelead.online/',
+        'ai.edgelead.online': 'https://ai.edgelead.online/'
+    };
     const CLIENT_KEY = 'el-client-id';
 
     // Shown as a "Contact us" button to accounts whose access has lapsed.
@@ -107,15 +112,19 @@
      * `icon` names an entry in ICONS: drawn, so every row lines up and looks
      * the same on every platform, where emoji did neither.
      */
+    // Phase 70: the rail says what each page is for. Clients are the accounts the agency runs;
+    // Outreach is finding new customers, where the scraping tools earn their keep.
     const NAV = [
         { href: 'home.html',      icon: 'home',    label: 'Home',      engine: null },
         { href: 'my-tasks.html',  icon: 'check',   label: 'My tasks',  engine: null, count: 'tasks' },
+        { group: 'Clients' },
         { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
-        { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
-        { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
         { href: 'websites.html',  icon: 'globe',   label: 'Websites',  engine: null },     // phase 59: website work, every client
         { href: 'billing.html',   icon: 'receipt', label: 'Billing',   engine: null },     // phase 60: agreements and invoices
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
+        { group: 'Outreach' },
+        { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
+        { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true },
         { href: 'site.html',      icon: 'link',    label: 'Our website', adminOnly: true }   // phase 66: publish to the public website
@@ -125,43 +134,55 @@
     const NAV_PARENT = { 'workspace.html': 'clients.html' };
 
     /**
-     * Everything that can be done for a client, grouped by what the agency is
-     * trying to achieve rather than by platform. Each opens its page with the
-     * client already chosen (?client=), so the question "for whom?" is asked
-     * once, before the tool, and never again on the way.
+     * Everything that can be done for a client, grouped by where its numbers come
+     * from (phase 70), because that decides when it is worth doing:
      *
-     * `apify` is true for the engines that spend scraping credit, so the list
-     * can say which do before anyone starts one.
+     *   meta      their own numbers, from Meta. The real thing, once Meta is connected.
+     *   team      what the team keeps by hand: the content plan, the ad ledger and
+     *             stock, message templates, website work.
+     *   tools     public data the scrapers read. Before Meta it is all there is; after,
+     *             it is for content ideas and comparing with rivals.
+     *   outreach  finding new customers. Not part of running a client's account.
+     *
+     * Each opens its page with the client already chosen (?client=), so "for whom?"
+     * is asked once. `apify` marks the engines that spend scraping credit.
      */
     const WORK = [
-        { group: 'Check performance', items: [
-            { href: 'ig-report.html',      name: 'Instagram audit',          text: 'Score their recent posts against local peers.',               engine: 'report',       apify: true },
-            { href: 'fb-report.html',      name: 'Facebook Page report',     text: 'Posting rhythm, reactions and reviews on their Page.',        engine: 'fb_page',      apify: true },
-            { href: 'workspace.html',      name: 'Monthly report',           text: 'Last month from their own Meta numbers, in plain words.',     engine: 'meta_owned',   tab: 'meta' }
+        { kind: 'meta', group: 'Their own numbers · Meta', items: [
+            { href: 'workspace.html',      name: 'Monthly report',           text: 'Last month from their own Meta numbers, in plain words.',     engine: 'meta_owned',   tab: 'meta' },
+            { href: 'workspace.html',      name: 'Account assistant',        text: 'What we did, what is planned, and their numbers, in one chat.', engine: null,         tab: 'ask' }
         ] },
-        { group: 'Compare with competitors', items: [
-            { href: 'ig-competitors.html', name: 'Competitor benchmark',     text: 'Side by side with their rivals: rank, gaps, what rivals win.', engine: 'report',       apify: true },
-            { href: 'workspace.html',      name: 'Find competitors',         text: 'Suggest similar businesses to compare against.',              engine: 'report',       apify: true, tab: 'settings' }
-        ] },
-        { group: 'Build websites', items: [
+        { kind: 'team', group: 'Kept by the team', items: [
+            { href: 'workspace.html',      name: 'Content plan',             text: 'The posts the team plans, typed in or pasted from a sheet.',  engine: null,           tab: 'content' },
+            { href: 'workspace.html',      name: 'Ad ledger and stock',      text: 'Products and stock, creatives, ads run and planned.',         engine: null,           tab: 'ledger' },
+            { href: 'workspace.html',      name: 'Message templates',        text: 'Replies with pictures, to copy into Business Suite.',         engine: null,           tab: 'replies' },
             { href: 'websites.html',       name: 'Website work',             text: 'A site, a page, a fix: a task on their board, labelled Website.', engine: null, extra: 'new=1' }
         ] },
-        { group: 'Plan content', items: [
-            { href: 'content-plan.html',   name: 'Content plan',             text: 'A month of posts built from what already works for them.',    engine: 'content_plan' },
+        { kind: 'tools', group: 'Tools · public data', items: [
+            { href: 'content-plan.html',   name: 'Content ideas from public posts', text: 'Post ideas from what works in their and their rivals’ posts.', engine: 'content_plan' },
+            { href: 'ig-report.html',      name: 'Instagram audit',          text: 'Score their recent posts against local peers.',               engine: 'report',       apify: true },
+            { href: 'fb-report.html',      name: 'Facebook Page report',     text: 'Posting rhythm, reactions and reviews on their Page.',        engine: 'fb_page',      apify: true },
+            { href: 'ig-competitors.html', name: 'Competitor benchmark',     text: 'Side by side with their rivals: rank, gaps, what rivals win.', engine: 'report',       apify: true },
+            { href: 'workspace.html',      name: 'Find competitors',         text: 'Suggest similar businesses to compare against.',              engine: 'report',       apify: true, tab: 'settings' },
             { href: 'fb-advisor.html',     name: 'Group post ideas',         text: 'Draft posts for the Facebook groups their customers use.',    engine: 'fb_community' }
         ] },
-        { group: 'Find customers', items: [
+        { kind: 'outreach', group: 'Outreach · find customers', items: [
             { href: 'index.html',          name: 'Find leads on Instagram',  text: 'Local accounts by place, hashtag or a rival’s followers.',    engine: 'leadgen',      apify: true },
             { href: 'leads.html',          name: 'Find Facebook Pages',      text: 'Local businesses with a contact button, ready for outreach.', engine: 'leadgen',      apify: true },
             { href: 'fb-communities.html', name: 'Find Facebook groups',     text: 'Local groups where people ask for recommendations.',          engine: 'fb_community', apify: true },
             { href: 'fb-audit.html',       name: 'Read Facebook groups',     text: 'Pull real customer requests out of recent group posts.',      engine: 'fb_community', apify: true },
             { href: 'fb-leads.html',       name: 'Local demand',             text: 'The requests found so far, ready to answer.',                 engine: 'fb_community' },
             { href: 'reviews.html',        name: 'Review tracker',           text: 'Who reviewed the businesses around a place, and the creators behind it.', engine: 'leadgen', apify: true }
-        ] },
-        { group: 'Ask', items: [
-            { href: 'workspace.html', name: 'Account assistant', text: 'What we did, what is planned, and their numbers, in one chat.', engine: null, tab: 'ask' }
         ] }
     ];
+    /** What each kind is for, said where the choice is made. Meta connected or not changes the advice. */
+    const WORK_NOTE = {
+        meta: on => on ? 'Their real reach, visits and followers, read from Meta. No Apify cost.' : 'Connect their Meta to get these. It opens the Meta tab.',
+        team: () => 'Typed in by your team and saved under the client. No Apify cost.',
+        tools: on => on ? 'Their Meta is connected, so their own numbers come from Meta. Use these for content ideas and to compare with rivals.'
+            : 'These read public posts. Until their Meta is connected, this is how you see their numbers.',
+        outreach: () => 'For finding new customers and leads, not for running this account.'
+    };
 
     /** Line icons, 24-unit grid, drawn in currentColor. */
     const ICONS = {
@@ -622,7 +643,7 @@
             const owner = !EL.me || EL.me.role === 'client';
             // Against the page's base, not its address (phase 57): inside the app (base ../) the address
             // is /ai/, and 'ai/' from there was /ai/ai/, a page that does not exist.
-            const dest = new URL((EL._app || EL.isEmbedded()) && owner ? 'ai/' : 'index.html', document.baseURI).href;
+            const dest = (EL._app || EL.isEmbedded()) && owner ? EL.ownerAppHref() : new URL('index.html', document.baseURI).href;
             let win = window;
             if (EL.isEmbedded() && owner) { try { if (window.top.location.origin === location.origin) win = window.top; } catch { /* another origin */ } }
             win.location.href = dest;
@@ -636,6 +657,35 @@
         authClient() {
             if (!EL.supabase) EL.supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
             return EL.supabase;
+        },
+
+        /**
+         * Where business owners open Edge Meta AI (phase 73). On EdgeLead's own domains that is
+         * their address, https://ai.edgelead.online/; anywhere else (a deploy preview) this site's ai/.
+         */
+        ownerAppHref() {
+            return OWNER_APP_BY_HOST[location.hostname] || new URL('ai/', document.baseURI).href;
+        },
+
+        /** Opened from the home screen, as an app (phase 75). */
+        isStandalone() { return isStandalone(); },
+
+        /**
+         * Put an app on the home screen, from a menu (phase 75): the browser's own prompt where it gave
+         * one (Chrome, Edge, Android), else the taps written out (Safari on iPhone).
+         */
+        async installApp(key) {
+            const A = APPS[key] || EDGELEAD_APP;
+            if (_installEvt) {
+                const evt = _installEvt; _installEvt = null;
+                try {
+                    evt.prompt();
+                    const choice = await evt.userChoice;
+                    if (choice && choice.outcome === 'accepted') return true;
+                } catch { /* fall through to the written steps */ }
+            }
+            showInstallHow(A);
+            return false;
         },
 
         /** Boots the header. Resolves with /api/me, or blocks the page and never resolves. */
@@ -658,7 +708,7 @@
             EL.authClient();
 
             const { data } = await EL.supabase.auth.getSession();
-            if (!data.session) { window.location.href = app ? 'ai/' : 'index.html'; return new Promise(() => {}); }
+            if (!data.session) { window.location.href = app ? EL.ownerAppHref() : 'index.html'; return new Promise(() => {}); }
             EL.session = data.session;
             EL.user = data.session.user;
 
@@ -725,7 +775,7 @@
             if (me.role === 'client' && !app) {
                 const sharedTool = EL.isEmbedded() && OWNER_EMBEDS.includes(currentPage(page));
                 if (!sharedTool) {
-                    window.location.replace('ai/' + location.search);
+                    window.location.replace(EL.ownerAppHref() + location.search);
                     return new Promise(() => {});
                 }
             }
@@ -1516,17 +1566,24 @@
 
         const connected = !!(client.meta && client.meta.connected);
         const href = item => `${item.href}?client=${encodeURIComponent(client.id)}${item.tab ? '&tab=' + item.tab : ''}${item.extra ? '&' + item.extra : ''}`;
-        const groups = WORK.map(g => {
+        // A client on Meta starts from its own numbers; the public-data tools fold away under them.
+        const order = connected ? ['meta', 'team', 'tools', 'outreach'] : ['team', 'tools', 'meta', 'outreach'];
+        const folded = kind => kind === 'outreach' || (connected && kind === 'tools');
+        const groups = order.map(kind => WORK.find(g => g.kind === kind)).map(g => {
             const items = g.items.filter(can);
             if (!items.length) return '';
-            return `<div class="el-work-g"><div class="el-eyebrow">${g.group}</div>${items.map(item => {
+            const rows = items.map(item => {
                 const blocked = item.engine === 'meta_owned' && !connected;
                 const tag = item.apify ? '<span class="el-chip">Uses Apify credit</span>' : '<span class="el-chip is-jade">No Apify cost</span>';
                 return `<a class="el-work" href="${href(item)}">
                     <span class="el-work-t"><b>${item.name}</b><small>${blocked ? 'Needs Meta connected first — opens the Meta tab.' : item.text}</small></span>
                     ${tag}
                 </a>`;
-            }).join('')}</div>`;
+            }).join('');
+            const note = `<p class="el-work-note">${WORK_NOTE[g.kind](connected)}</p>`;
+            return folded(g.kind)
+                ? `<details class="el-work-g el-work-fold" data-kind="${g.kind}"><summary class="el-eyebrow">${g.group} <span>(${items.length})</span></summary>${note}${rows}</details>`
+                : `<div class="el-work-g" data-kind="${g.kind}"><div class="el-eyebrow">${g.group}</div>${note}${rows}</div>`;
         }).join('');
         const d = openDrawer({
             title: `New work for ${EL.esc(client.name)}`,

@@ -38,6 +38,10 @@ function chatMessageError(message) {
 }
 function publicChatError(e) {
   if (e && e.code === 'CHAT_TIMEOUT') return 'That answer took too long. Please ask again, or ask about a shorter period.';
+  // Phase 74: the AI never started answering (a busy key); saying so beats two minutes of "Thinking…".
+  if (e && e.code === 'TURN_STALLED') return 'The AI is slow to respond right now. Please ask again in a moment.';
+  // Phase 76: both models were overloaded, after a retry on each.
+  if (e && e.code === 'AI_BUSY') return 'The AI is busy right now. Please try again in a minute.';
   if (/\b429\b|RESOURCE_EXHAUSTED|quota|rate limit/i.test(String((e && e.message) || ''))) return 'The assistant is busy right now. Please try again in a minute.';
   return 'Something went wrong while reading your numbers. Please try again in a moment.';
 }
@@ -98,12 +102,19 @@ async function provisionClient(clientId) {
       userToken = conn.user_token_enc ? (deps.decrypt ? deps.decrypt(conn.user_token_enc) : conn.user_token_enc) : null;
     } catch (e) { console.warn('[xp] token unreadable for connection', conn.id, e.message); continue; }
     if (!pageToken) continue;
-    const xc = await q(supabase.from('xp_meta_connections').upsert({
+    // Phase 73: looked up, then updated or inserted. el_connection_id has only a partial unique index
+    // (where it is not null), which Postgres cannot use as an ON CONFLICT target, so the upsert this
+    // used to be failed for every business and Edge Meta AI said "Meta not connected".
+    const row = {
       el_connection_id: conn.id, client_id: c.id, connection_type: 'USER_OAUTH',
       meta_user_id: conn.fb_user_id || null,
       token_enc: S.encrypt(userToken || pageToken), token_expires_at: conn.token_expires_at || null,
       scopes: conn.scopes || [], status: 'ACTIVE'
-    }, { onConflict: 'el_connection_id' }).select('id').single(), 'xp connection');
+    };
+    const have = await q(supabase.from('xp_meta_connections').select('id').eq('el_connection_id', conn.id).maybeSingle(), 'xp connection find');
+    const xc = have
+      ? await q(supabase.from('xp_meta_connections').update(row).eq('id', have.id).select('id').single(), 'xp connection')
+      : await q(supabase.from('xp_meta_connections').insert(row).select('id').single(), 'xp connection');
     connections += 1;
     const fb = await q(supabase.from('xp_meta_assets').upsert({
       client_id: c.id, connection_id: xc.id, platform: 'FB', asset_id: String(conn.page_id),
@@ -370,7 +381,7 @@ function mount(app, d) {
     const gate = await chatLimitCheck(isAdmin(a.ctx), a.clientId);
     if (!gate.ok) return res.status(429).json({ error: gate.error, limit: gate.quota.limit, remaining: 0 });
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, lang: req.body.lang });
       res.json({ ...out, remaining: leftAfter(gate.quota) });
     } catch (e) {
       log.error ? log.error('xp_chat_failed', { message: e.message }) : console.error('[xp chat]', e);
@@ -394,7 +405,7 @@ function mount(app, d) {
     const send = (type, data) => { if (!res.writableEnded) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
     const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
     try {
-      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
+      const out = await chat.answer({ clientId: a.clientId, message: message.trim(), conversationId, who: a.who, lang: req.body.lang, onEvent: (ev) => send(ev.type, ev), signal: gone.signal });
       send('done', { conversationId: out.conversationId, reply: out.reply, suggestions: out.suggestions, charts: out.charts || [], remaining: leftAfter(gate.quota) });
     } catch (e) {
       if (e.code === 'CHAT_CANCELLED') return;

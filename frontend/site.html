@@ -194,8 +194,8 @@
 
     // ---- work & proof -----------------------------------------------------------------
     function drawWork(body) {
-        if (!d.work.length) { body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No work on the site yet</h3><p>Add a website, a campaign or a product. It appears on the homepage and the Work page.</p></div>`; return; }
-        body.innerHTML = `<p class="sp-note">Cards show in this order on the homepage and the Work page. Items tagged with a service also show on that service's page.</p><section class="ws-card">${d.work.map(w => {
+        if (!d.work.length) { body.innerHTML = `<div class="ws-empty">${ic('doc')}<h3>No work on the site yet</h3><p>Add a website, a campaign or a product. It appears on the Work page, and on the homepage when it has screenshots or a cover photo.</p></div>`; return; }
+        body.innerHTML = `<p class="sp-note">Cards show in this order on the Work page. The homepage shows the first five that have screenshots or a cover photo. Items tagged with a service also show on that service's page.</p><section class="ws-card">${d.work.map(w => {
             const x = w.data;
             return `<div class="sp-row">
                 ${thumb(x.cover || (x.site && x.site.pages[0] && x.site.pages[0].image), x.gradient)}
@@ -487,7 +487,7 @@
         body.innerHTML = `<p class="sp-note">Enter figures from your reports. They show on the site exactly as entered until you change them.</p>
             <section class="ws-card">
                 ${st ? `<div class="sp-row"><span class="sp-thumb"></span><div class="sp-name">Homepage stat<small>${esc(st.stat.heading)} · ${esc(Number(st.stat.value).toLocaleString('en-US'))}</small></div><div class="sp-meta">${esc(st.stat.row.map(r => r.label).join(' · '))}</div><div>${chip(st.stat)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" id="rs-stat">Edit</button></div></div>
-                <div class="sp-row"><span class="sp-thumb" style="--g:#5b3fd1"></span><div class="sp-name">Edge Meta AI answers<small>${st.metaAi.qa.length} questions, on the homepage and Tools page</small></div><div class="sp-meta"></div><div>${chip(st.metaAi)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" id="rs-ai">Edit</button></div></div>` : ''}
+                <div class="sp-row"><span class="sp-thumb" style="--g:#5b3fd1"></span><div class="sp-name">Edge Meta AI answers<small>${st.metaAi.qa.length} questions, on the Tools page</small></div><div class="sp-meta"></div><div>${chip(st.metaAi)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" id="rs-ai">Edit</button></div></div>` : ''}
                 ${d.services.map(s => `<div class="sp-row"><span class="sp-thumb" style="--g:${esc(s.data.accent)}"></span><div class="sp-name">${esc(s.data.name)}<small>${s.data.results ? esc(s.data.results.metrics.map(m => `${m.label} ${m.value}`).join(' · ')) : 'No figures on the page'}</small></div><div class="sp-meta"></div><div>${chip(s.data.results)}</div><div class="sp-acts"><button class="ws-btn is-sm is-quiet" type="button" data-r="${esc(s.id)}">${s.data.results ? 'Edit' : 'Add'}</button></div></div>`).join('')}
             </section>`;
         body.querySelectorAll('[data-r]').forEach(b => b.addEventListener('click', () => editResults(d.services.find(s => s.id === b.dataset.r))));

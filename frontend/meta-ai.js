@@ -102,6 +102,7 @@
         $('oa-new').addEventListener('click', newChat);
         $('oa-side-toggle').addEventListener('click', () => $('oa-side').classList.toggle('is-open'));
         $('chat-form').addEventListener('submit', handleChatSubmit);
+        setupVoice();
         input.addEventListener('input', autoGrow);
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isTouch()) handleChatSubmit(e); });
         $('to-bottom').addEventListener('click', () => scrollToBottom(true));
@@ -225,7 +226,7 @@
         if (m < 2) return 'just now';
         if (m < 60) return `${m} min ago`;
         const h = Math.round(m / 60);
-        return h < 36 ? `${h} h ago` : new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return h < 36 ? `${h} h ago` : new Date(iso).toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric' });
     }
     function renderState() {
         const s = xpStatus;
@@ -327,6 +328,61 @@
         ask(text);
     }
     // Phase 50: without Meta the answers come from the agency's work, so the line says so.
+    // ---- speaking a question (phase 80, as in the Owner Assistant) ------------------------
+    // The browser's own speech recognition (Chrome, Edge, Android, Safari on iPhone). The words go into the
+    // box as they are heard, never straight to an answer: the owner reads them and sends. Where the browser
+    // has none (Firefox), the microphone is not shown. Bangla is heard when the app is in Bangla.
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let voice = null;
+    const voiceLang = () => (window.ELLang && ELLang.current && ELLang.current() === 'bn') ? 'bn-BD' : (navigator.language || 'en-US');
+    function voiceHint(text, warn) {
+        const hint = $('composer-hint'); if (!hint) return;
+        if (text) { hint.textContent = text; hint.classList.toggle('warn', !!warn); hint.dataset.voice = '1'; }
+        else if (hint.dataset.voice) { delete hint.dataset.voice; hint.classList.remove('warn'); hint.textContent = hintDefault(); }
+    }
+    function voiceStop() { if (voice) { voice.stopping = true; try { voice.r.stop(); } catch { /* already ended */ } } }
+    function voiceStart() {
+        const mic = $('mic-btn');
+        let r;
+        try { r = new SR(); } catch { voiceHint('This browser cannot listen. Please type your question.', true); return; }
+        r.lang = voiceLang(); r.interimResults = true; r.continuous = !isTouch(); r.maxAlternatives = 1;
+        const base = input.value.trim();
+        const v = voice = { r, base, heard: '', stopping: false };
+        mic.classList.add('is-on'); mic.setAttribute('aria-pressed', 'true'); mic.setAttribute('aria-label', 'Stop listening');
+        voiceHint('Listening… tap the microphone again when you are done.');
+        r.onresult = (e) => {
+            let said = '';
+            for (let i = 0; i < e.results.length; i++) said += (e.results[i][0] && e.results[i][0].transcript) || '';
+            v.heard = said.replace(/\s+/g, ' ').trim();
+            input.value = [v.base, v.heard].filter(Boolean).join(' ');
+            autoGrow();
+        };
+        r.onerror = (e) => {
+            const why = e && e.error;
+            v.error = why === 'not-allowed' || why === 'service-not-allowed' ? 'Allow the microphone for this site in your browser settings, then tap the microphone again.'
+                : why === 'no-speech' ? 'Nothing was heard. Tap the microphone and speak, or type your question.'
+                : why === 'audio-capture' ? 'No microphone was found on this device. Please type your question.'
+                : why === 'network' ? 'Listening needs a connection. Please type your question, or try again.'
+                : why === 'aborted' ? '' : 'Listening stopped. Tap the microphone to try again, or type your question.';
+        };
+        r.onend = () => {
+            if (voice !== v) return;
+            voice = null;
+            mic.classList.remove('is-on'); mic.setAttribute('aria-pressed', 'false'); mic.setAttribute('aria-label', 'Speak your question');
+            if (v.error) voiceHint(v.error, true);
+            else { voiceHint(''); if (v.heard) { input.focus(); const n = input.value.length; try { input.setSelectionRange(n, n); } catch { /* not focusable */ } } }
+        };
+        try { r.start(); } catch { voice = null; mic.classList.remove('is-on'); voiceHint('Listening could not start. Please type your question.', true); }
+    }
+    function setupVoice() {
+        const mic = $('mic-btn'); if (!mic) return;
+        if (!SR) { mic.hidden = true; return; }
+        mic.hidden = false;
+        mic.addEventListener('click', () => { if (voice) voiceStop(); else if (!chatBusy) voiceStart(); });
+        // A question being sent ends the listening, so late words do not land in the next one.
+        $('chat-form').addEventListener('submit', voiceStop, true);
+    }
+
     const hintDefault = () => (xpStatus && xpStatus.phase === 'not_connected'
         ? 'Answers come from what your agency shares with you. Connect Facebook and Instagram to ask about your numbers.'
         : 'Answers come from your own Instagram and Facebook data. The most recent days can still change.');
@@ -416,7 +472,7 @@
         abortCtl = new AbortController();
         const signal = abortCtl.signal;
         try {
-            const body = JSON.stringify({ message, clientId: activeClient.id, conversationId });
+            const body = JSON.stringify({ message, clientId: activeClient.id, conversationId, lang: window.ELLang ? ELLang.current() : 'en' });
             const res = await authFetch('/api/xp/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, body, signal });
             if (res.status >= 400 && res.status < 500) {
                 const data = await res.json().catch(() => ({}));
@@ -485,7 +541,21 @@
         ADS: { color: '#fbbf24', soft: 'rgba(251, 191, 36, 0.30)', fill: 'rgba(251, 191, 36, 0.16)' }
     };
     const platColor = (pl) => PLAT[pl] || PLAT.IG;
-    const chartPalette = () => ({ tipBg: '#0f0f10', tipBorder: 'rgba(24,106,255,0.35)', tipTitle: '#ffffff', tipBody: '#c3c9d6', tick: '#a3a3a8', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(0,0,0,0)', hole: '#000000' });
+    // Phase 81: the light theme draws charts dark-on-white; a switch restyles the charts already on screen.
+    const chartPalette = () => document.documentElement.dataset.theme === 'light'
+        ? { tipBg: '#ffffff', tipBorder: 'rgba(0,0,0,0.14)', tipTitle: '#0b0b0c', tipBody: '#33363d', tick: '#5f636b', grid: 'rgba(0, 0, 0, 0.07)', fade: 'rgba(255,255,255,0)', hole: '#ffffff' }
+        : { tipBg: '#0f0f10', tipBorder: 'rgba(24,106,255,0.35)', tipTitle: '#ffffff', tipBody: '#c3c9d6', tick: '#a3a3a8', grid: 'rgba(255, 255, 255, 0.05)', fade: 'rgba(0,0,0,0)', hole: '#000000' };
+    document.addEventListener('el-theme', () => {
+        if (!window.Chart || !Chart.instances) return;
+        const pal = chartPalette();
+        Object.values(Chart.instances).forEach((c) => {
+            const o = c.options, tip = o.plugins && o.plugins.tooltip;
+            if (tip) Object.assign(tip, { backgroundColor: pal.tipBg, borderColor: pal.tipBorder, titleColor: pal.tipTitle, bodyColor: pal.tipBody });
+            if (o.scales && o.scales.x) o.scales.x.ticks.color = pal.tick;
+            if (o.scales && o.scales.y) { o.scales.y.ticks.color = pal.tick; o.scales.y.grid.color = pal.grid; }
+            c.update('none');
+        });
+    });
     const platLabel = (sec) => `<div class="plat"><i style="background:${platColor(sec.platform).color}"></i><span>${escHtml(sec.name)}</span></div>`;
     const panelHead = (title, subtitle, right = '') => `
         <div class="panel-head"><div><div class="panel-title">${escHtml(title)}</div>${subtitle ? `<div class="panel-sub">${escHtml(subtitle)}</div>` : ''}</div>
@@ -726,7 +796,7 @@
             closeConvMenu();
             if (!list.length) { host.innerHTML = '<p class="oa-note" style="text-align:left;margin:0 4px">No chats yet.</p>'; return; }
             host.innerHTML = list.map((c) => {
-                const when = new Date(c.updated_at || c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const when = new Date(c.updated_at || c.created_at).toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric' });
                 return `<div class="conv-item">
                     <button type="button" class="conv-row${c.id === conversationId ? ' on' : ''}" data-conv="${escHtml(c.id)}" title="${escHtml(c.title || '')}">
                         <span data-name>${escHtml(c.title || 'Conversation')}</span><span class="conv-when">${escHtml(when)}</span></button>

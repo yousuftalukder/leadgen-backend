@@ -2,7 +2,19 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!-- Phase 80, as in the Owner Assistant: a phone or tablet does not zoom, in the browser or the installed app;
+         computers ignore these two settings and still zoom. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <script>
+    // A phone always gets the phone layout, told by the device and not the page's width: a touch screen whose
+    // short side is under 600 px. That holds when the browser asks for the "Desktop site" and when the phone is
+    // turned sideways. It only marks the page; the styles and the bar read the mark.
+    (function () {
+        var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        var side = Math.min(screen.width || 0, screen.height || 0);
+        if (coarse && side && side < 600) document.documentElement.classList.add('is-phone');
+    })();
+    </script>
     <!--
         Edge Meta AI as an app of its own (phase 47). The same chat as
         client-assistant.html (meta-ai.js / meta-ai.css), with nothing of
@@ -15,6 +27,8 @@
         service worker.
     -->
     <base href="../">
+    <!-- Phase 83: English or বাংলা, set before anything is drawn. -->
+    <script src="ai/i18n.js?v=3"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://leadgen-backend-1-mgzc.onrender.com">
@@ -24,6 +38,31 @@
     <link rel="stylesheet" href="meta-ai.css">
     <link rel="manifest" href="ai/manifest.webmanifest">
     <meta name="theme-color" content="#000000">
+    <script>
+    // Phase 81, as in the Owner Assistant: dark or light, chosen in the account menu and kept on this device.
+    // Set here, before anything is drawn, so a light page never flashes dark. The menu calls EMATheme.set.
+    window.EMATheme = (function () {
+        var KEY = 'ema_theme', root = document.documentElement;
+        function apply(t) {
+            root.setAttribute('data-theme', t);
+            root.style.colorScheme = t;
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', t === 'light' ? '#f5f6f8' : '#000000');
+        }
+        var t = 'dark';
+        try { t = localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'; } catch (e) { /* private mode: dark */ }
+        apply(t);
+        return {
+            current: function () { return root.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; },
+            set: function (n) {
+                n = n === 'light' ? 'light' : 'dark';
+                try { localStorage.setItem(KEY, n); } catch (e) { /* private mode: this visit only */ }
+                apply(n);
+                document.dispatchEvent(new CustomEvent('el-theme', { detail: n }));
+            }
+        };
+    })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -35,6 +74,7 @@
     html, body { height: 100%; }
     body { margin: 0; padding: 0 !important; overflow: hidden; background: var(--bg-color); }
     [hidden] { display: none !important; }
+    html.i18n-wait body { visibility: hidden; }
 
     /* ---- sign in ---- */
     .ai-gate { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); overflow-y: auto; }
@@ -58,11 +98,81 @@
 
     /* ---- the app: one screen, the chat scrolls inside it ---- */
     .ai-page { height: 100dvh; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-    .ai-page .oa-wrap { flex: 1; min-height: 0; grid-template-columns: 270px minmax(0, 1fr); gap: 0; align-items: stretch; }
-    .ai-page .oa-side { position: relative; top: 0; height: 100%; overflow-y: auto; padding: max(16px, env(safe-area-inset-top)) 14px 16px; border-right: 1px solid var(--card-border); background: rgba(255,255,255,0.015); }
+    .ai-page .oa-wrap { flex: 1; min-height: 0; grid-template-columns: 290px minmax(0, 1fr); gap: 0; align-items: stretch; transition: grid-template-columns .2s ease; }
+    .ai-page .oa-side { position: relative; top: 0; height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0;
+        border-right: 1px solid var(--card-border); background: var(--side-bg, #070708); }
     .ai-page .oa-main { min-height: 0; height: 100%; padding: 0 16px; }
+
+    /* ---- the sidebar (phase 75) ---- */
+    .side-head { display: flex; align-items: center; gap: 10px; padding: max(14px, env(safe-area-inset-top)) 12px 12px 14px; border-bottom: 1px solid var(--card-border); }
+    .side-head .ai-title .oa-by { color: var(--text-secondary); }
+    .side-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 10px 16px; }
+    .side-new { width: 100%; display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border-radius: 12px; cursor: pointer;
+        border: 1px solid var(--card-border); background: rgba(var(--ink), 0.02); color: var(--text-primary); font: inherit; font-size: 0.88rem; font-weight: 600; }
+    .side-new:hover { background: rgba(var(--ink), 0.06); }
+    .side-new svg { color: var(--text-muted); }
+    .side-acct { position: relative; padding: 10px 10px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--card-border); }
+    .acct-btn { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 12px; border: 0; background: none; color: var(--text-muted); font: inherit; cursor: pointer; text-align: left; }
+    .acct-btn:hover { background: rgba(var(--ink), 0.05); }
+    .acct-av { width: 32px; height: 32px; flex: none; border-radius: 999px; display: grid; place-items: center; background: var(--av-bg, #1d2230); border: 1px solid rgba(var(--ink), 0.1); color: var(--text-primary); font-size: 0.78rem; font-weight: 700; position: relative; overflow: hidden; }
+    .acct-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .acct-txt { flex: 1; min-width: 0; line-height: 1.25; }
+    .acct-txt b { display: block; color: var(--text-primary); font-size: 0.86rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acct-txt small { display: block; color: var(--lime); font-size: 0.72rem; }
+    .ai-page .acct-menu { position: absolute; left: 10px; right: 10px; bottom: calc(100% - 4px); top: auto; width: auto; z-index: 80; }
+    .acct-menu [hidden] { display: none; }
+    .acct-sep { height: 1px; margin: 4px 2px; background: rgba(var(--ink), 0.08); }
+    .acct-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 6px 6px 11px; font-size: 0.84rem; color: var(--text-primary); }
+    .acct-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: rgba(var(--ink), 0.06); border: 1px solid rgba(var(--ink), 0.08); }
+    .oa-menu .acct-seg button { width: auto; padding: 4px 10px; font-size: 0.78rem; border-radius: 6px; color: var(--text-muted); }
+    .oa-menu .acct-seg button[aria-checked="true"] { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+    .acct-seg [lang="bn"] { font-family: 'Anek Bangla', var(--font-body, sans-serif); }
+    .oa-side-toggle { position: relative; display: inline-grid; place-items: center; padding: 6px 8px; }
+    .side-badge { position: absolute; top: -6px; right: -7px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; display: grid; place-items: center;
+        background: var(--accent-solid); color: #000; font-size: 0.66rem; font-weight: 800; }
+    /* Desktop: the bar can be put away; the button in the app bar brings it back (kept on this device). */
+    @media (min-width: 941px) {
+        .ai-page.side-collapsed .oa-wrap { grid-template-columns: 0 minmax(0, 1fr); }
+        .ai-page.side-collapsed .oa-side { visibility: hidden; border-right: 0; }
+        .ai-page:not(.side-collapsed) .oa-head .oa-side-toggle, .ai-page:not(.side-collapsed) .oa-head .head-mark { display: none; }
+        .ai-page:not(.side-collapsed) .oa-head .oa-brand { display: none; }
+        .ai-page:not(.side-collapsed) .oa-head .ai-title .oa-by { font-size: 1rem; font-weight: 700; color: var(--text-primary); }
+    }
+
+    /* the updates in the bar */
+    .side-sec { margin-bottom: 10px; border: 1px solid var(--card-border); border-radius: 14px; background: rgba(var(--ink), 0.02); }
+    .side-sec-h { width: 100%; display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 0.86rem; font-weight: 700; cursor: pointer; text-align: left; border-radius: 14px; }
+    .side-sec-h:hover { background: rgba(var(--ink), 0.04); }
+    .side-sec-h svg { width: 16px; height: 16px; color: var(--text-muted); flex: none; }
+    .side-sec-h .side-chev { margin-left: 4px; transition: transform .15s ease; }
+    .side-sec.is-open .side-chev { transform: rotate(90deg); }
+    .side-n { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: grid; place-items: center; font-size: 0.7rem; font-weight: 800; background: rgba(var(--ink), 0.08); color: var(--text-primary); }
+    .side-n.is-hot { background: var(--accent-solid); color: #000; }
+    .side-n:empty { display: none; }
+    .side-body { padding: 0 6px 8px; }
+    .side-sec:not(.is-open) .side-body { display: none; }
+    .side-todo { display: flex; align-items: flex-start; gap: 9px; padding: 7px 6px; border-radius: 10px; }
+    .side-todo:hover { background: rgba(var(--ink), 0.03); }
+    .side-tick { width: 18px; height: 18px; margin-top: 1px; flex: none; border-radius: 6px; border: 1.5px solid rgba(var(--ink), 0.3); background: none; cursor: pointer; display: grid; place-items: center; color: var(--on-lime, #000); padding: 0; }
+    .side-tick.is-done { background: var(--lime); border-color: var(--lime); }
+    .side-tick svg { width: 12px; height: 12px; }
+    .side-tick:not(.is-done) svg { visibility: hidden; }
+    .side-todo-t { flex: 1; min-width: 0; border: 0; background: none; padding: 0; color: var(--text-primary); font: inherit; font-size: 0.84rem; line-height: 1.35; text-align: left; cursor: pointer; }
+    .side-todo-t small { display: block; color: var(--text-muted); font-size: 0.72rem; margin-top: 2px; }
+    .side-todo.is-done .side-todo-t { color: var(--text-muted); text-decoration: line-through; }
+    .side-link { width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 6px; border: 0; border-radius: 10px; background: none; color: var(--text-secondary); font: inherit; font-size: 0.83rem; text-align: left; cursor: pointer; }
+    .side-link:hover { background: rgba(var(--ink), 0.04); color: var(--text-primary); }
+    .side-link span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .side-link small { color: var(--text-muted); font-size: 0.72rem; flex: none; }
+    .side-more { color: var(--accent-solid); font-weight: 600; }
+    .side-empty { margin: 2px 6px 6px; color: var(--text-muted); font-size: 0.8rem; line-height: 1.45; }
+    .side-act { width: calc(100% - 4px); margin: 6px 2px 2px; padding: 8px 10px; border-radius: 10px; border: 0; background: rgba(var(--ink), 0.92); color: var(--on-ink, #0b0b0c); font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+    .side-act:hover { background: rgba(var(--ink), 1); }
+    .side-nav { display: grid; gap: 2px; margin: 4px 0 2px; }
+    .side-nav .side-sec-h { border-radius: 12px; font-weight: 600; color: var(--text-secondary); }
+    .side-nav .side-sec-h:hover { color: var(--text-primary); }
     .ai-page .oa-head { margin: 0 -16px; padding: max(10px, env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--card-border); flex-wrap: nowrap;
-        background: rgba(0,0,0,0.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+        background: var(--head-bg, rgba(0,0,0,0.92)); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
     .ai-page .oa-scroll { min-height: 0; padding-top: 18px; }
     .ai-page .oa-form { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
     .ai-page .oa-to-bottom { bottom: 120px; }
@@ -71,19 +181,41 @@
     .ai-title .oa-brand { font-size: 1rem; white-space: nowrap; }
     .ai-title .oa-by { display: block; margin: 1px 0 0 !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .ai-page .oa-state { max-width: 42%; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ai-more { flex: none; }
-    .ai-menu { right: 12px; top: calc(max(10px, env(safe-area-inset-top)) + 48px); width: 200px; }
     #ai-nudge:empty { display: none; }
     #ai-nudge .el-install { margin: 12px auto 0; max-width: 860px; }
     @media (max-width: 940px) {
         .ai-page .oa-wrap { grid-template-columns: minmax(0, 1fr); }
-        .ai-page .oa-side { display: block; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(84vw, 320px); background: #0a0a0b;
+        .ai-page .oa-side { display: flex; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(86vw, 330px);
             transform: translateX(-102%); transition: transform .22s ease; box-shadow: 20px 0 50px rgba(0,0,0,0.5); }
         .ai-page .oa-side.is-open { transform: none; }
-        .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); }
+        .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
         .ai-page .oa-state { display: none; }   /* on a phone the screen itself says it: the reading card, the reconnect banner */
+        .side-head .side-close svg { display: none; }
+        .side-head .side-close::before { content: '✕'; }
+        /* Touch targets a thumb can hit. */
+        .side-todo { padding: 9px 6px; }
+        .side-link, .side-sec-h { min-height: 42px; }
     }
-    @media (min-width: 941px) { .ai-scrim { display: none; } .ai-page .oa-side-toggle { display: none; } }
+    @media (min-width: 941px) { html:not(.is-phone) .ai-scrim { display: none; } }
+    /* Phase 80: a phone at any width (the "Desktop site", sideways) is laid out as a phone. */
+    html.is-phone .ai-page .oa-wrap { grid-template-columns: minmax(0, 1fr); }
+    html.is-phone .ai-page .oa-side { display: flex; position: fixed; z-index: 70; inset: 0 auto 0 0; width: min(86vw, 330px);
+        transform: translateX(-102%); transition: transform .22s ease; box-shadow: 20px 0 50px rgba(0,0,0,0.5); visibility: visible; }
+    html.is-phone .ai-page .oa-side.is-open { transform: none; }
+    html.is-phone .ai-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,0.5); }
+    html.is-phone .ai-page .oa-state { display: none; }
+    html.is-phone .ai-page .oa-head .oa-side-toggle, html.is-phone .ai-page .oa-head .head-mark, html.is-phone .ai-page .oa-head .oa-brand { display: revert; }
+    html.is-phone .ai-page .oa-head .oa-side-toggle { display: inline-grid; }
+    /* No double-tap zoom on a phone, and no grey flash on a tap. */
+    html.is-phone, html.is-phone body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    /* phase 86: reloading an app that has no browser bar */
+    .ai-update[hidden], .ai-pull[hidden] { display: none; }
+    .ai-update { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0 0; padding: 10px 12px 10px 14px;
+        border-radius: 12px; border: 1px solid rgba(var(--ink), 0.12); background: var(--surface-1); font-size: 0.88rem; color: var(--text-primary); }
+    .ai-update .btn-primary { width: auto; margin: 0; padding: 7px 14px; font-size: 0.84rem; }
+    .oa-main { position: relative; }
+    .ai-pull { position: absolute; left: 50%; top: 64px; z-index: 30; transform: translate(-50%, 0); padding: 6px 12px; border-radius: 999px;
+        background: var(--surface-2, #1d2230); border: 1px solid rgba(var(--ink), 0.12); color: var(--text-secondary); font-size: 0.8rem; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -129,28 +261,80 @@
 
 <div class="el-page ai-page" id="ai-app" hidden>
     <div class="oa-wrap">
-        <aside class="oa-side" id="oa-side">
-            <button class="btn-secondary oa-new" id="oa-new" type="button">+ New chat</button>
-            <h3 class="oa-side-h">Recent chats</h3>
-            <div id="chat-history"></div>
+        <!-- Phase 75: the owner's whole app in one bar, as in the Owner Assistant: their to-dos and
+             reports first, then the rest of what the agency shares, then the chats, then the account. -->
+        <aside class="oa-side" id="oa-side" aria-label="Your updates and chats">
+            <div class="side-head">
+                <img class="ai-mark" src="icons/ai-192.png?v=1" alt="">
+                <div class="ai-title"><div class="oa-brand"><span>Edge Meta</span> <span class="oa-a">AI</span></div><span class="oa-by" id="side-for"></span></div>
+                <button class="icon-btn side-close" id="side-close" type="button" aria-label="Close the sidebar" title="Close the sidebar">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+                </button>
+            </div>
+            <div class="side-scroll">
+                <div id="ai-hub" class="side-hub"></div>
+                <button class="side-new" id="oa-new" type="button">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                    New chat
+                </button>
+                <h3 class="oa-side-h">Recent chats</h3>
+                <div id="chat-history"></div>
+            </div>
+            <div class="side-acct">
+                <div id="ai-menu" role="menu" aria-label="Account" class="oa-menu acct-menu hidden">
+                    <button type="button" role="menuitem" id="acct-profile">Profile</button>
+                    <div class="acct-sep"></div>
+                    <button type="button" role="menuitem" id="acct-install">Add to Home Screen</button>
+                    <button type="button" role="menuitem" id="acct-help">Help</button>
+                    <button type="button" role="menuitem" id="acct-reload">Reload the app</button>
+                    <!-- Phase 84, as in the Owner Assistant: Theme and Language as rows, each showing what is chosen -->
+                    <div class="acct-row">
+                        <span>Theme</span>
+                        <span class="acct-seg" role="group" aria-label="Theme">
+                            <button type="button" role="menuitemradio" data-theme-pick="dark" aria-checked="true">Dark</button>
+                            <button type="button" role="menuitemradio" data-theme-pick="light" aria-checked="false">Light</button>
+                        </span>
+                    </div>
+                    <div class="acct-row">
+                        <span>Language</span>
+                        <span class="acct-seg" role="group" aria-label="Language" data-no-i18n>
+                            <button type="button" role="menuitemradio" data-lang-pick="en" lang="en" aria-checked="true">English</button>
+                            <button type="button" role="menuitemradio" data-lang-pick="bn" lang="bn" aria-checked="false">বাংলা</button>
+                        </span>
+                    </div>
+                    <div class="acct-sep"></div>
+                    <button type="button" role="menuitem" data-signout>Sign out</button>
+                </div>
+                <button class="acct-btn" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu">
+                    <span class="acct-av" id="acct-av">·</span>
+                    <span class="acct-txt"><b id="acct-name">You</b><small id="acct-sub">Account</small></span>
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l4-4 4 4M8 15l4 4 4-4"/></svg>
+                </button>
+            </div>
         </aside>
         <div class="ai-scrim" id="ai-scrim" hidden></div>
 
         <main class="oa-main">
             <div class="oa-head">
-                <button class="icon-btn oa-side-toggle" id="oa-side-toggle" type="button" aria-label="Recent chats">☰</button>
-                <img class="ai-mark" src="icons/ai-192.png?v=1" alt="">
+                <button class="icon-btn oa-side-toggle" id="oa-side-toggle" type="button" aria-label="Open the sidebar" title="Your to-dos, reports and chats">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+                    <span class="side-badge" id="hub-badge" hidden></span>
+                </button>
+                <img class="ai-mark head-mark" src="icons/ai-192.png?v=1" alt="">
                 <div class="ai-title"><div class="oa-brand"><span>Edge Meta</span> <span class="oa-a">AI</span></div><span class="oa-by" id="oa-for"></span></div>
                 <span class="oa-state" id="oa-state"></span>
-                <button class="icon-btn ai-more" id="ai-more" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ai-menu" aria-label="More">⋯</button>
             </div>
-            <div id="ai-hub" class="hub-host"></div>
             <div id="ai-nudge"></div>
+            <div class="ai-update" id="ai-update" role="status" hidden><span>A new version of Edge Meta AI is ready.</span><button type="button" class="btn-primary" id="ai-update-go">Reload</button></div>
+            <div class="ai-pull" id="ai-pull" aria-hidden="true" hidden>Pull down to reload</div>
             <div id="chat-scroll" class="oa-scroll"><div id="chat-box" class="oa-box"></div></div>
             <button type="button" id="to-bottom" class="oa-to-bottom hidden" aria-label="Jump to the latest">↓</button>
             <form id="chat-form" class="oa-form">
                 <div class="composer">
                     <textarea id="chat-input" rows="1" maxlength="2000" placeholder="Ask about your numbers…" aria-label="Your question"></textarea>
+                    <button type="button" id="mic-btn" class="mic-btn" aria-label="Speak your question" aria-pressed="false" title="Speak your question" hidden>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+                    </button>
                     <button type="submit" id="send-btn" class="send-btn" aria-label="Send" disabled></button>
                 </div>
                 <p id="composer-hint" class="oa-hint">Answers come from your own Instagram and Facebook data. The most recent days can still change.</p>
@@ -161,11 +345,6 @@
         <button type="button" role="menuitem" data-action="conv-rename">Rename</button>
         <button type="button" role="menuitem" data-action="conv-delete" class="danger">Delete</button>
     </div>
-    <div id="ai-menu" role="menu" aria-label="More" class="oa-menu ai-menu hidden">
-        <button type="button" role="menuitem" data-hub-open="todos">Your to-dos</button>
-        <button type="button" role="menuitem" data-hub-open="reports">Your reports</button>
-        <button type="button" role="menuitem" data-signout>Sign out</button>
-    </div>
 </div>
 
 <script src="vendor/supabase-js-2.116.0.js"></script>
@@ -175,6 +354,7 @@
 <script id="chartjs" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" defer></script>
 <script src="report-view.js"></script>
 <script src="meta-ai.js"></script>
+<script src="phone-codes.js"></script>
 <script src="owner-hub.js"></script>
 <script>
 (async function () {
@@ -190,10 +370,18 @@
     // Phase 57: a sign-in link from the agency carries its token as #th=. It is traded for a session here,
     // in whichever browser or installed app opened it, and dropped from the address bar at once.
     const th = hash.get('th');
-    if (linkError || th) history.replaceState(null, '', location.pathname + location.search);
     let sb;
     try { sb = EL.authClient(); }
     catch { offline(); return; }
+    // Phase 73: owners have their own address (ai.edgelead.online). Opened anywhere else (the
+    // workspace's /ai/, an older email), a sign-in link or someone not signed in goes there, link and
+    // all; someone already signed in here, the team, stays.
+    const home = EL.ownerAppHref();
+    if (new URL(home).origin !== location.origin) {
+        const here = !th && !!(await sb.auth.getSession().catch(() => ({ data: {} }))).data.session;
+        if (!here) { location.replace(home + location.search + location.hash); return; }
+    }
+    if (linkError || th) history.replaceState(null, '', location.pathname + location.search);
     if (th) {
         const { error } = await sb.auth.verifyOtp({ token_hash: th, type: 'magiclink' }).catch(e => ({ error: e }));
         if (error) linkError = 'otp_expired';
@@ -290,7 +478,10 @@
         // The chats drawer on a phone: a scrim to close it, and it closes itself on a choice.
         const side = $('oa-side'), scrim = $('ai-scrim');
         // On a phone the drawer is off-screen when closed, and out of reach of the keyboard too (phase 57).
-        const phone = matchMedia('(max-width: 940px)');
+        // A phone by its width, or (phase 80) by the device itself, whatever width the browser draws at.
+        const narrow = matchMedia('(max-width: 940px)');
+        const isPhoneDevice = document.documentElement.classList.contains('is-phone');
+        const phone = { get matches() { return isPhoneDevice || narrow.matches; }, addEventListener: (t, f) => narrow.addEventListener(t, f) };
         const syncSide = () => {
             const open = side.classList.contains('is-open');
             scrim.hidden = !open;
@@ -301,19 +492,124 @@
         phone.addEventListener('change', syncSide); syncSide();
         scrim.addEventListener('click', () => side.classList.remove('is-open'));
 
+        // Phase 75: one button opens and closes the bar. On a phone it slides over the chat; on a computer
+        // it can be put away, which is remembered on this device.
+        const page = $('ai-app'), COLLAPSE = 'el-ai-side-collapsed';
+        try { if (localStorage.getItem(COLLAPSE) === '1') page.classList.add('side-collapsed'); } catch { /* private mode */ }
+        const setCollapsed = on => { page.classList.toggle('side-collapsed', on); try { localStorage.setItem(COLLAPSE, on ? '1' : '0'); } catch { /* private mode */ } };
+        // meta-ai.js toggles .is-open on the button; on a computer the same button brings a put-away bar back.
+        $('oa-side-toggle').addEventListener('click', () => { if (!phone.matches) { side.classList.remove('is-open'); setCollapsed(false); } });
+        $('side-close').addEventListener('click', () => { if (phone.matches) side.classList.remove('is-open'); else setCollapsed(true); });
+        // A choice in the bar on a phone (a chat, a to-do, a report) closes it, so the chat or the sheet is in view.
+        side.addEventListener('click', e => { if (phone.matches && e.target.closest('[data-conv], #oa-new, [data-side-go]')) side.classList.remove('is-open'); });
+
+        // The account: name, photo, business, Add to Home Screen, Sign out. Phase 82: the Profile sheet
+        // changes the name and photo, and says so with 'el-profile'.
+        const showAccount = () => {
+            const name = String(me.full_name || '').trim() || String(me.email || '').split('@')[0];
+            $('acct-name').textContent = name || 'You';
+            const av = $('acct-av');
+            av.textContent = (name || '·').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+            if (me.avatar_url) {
+                const img = document.createElement('img');
+                img.src = me.avatar_url; img.alt = '';
+                img.addEventListener('error', () => img.remove());   // a link that has run out: the initials stay
+                av.appendChild(img);
+            }
+        };
+        showAccount();
+        document.addEventListener('el-profile', showAccount);
+        $('acct-sub').textContent = (me.business && me.business.name) || 'Your account';
+        $('acct-profile').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('profile'); });
+        const install = $('acct-install');
+        install.hidden = EL.isStandalone();
+        install.addEventListener('click', () => { closeMenu(); EL.installApp('ai'); });
+        // Phase 84, as in the Owner Assistant: Theme (Dark | Light, kept on this device) and Language (English |
+        // বাংলা, kept on the account so it follows the owner to every device). The menu stays open for the theme.
+        const mark = (sel, on) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-checked', String(on(b))));
+        const syncPicks = () => {
+            mark('[data-theme-pick]', b => b.dataset.themePick === EMATheme.current());
+            mark('[data-lang-pick]', b => b.dataset.langPick === ELLang.current());
+        };
+        syncPicks();
+        document.querySelectorAll('[data-theme-pick]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); EMATheme.set(b.dataset.themePick); syncPicks(); }));
+        const chooseLang = async (l) => {
+            if (l === ELLang.current()) return;
+            // saved on the account first: leaving Bangla reloads the page, and the reload must find the new choice
+            await EL.api('/api/me/profile', { method: 'POST', body: { ui_language: l } }).then(() => { me.ui_language = l; }).catch(() => { /* this device still keeps it */ });
+            ELLang.set(l); syncPicks();
+        };
+        document.querySelectorAll('[data-lang-pick]').forEach(b => b.addEventListener('click', () => { closeMenu(); chooseLang(b.dataset.langPick); }));
+        // After signing in, the account's own choice wins over this device's (as in the Owner Assistant).
+        if (me.ui_language && ELLang.LANGS[me.ui_language] && me.ui_language !== ELLang.current()) ELLang.set(me.ui_language);
+        $('acct-help').addEventListener('click', () => { closeMenu(); if (phone.matches) side.classList.remove('is-open'); OwnerHub.open('help'); });
+
         const menu = $('ai-menu'), more = $('ai-more');
+        const closeMenu = () => { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); };
         more.addEventListener('click', e => { e.stopPropagation(); const open = menu.classList.toggle('hidden') === false; more.setAttribute('aria-expanded', String(open)); });
-        document.addEventListener('click', e => { if (!e.target.closest('#ai-menu')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); } });
+        document.addEventListener('click', e => { if (!e.target.closest('#ai-menu')) closeMenu(); });
         document.addEventListener('keydown', e => {
             if (e.key !== 'Escape') return;
-            if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); more.setAttribute('aria-expanded', 'false'); more.focus(); }
+            if (!menu.classList.contains('hidden')) { closeMenu(); more.focus(); }
             else if (side.classList.contains('is-open') && phone.matches) side.classList.remove('is-open');
         });
 
+        // Phase 86: an app on the home screen has no reload button, and on an iPhone no pull-to-refresh.
+        // Three ways to get the newest version, none of which brings zooming back:
+        //   the account menu's "Reload the app"; pulling the chat down from its top on a phone; and a bar
+        //   that offers it when the site has changed since this page was opened (checked when the app
+        //   comes back to the front, and every 30 minutes).
+        const reloadApp = async () => {
+            try { const r = await navigator.serviceWorker?.getRegistration(); if (r) await r.update(); } catch { /* reload anyway */ }
+            location.reload();
+        };
+        $('acct-reload').addEventListener('click', () => { closeMenu(); reloadApp(); });
+
+        const pull = $('ai-pull'), scroller = $('chat-scroll');
+        let y0 = null, dy = 0;
+        scroller.addEventListener('touchstart', e => { y0 = phone.matches && scroller.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; dy = 0; }, { passive: true });
+        scroller.addEventListener('touchmove', e => {
+            if (y0 === null) return;
+            dy = e.touches[0].clientY - y0;
+            if (dy <= 0 || scroller.scrollTop > 0) { pull.hidden = true; return; }
+            pull.hidden = false;
+            pull.textContent = dy > 90 ? 'Release to reload' : 'Pull down to reload';
+            pull.style.transform = `translate(-50%, ${Math.min(dy, 120) / 2}px)`;
+        }, { passive: true });
+        scroller.addEventListener('touchend', () => {
+            if (y0 !== null && dy > 90 && scroller.scrollTop <= 0) { pull.textContent = 'Reloading…'; reloadApp(); }
+            else pull.hidden = true;
+            y0 = null;
+        }, { passive: true });
+
+        // The page and the files it is made of: a change to any of them is a new version.
+        const parts = ['ai/', 'meta-ai.js', 'owner-hub.js', 'meta-ai.css', 'ai/i18n-bn.js'].map(p => new URL(p, document.baseURI).href);
+        const stamp = async () => {
+            try {
+                const tags = await Promise.all(parts.map(async u => {
+                    const r = await fetch(u, { method: 'HEAD', cache: 'no-store' });
+                    return r.ok ? (r.headers.get('etag') || r.headers.get('last-modified') || '') : '';
+                }));
+                return tags.every(Boolean) ? tags.join('|') : null;
+            } catch { return null; }
+        };
+        let first = null;
+        stamp().then(s => { first = s; });
+        const checkNew = async () => {
+            if (!first || document.hidden || !$('ai-update').hidden) return;
+            const now = await stamp();
+            if (now && now !== first) $('ai-update').hidden = false;
+        };
+        document.addEventListener('visibilitychange', checkNew);
+        setInterval(checkNew, 30 * 60 * 1000);
+        $('ai-update-go').addEventListener('click', reloadApp);
+
         MetaAI.start(me, { app: true });
-        // Everything the agency shares with the owner, beside the chat (phase 49).
-        OwnerHub.mount(me, $('ai-hub'));
-        document.querySelectorAll('[data-hub-open]').forEach(b => b.addEventListener('click', () => { menu.classList.add('hidden'); OwnerHub.open(b.dataset.hubOpen); }));
+        // The business's name sits at the top of the bar too, once the chat has found it.
+        const forName = () => { $('side-for').textContent = $('oa-for').textContent; };
+        new MutationObserver(forName).observe($('oa-for'), { childList: true, characterData: true, subtree: true }); forName();
+        // Everything the agency shares with the owner, in the bar (phase 49; phase 75 moved it there).
+        OwnerHub.mount(me, $('ai-hub'), { side: true });
     }
 })();
 </script>

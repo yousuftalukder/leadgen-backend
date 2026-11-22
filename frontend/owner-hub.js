@@ -20,7 +20,7 @@
 (function () {
     'use strict';
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const shortDay = iso => (iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
+    const shortDay = iso => (iso ? new Date(String(iso).slice(0, 10) + 'T00:00:00Z').toLocaleDateString(window.ELLang ? ELLang.locale() : 'en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
     const today = () => new Date().toISOString().slice(0, 10);
     const ago = iso => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 2 ? 'just now' : m < 60 ? `${m} min ago` : m < 2160 ? `${Math.round(m / 60)} h ago` : shortDay(iso); };
     const STATE = { todo: 'Planned', doing: 'In progress', waiting: 'Waiting on you', done: 'Done' };
@@ -141,11 +141,107 @@
     const waitingPosts = () => data.posts.filter(p => p.status === 'idea');
     const unpaid = () => ((data.billing && data.billing.invoices) || []).filter(v => v.status === 'unpaid');
 
+    const toolsFor = () => [
+        (me.engines || []).includes('leadgen') ? ['leads', 'Find customers', 'client-leads.html'] : null,
+        (me.engines || []).includes('fb_community') ? ['demand', 'Local demand', 'client-community.html'] : null
+    ].filter(Boolean);
+
+    // ---- the bar (phase 75) ------------------------------------------------------------
+    // In Edge Meta AI everything sits in the left bar, as in the Owner Assistant: the to-dos
+    // to tick off right there, the reports folded open under their own heading, then the rest.
+    const ICON = {
+        todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>',
+        report: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>',
+        posts: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>',
+        work: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="9"/></svg>',
+        numbers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+        tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+        billing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>',
+        overview: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+        chev: '<svg class="side-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+        tick: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>'
+    };
+    const OPEN_KEY = 'el-ai-side-open';
+    let openSecs = { todos: true, reports: false };
+    try { openSecs = { ...openSecs, ...JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') }; } catch { /* private mode */ }
+    let sideMode = false;
+    const SIDE_TODOS = 5, SIDE_REPORTS = 8;
+
+    async function tick(t) {
+        const to = t.status === 'done' ? 'todo' : 'done';
+        await EL.api(`/api/client/tasks/${encodeURIComponent(t.id)}`, { method: 'PATCH', body: { status: to } });
+        t.status = to; t.completedAt = to === 'done' ? new Date().toISOString() : null;
+        EL.toast(to === 'done' ? 'Done. Your agency sees it.' : 'Marked not done.');
+    }
+
+    function drawSide() {
+        const tools = toolsFor();
+        const list = data.tasks.filter(t => t.yours && (t.status !== 'done' || recentDone(t)))
+            .sort((a, b) => (a.status === 'done') - (b.status === 'done') || (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+        const open = todos().length;
+        const sec = (k, icon, label, n, hot, body) => `<section class="side-sec${openSecs[k] ? ' is-open' : ''}" data-sec="${k}">
+            <button type="button" class="side-sec-h" data-fold="${k}" aria-expanded="${!!openSecs[k]}">${icon}<span>${label}</span><span class="side-n${hot ? ' is-hot' : ''}">${n || ''}</span>${ICON.chev}</button>
+            <div class="side-body">${body}</div></section>`;
+        const todoRows = list.slice(0, SIDE_TODOS).map(t => `<div class="side-todo${t.status === 'done' ? ' is-done' : ''}">
+                <button type="button" class="side-tick${t.status === 'done' ? ' is-done' : ''}" role="checkbox" aria-checked="${t.status === 'done'}" aria-label="Done: ${esc(t.title)}" data-tick="${esc(t.id)}">${ICON.tick}</button>
+                <button type="button" class="side-todo-t" data-side-go data-task="${esc(t.id)}">${esc(t.title)}${taskLine(t) ? `<small>${taskLine(t)}</small>` : ''}</button></div>`).join('');
+        const todosBody = (list.length ? todoRows : '<p class="side-empty">Nothing is waiting on you. When your agency needs something, it shows up here.</p>')
+            + (list.length > SIDE_TODOS ? `<button type="button" class="side-link side-more" data-side-go data-hub="todos"><span>See all ${list.length}</span></button>` : '');
+        const reportsBody = (data.reports.length
+            ? data.reports.slice(0, SIDE_REPORTS).map(r => `<button type="button" class="side-link" data-side-go data-rep="${esc(r.id)}"><span>${esc(r.title)}${r.handle ? ' · @' + esc(String(r.handle).replace(/^@/, '')) : ''}</span><small>${esc(shortDay(r.date))}</small></button>`).join('')
+            : '<p class="side-empty">No reports yet. Your agency’s reports for you appear here.</p>')
+            + (data.reports.length > SIDE_REPORTS ? `<button type="button" class="side-link side-more" data-side-go data-hub="reports"><span>See all ${data.reports.length}</span></button>` : '')
+            + ((me.engines || []).includes('report') ? '<button type="button" class="side-act" data-side-go data-hub="checkup">New check-up</button>' : '');
+        const nav = (k, icon, label, n, hot) => `<button type="button" class="side-sec-h" data-side-go data-hub="${k}">${icon}<span>${label}</span><span class="side-n${hot ? ' is-hot' : ''}">${n || ''}</span></button>`;
+        host.innerHTML = (loadFailed ? '<button type="button" class="side-sec-h" data-hub="retry"><span>Couldn’t load your updates · Retry</span></button>' : '')
+            + `<div class="side-nav side-top">${nav('overview', ICON.overview, 'Overview', 0, false)}</div>`
+            + sec('todos', ICON.todo, 'To-dos', open, open > 0, todosBody)
+            + sec('reports', ICON.report, 'Reports', data.reports.length, false, reportsBody)
+            + `<div class="side-nav">
+                ${nav('posts', ICON.posts, 'Posts to approve', waitingPosts().length, waitingPosts().length > 0)}
+                ${nav('work', ICON.work, 'Working on', working().length, false)}
+                ${data.growth && data.growth.connected ? nav('numbers', ICON.numbers, 'Daily numbers', 0, false) : ''}
+                ${tools.map(([k, l]) => nav('tool-' + k, ICON.tool, esc(l), 0, false)).join('')}
+                ${data.billing && (data.billing.agreement || (data.billing.invoices || []).length) ? nav('billing', ICON.billing, 'Billing', unpaid().length, unpaid().length > 0 || !!data.billing.needsSignature) : ''}
+            </div>`;
+        host.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => {
+            const k = b.dataset.fold; openSecs[k] = !openSecs[k];
+            try { localStorage.setItem(OPEN_KEY, JSON.stringify(openSecs)); } catch { /* private mode */ }
+            const s = b.closest('.side-sec'); s.classList.toggle('is-open', openSecs[k]); b.setAttribute('aria-expanded', String(openSecs[k]));
+        }));
+        host.querySelectorAll('[data-tick]').forEach(b => b.addEventListener('click', async () => {
+            const t = data.tasks.find(x => x.id === b.dataset.tick); if (!t) return;
+            b.disabled = true;
+            try { await tick(t); draw(); }
+            catch (err) { b.disabled = false; if (!err.handled) EL.toast(err.message, 'bad'); }
+        }));
+        host.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
+        host.querySelectorAll('[data-rep]').forEach(b => b.addEventListener('click', () => openReport(b.dataset.rep)));
+        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => go(b.dataset.hub, tools)));
+    }
+
+    function go(k, tools) {
+        if (k === 'retry') { load().catch(() => {}); return; }
+        if (k === 'overview') openOverview();
+        else if (k === 'todos') openTodos();
+        else if (k === 'work') openWork();
+        else if (k === 'posts') openPosts();
+        else if (k === 'reports') openReports();
+        else if (k === 'numbers') openNumbers();
+        else if (k === 'checkup') openCheckup();
+        else if (k === 'billing') openBilling();
+        else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
+    }
+
     function draw() {
-        const tools = [
-            (me.engines || []).includes('leadgen') ? ['leads', 'Find customers', 'client-leads.html'] : null,
-            (me.engines || []).includes('fb_community') ? ['demand', 'Local demand', 'client-community.html'] : null
-        ].filter(Boolean);
+        if (sideMode) drawSide(); else drawRow();
+        const n = todos().length + waitingPosts().length;
+        const badge = document.getElementById('hub-badge');
+        if (badge) { badge.textContent = n ? String(n) : ''; badge.hidden = !n; }
+    }
+
+    function drawRow() {
+        const tools = toolsFor();
         const chip = (k, label, n, hot) => `<button type="button" class="hub-chip${hot ? ' is-hot' : ''}" data-hub="${k}">${label}${n ? `<b>${n}</b>` : ''}</button>`;
         host.innerHTML = `<div class="hub-row" role="toolbar" aria-label="Updates from your agency">
             ${chip('todos', 'To-dos', todos().length, todos().length > 0)}
@@ -158,21 +254,7 @@
             ${data.billing && (data.billing.agreement || (data.billing.invoices || []).length) ? chip('billing', 'Billing', unpaid().length, unpaid().length > 0 || !!data.billing.needsSignature) : ''}
             ${loadFailed ? '<button type="button" class="hub-chip is-hot" data-hub="retry">Couldn’t load your updates · Retry</button>' : ''}
         </div>`;
-        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => {
-            const k = b.dataset.hub;
-            if (k === 'retry') { load().catch(() => {}); return; }
-            if (k === 'todos') openTodos();
-            else if (k === 'work') openWork();
-            else if (k === 'posts') openPosts();
-            else if (k === 'reports') openReports();
-            else if (k === 'numbers') openNumbers();
-            else if (k === 'checkup') openCheckup();
-            else if (k === 'billing') openBilling();
-            else { const t = tools.find(x => 'tool-' + x[0] === k); if (t) openTool(t[1], t[2]); }
-        }));
-        const n = todos().length + waitingPosts().length;
-        const badge = document.getElementById('hub-badge');
-        if (badge) { badge.textContent = n ? String(n) : ''; badge.hidden = !n; }
+        host.querySelectorAll('[data-hub]').forEach(b => b.addEventListener('click', () => go(b.dataset.hub, tools)));
     }
 
     // ---- to-dos and the agency's work ----------------------------------------------
@@ -248,6 +330,261 @@
             catch (err) { if (!err.handled) EL.toast(err.message, 'bad'); }
             finally { send.disabled = false; }
         });
+    }
+
+    // ---- the overview (phase 77) -------------------------------------------------------------
+    // Everything the agency is doing for the owner on one sheet, opened from the bar: the counts,
+    // then what waits on them, the work, the posts coming up and what was finished lately. Built from
+    // what the bar already loaded, so it opens at once; every count and row opens its own sheet.
+    function openOverview() {
+        const s = sheet('Overview', 'Your agency’s work for you, as it stands', openOverview);
+        // One label per row ("In progress · due Oct 31"), red when the date has passed.
+        const due = (t, lead = '') => {
+            const late = !!t.dueDate && t.status !== 'done' && t.dueDate < today();
+            const when = t.dueDate && t.status !== 'done' ? `${late ? 'overdue since' : 'due'} ${shortDay(t.dueDate)}` : '';
+            const text = [lead, when].filter(Boolean).join(' · ');
+            return text ? `<span class="work-m${late ? ' is-late' : ''}">${esc(text)}</span>` : '';
+        };
+        const yours = todos(), doing = working().sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'));
+        const upcoming = data.posts.filter(p => p.status !== 'skipped' && (!p.plannedOn || p.plannedOn >= today())).slice(0, 6);
+        const finished = data.tasks.filter(recentDone).sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt))).slice(0, 5);
+        const count = (k, label, n, hot) => `<button type="button" class="tile work-count${hot ? ' is-hot' : ''}" data-ov="${k}"><span class="tile-label">${label}</span><span class="tile-value">${n}</span></button>`;
+        const row = (attrs, title, meta, cls = '') => `<li><button type="button" class="work-row${cls}" ${attrs}><span class="work-t">${esc(title)}</span>${meta}</button></li>`;
+        const section = (k, name, rows, empty) => `<div class="work-sec is-${k}"><div class="work-h"><i></i>${name}</div>${rows.length ? `<ul class="work-list">${rows.join('')}</ul>` : `<p class="hub-empty">${empty}</p>`}</div>`;
+        s.body.innerHTML = `<div class="tiles work-counts">
+                ${count('todos', 'Waiting on you', yours.length, yours.length > 0)}
+                ${count('work', 'In progress', doing.length, false)}
+                ${count('posts', 'Posts for your OK', waitingPosts().length, waitingPosts().length > 0)}
+                ${count('reports', 'Reports', data.reports.length, false)}
+            </div>`
+            + section('yours', 'Waiting on you', yours.map(t => row(`data-task="${esc(t.id)}"`, t.title, due(t))), 'Nothing is waiting on you.')
+            + section('doing', 'We are working on', doing.map(t => row(`data-task="${esc(t.id)}"`, t.title, due(t, STATE[t.status] || ''))), 'Nothing open right now.')
+            + section('posts', 'Planned posts', upcoming.map(p => row('data-ov="posts"', p.hook || 'Planned post',
+                `<span class="work-m">${esc([shortDay(p.plannedOn), p.format, p.statusName].filter(Boolean).join(' · '))}</span>`, p.status === 'idea' ? ' is-wait' : '')), 'No posts planned yet.')
+            + (finished.length ? section('done', 'Finished in the last 30 days', finished.map(t => row(`data-task="${esc(t.id)}"`, t.title, `<span class="work-m">done ${esc(shortDay(t.completedAt))}</span>`)), '') : '');
+        s.body.querySelectorAll('[data-ov]').forEach(b => b.addEventListener('click', () => go(b.dataset.ov, toolsFor())));
+        s.body.querySelectorAll('[data-task]').forEach(b => b.addEventListener('click', () => openTask(data.tasks.find(x => x.id === b.dataset.task))));
+    }
+
+    // ---- profile (phase 82, as in the Owner Assistant) ------------------------------------------
+    // Name, phone and photo, from the account menu. The email is how they sign in, so it is shown and not
+    // changed here: the agency changes it (phase 79). A change tells the page with 'el-profile', so the
+    // account button picks it up.
+    const initials = n => String(n || '·').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '·';
+    const changed = () => document.dispatchEvent(new CustomEvent('el-profile', { detail: me }));
+    /** A square photo, 320 px, JPEG: a phone's 5 MB picture becomes a few dozen KB before it leaves. */
+    async function squarePhoto(file) {
+        const bmp = await createImageBitmap(file);
+        const side = Math.min(bmp.width, bmp.height), size = Math.min(320, side);
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = size;
+        cv.getContext('2d').drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+        return new Promise((ok, no) => cv.toBlob(b => (b ? ok(b) : no(new Error('That picture could not be read.'))), 'image/jpeg', 0.88));
+    }
+    // Phase 84, as in the Owner Assistant's Profile: the phone is a country code and the number, checked here as the
+    // server checks it (phone-codes.js); "Your business" is what the owner tells the agency (phone, website, address,
+    // hours, anything else), beside what the agency has; "Sign-in" shows the email and signs out every device.
+    const PH = () => window.PHONE || null;
+    function phoneField(id, value) {
+        const P = PH(), p = P ? P.parse(value) : { iso: 'BD', national: String(value || '') };
+        const list = P ? P.COUNTRIES : [['BD', 'Bangladesh', '880']];
+        const c = list.find(x => x[0] === p.iso) || list[0];
+        return `<div class="hub-phone">
+                <span class="hub-cc"><select id="${id}-cc" aria-label="Country code">${list.map(([iso, name, code]) => `<option value="${iso}"${iso === c[0] ? ' selected' : ''}>${esc(name)} (+${code})</option>`).join('')}</select><span aria-hidden="true" data-no-i18n>${c[0]} +${c[2]}</span></span>
+                <input id="${id}" type="tel" inputmode="tel" autocomplete="tel-national" maxlength="20" placeholder="Phone number" value="${esc(p.national)}">
+            </div>`;
+    }
+    function phoneCheck(root, id) {
+        const P = PH(), iso = root.querySelector(`#${id}-cc`).value, raw = root.querySelector('#' + id).value;
+        return P ? P.check(iso, raw) : { ok: true, value: raw.trim() || null };
+    }
+    function wirePhone(root, id, onInput) {
+        const sel = root.querySelector(`#${id}-cc`), show = sel.nextElementSibling;
+        sel.addEventListener('change', () => { const c = (PH() ? PH().COUNTRIES : []).find(x => x[0] === sel.value); if (c) show.textContent = `${c[0]} +${c[2]}`; onInput(); });
+        root.querySelector('#' + id).addEventListener('input', onInput);
+    }
+    const say = (el, text, kind) => { el.textContent = text || ''; el.className = 'hub-err' + (kind ? ' is-' + kind : ''); };
+
+    function openProfile() {
+        const s = sheet('Profile', 'You, your business and how you sign in', openProfile);
+        const biz = (me && me.business) || null, d = (biz && biz.details) || {};
+        const agencyLine = biz ? [biz.niche, biz.location, biz.ig_handle ? '@' + biz.ig_handle : ''].filter(Boolean).map(esc).join(' · ') : '';
+        s.body.innerHTML = `<div class="hub-prof">
+                <div class="hub-prof-av" id="pf-av"></div>
+                <div class="hub-prof-pic">
+                    <label class="btn-secondary hub-prof-up">Change photo<input type="file" id="pf-file" accept="image/png,image/jpeg,image/webp,image/heic,image/*" hidden></label>
+                    <button class="btn-secondary" type="button" id="pf-rm">Remove</button>
+                </div>
+            </div>
+            <p class="hub-err" id="pf-pmsg" role="alert"></p>
+            <section class="hub-card"><h3>Your details</h3>
+            <div class="hub-form">
+                <label for="pf-name">Your name</label>
+                <input id="pf-name" autocomplete="name" maxlength="80" value="${esc((me && me.full_name) || '')}">
+                <label for="pf-phone">Phone <span class="hub-opt">(if you like)</span></label>
+                ${phoneField('pf-phone', me && me.phone)}
+                <button class="btn-primary" type="button" id="pf-save" disabled>Save</button>
+                <p class="hub-err" id="pf-msg" role="alert"></p>
+            </div></section>
+            ${biz ? `<section class="hub-card"><h3>Your business</h3>
+            <div class="hub-biz"><b>${esc(biz.name)}</b>${agencyLine ? `<span>${agencyLine}</span>` : ''}</div>
+            <div class="hub-form">
+                <label for="bz-phone">Business phone</label>
+                ${phoneField('bz-phone', d.phone)}
+                <label for="bz-website">Website</label>
+                <input id="bz-website" inputmode="url" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="www.yourbusiness.com" value="${esc(d.website || '')}">
+                <label for="bz-address">Address</label>
+                <input id="bz-address" autocomplete="street-address" maxlength="200" value="${esc(d.address || '')}">
+                <label for="bz-hours">Opening hours</label>
+                <textarea id="bz-hours" rows="2" maxlength="300" placeholder="Sat–Thu 10am–10pm, Fri closed">${esc(d.hours || '')}</textarea>
+                <label for="bz-notes">Anything your agency should know</label>
+                <textarea id="bz-notes" rows="3" maxlength="1000" placeholder="Offers coming up, what you want more of, what to avoid">${esc(d.notes || '')}</textarea>
+                <p class="hub-tip">Your agency sees these. To change the business name or what you do, ask your agency.</p>
+                <button class="btn-primary" type="button" id="bz-save" disabled>Save</button>
+                <p class="hub-err" id="bz-msg" role="alert"></p>
+            </div></section>` : ''}
+            <section class="hub-card"><h3>Sign-in</h3>
+            <div class="hub-form">
+                <label>Email</label>
+                <p class="hub-prof-mail">${esc((me && me.email) || '')}</p>
+                <p class="hub-tip">You sign in with a code sent to this email, so there is no password to remember. To use another email, ask your agency: they can change it for you.</p>
+                <button class="btn-secondary" type="button" id="pf-out-all">Sign out on every device</button>
+                <p class="hub-err" id="pf-out-msg" role="alert"></p>
+            </div></section>`;
+        const $ = id => s.body.querySelector('#' + id);
+        const drawAv = () => {
+            const url = me && me.avatar_url;
+            $('pf-av').innerHTML = url ? `<img src="${esc(url)}" alt="">` : esc(initials((me && me.full_name) || (me && me.email || '').split('@')[0]));
+            $('pf-rm').hidden = !url;
+        };
+        drawAv();
+
+        // your details
+        const phoneNow = () => { const r = phoneCheck(s.body, 'pf-phone'); return r.ok ? (r.value || '') : null; };
+        const dirty = () => $('pf-name').value.trim() !== ((me && me.full_name) || '') || phoneNow() !== ((me && me.phone) || '');
+        const ready = () => { $('pf-save').disabled = !dirty() || !$('pf-name').value.trim(); };
+        $('pf-name').addEventListener('input', ready);
+        wirePhone(s.body, 'pf-phone', ready);
+        const save = async () => {
+            if ($('pf-save').disabled) return;
+            const ph = phoneCheck(s.body, 'pf-phone');
+            if (!ph.ok) return say($('pf-msg'), ph.error);
+            $('pf-save').disabled = true; say($('pf-msg'), '');
+            try {
+                const r = await EL.api('/api/me/profile', { method: 'POST', body: { full_name: $('pf-name').value, phone: ph.value || '' } });
+                Object.assign(me, { full_name: r.full_name, phone: r.phone });
+                $('pf-name').value = r.full_name || '';
+                if (PH()) $('pf-phone').value = PH().parse(r.phone).national;   // as it was kept: "1812000000"
+                say($('pf-msg'), 'Saved.', 'good');
+                drawAv(); changed();
+            } catch (err) { say($('pf-msg'), err.message); }
+            ready();
+        };
+        $('pf-save').addEventListener('click', save);
+        [$('pf-name'), $('pf-phone')].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') save(); }));
+
+        // your business
+        if (biz) {
+            const FIELDS = ['website', 'address', 'hours', 'notes'];
+            const bizNow = () => {
+                const ph = phoneCheck(s.body, 'bz-phone');
+                const out = { phone: ph.ok ? (ph.value || '') : null };
+                for (const k of FIELDS) out[k] = $('bz-' + k).value.trim();
+                return out;
+            };
+            const bizReady = () => { const n = bizNow(); $('bz-save').disabled = ['phone', ...FIELDS].every(k => n[k] === (d[k] || '')); };
+            FIELDS.forEach(k => $('bz-' + k).addEventListener('input', bizReady));
+            wirePhone(s.body, 'bz-phone', bizReady);
+            $('bz-save').addEventListener('click', async () => {
+                const ph = phoneCheck(s.body, 'bz-phone');
+                if (!ph.ok) return say($('bz-msg'), ph.error);
+                $('bz-save').disabled = true; say($('bz-msg'), '');
+                try {
+                    const r = await EL.api('/api/me/business', { method: 'POST', body: { details: { ...bizNow(), phone: ph.value || '' } } });
+                    Object.assign(d, r.details); biz.details = d;
+                    if (PH()) $('bz-phone').value = PH().parse(d.phone).national;
+                    say($('bz-msg'), 'Saved. Your agency sees it now.', 'good');
+                } catch (err) { say($('bz-msg'), err.message); }
+                bizReady();
+            });
+        }
+
+        // sign-in: every session of this login ends, this one too
+        $('pf-out-all').addEventListener('click', async () => {
+            if (!confirm('Sign out on every device, this one too? You sign in again with a code sent to your email.')) return;
+            $('pf-out-all').disabled = true; say($('pf-out-msg'), 'Signing out…', 'muted');
+            try {
+                const { error } = await EL.supabase.auth.signOut({ scope: 'global' });
+                if (error) throw error;
+                EL.signOut();
+            } catch (err) { $('pf-out-all').disabled = false; say($('pf-out-msg'), 'That did not go through. Please try again.'); }
+        });
+
+        // the photo
+        $('pf-file').addEventListener('change', async () => {
+            const file = $('pf-file').files[0]; $('pf-file').value = '';
+            if (!file) return;
+            $('pf-pmsg').className = 'hub-err is-muted'; $('pf-pmsg').textContent = 'Uploading…';
+            try {
+                const blob = await squarePhoto(file).catch(() => { throw new Error('That picture could not be read. Try a JPEG or PNG.'); });
+                const res = await fetch(`${EL.backendUrl()}/api/me/avatar`, {
+                    method: 'POST', headers: { Authorization: `Bearer ${await EL.token()}`, 'Content-Type': 'image/jpeg' }, body: blob
+                });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(d.error || 'The photo did not upload.');
+                me.avatar_url = d.avatar_url; drawAv(); changed();
+                $('pf-pmsg').textContent = '';
+            } catch (err) { $('pf-pmsg').className = 'hub-err'; $('pf-pmsg').textContent = err.message; }
+        });
+        $('pf-rm').addEventListener('click', async () => {
+            $('pf-rm').disabled = true; $('pf-pmsg').textContent = '';
+            try { await EL.api('/api/me/avatar', { method: 'DELETE' }); me.avatar_url = null; drawAv(); changed(); }
+            catch (err) { $('pf-pmsg').className = 'hub-err'; $('pf-pmsg').textContent = err.message; }
+            $('pf-rm').disabled = false;
+        });
+    }
+
+    // ---- help (phase 80, as in the Owner Assistant) ---------------------------------------------
+    // How the app works, in the owner's words, from the account menu.
+    function openHelp() {
+        const s = sheet('Help', 'How Edge Meta AI works', openHelp);
+        // Phase 84, as in the Owner Assistant: questions in groups, each opening to its answer. What does not apply
+        // here is left out (Add to Home Screen when the app already runs from there).
+        const q = (title, html, open = false) => `<details class="help-q"${open ? ' open' : ''}><summary>${title}</summary><div class="help-a">${html}</div></details>`;
+        const group = (title, qs) => `<section class="help-group"><h3>${title}</h3>${qs.join('')}</section>`;
+        s.body.innerHTML = `<div class="help">
+            <p class="help-lead">Edge Meta AI answers questions about your business’s Instagram and Facebook, from your own numbers, and keeps your agency’s work for you in one place. Tap a question to read the answer.</p>
+            ${group('Asking questions', [
+                q('What can I ask?', `<p>Type a question at the bottom, or tap the microphone and say it. The words appear in the box first, so you can check them before you send.</p>
+                    <ul><li>“How are we doing this month so far?”</li><li>“Which post did best last month?”</li><li>“What are you working on for us?”</li><li>“When is our next post?”</li></ul>
+                    <p>Answers come from your own Instagram and Facebook numbers and from what your agency shares with you. Charts and follow-up questions appear under an answer when they help.</p>`, true),
+                q('Where do the numbers come from?', `<p>Your numbers update by themselves twice a day. The last day or two can still change while Meta finishes counting. Edge Meta AI only reads: nothing is ever posted, and no messages are read.</p>`),
+                q('Asking in Bangla', `<p>Account menu → <b>Language</b> → <b>বাংলা</b>. The app’s words and the answers are then in Bangla; names and figures stay as Meta gives them. Your choice is kept on your account, so every device you use follows it.</p>`)
+            ])}
+            ${group('Chats', [
+                q('Finding, renaming or deleting a chat', `<p>Your chats are kept under <b>Recent chats</b> in the bar. Tap one to carry on where you left off. To rename or delete one, tap its <b>⋯</b> button.</p>`),
+                q('Starting again', `<p>Tap <b>New chat</b> in the bar. Your earlier chats stay in the list.</p>`)
+            ])}
+            ${group('Your agency’s work', [
+                q('Your updates, in the bar on the left', `<p><b>Overview</b> shows all of your agency’s work at once. <b>To-dos</b> are what your agency needs from you: tick one off right there. <b>Reports</b> opens every report your agency shared, and a new check-up. <b>Posts to approve</b> is where you approve a planned post, ask for changes, or skip it.</p>
+                    <p>On a phone, the bar opens from the button at the top left. The number on it is how many things wait for you.</p>`),
+                q('Something wrong?', `<p>Ask your agency: they see the same work and reports you do, and can fix a to-do, a post or a report for you.</p>`)
+            ])}
+            ${group('Your account', [
+                q('Changing your name, photo or phone', `<p>Account menu → <b>Profile</b>: your photo, your name and phone, your business’s details for your agency (phone, website, address, opening hours, anything they should know), and how you sign in.</p>`),
+                q('Signing in', `<p>There is no password. Each time, enter your email and the 6-digit code we send to it. Your agency can also send you a one-tap sign-in link, and can change the email you sign in with.</p>`),
+                q('Lost a phone, or signed in somewhere else?', `<p>Profile → <b>Sign out on every device</b>. Every device is signed out, this one too; sign in again with a code.</p>`)
+            ])}
+            ${group('The app', [
+                q('Light or dark', `<p>Account menu → <b>Theme</b>: Dark or Light. The choice is kept on this device.</p>`),
+                q('Getting the newest version', `<p>Edge Meta AI updates itself. When a new version is out, a bar offers to <b>Reload</b>. You can also choose <b>Reload the app</b> in the account menu, or, on a phone, pull the chat down from its top.</p>`),
+                ...(EL.isStandalone() ? [] : [q('On your phone', `<p>Open the account menu at the bottom of the bar and choose <b>Add to Home Screen</b>. Edge Meta AI then opens full screen, like an app.</p>`)])
+            ])}
+            ${group('Privacy', [
+                q('Who can see my chats?', `<p>Only you. Your agency sees the work and reports it shares with you, not your chats.</p>`),
+                q('Can an answer be wrong?', `<p>Answers are written by AI from your own numbers, and AI can make mistakes. Check anything important in Meta Business Suite, or ask your agency.</p>`)
+            ])}
+        </div>`;
     }
 
     // ---- planned posts -------------------------------------------------------------------
@@ -460,11 +797,11 @@
     }
 
     /** Mount under the app bar. `onAsk` lets a sheet hand a question to the chat. */
-    function mount(user, hostEl) {
-        me = user; host = hostEl;
+    function mount(user, hostEl, opts = {}) {
+        me = user; host = hostEl; sideMode = !!opts.side;
         host.innerHTML = '';
         load().catch(() => {});
         document.addEventListener('visibilitychange', () => { if (!document.hidden) load().catch(() => {}); });
     }
-    window.OwnerHub = { mount, reload: () => load(), open: k => ({ todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
+    window.OwnerHub = { mount, reload: () => load(), open: k => ({ overview: openOverview, profile: openProfile, help: openHelp, todos: openTodos, work: openWork, posts: openPosts, reports: openReports, numbers: openNumbers, checkup: openCheckup, billing: openBilling }[k] || (() => {}))() };
 })();

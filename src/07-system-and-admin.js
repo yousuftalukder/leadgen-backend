@@ -7,6 +7,7 @@
  */
 'use strict';
 const S = require('./shared');
+const PHONE = require('../frontend/phone-codes.js');   // phase 84: one set of phone rules for the page and the server
 const {
     ALERT_WEBHOOK, APIFY_CYCLE_CREDIT, APIFY_MEMORY_MB, APIFY_TIMEOUT_SECS, APP_VERSION, ApifyClient,
     BOOT_TS, BUDGET_MODE, COST_PER_1K_FB_POSTS, COST_PER_1K_POSTS, COST_PER_1K_PROFILE, EMAIL_RE, ENC_KEY,
@@ -415,7 +416,13 @@ app.get('/api/me', async (req, res) => {
         email: ctx.user.email,
         role: ctx.profile.role,
         engines: ctx.profile.role === 'admin' ? ENGINES : (access || []).map(a => a.engine),
-        state
+        state,
+        // Phase 82: the profile. phone and the photo are null until the phase-82 database update.
+        full_name: ctx.profile.full_name || null,
+        phone: ctx.profile.phone || null,
+        avatar_url: await avatarUrl(ctx.profile.avatar_path),
+        // Phase 84: the language chosen for Edge Meta AI, on the account so it follows them. Null: not chosen yet.
+        ui_language: ctx.profile.ui_language || null
     };
 
     // Only a client needs a window and an allowance on screen. An employee
@@ -438,7 +445,11 @@ app.get('/api/me', async (req, res) => {
 
     if (ctx.profile.role === 'client') {
         const own = await S.ownClientFor(ctx).catch(() => null);
-        body.business = own ? { id: own.id, name: own.name, ig_handle: own.ig_handle || null } : null;
+        // Phase 84: with what the agency has (shown, not editable) and what the owner told it, for the Profile.
+        body.business = own ? {
+            id: own.id, name: own.name, ig_handle: own.ig_handle || null, fb_page: own.fb_page || null,
+            niche: own.niche || null, location: own.location || null, details: ownerDetails(own.owner_details)
+        } : null;
         // An owner login the agency made: no trial clock, and no business means access has ended.
         body.agency_owner = ctx.profile.agency_owner === true;
         // Phase 56: why there is no business — a trial that ran out says so, with the date.
@@ -473,6 +484,210 @@ app.get('/api/me', async (req, res) => {
     }
 
     res.json(body);
+});
+
+// ===========================================================================
+// PHASE 82 :: A PROFILE OF ONE'S OWN
+//
+// Name, phone and photo, set by the person themself (Edge Meta AI's Profile
+// sheet). The email is not here: it is how they sign in, and for an owner the
+// agency changes it (phase 79). The photo is an object in the private
+// "avatars" bucket, made on the first upload, and only ever handed out as a
+// signed link; what it is comes from its bytes, never the browser's header.
+// ===========================================================================
+const AVATAR_BUCKET = process.env.AVATAR_BUCKET || 'avatars';
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_TTL_SECS = 24 * 3600;
+const AVATAR_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+let _avatarBucket = null;
+
+/** A missing phone or avatar_path column: the phase-82 SQL has not been run. */
+function missing82(err) {
+    return !!err && (err.code === 'PGRST204' || err.code === '42703') && /phone|avatar_path/i.test(String(err.message || ''));
+}
+function migration82(res) {
+    return res.status(503).json({
+        error: 'The profile needs the phase-82 database update. Run sql/schema-phase82.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+
+async function ensureAvatarBucket() {
+    if (!supabase.storage) return false;
+    if (!_avatarBucket) {
+        _avatarBucket = (async () => {
+            try {
+                const { data } = await supabase.storage.getBucket(AVATAR_BUCKET);
+                if (data) return true;
+                const { error } = await supabase.storage.createBucket(AVATAR_BUCKET, {
+                    public: false, fileSizeLimit: AVATAR_MAX_BYTES, allowedMimeTypes: Object.keys(AVATAR_TYPES)
+                });
+                if (error && !/exist/i.test(error.message || '')) throw error;
+                return true;
+            } catch (err) {
+                logger.warn('avatar_bucket_unavailable', { message: err.message });
+                _avatarBucket = null;
+                return false;
+            }
+        })();
+    }
+    return _avatarBucket;
+}
+
+/** A day's signed link to a photo, or null. Never fails the caller: a page without the photo shows initials. */
+async function avatarUrl(p) {
+    if (!p || !supabase.storage) return null;
+    try {
+        const { data, error } = await supabase.storage.from(AVATAR_BUCKET).createSignedUrl(p, AVATAR_TTL_SECS);
+        return error ? null : (data && data.signedUrl) || null;
+    } catch { return null; }
+}
+
+async function removeAvatarObject(p) {
+    if (!p || !supabase.storage) return;
+    const { error } = await supabase.storage.from(AVATAR_BUCKET).remove([p]).catch(e => ({ error: e }));
+    if (error) logger.warn('avatar_remove_failed', { message: error.message });
+}
+
+/** Name and phone. Either may be sent alone; an empty phone clears it, an empty name is refused. */
+app.post('/api/me/profile', rateLimit({ windowMs: 60000, max: 20, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+        const b = req.body || {};
+        const patch = {};
+        if (b.full_name !== undefined) {
+            const name = String(b.full_name || '').replace(/\s+/g, ' ').trim();
+            if (!name) return res.status(400).json({ error: 'Type your name.' });
+            if (name.length > 80) return res.status(400).json({ error: 'That name is too long: 80 letters at most.' });
+            patch.full_name = name;
+        }
+        if (b.phone !== undefined) {
+            // Phase 84: a country code and the number, checked as the page checks it ("+880 1712345678")
+            const ph = PHONE.normalize(b.phone);
+            if (!ph.ok) return res.status(400).json({ error: ph.error });
+            patch.phone = ph.value;
+        }
+        if (b.ui_language !== undefined) {
+            if (!UI_LANGUAGES.includes(b.ui_language)) return res.status(400).json({ error: 'That language is not offered.' });
+            patch.ui_language = b.ui_language;
+        }
+        if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change.' });
+        patch.updated_at = new Date().toISOString();
+        const { error } = await supabase.from('app_users').update(patch).eq('id', ctx.user.id);
+        if (error) { if (missing84(error)) return migration84(res); if (missing82(error)) return migration82(res); throw error; }
+        invalidateAuth(ctx.user.id);
+        res.json({
+            success: true, full_name: patch.full_name ?? ctx.profile.full_name ?? null,
+            phone: 'phone' in patch ? patch.phone : (ctx.profile.phone || null),
+            ui_language: patch.ui_language || ctx.profile.ui_language || null
+        });
+    } catch (err) { sendErr(res, err); }
+});
+
+/** The photo. The body is the picture itself (PNG, JPEG or WebP, 2 MB at most); the page makes it small first. */
+app.post('/api/me/avatar',
+    rateLimit({ windowMs: 60000, max: 10, key: bearerId }),
+    S.express.raw({ type: Object.keys(AVATAR_TYPES), limit: AVATAR_MAX_BYTES }),
+    async (req, res) => {
+        try {
+            const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+            if (!('avatar_path' in ctx.profile)) return migration82(res);
+            const buf = Buffer.isBuffer(req.body) ? req.body : null;
+            if (!buf || !buf.length) return res.status(400).json({ error: 'Send a picture: PNG, JPEG or WebP.' });
+            const type = S.sniffImage(buf);
+            if (!AVATAR_TYPES[type]) return res.status(400).json({ error: 'That is not a PNG, JPEG or WebP picture.' });
+            if (!(await ensureAvatarBucket())) return res.status(503).json({ error: 'Photo storage is not available right now. Try again in a minute.' });
+            const p = `${ctx.user.id}/${crypto.randomUUID()}.${AVATAR_TYPES[type]}`;
+            const { error: ue } = await supabase.storage.from(AVATAR_BUCKET).upload(p, buf, { contentType: type, upsert: false, cacheControl: '86400' });
+            if (ue) throw ue;
+            const { error } = await supabase.from('app_users').update({ avatar_path: p, updated_at: new Date().toISOString() }).eq('id', ctx.user.id);
+            if (error) {
+                await removeAvatarObject(p);
+                if (missing82(error)) return migration82(res);
+                throw error;
+            }
+            await removeAvatarObject(ctx.profile.avatar_path);
+            invalidateAuth(ctx.user.id);
+            res.status(201).json({ success: true, avatar_url: await avatarUrl(p) });
+        } catch (err) {
+            if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'That picture is over 2 MB. Use a smaller one.' });
+            sendErr(res, err);
+        }
+    });
+
+app.delete('/api/me/avatar', rateLimit({ windowMs: 60000, max: 10, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res, { allowLapsed: true }); if (!ctx) return;
+        if (!ctx.profile.avatar_path) return res.json({ success: true, avatar_url: null });
+        const { error } = await supabase.from('app_users').update({ avatar_path: null, updated_at: new Date().toISOString() }).eq('id', ctx.user.id);
+        if (error) { if (missing82(error)) return migration82(res); throw error; }
+        await removeAvatarObject(ctx.profile.avatar_path);
+        invalidateAuth(ctx.user.id);
+        res.json({ success: true, avatar_url: null });
+    } catch (err) { sendErr(res, err); }
+});
+
+// ===========================================================================
+// PHASE 84 :: THE OWNER'S SETTINGS, AS IN THE OWNER ASSISTANT
+//
+// The language is kept on the account (app_users.ui_language), through
+// /api/me/profile above. The business: what the owner tells the agency about
+// it, from their Profile (clients.owner_details). The agency's own fields
+// (name, what they do, where, its notes) are not touched here; the agency
+// reads these on the client's Settings tab.
+// ===========================================================================
+const UI_LANGUAGES = ['en', 'bn'];
+const OWNER_DETAIL_LIMITS = { phone: 40, website: 200, address: 200, hours: 300, notes: 1000 };
+
+/** A missing ui_language or owner_details column: the phase-84 SQL has not been run. */
+function missing84(err) {
+    return !!err && (err.code === 'PGRST204' || err.code === '42703') && /ui_language|owner_details/i.test(String(err.message || ''));
+}
+function migration84(res) {
+    return res.status(503).json({
+        error: 'This needs the phase-84 database update. Run sql/schema-phase84.sql in the Supabase SQL editor.',
+        code: 'migration_required'
+    });
+}
+
+/** The stored details: only the known fields, as strings. */
+function ownerDetails(d) {
+    const out = {};
+    for (const k of Object.keys(OWNER_DETAIL_LIMITS)) out[k] = d && typeof d[k] === 'string' ? d[k] : '';
+    return out;
+}
+
+/** The owner's own business: phone, website, address, opening hours, anything the agency should know. */
+app.post('/api/me/business', rateLimit({ windowMs: 60000, max: 20, key: bearerId }), async (req, res) => {
+    try {
+        const ctx = await auth(req, res); if (!ctx) return;
+        if (ctx.profile.role !== 'client') return res.status(403).json({ error: 'Only a business owner has a business here.' });
+        const own = await S.ownClientFor(ctx).catch(() => null);
+        if (!own) return res.status(404).json({ error: 'There is no business on this account.' });
+        const b = req.body && req.body.details;
+        if (!b || typeof b !== 'object' || Array.isArray(b)) return res.status(400).json({ error: 'Send the details.' });
+        const details = {};
+        for (const [k, max] of Object.entries(OWNER_DETAIL_LIMITS)) {
+            // a note and the hours keep their lines; the rest is one line
+            const raw = String(b[k] ?? '');
+            const v = (k === 'notes' || k === 'hours' ? raw.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n') : raw.replace(/\s+/g, ' ')).trim();
+            if (v.length > max) return res.status(400).json({ error: `That is too long: ${max} letters at most.` });
+            details[k] = v;
+        }
+        if (details.phone) {
+            const ph = PHONE.normalize(details.phone);
+            if (!ph.ok) return res.status(400).json({ error: ph.error });
+            details.phone = ph.value;
+        }
+        if (details.website && !/^(https?:\/\/)?[^\s/]+\.[^\s]{2,}/i.test(details.website)) {
+            return res.status(400).json({ error: 'That website does not look right. For example: www.yourbusiness.com' });
+        }
+        const empty = Object.values(details).every(v => !v);
+        const { error } = await supabase.from('clients')
+            .update({ owner_details: empty ? null : { ...details, updated_at: new Date().toISOString() } }).eq('id', own.id);
+        if (error) { if (missing84(error)) return migration84(res); throw error; }
+        res.json({ success: true, details });
+    } catch (err) { sendErr(res, err); }
 });
 
 /**
@@ -882,6 +1097,18 @@ app.patch('/api/admin/settings', async (req, res) => {
                 if (pw && pw.length < 8) return res.status(400).json({ error: 'That app password looks too short — Google shows it as four groups of four characters.' });
                 writes.push({ key: 'mail_app_password', value: pw ? encryptSecret(pw) : '' });
             }
+            // Phase 71: Resend. A key, sealed like the app password; and the address it sends from.
+            if (m.resendKey !== undefined) {
+                const key = String(m.resendKey || '').trim();
+                if (key && !/^re_[A-Za-z0-9_]{10,}$/.test(key)) return res.status(400).json({ error: 'That does not look like a Resend API key. It starts with re_ (resend.com → API Keys).' });
+                writes.push({ key: 'mail_resend_key', value: key ? encryptSecret(key) : '' });
+            }
+            if (m.resendFrom !== undefined) {
+                const rf = String(m.resendFrom || '').trim().toLowerCase().slice(0, 120);
+                if (rf && !EMAIL_RE.test(rf)) return res.status(400).json({ error: 'The Resend sending address does not look like an email address.' });
+                if (/@(gmail|googlemail|yahoo|outlook|hotmail)\./.test(rf)) return res.status(400).json({ error: 'Resend cannot send from a Gmail, Yahoo or Outlook address. Use an address on a domain you verified at resend.com/domains, or leave it empty to use onboarding@resend.dev for testing.' });
+                writes.push({ key: 'mail_resend_from', value: rf });
+            }
             S._mailTransport = null;
         }
         if (!writes.length) return res.status(400).json({ error: 'Nothing to change.' });
@@ -904,12 +1131,12 @@ app.post('/api/admin/mail/test', async (req, res) => {
     try {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
         const s = await mailSettings();
-        if (!s.configured) return res.status(400).json({ ok: false, error: 'Save a Gmail address and an app password first.' });
+        if (!s.configured) return res.status(400).json({ ok: false, error: 'Save a Resend API key, or a Gmail address and an app password, first.' });
         const to = String(req.body?.to || '').trim().toLowerCase() || s.notifyTo;
         const r = await sendMail({
             to,
             subject: 'EdgeLead can send email',
-            text: `This is the test message from EdgeLead, sent from ${s.from} at ${new Date().toISOString()}.\n\n` +
+            text: `This is the test message from EdgeLead, sent ${s.provider === 'resend' ? 'through Resend' : 'through Gmail'} from ${s.sender} at ${new Date().toISOString()}.\n\n` +
                   'If you are reading it, new trials and requests to continue will reach this address, and clients will hear when you activate them.'
         });
         res.status(r.ok ? 200 : 502).json({ ...r, to });
