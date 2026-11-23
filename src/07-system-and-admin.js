@@ -1183,6 +1183,8 @@ app.post('/api/admin/users', async (req, res) => {
         const ctx = await requireAdmin(req, res); if (!ctx) return;
         const { email, password, fullName, role, engines, byoKeyOnly } = req.body;
         if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+        // Phase 87: the owner is the only admin. Teammates are added as Team.
+        if (role === 'admin') return res.status(400).json({ error: 'Only the owner is an admin. Add them as a teammate.' });
 
         const { data: created, error: createErr } = await supabase.auth.admin.createUser({
             email, password, email_confirm: true
@@ -1240,6 +1242,9 @@ app.patch('/api/admin/users/:id', async (req, res) => {
         const target = req.params.id;
 
         const patch = { updated_at: new Date().toISOString() };
+        // Phase 87: the owner is the only admin, and cannot turn themselves off or step down by accident.
+        if (role === 'admin' && target !== ctx.user.id) return res.status(400).json({ error: 'Only the owner is an admin.' });
+        if (target === ctx.user.id && (isActive === false || (role && role !== 'admin'))) return res.status(400).json({ error: 'You cannot turn off or demote your own account.' });
 
         // Was `role === 'admin' ? 'admin' : 'user'`, which quietly promoted a
         // client to employee whenever an admin patched anything else on the

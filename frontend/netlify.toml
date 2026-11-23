@@ -16,11 +16,370 @@
 # (deploy-preview-N--edgeleadwork.netlify.app) are untouched.
 # ---------------------------------------------------------------------------
 
+# The old Netlify address (see DOMAIN below) is matched before everything else.
 [[redirects]]
   from = "https://edgeleadwork.netlify.app/*"
   to = "https://workspace.edgelead.online/:splat"
   status = 301
   force = true
+
+# ---------------------------------------------------------------------------
+# PHASE 87: THE CRM IS THE WHOLE WORKSPACE
+#
+# Every older page is closed for now, for everyone, and opens the CRM instead.
+# The files stay in the repository; to bring a page back, delete its two lines
+# below. 302, not 301, so browsers do not remember the move.
+#   /, index.html and welcome.html serve the CRM in place (200): it has its own
+#   sign-in, and password-reset links from Supabase land on welcome.html.
+#   privacy, terms and data-deletion stay public for Meta's review.
+# These come first: Netlify uses the first rule that matches.
+# ---------------------------------------------------------------------------
+[[redirects]]
+  from = "https://ai.edgelead.online/*"
+  to = "https://workspace.edgelead.online/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/"
+  to = "/crm.html"
+  status = 200
+  force = true
+[[redirects]]
+  from = "/index.html"
+  to = "/crm.html"
+  status = 200
+  force = true
+[[redirects]]
+  from = "/index"
+  to = "/crm.html"
+  status = 200
+  force = true
+[[redirects]]
+  from = "/welcome.html"
+  to = "/crm.html"
+  status = 200
+  force = true
+[[redirects]]
+  from = "/welcome"
+  to = "/crm.html"
+  status = 200
+  force = true
+[[redirects]]
+  from = "/admin.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/admin"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/assistant.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/assistant"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/billing.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/billing"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-assistant.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-assistant"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-community.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-community"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-leads.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client-leads"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/client"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/clients.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/clients"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/content-plan.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/content-plan"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/creators.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/creators"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-advisor.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-advisor"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-audit.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-audit"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-communities.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-communities"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-leads.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-leads"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-report.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/fb-report"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/home.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/home"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/ig-competitors.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/ig-competitors"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/ig-report.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/ig-report"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/invoice.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/invoice"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/leads.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/leads"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/monthly.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/monthly"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/my-tasks.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/my-tasks"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/pipeline.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/pipeline"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/report.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/report"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/reviews.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/reviews"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/schedules.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/schedules"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/share.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/share"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/signup.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/signup"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/site.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/site"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/websites.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/websites"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/workspace.html"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/workspace"
+  to = "/crm.html"
+  status = 302
+  force = true
+[[redirects]]
+  from = "/ai/*"
+  to = "/crm.html"
+  status = 302
+  force = true
+
 
 # Business owners use ai.edgelead.online: its front page is Edge Meta AI (ai/),
 # served in place so the address stays ai.edgelead.online/. ai/index.html sets
@@ -101,9 +460,3 @@
   [headers.values]
     Cache-Control = "public, max-age=604800"
 
-# Phase 87: Home became the CRM. Old bookmarks to Home land on the CRM.
-[[redirects]]
-  from = "/home.html"
-  to = "/crm.html"
-  status = 301
-  force = true

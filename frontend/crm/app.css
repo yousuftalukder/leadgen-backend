@@ -405,3 +405,24 @@ a{color:inherit}
 .infl div{padding:12px 16px;border-left:1px solid var(--line)}.infl div:first-child{border-left:0}
 .infl b{display:block;font-family:var(--mono);font-weight:500;font-size:20px}.infl small{color:var(--muted);font-size:12px}
 @media (max-width:860px){.mapcard .map{height:460px}.infl{grid-template-columns:1fr 1fr}.infl div:nth-child(3){border-left:0}}
+
+/* phase 87b: admin and sign-in */
+.opt.person.off .t b,.opt.person.off .ava{opacity:.5}
+.acts2{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.btn.danger{color:var(--bad)}
+.pill{font-size:11px;padding:1px 7px;border-radius:99px;background:var(--gold-soft);color:var(--ink);font-weight:500;vertical-align:1px}
+.addp{display:grid;gap:10px;padding:14px 16px 16px;border-top:1px solid var(--line)}
+.addp .bar{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.grid3 .inline{display:flex;gap:6px}.grid3 .inline input{min-width:0}
+@media (max-width:760px){.grid3{grid-template-columns:1fr}.opt.person{flex-wrap:wrap}.acts2{width:100%;justify-content:flex-start}}
+.auth{min-height:100vh;min-height:100dvh;display:grid;place-content:center;gap:16px;padding:24px 16px;background:var(--bg)}
+.authcard{width:min(400px,calc(100vw - 32px));padding:28px;display:grid;gap:14px}
+.authcard .brand{padding:0;margin-bottom:6px}
+.authcard h1{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;font-size:34px;margin:0;letter-spacing:-.01em}
+.authcard .sub{margin:-6px 0 4px}
+.authcard form{display:grid;gap:12px}
+.btn.wide{width:100%;justify-content:center;padding:11px}
+.linkbtn{border:0;background:none;color:var(--muted);font-size:13px;text-decoration:underline;text-underline-offset:3px;justify-self:start;padding:0;cursor:pointer}
+.authcard .err:empty{display:none}
+.authfoot{margin:0;text-align:center;color:var(--dim);font-size:12px}
