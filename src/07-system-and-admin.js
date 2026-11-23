@@ -482,6 +482,8 @@ app.get('/api/me', async (req, res) => {
             }
         }
     }
+    // Phase 87: which social media tools are on, so a page whose tool is off can send staff to the CRM.
+    if (body.role !== 'client' && S.CRM_TOOLS && S.toolOn) body.tools = Object.fromEntries(S.CRM_TOOLS.map(t => [t.key, S.toolOn(t.key)]));
 
     res.json(body);
 });

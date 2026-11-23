@@ -100,3 +100,10 @@
   for = "/icons/*"
   [headers.values]
     Cache-Control = "public, max-age=604800"
+
+# Phase 87: Home became the CRM. Old bookmarks to Home land on the CRM.
+[[redirects]]
+  from = "/home.html"
+  to = "/crm.html"
+  status = 301
+  force = true

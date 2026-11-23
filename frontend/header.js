@@ -123,8 +123,9 @@
         { href: 'billing.html',   icon: 'receipt', label: 'Billing',   engine: null },     // phase 60: agreements and invoices
         { href: 'schedules.html', icon: 'clock',   label: 'Schedules', engine: null },
         { group: 'Outreach' },
-        { href: 'leads.html',     icon: 'leads',   label: 'Leads',     engine: 'leadgen' },
-        { href: 'pipeline.html',  icon: 'target',  label: 'Pipeline',  engine: 'leadgen', count: 'followups' },
+        { href: 'crm.html#leads',       icon: 'leads',  label: 'Leads',       engine: null },   // phase 87: the CRM's leads
+        { href: 'crm.html#pipeline',    icon: 'target', label: 'Pipeline',    engine: null },
+        { href: 'crm.html#influencers', icon: 'globe',  label: 'Influencers', engine: null },
         { group: 'Admin' },
         { href: 'admin.html',     icon: 'shield',  label: 'Team & settings', adminOnly: true },
         { href: 'site.html',      icon: 'link',    label: 'Our website', adminOnly: true }   // phase 66: publish to the public website
@@ -803,6 +804,20 @@
                 // which one. Everyone else is asked on every page where work starts.
                 if (me.role !== 'client' && WORK_PAGES.includes(currentPage(page))) mountWorkForHost();
                 EL._mountClientPicker().catch(() => {});
+            }
+
+            // Phase 87: the CRM replaced the old outreach pages. A page whose social media tool is
+            // switched off (Settings in the CRM) sends the team to the CRM instead of a page that cannot work.
+            const PAGE_TOOL = {
+                'index.html': 'leadfinder', 'leads.html': 'leadfinder', 'pipeline.html': 'leadfinder', 'reviews.html': 'leadfinder',
+                'ig-report.html': 'reports', 'ig-competitors.html': 'reports', 'schedules.html': 'reports', 'monthly.html': 'reports',
+                'fb-report.html': 'facebook', 'fb-communities.html': 'facebook', 'fb-audit.html': 'facebook', 'fb-leads.html': 'facebook', 'fb-advisor.html': 'facebook',
+                'content-plan.html': 'content', 'assistant.html': 'metaai'
+            };
+            const offTool = PAGE_TOOL[currentPage(page)];
+            if (me.role !== 'client' && offTool && me.tools && me.tools[offTool] === false) {
+                window.location.replace('crm.html' + (currentPage(page) === 'pipeline.html' ? '#pipeline' : ''));
+                return new Promise(() => {});
             }
 
             const isAdmin = me.role === 'admin';

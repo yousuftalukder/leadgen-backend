@@ -212,7 +212,7 @@ test('the rail has a Clients section and an Outreach section holding Leads and P
     const nav = header.slice(header.indexOf('const NAV = ['), header.indexOf('];', header.indexOf('const NAV = [')));
     const at = s => nav.indexOf(s);
     assert.ok(at("{ group: 'Clients' }") < at("'clients.html'"));
-    assert.ok(at("{ group: 'Outreach' }") < at("'leads.html'") && at("'leads.html'") < at("'pipeline.html'"));
+    assert.ok(at("{ group: 'Outreach' }") < at("'crm.html#leads'") && at("'crm.html#leads'") < at("'crm.html#pipeline'"))   // phase 87: the CRM's Leads and Pipeline;
     assert.ok(at("'schedules.html'") < at("{ group: 'Outreach' }"));
 });
 
