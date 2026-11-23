@@ -447,11 +447,14 @@ function newLead() {
 }
 function importCsv() {
     if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-    modal('Import leads from a CSV', `<div class="field"><label for="ic-f">CSV file</label><input id="ic-f" type="file" accept=".csv,text/csv"><small>Columns are matched by name: Name, Company, Email, Phone, Website, City, Country, Source, Value. Others are ignored.</small></div>
-      <div class="field"><label for="ic-s">Source for rows without one</label><select id="ic-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div><div id="ic-out"></div>`, 'Import', async () => {
+    modal('Import leads from a CSV', `<div class="field"><label for="ic-f">CSV file</label><input id="ic-f" type="file" accept=".csv,text/csv"><small>Columns are matched by name: Name, Company, Email, Phone, Website, City, Country, Value. Others are ignored.</small></div>
+      <div class="grid2"><div class="field"><label for="ic-s">Category for these leads</label><select id="ic-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div>
+        <div class="field"><label for="ic-o">Owner</label><select id="ic-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
+      ${fieldHtml('ic-t', 'Tag (optional)', 'maxlength="40" placeholder="e.g. Dhaka salons, November"', 'Added to every lead in this file, so you can find the batch later.')}
+      <label class="check"><input type="checkbox" id="ic-u"> The file has its own Source column: use it where a row has one</label><div id="ic-out"></div>`, 'Import', async () => {
         const file = $('#ic-f').files[0]; if (!file) throw new Error('Choose a CSV file first.');
         const csv = await file.text();
-        const r = await api('/api/crm/leads/import', { method: 'POST', body: { csv, source: v('ic-s') } });
+        const r = await api('/api/crm/leads/import', { method: 'POST', body: { csv, source: v('ic-s'), owner_id: v('ic-o'), tag: v('ic-t').trim(), useFileSource: $('#ic-u').checked } });
         st.leads = null;
         $('#ic-out').innerHTML = `<div class="note"><b>${r.added} added.</b> ${r.duplicates.length ? r.duplicates.length + ' already in the CRM were skipped. ' : ''}${r.skipped.length ? r.skipped.length + ' rows could not be used: ' + r.skipped.slice(0, 5).map(s => 'row ' + s.row + ' (' + esc(s.reason) + ')').join('; ') : ''}</div>`;
         $('#mok').textContent = 'Done'; $('#mok').onclick = () => { $('#layer').innerHTML = ''; render(); };

@@ -426,3 +426,4 @@ a{color:inherit}
 .linkbtn{border:0;background:none;color:var(--muted);font-size:13px;text-decoration:underline;text-underline-offset:3px;justify-self:start;padding:0;cursor:pointer}
 .authcard .err:empty{display:none}
 .authfoot{margin:0;text-align:center;color:var(--dim);font-size:12px}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--muted)}.check input{margin-top:2px}

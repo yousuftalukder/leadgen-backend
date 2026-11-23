@@ -89,6 +89,11 @@ test('CSV columns are matched by their usual names; bad rows are reported, not i
     assert.strictEqual(skipped.length, 1);
     assert.strictEqual(skipped[0].row, 3);
 });
+test('the category picked for an import goes on every row unless the file’s own Source column is asked for', () => {
+    const rows = S.parseCsv('Name,Source\nA,Google Ads\nB,\n');
+    assert.deepStrictEqual(S.csvToLeads(rows, 'seo', { useFileSource: false }).leads.map(l => l.source), ['seo', 'seo']);
+    assert.deepStrictEqual(S.csvToLeads(rows, 'seo', { useFileSource: true }).leads.map(l => l.source), ['ads_google', 'seo']);
+});
 test('a CSV with neither a name nor a company column is refused', () => {
     refuses(() => S.csvToLeads([['Email'], ['a@b.co']]), /Name or Company/);
 });

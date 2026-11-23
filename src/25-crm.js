@@ -148,7 +148,7 @@ const CSV_FIELDS = {
     source: ['source', 'lead source'], value: ['value', 'deal value', 'budget'], next_step: ['next step', 'note', 'notes']
 };
 /** Map CSV rows (first row = headers) to lead bodies; unknown columns are ignored, the source falls back. */
-function csvToLeads(rows, fallbackSource = 'other') {
+function csvToLeads(rows, fallbackSource = 'other', { useFileSource = true } = {}) {
     if (!rows.length) return { leads: [], skipped: [] };
     const head = rows[0].map(h => String(h).trim().toLowerCase());
     const col = {};
@@ -161,7 +161,8 @@ function csvToLeads(rows, fallbackSource = 'other') {
         const body = {};
         for (const f of Object.keys(CSV_FIELDS)) { const v = get(f); if (v !== undefined && String(v).trim() !== '') body[f] = String(v).trim(); }
         if (!body.full_name) body.full_name = body.company;
-        body.source = srcByLabel[String(body.source || '').toLowerCase()] || fallbackSource;
+        // The category chosen for the import wins, unless the file's own Source column was asked for (and the row has one).
+        body.source = (useFileSource && srcByLabel[String(body.source || '').toLowerCase()]) || fallbackSource;
         try { leads.push(cleanLeadBody(body)); } catch (e) { skipped.push({ row: n + 2, reason: e.message }); }
     });
     return { leads, skipped };
@@ -447,7 +448,10 @@ app.post('/api/crm/leads/:id/convert', async (req, res) => {
 app.post('/api/crm/leads/import', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        const { leads, skipped } = csvToLeads(parseCsv(req.body && req.body.csv), req.body && sourceInfo(req.body.source) ? req.body.source : 'other');
+        const b = req.body || {};
+        const { leads, skipped } = csvToLeads(parseCsv(b.csv), sourceInfo(b.source) ? b.source : 'other', { useFileSource: b.useFileSource === true });
+        const owner = S.UUID_RE && S.UUID_RE.test(String(b.owner_id || '')) ? b.owner_id : ctx.user.id;
+        const tag = str(b.tag, 40);
         if (leads.length > 2000) throw bad('Import up to 2,000 rows at a time.');
         const emails = leads.map(l => l.email_norm).filter(Boolean), phones = leads.map(l => l.phone_norm).filter(Boolean);
         const existing = [];
@@ -456,7 +460,7 @@ app.post('/api/crm/leads/import', async (req, res) => {
         const fresh = [], dupes = [];
         for (const l of leads) { const d = findDuplicate(l, existing); if (d) dupes.push({ name: l.full_name, matches: d.full_name }); else { fresh.push(l); existing.push({ ...l, id: 'new' }); } }
         for (let i = 0; i < fresh.length; i += 200) {
-            const { error } = await supabase.from('crm_leads').insert(fresh.slice(i, i + 200).map(l => ({ ...l, owner_id: ctx.user.id, created_by: ctx.user.id, stage: 'new', tags: [...(l.tags || []), 'Imported'] })));
+            const { error } = await supabase.from('crm_leads').insert(fresh.slice(i, i + 200).map(l => ({ ...l, owner_id: owner, created_by: ctx.user.id, stage: 'new', tags: [...new Set([...(l.tags || []), 'Imported', ...(tag ? [tag] : [])])] })));
             if (error) throw error;
         }
         res.json({ added: fresh.length, duplicates: dupes, skipped });
