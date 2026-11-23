@@ -323,14 +323,24 @@ console.log('\npages: shell, styles and auth on every one');
     // anyone without a session to the login page. signup.html used to pass
     // this check only because a comment mentioned EL.init.
     const PRE_SESSION = new Set(['signup.html', 'welcome.html']);
+    // The CRM (phase 87) is its own light app: crm/app.css and crm/app.js, no header.js,
+    // so it loads fast. It must still use the supabase client and send anyone without a
+    // session to the login page — checked separately below.
+    const STANDALONE = new Set(['crm.html']);
     const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
 
     for (const f of PAGES) {
         const src = fs.readFileSync(path.join(FRONT_DIR, f), 'utf8');
-        if (!/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
-        if (!STATIC.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
+        if (STANDALONE.has(f)) {
+            const js = fs.readFileSync(path.join(FRONT_DIR, 'crm', 'app.js'), 'utf8');
+            if (!/href=["']crm\/app\.css["']/.test(src)) noCss.push(f);
+            if (!/src=["']crm\/app\.js["']/.test(src)) noHeader.push(f);
+            if (!/getSession\(\)[\s\S]{0,120}location\.href = 'index\.html'/.test(js)) noInit.push(f);
+        }
+        if (!STANDALONE.has(f) && !/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
+        if (!STATIC.has(f) && !STANDALONE.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
         if (!STATIC.has(f) && !/supabase-js/.test(src)) noSupabase.push(f);
-        if (!PUBLIC.has(f) && !STATIC.has(f) && !PRE_SESSION.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
+        if (!PUBLIC.has(f) && !STATIC.has(f) && !PRE_SESSION.has(f) && !STANDALONE.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
         for (const m of src.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
             try { new Function(m[1]); } catch (e) { badParse.push(`${f}: ${e.message}`); }
         }

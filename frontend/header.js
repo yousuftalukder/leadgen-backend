@@ -115,7 +115,7 @@
     // Phase 70: the rail says what each page is for. Clients are the accounts the agency runs;
     // Outreach is finding new customers, where the scraping tools earn their keep.
     const NAV = [
-        { href: 'home.html',      icon: 'home',    label: 'Home',      engine: null },
+        { href: 'crm.html',       icon: 'home',    label: 'CRM',       engine: null },   // phase 87: the CRM replaces Home
         { href: 'my-tasks.html',  icon: 'check',   label: 'My tasks',  engine: null, count: 'tasks' },
         { group: 'Clients' },
         { href: 'clients.html',   icon: 'clients', label: 'Clients',   engine: null, count: 'clients' },
@@ -1295,7 +1295,7 @@
         bar.id = 'el-sidebar';
         bar.innerHTML = `
             <div class="el-side-top">
-                <a class="el-logo" href="${isClient ? 'client.html' : 'home.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png?v=2" alt="" width="27" height="32"><span class="el-logo-text"><span>EdgeLead</span>${isClient ? '' : '<small class="el-logo-sub">Workspace</small>'}</span></a>
+                <a class="el-logo" href="${isClient ? 'client.html' : 'crm.html'}" aria-label="EdgeLead home"><img class="el-logo-mark" src="icons/logo-mark.png?v=2" alt="" width="27" height="32"><span class="el-logo-text"><span>EdgeLead</span>${isClient ? '' : '<small class="el-logo-sub">Workspace</small>'}</span></a>
                 ${isClient || !me ? '' : `
                 <button class="el-newwork" type="button" id="el-newwork">${icon('plus')}<span>New work</span></button>
                 <div class="el-find" role="search">
