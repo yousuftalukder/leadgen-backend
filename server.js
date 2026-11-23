@@ -84,6 +84,7 @@ require('./src/22-client-workbook');
 require('./src/23-ad-brief');
 require('./src/24-website');
 require('./src/25-crm');
+require('./src/25-phone');
 require('./src/26-runtime');
 const {
     ASSISTANT_TOOLS, CLIENT_PILLARS, CLIENT_REPORT_TITLES, DEMAND_INTENT, JOB_QUOTA_METRIC, JOB_WORKERS,

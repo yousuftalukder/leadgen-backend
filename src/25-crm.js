@@ -41,7 +41,7 @@ const CRM_STAGES = [
     { key: 'new', label: 'New' }, { key: 'contacted', label: 'Contacted' }, { key: 'replied', label: 'Replied' },
     { key: 'meeting', label: 'Meeting' }, { key: 'proposal', label: 'Proposal' }, { key: 'won', label: 'Won' }, { key: 'lost', label: 'Lost' }
 ];
-const CRM_ACTIVITY_TYPES = ['note', 'email_out', 'email_in', 'call', 'whatsapp', 'meeting', 'stage', 'task', 'system'];
+const CRM_ACTIVITY_TYPES = ['note', 'email_out', 'email_in', 'call', 'whatsapp', 'meeting', 'stage', 'task', 'system', 'sms'];
 const LOGGABLE = ['note', 'email_out', 'email_in', 'call', 'whatsapp', 'meeting'];
 const CR_STAGES = ['prospect', 'talking', 'partner'];
 /** Rough rates into taka for adding mixed currencies on the overview. Shown as "≈". */
@@ -168,6 +168,30 @@ function csvToLeads(rows, fallbackSource = 'other', { useFileSource = true } = {
     return { leads, skipped };
 }
 
+/** Phase 88: what kind of job a won lead is: the service sold when it was converted, else its source's department. */
+const JOB_KINDS = [['website', 'Websites'], ['seo', 'SEO'], ['marketing', 'Marketing & ads'], ['influencer', 'Influencer campaigns']];
+function jobKind(lead) {
+    const s = String(lead.service || '').toLowerCase();
+    if (/web|site|landing|shop|store/.test(s)) return 'website';
+    if (/seo|search engine|google business/.test(s)) return 'seo';
+    if (/influenc|creator/.test(s)) return 'influencer';
+    if (s) return 'marketing';
+    const d = departmentOf(lead.source);
+    return d === 'website' || d === 'seo' || d === 'influencer' ? d : 'marketing';
+}
+/** Won jobs by kind: all time and in the period, with their value in taka. */
+function jobsWon(leads, since, until = new Date()) {
+    const t0 = new Date(since).getTime(), t1 = new Date(until).getTime();
+    const out = Object.fromEntries(JOB_KINDS.map(([k, label]) => [k, { key: k, label, count: 0, value: 0, periodCount: 0, periodValue: 0 }]));
+    for (const l of leads) {
+        if (l.stage !== 'won') continue;
+        const j = out[jobKind(l)], v = toBdt(l.value, l.currency), t = new Date(l.stage_at || l.updated_at || l.created_at).getTime();
+        j.count++; j.value += v;
+        if (t >= t0 && t <= t1) { j.periodCount++; j.periodValue += v; }
+    }
+    return JOB_KINDS.map(([k]) => out[k]);
+}
+
 function toBdt(value, currency) { return (Number(value) || 0) * (TO_BDT[currency] || 1); }
 
 /**
@@ -241,6 +265,7 @@ function cleanInfluencerBody(b, { partial = false } = {}) {
     return out;
 }
 
+Object.assign(S, { jobKind: (...a) => jobKind(...a), jobsWon: (...a) => jobsWon(...a) });
 Object.assign(S, { CRM_SOURCES, CRM_STAGES, CRM_DEPTS, CRM_TOOLS: TOOLS, normEmail, normPhone, cleanLeadBody, findDuplicate, parseCsv, csvToLeads,
     crmOverview, toolForPath, parseToolSwitch, cleanInfluencerBody, departmentOf, toBdt });
 
@@ -311,6 +336,7 @@ async function logActivity(lead_id, type, body, meta, actor_id) {
     await supabase.from('crm_activities').insert({ lead_id, type, body: body || null, meta: meta || {}, actor_id: actor_id || null });
     await supabase.from('crm_leads').update({ last_activity_at: new Date().toISOString() }).eq('id', lead_id);
 }
+S.logActivityExternal = (...a) => logActivity(...a).catch(e => logger.warn('crm_activity_failed', { message: e.message }));   // phase 88: the phone files calls and texts on the lead
 const LEAD_COLS = 'id, full_name, title, company, website, email, phone, whatsapp, city, country, timezone, source, source_detail, stage, lost_reason, value, currency, score, tags, next_step, next_step_at, last_activity_at, unsubscribed, owner_id, client_id, created_at, updated_at, stage_at';
 
 app.get('/api/crm/meta', async (req, res) => {
@@ -438,7 +464,9 @@ app.post('/api/crm/leads/:id/convert', async (req, res) => {
         }).select('id, name').single();
         if (error) throw error;
         const now = new Date().toISOString();
-        await supabase.from('crm_leads').update({ stage: 'won', stage_at: now, client_id: client.id, value, next_step: null, next_step_at: null, updated_at: now }).eq('id', lead.id);
+        const won = { stage: 'won', stage_at: now, client_id: client.id, value, service: service || null, next_step: null, next_step_at: null, updated_at: now };
+        const { error: wErr } = await supabase.from('crm_leads').update(won).eq('id', lead.id);
+        if (wErr) { delete won.service; const { error: e2 } = await supabase.from('crm_leads').update(won).eq('id', lead.id); if (e2) throw e2; }   // before phase 88's SQL there is no service column
         await logActivity(lead.id, 'stage', null, { from: lead.stage, to: 'won' }, ctx.user.id);
         await logActivity(lead.id, 'system', `Became a client: ${client.name}`, { client_id: client.id, service }, ctx.user.id);
         res.json({ client, lead_id: lead.id });
@@ -502,7 +530,7 @@ app.get('/api/crm/overview', async (req, res) => {
         const days = [7, 30, 90].includes(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 30;
         const since = new Date(Date.now() - days * 864e5);
         const [l, a, nx, cr, posts] = await Promise.all([
-            supabase.from('crm_leads').select('id, source, stage, value, currency, owner_id, created_at, stage_at').limit(20000),
+            supabase.from('crm_leads').select('*').limit(20000),   // '*' so the overview still works before phase 88 adds service
             supabase.from('crm_activities').select('lead_id, type, actor_id, at, meta').gte('at', since.toISOString()).in('type', ['email_out', 'email_in', 'call', 'meeting', 'stage']).limit(50000),
             supabase.from('crm_leads').select('id, full_name, company, next_step, next_step_at, owner_id').not('next_step_at', 'is', null).not('stage', 'in', '(won,lost)').order('next_step_at', { ascending: true }).limit(8),
             supabase.from('crm_influencers').select('id, stage').limit(20000),
@@ -514,6 +542,7 @@ app.get('/api/crm/overview', async (req, res) => {
         o.influencers = { total: crs.length, partners: crs.filter(x => x.stage === 'partner').length, talking: crs.filter(x => x.stage === 'talking').length,
                           prospects: crs.filter(x => x.stage === 'prospect').length, posts: (posts.data || []).length, views: (posts.data || []).reduce((s, p) => s + (p.views || 0), 0) };
         o.upNext = nx.data || []; o.days = days;
+        o.jobs = jobsWon(l.data || [], since);
         res.json(o);
     } catch (e) { fail(res, e, 'crm_overview'); }
 });

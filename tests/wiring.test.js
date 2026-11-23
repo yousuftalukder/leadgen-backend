@@ -326,7 +326,7 @@ console.log('\npages: shell, styles and auth on every one');
     // The CRM (phase 87) is its own light app: crm/app.css and crm/app.js, no header.js,
     // so it loads fast. It must still use the supabase client and send anyone without a
     // session to its own sign-in screen — checked separately below.
-    const STANDALONE = new Set(['crm.html']);
+    const STANDALONE = new Set(['crm.html', 'phone.html']);   // phase 88: the Phone is the CRM's phone view on its own
     const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
 
     for (const f of PAGES) {
@@ -365,7 +365,9 @@ console.log('\nnavigation: every destination exists, every page is reachable');
 
     // Pages reachable some other way (a link, a redirect, a share URL) are
     // fine; pages reachable NO way are the problem.
-    const allSrc = PAGES.map(f => fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')).join('\n') + HEADER;
+    // The CRM's pages are built by its scripts (phase 87), so their links count too.
+    const CRM_JS = ['app.js', 'phone.js'].map(f => fs.readFileSync(path.join(FRONT_DIR, 'crm', f), 'utf8')).join('\n');
+    const allSrc = PAGES.map(f => fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')).join('\n') + HEADER + CRM_JS;
     const orphans = PAGES.filter(f =>
         f !== 'index.html' &&
         !navHrefs.includes(f) &&
