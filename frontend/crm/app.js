@@ -9,6 +9,8 @@ const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
 const BACKEND = 'https://leadgen-backend-1-mgzc.onrender.com';
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/positron';
+// A password reset or invite link lands here with its token in the address (welcome.html is served by this page).
+const AUTH_LINK = (location.hash.match(/type=(recovery|invite|signup)/) || [])[1] || null;
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ------------------------------------------------------------------ helpers
@@ -47,7 +49,7 @@ const ICONS = {
     settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>', mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
     phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/>', note: '<path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h5"/>', reply: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/>',
     stage: '<path d="M4 12h16M14 6l6 6-6 6"/>', wa: '<path d="M4 20l1.3-4A8 8 0 1 1 8 18.7z"/>', client: '<path d="M20 6 9 17l-5-5"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>', plus: '<path d="M12 5v14M5 12h14"/>',
-    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'
+    shield: '<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'
 };
 const ic = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
 function toast(t, bad) { const el = document.createElement('div'); el.className = 'toast'; el.setAttribute('role', 'status'); if (bad) el.style.background = 'var(--bad)'; el.textContent = t; document.body.appendChild(el); setTimeout(() => el.remove(), 3200); }
@@ -55,7 +57,7 @@ function toast(t, bad) { const el = document.createElement('div'); el.className 
 // ------------------------------------------------------------------ data
 async function api(path, { method = 'GET', body } = {}) {
     const { data } = await sb.auth.getSession();
-    if (!data.session) { location.href = 'index.html'; throw new Error('Signed out'); }
+    if (!data.session) { signIn(); throw new Error('Signed out'); }
     const r = await fetch(BACKEND + path, { method, headers: { Authorization: 'Bearer ' + data.session.access_token, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { const e = new Error(j.error || `The server answered ${r.status}.`); e.status = r.status; e.data = j; throw e; }
@@ -70,7 +72,7 @@ async function leads(force) { if (!st.leads || force) st.leads = (await api('/ap
 const isAdmin = () => st.meta && st.meta.me.role === 'admin';
 
 // ------------------------------------------------------------------ shell
-const NAV = [['overview', 'Overview', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['sequences', 'Sequences', 'seq'], ['influencers', 'Influencers', 'pin'], ['clients', 'Clients', 'clients'], ['settings', 'Settings', 'settings']];
+const NAV = [['overview', 'Overview', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['sequences', 'Sequences', 'seq'], ['influencers', 'Influencers', 'pin'], ['clients', 'Clients', 'clients'], ['settings', 'Settings', 'settings'], ['admin', 'Admin', 'shield']];
 let route = 'overview';
 function shell() {
     const open = (st.leads || []).filter(l => !['won', 'lost'].includes(l.stage)).length;
@@ -78,19 +80,18 @@ function shell() {
     const toolsOn = st.meta ? Object.values(st.meta.tools || {}).filter(Boolean).length : 0;
     $('#rail').innerHTML = `<div class="brand"><b>E</b>EdgeLead</div>` +
         NAV.slice(0, 5).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}" ${route === k ? 'aria-current="page"' : ''}>${ic(i)}${l}${k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${open}</span>` : ''}</a>`).join('') +
-        `<div class="grp">Business</div>` + NAV.slice(5).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
-        (toolsOn ? `<div class="grp">Tools</div><a href="home.html">${ic('settings')}Social tools<span class="ct">${toolsOn} on</span></a>` : '') +
-        `<div class="foot"><span>${esc(teamName(st.meta.me.id))} · ${isAdmin() ? 'Admin' : 'Team'}</span><button class="btn sm ghost" id="theme" type="button">Light / dark</button><button class="btn sm ghost" id="signout" type="button">Sign out</button></div>`;
+        `<div class="grp">Business</div>` + NAV.slice(5).filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
+        `<div class="foot"><span>${esc(teamName(st.meta.me.id))} · ${isAdmin() ? 'Owner' : 'Team'}</span><button class="btn sm ghost" id="theme" type="button">Light / dark</button><button class="btn sm ghost" id="signout" type="button">Sign out</button></div>`;
     $('#tabbar').innerHTML = NAV.filter(n => ['overview', 'leads', 'pipeline', 'influencers', 'settings'].includes(n[0])).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
 }
 async function render() {
     route = (location.hash || '#overview').slice(1).split('?')[0];
-    if (!NAV.some(n => n[0] === route)) route = 'overview';
+    if (!NAV.some(n => n[0] === route) || (route === 'admin' && !isAdmin())) route = 'overview';
     if (route !== 'influencers' && mapObj) { mapObj.remove(); mapObj = null; }
     shell();
     const v = $('#view');
     try {
-        const html = await ({ overview: vOverview, leads: vLeads, pipeline: vPipeline, sequences: vSequences, influencers: vInfluencers, clients: vClients, settings: vSettings }[route])();
+        const html = await ({ overview: vOverview, leads: vLeads, pipeline: vPipeline, sequences: vSequences, influencers: vInfluencers, clients: vClients, settings: vSettings, admin: vAdmin }[route])();
         v.innerHTML = html; shell();
         if (route === 'influencers') mapInit();
     } catch (e) { v.innerHTML = `<div class="empty err">Could not load this page: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; }
@@ -282,29 +283,86 @@ async function vClients() {
     const [{ clients }] = await Promise.all([api('/api/clients'), leads(), net()]);
     const fromLead = id => st.leads.find(l => l.client_id === id);
     const loc = new Map(st.net.clients.map(c => [c.id, c]));
-    return `<div class="head"><div><h1>Clients</h1><p class="sub">Businesses we work for. A converted lead arrives here with its history.</p></div><div class="sp"></div><a class="btn" href="clients.html">Full client tools</a></div>
+    return `<div class="head"><div><h1>Clients</h1><p class="sub">Businesses we work for. A converted lead arrives here with its history.</p></div></div>
       <section class="card">${(clients || []).filter(c => !c.archived).map(c => { const l = fromLead(c.id), m = loc.get(c.id);
         return `<div class="row" style="cursor:default"><span class="kind">${ic('clients')}</span><div class="t"><b>${esc(c.name)}</b><span>${esc([c.location || [m && m.city, m && m.country].filter(Boolean).join(', '), l ? 'from a ' + srcOf(l.source).label + ' lead' : null].filter(Boolean).join(' · ') || 'No location yet')}</span></div>
-          ${l ? `<button class="btn sm ghost" type="button" data-open="${l.id}">Lead history</button>` : ''}<button class="btn sm" type="button" data-pinclient="${c.id}" data-name="${esc(c.name)}">${m && m.lat != null ? 'Move pin' : 'Pin on map'}</button><a class="btn sm" href="workspace.html?client=${encodeURIComponent(c.id)}">Open</a></div>`; }).join('') || '<div class="empty">No clients yet.</div>'}</section>`;
+          ${l ? `<button class="btn sm ghost" type="button" data-open="${l.id}">Lead history</button>` : ''}<button class="btn sm" type="button" data-pinclient="${c.id}" data-name="${esc(c.name)}">${m && m.lat != null ? 'Move pin' : 'Pin on map'}</button></div>`; }).join('') || '<div class="empty">No clients yet.</div>'}</section>`;
 }
 
 // ------------------------------------------------------------------ settings
 async function vSettings() {
-    const tools = isAdmin() ? (await api('/api/admin/tools')).tools : null;
     const tree = st.meta.sources;
-    return `<div class="head"><div><h1>Settings</h1><p class="sub">${isAdmin() ? 'You are an admin.' : 'Only admins can change these.'}</p></div></div>
+    return `<div class="head"><div><h1>Settings</h1><p class="sub">How the CRM is set up.${isAdmin() ? ' People and tools are in Admin.' : ''}</p></div></div>
       <div class="set">
-        ${tools ? `<section class="card"><div class="card-h"><h2>Social media tools</h2><span>${tools.filter(t => t.on).length ? tools.filter(t => t.on).length + ' on' : 'All off'}</span></div>
-          <p class="note" style="margin:0 16px 8px">While a tool is off its pages stop working and nothing runs for it in the background: no Apify runs, no scheduled reports, no Meta sync. Turning Edge Meta AI or reports on or off restarts the server, about a minute.</p>
-          ${tools.map(t => `<div class="opt"><div class="t"><b>${esc(t.label)}</b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="${esc(t.label)}"><i></i></label></div>`).join('')}</section>` : ''}
         <section class="card"><div class="card-h"><h2>Lead sources</h2><span>Every lead has one</span></div><div class="tree">
           ${tree.filter(s => s.dept !== 'marketing').slice(0, 2).map(s => `<div>${srcChip(s.key)}</div>`).join('')}<div><span class="src"><b>Marketing</b></span></div><div class="l2"><span class="src"><b>Ads</b></span></div>
           ${['ads_google', 'ads_meta'].map(k => `<div class="l3">${srcChip(k)}</div>`).join('')}${['social', 'email'].map(k => `<div class="l2">${srcChip(k)}</div>`).join('')}${['influencer', 'referral', 'other'].map(k => `<div>${srcChip(k)}</div>`).join('')}</div></section>
-        <section class="card"><div class="card-h"><h2>Team</h2><span>${st.meta.team.length} people</span></div>${st.meta.team.map(m => `<div class="opt"><span class="ava">${initials(m.name)}</span><div class="t"><b>${esc(m.name)}</b><span>${m.role === 'admin' ? 'Admin' : 'Team'}</span></div></div>`).join('')}
-          ${isAdmin() ? '<div class="opt"><div class="t"><span>Add or remove people on the team page.</span></div><a class="btn sm" href="admin.html">Team & admin</a></div>' : ''}</section>
+        <section class="card"><div class="card-h"><h2>Team</h2><span>${st.meta.team.length} people</span></div>${st.meta.team.map(m => `<div class="opt"><span class="ava">${initials(m.name)}</span><div class="t"><b>${esc(m.name)}</b><span>${m.role === 'admin' ? 'Owner' : 'Team'}</span></div></div>`).join('')}
+          ${isAdmin() ? '<div class="opt"><div class="t"><span>Add, turn off or remove people in Admin.</span></div><a class="btn sm" href="#admin">Admin</a></div>' : ''}</section>
         <section class="card"><div class="card-h"><h2>Mailboxes</h2><span>Next phase</span></div><div class="opt"><div class="t"><b>Email automation</b><span>Connect a Google Workspace mailbox on edgelead.online to send sequences.</span></div><button class="btn sm" type="button" disabled>Coming next</button></div></section>
         <section class="card"><div class="card-h"><h2>Calling</h2><span>After email</span></div><div class="opt"><div class="t"><b>Twilio dialer</b><span>Call from a lead's record; every call recorded and logged.</span></div><button class="btn sm" type="button" disabled>Coming next</button></div></section>
       </div>`;
+}
+
+
+// ------------------------------------------------------------------ admin (the owner only; the server checks too)
+async function vAdmin() {
+    const [{ users }, { tools }] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools')]);
+    const staff = users.filter(u => u.role !== 'client').sort((a, b) => (b.role === 'admin') - (a.role === 'admin') || (a.full_name || a.email).localeCompare(b.full_name || b.email));
+    const owners = users.filter(u => u.role === 'client');
+    const me = st.meta.me.id;
+    const person = u => `<div class="opt person ${u.is_active ? '' : 'off'}"><span class="ava">${initials(u.full_name || u.email)}</span>
+        <div class="t"><b>${esc(u.full_name || u.email.split('@')[0])}${u.id === me ? ' <small class="pill">you</small>' : ''}</b><span>${esc(u.email)} · ${u.role === 'admin' ? 'Owner' : u.role === 'client' ? 'Client login' : 'Team'}${u.is_active ? '' : ' · turned off'} · added ${new Date(u.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
+        ${u.id === me ? '' : `<div class="acts2"><button class="btn sm" type="button" data-uact="pass" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">New password</button>
+          <button class="btn sm" type="button" data-uact="${u.is_active ? 'off' : 'on'}" data-uid="${u.id}">${u.is_active ? 'Turn off' : 'Turn on'}</button>
+          <button class="btn sm ghost danger" type="button" data-uact="remove" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">Remove</button></div>`}</div>`;
+    const tools_ = tools;
+    return `<div class="head"><div><h1>Admin</h1><p class="sub">Only you can open this. Teammates use the CRM but cannot see or change any of this.</p></div></div>
+      <div class="set">
+        <section class="card"><div class="card-h"><h2>Team</h2><span>${staff.filter(u => u.is_active).length} active</span></div>
+          ${staff.map(person).join('')}
+          <form class="addp" id="addp" autocomplete="off"><div class="card-h" style="padding:0 0 4px"><span class="lbl">Add a teammate</span></div>
+            <div class="grid3">${fieldHtml('ap-n', 'Name', 'placeholder="Full name"')}${fieldHtml('ap-e', 'Email', 'type="email" placeholder="name@edgelead.online"')}
+            <div class="field"><label for="ap-p">Password</label><div class="inline"><input id="ap-p" type="text" minlength="8" placeholder="8 characters or more"><button class="btn sm" type="button" data-act="genpass">Make one</button></div></div></div>
+            <div class="bar"><span class="note" style="margin:0">They sign in at workspace.edgelead.online with this email and password, and see the CRM only.</span><button class="btn pri" type="submit">Add teammate</button></div>
+            <div id="ap-out"></div></form></section>
+        ${tools_ ? `<section class="card"><div class="card-h"><h2>Social media tools</h2><span>${tools_.filter(t => t.on).length ? tools.filter(t => t.on).length + ' on' : 'All off'}</span></div>
+          <p class="note" style="margin:0 16px 8px">While a tool is off its pages stop working and nothing runs for it in the background: no Apify runs, no scheduled reports, no Meta sync. Turning Edge Meta AI or reports on or off restarts the server, about a minute.</p>
+          ${tools_.map(t => `<div class="opt"><div class="t"><b>${esc(t.label)}</b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="${esc(t.label)}"><i></i></label></div>`).join('')}</section>` : ''}
+        ${owners.length ? `<section class="card"><div class="card-h"><h2>Client logins</h2><span>From the old Edge Meta AI</span></div>
+          <p class="note" style="margin:0 16px 8px">Business owners who had their own login. They cannot use the CRM; the old pages they used are closed for now.</p>${owners.map(person).join('')}</section>` : ''}
+      </div>`;
+}
+const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
+
+// ------------------------------------------------------------------ sign in (the CRM is the front door; index.html and welcome.html serve this page)
+function authScreen(inner) {
+    document.body.innerHTML = `<main class="auth"><section class="card authcard"><div class="brand"><b>E</b>EdgeLead</div>${inner}<div class="err" id="aerr" role="alert"></div></section><p class="authfoot">EdgeLead CRM · for the EdgeLead team</p></main>`;
+    const f = $('.authcard input'); if (f) f.focus();
+}
+function signIn(msg) {
+    authScreen(`<h1>Sign in</h1><p class="sub">Use the email and password the owner gave you.</p>
+      <form id="signin">${fieldHtml('si-e', 'Email', 'type="email" autocomplete="username" required')}${fieldHtml('si-p', 'Password', 'type="password" autocomplete="current-password" required')}
+      <button class="btn pri wide" type="submit">Sign in</button></form><button class="linkbtn" type="button" id="forgot">Forgot your password?</button>`);
+    if (msg) $('#aerr').textContent = msg;
+    $('#signin').onsubmit = async ev => { ev.preventDefault(); const b = ev.target.querySelector('button'); b.disabled = true; b.textContent = 'Signing in…'; $('#aerr').textContent = '';
+        const { error } = await sb.auth.signInWithPassword({ email: v('si-e').trim(), password: v('si-p') });
+        if (error) { $('#aerr').textContent = /invalid/i.test(error.message) ? 'That email and password do not match.' : error.message; b.disabled = false; b.textContent = 'Sign in'; return; }
+        location.replace('crm.html'); };
+    $('#forgot').onclick = async () => { const email = v('si-e').trim(); if (!email) { $('#aerr').textContent = 'Write your email first, then press this again.'; return; }
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/welcome.html' });
+        $('#aerr').textContent = error ? error.message : 'If that email has an account, a link to set a new password is on its way.'; };
+}
+function setPassword() {
+    authScreen(`<h1>Choose a password</h1><p class="sub">You will use it with your email to sign in.</p>
+      <form id="setpw">${fieldHtml('np-1', 'New password', 'type="password" autocomplete="new-password" minlength="8" required')}${fieldHtml('np-2', 'Again', 'type="password" autocomplete="new-password" minlength="8" required')}
+      <button class="btn pri wide" type="submit">Save and open the CRM</button></form>`);
+    $('#setpw').onsubmit = async ev => { ev.preventDefault();
+        if (v('np-1').length < 8) { $('#aerr').textContent = 'Use 8 characters or more.'; return; }
+        if (v('np-1') !== v('np-2')) { $('#aerr').textContent = 'The two passwords are different.'; return; }
+        const { error } = await sb.auth.updateUser({ password: v('np-1') });
+        if (error) { $('#aerr').textContent = error.message; return; }
+        location.replace('crm.html'); };
 }
 
 // ------------------------------------------------------------------ lead record
@@ -352,7 +410,7 @@ function drawLead({ lead: l, activities, tasks, influencers, client }) {
       ${l.stage === 'lost' ? `<div><dt>Why lost</dt><dd>${inp('lost_reason', l.lost_reason)}</dd></div>` : ''}
     </dl>
     <div class="links"><span class="lbl">Linked</span>
-      ${client ? `<a class="lnk" href="workspace.html?client=${encodeURIComponent(client.id)}">${ic('clients')}${esc(client.name)}<small>client</small></a>` : ''}
+      ${client ? `<a class="lnk" href="#clients">${ic('clients')}${esc(client.name)}<small>client</small></a>` : ''}
       ${influencers.map(c => `<button type="button" class="lnk" data-crgo="${c.id}">${ic('pin')}@${esc(c.handle)}<small>creator</small></button>`).join('')}
       <button type="button" class="lnk" data-dept="${srcOf(l.source).dept}">${ic('overview')}${esc(srcOf(l.source).path || srcOf(l.source).label)}<small>department</small></button></div></div></div>`;
 }
@@ -423,7 +481,7 @@ document.addEventListener('click', async e => {
     if (t.closest('[data-close]')) { $('#layer').innerHTML = ''; st.openId = null; return; }
     if (t.closest('[data-unsub]')) { $('#sub').innerHTML = ''; if (!st.openId) $('#layer').innerHTML = ''; return; }
     if (t.closest('#theme')) { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('crm-theme', r.dataset.theme); } catch {} if (route === 'influencers') mapInit(); return; }
-    if (t.closest('#signout')) { await sb.auth.signOut(); location.href = 'index.html'; return; }
+    if (t.closest('#signout')) { await sb.auth.signOut(); location.replace('crm.html'); return; }
     if (t.closest('#newLead')) return newLead();
     if (t.closest('#openPal')) return palette();
     const pe = t.closest('[data-period]'); if (pe) { st.period = +pe.dataset.period; return render(); }
@@ -436,6 +494,7 @@ document.addEventListener('click', async e => {
     if (a) {
         const k = a.dataset.act;
         if (k === 'import') return importCsv();
+        if (k === 'genpass') { $('#ap-p').value = makePass(); return; }
         if (k === 'clearsel') { st.sel.clear(); return render(); }
         if (k === 'fit') { st.fitAll = true; fit(null); st.fitAll = false; return; }
         if (k === 'newcr') { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>'; return creatorForm({}, async body => { const { influencer } = await api('/api/crm/influencers', { method: 'POST', body }); st.crOn = influencer.id; await net(true); $('#layer').innerHTML = ''; toast('@' + influencer.handle + ' added'); render(); }, 'Add a creator', 'Add creator'); }
@@ -474,11 +533,32 @@ document.addEventListener('click', async e => {
         return;
     }
     const td = t.closest('[data-taskdone]'); if (td) { await api('/api/crm/tasks/' + td.dataset.taskdone, { method: 'PATCH', body: { done: true } }); st.leads = null; toast('Done'); return openLead(st.openId); }
+    const ua = t.closest('[data-uact]'); if (ua) {
+        const id = ua.dataset.uid, k = ua.dataset.uact, name = ua.dataset.name;
+        if (k === 'on' || k === 'off') { try { await api('/api/admin/users/' + id, { method: 'PATCH', body: { isActive: k === 'on' } }); toast(k === 'on' ? 'Turned on' : 'Turned off. They are signed out within a minute.'); render(); } catch (err) { toast(err.message, true); } return; }
+        if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
+        if (k === 'pass') { const pw = makePass(); return modal('New password for ' + name, `${fieldHtml('up-p', 'New password', `type="text" value="${pw}" minlength="8"`, 'Copy it now and give it to them. It is not shown again.')}`, 'Save password', async () => {
+            if (v('up-p').length < 8) throw new Error('Use 8 characters or more.'); await api('/api/admin/users/' + id, { method: 'PATCH', body: { password: v('up-p') } }); $('#layer').innerHTML = ''; toast('Password changed'); }); }
+        if (k === 'remove') return modal('Remove ' + name + '?', `<p style="margin:0;color:var(--muted)">Their login is deleted. Their leads, clients and work move to you, so nothing is lost.</p>`, 'Remove', async () => {
+            await api('/api/admin/users/' + id, { method: 'DELETE' }); $('#layer').innerHTML = ''; toast(name + ' removed'); render(); });
+    }
     const sc = t.closest('[data-crstage]'); if (sc) { st.crStage = sc.dataset.crstage; return render(); }
     const cg = t.closest('[data-crgo]'); if (cg) { st.crOn = cg.dataset.crgo; $('#layer').innerHTML = ''; st.openId = null; location.hash = 'influencers'; return render(); }
     const crr = t.closest('[data-cr]'); if (crr) { st.crOn = crr.dataset.cr; return render(); }
     const pc = t.closest('[data-pinclient]'); if (pc) { st.picking = { kind: 'client', id: pc.dataset.pinclient, label: pc.dataset.name }; location.hash = 'influencers'; return; }
     const o = t.closest('[data-open]'); if (o) { $('#sub') && ($('#sub').innerHTML = ''); return openLead(o.dataset.open); }
+});
+document.addEventListener('submit', async e => {
+    if (e.target.id !== 'addp') return; e.preventDefault();
+    const b = e.target.querySelector('[type=submit]'); b.disabled = true;
+    try {
+        const email = v('ap-e').trim(), password = v('ap-p');
+        if (!email || password.length < 8) throw new Error('Write their email and a password of 8 characters or more.');
+        await api('/api/admin/users', { method: 'POST', body: { email, password, fullName: v('ap-n').trim(), role: 'user' } });
+        toast('Teammate added'); await render();
+        $('#ap-out').innerHTML = `<div class="note"><b>Send them this:</b> sign in at workspace.edgelead.online with ${esc(email)} and the password ${esc(password)}. They can change it with “Forgot your password?”.</div>`;
+        st.meta = await api('/api/crm/meta');
+    } catch (err) { toast(err.message, true); b.disabled = false; }
 });
 document.addEventListener('change', async e => {
     const t = e.target;
@@ -523,9 +603,15 @@ function palette() {
 (async function boot() {
     try { const th = localStorage.getItem('crm-theme'); if (th) document.documentElement.dataset.theme = th; } catch {}
     const { data } = await sb.auth.getSession();
-    if (!data.session) { location.href = 'index.html'; return; }
+    if (AUTH_LINK && data.session) { history.replaceState(null, '', location.pathname); return setPassword(); }
+    if (!data.session) return signIn();
+    if (!/crm\.html$/.test(location.pathname)) history.replaceState(null, '', 'crm.html' + (location.hash.includes('access_token') ? '' : location.hash));
     try { st.meta = await api('/api/crm/meta'); }
-    catch (e) { $('#view').innerHTML = `<div class="empty err">${e.status === 403 ? 'The CRM is for the EdgeLead team.' : 'Could not reach the server: ' + esc(e.message)}</div>`; return; }
+    catch (e) {
+        if (e.status === 403) { await sb.auth.signOut(); return signIn('This workspace is for the EdgeLead team only.'); }
+        if (e.status === 401) { await sb.auth.signOut(); return signIn('Your session ended. Sign in again.'); }
+        $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
+    }
     addEventListener('hashchange', render);
     render();
     leads().then(shell).catch(() => {});

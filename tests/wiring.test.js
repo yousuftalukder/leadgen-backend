@@ -325,7 +325,7 @@ console.log('\npages: shell, styles and auth on every one');
     const PRE_SESSION = new Set(['signup.html', 'welcome.html']);
     // The CRM (phase 87) is its own light app: crm/app.css and crm/app.js, no header.js,
     // so it loads fast. It must still use the supabase client and send anyone without a
-    // session to the login page — checked separately below.
+    // session to its own sign-in screen — checked separately below.
     const STANDALONE = new Set(['crm.html']);
     const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
 
@@ -335,7 +335,7 @@ console.log('\npages: shell, styles and auth on every one');
             const js = fs.readFileSync(path.join(FRONT_DIR, 'crm', 'app.js'), 'utf8');
             if (!/href=["']crm\/app\.css["']/.test(src)) noCss.push(f);
             if (!/src=["']crm\/app\.js["']/.test(src)) noHeader.push(f);
-            if (!/getSession\(\)[\s\S]{0,120}location\.href = 'index\.html'/.test(js)) noInit.push(f);
+            if (!/if \(!data\.session\) return signIn\(\)/.test(js)) noInit.push(f);   // no session: the sign-in screen
         }
         if (!STANDALONE.has(f) && !/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
         if (!STATIC.has(f) && !STANDALONE.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
