@@ -24,6 +24,8 @@
  *   node tests/usecases.test.js
  */
 'use strict';
+// Phase 87: these tests exercise the social media tools, which are switched off by default.
+process.env.TOOLS_ENABLED = 'all';
 const assert = require('assert');
 const Module = require('module');
 const path = require('path');

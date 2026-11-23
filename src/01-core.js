@@ -332,6 +332,8 @@ const readLimit  = rateLimit({ windowMs: 60000, max: 240, key: bearerId });
 const publicLimit = rateLimit({ windowMs: 60000, max: 30 });
 S.publicLimit = publicLimit;
 app.use('/api/', readLimit);
+// Phase 87: a social media tool that an admin switched off answers 403 here, before its own routes (src/25-crm.js).
+app.use('/api/', (req, res, next) => (S.toolGate ? S.toolGate(req, res, next) : next()));
 
 // Request accounting. Method and path only — request bodies carry Apify tokens
 // and must never reach a log line.

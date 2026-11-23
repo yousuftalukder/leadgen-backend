@@ -429,6 +429,9 @@ async function start() {
         });
 
         await schemaProbe();
+        // Phase 87: which social media tools are on. Their background work below only starts for those.
+        const tools = await S.loadToolSwitch();
+        logger.info('tools', tools);
         await migrateSecretsAtRest();
 
         // Jobs run in-process. Render's free tier sleeps on idle and restarts on
@@ -446,16 +449,19 @@ async function start() {
         // then the scheduler, which stays quiet until a schedule is due.
         await instanceHeartbeat();
         setInterval(instanceHeartbeat, INSTANCE_BEAT_MS).unref?.();
-        if (SCHEDULER_ENABLED) {
+        if (SCHEDULER_ENABLED && tools.reports) {
             setTimeout(() => schedulerTick().catch(() => {}), 15000).unref?.();
-            setInterval(schedulerTick, Math.max(15000, SCHEDULER_POLL_MS)).unref?.();
+            setInterval(() => S.toolOn('reports') && schedulerTick(), Math.max(15000, SCHEDULER_POLL_MS)).unref?.();
+        }
+        if (SCHEDULER_ENABLED && (tools.metaai || tools.reports)) {
             // Phase 30: the daily Meta read. Quiet unless a connection is due.
             setTimeout(() => metaDailyTick().catch(() => {}), 45000).unref?.();
-            setInterval(() => metaDailyTick().catch(() => {}), Math.max(60000, META_DAILY_POLL_MS)).unref?.();
+            setInterval(() => (S.toolOn('metaai') || S.toolOn('reports')) && metaDailyTick().catch(() => {}), Math.max(60000, META_DAILY_POLL_MS)).unref?.();
         }
         // Phase 31: XpulseAI's warehouse sync on its own clock (09:00 and 21:00 UTC),
         // and the boot-time pass that provisions every connected client into it.
-        try { logger.info('xp_start', xp.start()); } catch (e) { logger.error('xp_start_failed', { message: e.message }); }
+        if (tools.metaai) { try { logger.info('xp_start', xp.start()); } catch (e) { logger.error('xp_start_failed', { message: e.message }); } }
+        else logger.info('xp_off', { reason: 'Edge Meta AI is switched off' });
         logger.info('phase11_ready', { instance: INSTANCE_ID, scheduler: SCHEDULER_ENABLED, pollMs: SCHEDULER_POLL_MS });
     });
 
