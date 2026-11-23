@@ -318,7 +318,7 @@
         // The front door leads to Home (phase 33). This page is also the
         // Instagram lead finder, which New work opens with ?client=; only a
         // bare visit — the site's address, or just signed in — goes home.
-        if (!window.location.search) { window.location.replace('home.html'); return new Promise(() => {}); }
+        if (!window.location.search) { window.location.replace('crm.html'); return new Promise(() => {}); }   // phase 87: the CRM is the front door
 
         // EL.init renders the shared header, checks the engine grant, and gives
         // us EL.api — which resolves a LIVE token on every single call. The old

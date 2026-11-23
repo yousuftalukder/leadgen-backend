@@ -9,8 +9,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 ```
 
 - `src/01-core.js` connects with `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`; the
-  frontend hardcodes the same URL in `frontend/header.js`, `frontend/index.html`
-  and `frontend/signup.html`. The Render deploy's `SUPABASE_URL` is this same
+  frontend hardcodes the same URL in `frontend/header.js`, `frontend/index.html`,
+  `frontend/signup.html` and `frontend/crm/app.js` (the CRM, which also hardcodes
+  the anon key and the Render backend URL, because it does not load header.js). The Render deploy's `SUPABASE_URL` is this same
   project.
 - The schema lives in `sql/*.sql`, applied in phase order. The live database
   matches it through phase 69.

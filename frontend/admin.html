@@ -209,6 +209,13 @@
             <div class="funnel" id="funnel" hidden></div>
             <div id="users-list" class="empty">Loading people…</div>
         </div>
+
+        <!-- Phase 87: the social media tools. Stored as system_settings['tools_enabled']; all off by default. -->
+        <div class="card" id="tools-card">
+            <h2 class="card-title">Social media tools</h2>
+            <p class="card-subtitle">While a tool is off its pages stop working and nothing runs for it in the background: no Apify runs, no scheduled reports, no Meta sync. Turning Edge Meta AI or reports on or off restarts the server, which takes about a minute.</p>
+            <div id="tools-list" class="empty">Loading tools…</div>
+        </div>
     </section>
 
     <!-- ================= KEYS ================= -->
@@ -500,6 +507,27 @@
     const $ = id => document.getElementById(id);
     const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    // Phase 87: the tools switch (tools_enabled).
+    async function loadTools() {
+        try {
+            const d = await EL.api('/api/admin/tools');
+            $('tools-list').className = '';
+            $('tools-list').innerHTML = d.tools.map(t => `<label style="display:flex;gap:14px;align-items:center;padding:12px 0;border-top:1px solid var(--border-subtle,rgba(255,255,255,.08));cursor:pointer">
+                <span style="flex:1;min-width:0"><b style="display:block">${esc(t.label)}</b><span class="card-subtitle" style="margin:0">${esc(t.detail)}</span></span>
+                <input type="checkbox" data-tool="${esc(t.key)}" ${t.on ? 'checked' : ''} style="width:20px;height:20px"> <span style="min-width:28px">${t.on ? 'On' : 'Off'}</span></label>`).join('');
+        } catch (e) { $('tools-list').textContent = 'Could not load the tools: ' + (e.message || e); }
+    }
+    $('tools-list').addEventListener('change', async e => {
+        const box = e.target.closest('[data-tool]'); if (!box) return;
+        box.disabled = true;
+        try {
+            const d = await EL.api('/api/admin/tools', { method: 'PUT', body: { tools: { [box.dataset.tool]: box.checked } } });
+            if (d.restarting) alert('Saved. The server restarts now and is back within a minute.');
+        } catch (err) { box.checked = !box.checked; alert('That did not save: ' + (err.message || err)); }
+        loadTools();
+    });
+    loadTools();
 
     /**
      * esc() stops an attribute breakout but leaves `javascript:` intact, and
