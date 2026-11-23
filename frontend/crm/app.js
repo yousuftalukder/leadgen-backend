@@ -49,6 +49,7 @@ const ICONS = {
     settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>', mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
     phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/>', note: '<path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h5"/>', reply: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/>',
     stage: '<path d="M4 12h16M14 6l6 6-6 6"/>', wa: '<path d="M4 20l1.3-4A8 8 0 1 1 8 18.7z"/>', client: '<path d="M20 6 9 17l-5-5"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>', plus: '<path d="M12 5v14M5 12h14"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>', seo: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8M7.5 12l2-2 1.5 1.5L13.5 9"/>', mega: '<path d="M3 10v4h3l7 4V6L6 10z"/><path d="M16 9a4 4 0 0 1 0 6M19 6.5a8 8 0 0 1 0 11"/>', star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
     shield: '<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'
 };
 const ic = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
@@ -72,28 +73,29 @@ async function leads(force) { if (!st.leads || force) st.leads = (await api('/ap
 const isAdmin = () => st.meta && st.meta.me.role === 'admin';
 
 // ------------------------------------------------------------------ shell
-const NAV = [['overview', 'Overview', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['sequences', 'Sequences', 'seq'], ['influencers', 'Influencers', 'pin'], ['clients', 'Clients', 'clients'], ['settings', 'Settings', 'settings'], ['admin', 'Admin', 'shield']];
+const NAV = [['overview', 'Overview', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['sequences', 'Sequences', 'seq'], ['influencers', 'Influencers', 'pin'], ['phone', 'Phone', 'phone'], ['clients', 'Clients', 'clients'], ['settings', 'Settings', 'settings'], ['admin', 'Admin', 'shield']];
 let route = 'overview';
 function shell() {
     const open = (st.leads || []).filter(l => !['won', 'lost'].includes(l.stage)).length;
     const due = (st.leads || []).filter(l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)).length;
     const toolsOn = st.meta ? Object.values(st.meta.tools || {}).filter(Boolean).length : 0;
     $('#rail').innerHTML = `<div class="brand"><b>E</b>EdgeLead</div>` +
-        NAV.slice(0, 5).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}" ${route === k ? 'aria-current="page"' : ''}>${ic(i)}${l}${k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${open}</span>` : ''}</a>`).join('') +
-        `<div class="grp">Business</div>` + NAV.slice(5).filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
+        NAV.slice(0, 6).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}" ${route === k ? 'aria-current="page"' : ''}>${ic(i)}${l}${k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${open}</span>` : k === 'phone' ? `<span class="ct hot" data-phbadge ${window.ELPhone && ELPhone.unread() ? '' : 'hidden'}>${window.ELPhone ? ELPhone.unread() || '' : ''}</span>` : ''}</a>`).join('') +
+        `<div class="grp">Business</div>` + NAV.slice(6).filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
         `<div class="foot"><span>${esc(teamName(st.meta.me.id))} · ${isAdmin() ? 'Owner' : 'Team'}</span><button class="btn sm ghost" id="theme" type="button">Light / dark</button><button class="btn sm ghost" id="signout" type="button">Sign out</button></div>`;
-    $('#tabbar').innerHTML = NAV.filter(n => ['overview', 'leads', 'pipeline', 'influencers', 'settings'].includes(n[0])).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
+    $('#tabbar').innerHTML = NAV.filter(n => ['overview', 'leads', 'pipeline', 'phone', 'influencers'].includes(n[0])).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
 }
 async function render() {
-    route = (location.hash || '#overview').slice(1).split('?')[0];
+    route = window.EL_PHONE_ONLY ? 'phone' : (location.hash || '#overview').slice(1).split('?')[0];
     if (!NAV.some(n => n[0] === route) || (route === 'admin' && !isAdmin())) route = 'overview';
     if (route !== 'influencers' && mapObj) { mapObj.remove(); mapObj = null; }
     shell();
     const v = $('#view');
     try {
-        const html = await ({ overview: vOverview, leads: vLeads, pipeline: vPipeline, sequences: vSequences, influencers: vInfluencers, clients: vClients, settings: vSettings, admin: vAdmin }[route])();
+        const html = await ({ overview: vOverview, leads: vLeads, pipeline: vPipeline, sequences: vSequences, influencers: vInfluencers, clients: vClients, settings: vSettings, admin: vAdmin, phone: async () => window.ELPhone ? ELPhone.view() : '' }[route])();
         v.innerHTML = html; shell();
         if (route === 'influencers') mapInit();
+        if (route === 'phone' && window.ELPhone) ELPhone.mounted();
     } catch (e) { v.innerHTML = `<div class="empty err">Could not load this page: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; }
 }
 
@@ -109,9 +111,22 @@ async function vOverview() {
     const strip = [['New leads', num(T.leads), '--ink', o.series.leads], ['Cold emails sent', num(T.sent), '--s-web', o.series.sent], ['Calls', num(T.calls), '--gold', o.series.calls],
                    ['Replies', num(T.replies), '--ok', o.series.replies], ['Meetings', num(T.meetings), '--s-meta', o.series.meetings], ['Won', num(T.won), '--ok', o.series.won]];
     const I = o.influencers;
+    const JOB = { website: ['--s-web', 'globe'], seo: ['--s-seo', 'seo'], marketing: ['--s-meta', 'mega'], influencer: ['--s-inf', 'star'] };
+    const J = o.jobs || [], jAll = J.reduce((a, j) => a + j.value, 0), jP = J.reduce((a, j) => a + j.periodValue, 0), jPc = J.reduce((a, j) => a + j.periodCount, 0), jC = J.reduce((a, j) => a + j.count, 0);
+    const jobs = J.length ? `<section class="jobs">
+        <div class="card jhero"><small class="lbl">Revenue won · ${st.period === 90 ? 'this quarter' : 'last ' + st.period + ' days'}</small><b class="big">${lakh(jP)}</b>
+          <em>${num(jPc)} new job${jPc === 1 ? '' : 's'} · ${lakh(jAll)} from ${num(jC)} job${jC === 1 ? '' : 's'} all time</em>
+          <div class="stack" role="img" aria-label="Revenue by job type">${J.filter(j => j.value).map(j => `<i style="--c:var(${JOB[j.key][0]});flex:${j.value}" title="${esc(j.label)}: ${lakh(j.value)}"></i>`).join('') || '<i style="flex:1;--c:var(--line2)"></i>'}</div>
+          <div class="slegend">${J.map(j => `<span style="--c:var(${JOB[j.key][0]})"><i></i>${esc(j.label)}<b>${jAll ? pct(j.value, jAll) : 0}%</b></span>`).join('')}</div></div>
+        ${J.map(j => `<div class="card job" style="--c:var(${JOB[j.key][0]})"><div class="jh"><span class="ji">${ic(JOB[j.key][1])}</span>${esc(j.label)}</div>
+          <b class="jn">${num(j.count)}</b><small>${j.count === 1 ? 'job' : 'jobs'} won · all time</small>
+          <div class="jv"><span>${lakh(j.value)}</span>${j.periodCount ? `<em>+${num(j.periodCount)} · ${lakh(j.periodValue)} this period</em>` : '<em class="z">none this period</em>'}</div>
+          <i class="jbar"><i style="width:${jAll ? Math.max(3, pct(j.value, jAll)) : 0}%"></i></i></div>`).join('')}
+      </section>` : '';
     return `<div class="head"><div><p class="greet">Good ${hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening'}, ${esc(teamName(st.meta.me.id).split(' ')[0])}.</p>
         <p class="sub">${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · ${o.upNext.filter(l => new Date(l.next_step_at) < startOfTomorrow()).length} follow-ups due today</p></div><div class="sp"></div>
         <div class="period" role="group" aria-label="Period">${[[7, '7 days'], [30, '30 days'], [90, 'Quarter']].map(([v, t]) => `<button type="button" data-period="${v}" class="${st.period === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      ${jobs}
       <section class="card strip">${strip.map(([l, v, c, s]) => `<div class="m"><small>${l}</small><b>${v}</b>${l === 'Won' ? `<em>${lakh(T.wonValue)} signed</em>` : '<em style="color:var(--dim)">' + (st.period === 90 ? 'this quarter' : 'last ' + st.period + ' days') + '</em>'}${sparkSvg(s, c)}</div>`).join('')}</section>
       <section class="card"><div class="card-h"><h2>By department</h2><span>Click a row to see its leads</span></div><div class="tablewrap"><table class="dept"><thead><tr><th>Department</th><th>Leads</th><th>Emails sent</th><th>Calls</th><th>Replies</th><th>Reply rate</th><th>Meetings</th><th>Won</th><th>Open pipeline</th></tr></thead><tbody>
         ${o.departments.map(d => row(d, 'parent', DEPT_VAR[d.key]) + d.children.map(c => row(c, 'child', SRC_VAR[c.key])).join('')).join('')}</tbody>
@@ -307,7 +322,7 @@ async function vSettings() {
 
 // ------------------------------------------------------------------ admin (the owner only; the server checks too)
 async function vAdmin() {
-    const [{ users }, { tools }] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools')]);
+    const [{ users }, { tools }, ph] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools'), api('/api/admin/phone/usage').catch(e => ({ error: e.message }))]);
     const staff = users.filter(u => u.role !== 'client').sort((a, b) => (b.role === 'admin') - (a.role === 'admin') || (a.full_name || a.email).localeCompare(b.full_name || b.email));
     const owners = users.filter(u => u.role === 'client');
     const me = st.meta.me.id;
@@ -326,12 +341,33 @@ async function vAdmin() {
             <div class="field"><label for="ap-p">Password</label><div class="inline"><input id="ap-p" type="text" minlength="8" placeholder="8 characters or more"><button class="btn sm" type="button" data-act="genpass">Make one</button></div></div></div>
             <div class="bar"><span class="note" style="margin:0">They sign in at workspace.edgelead.online with this email and password, and see the CRM only.</span><button class="btn pri" type="submit">Add teammate</button></div>
             <div id="ap-out"></div></form></section>
+        ${phoneUsage(ph)}
         ${tools_ ? `<section class="card"><div class="card-h"><h2>Social media tools</h2><span>${tools_.filter(t => t.on).length ? tools.filter(t => t.on).length + ' on' : 'All off'}</span></div>
           <p class="note" style="margin:0 16px 8px">While a tool is off its pages stop working and nothing runs for it in the background: no Apify runs, no scheduled reports, no Meta sync. Turning Edge Meta AI or reports on or off restarts the server, about a minute.</p>
           ${tools_.map(t => `<div class="opt"><div class="t"><b>${esc(t.label)}</b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="${esc(t.label)}"><i></i></label></div>`).join('')}</section>` : ''}
         ${owners.length ? `<section class="card"><div class="card-h"><h2>Client logins</h2><span>From the old Edge Meta AI</span></div>
           <p class="note" style="margin:0 16px 8px">Business owners who had their own login. They cannot use the CRM; the old pages they used are closed for now.</p>${owners.map(person).join('')}</section>` : ''}
       </div>`;
+}
+function phoneUsage(u) {
+    if (!u || u.error) return `<section class="card"><div class="card-h"><h2>Phone</h2><span>Usage</span></div><div class="empty">${esc((u && u.error) || 'Not available yet.')}</div></section>`;
+    const O = u.ours, tw = Array.isArray(u.twilio) ? Object.fromEntries(u.twilio.map(r => [r.category, r])) : null;
+    const usd = v => '$' + (Number(v) || 0).toFixed(2);
+    const month = new Date(u.month + '-01T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const tile = (l, v, sub) => `<div><small>${l}</small><b>${v}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
+    return `<section class="card phu"><div class="card-h"><h2>Phone · ${esc(u.number)}</h2><span class="phstate ${u.ready ? 'ready' : 'error'}"><i></i>${u.ready ? 'Live' : 'Not set up'}</span></div>
+      <div class="phu-t">${tile('Twilio spend · ' + esc(month), tw ? usd((tw.totalprice || {}).price) : '—', u.balance ? 'Balance ' + usd(u.balance.amount) : (u.twilio && u.twilio.error ? esc(u.twilio.error) : ''))}
+        ${tile('Calls in', num(O.callsIn), num(O.minutesIn) + ' min · ' + num(O.missed) + ' missed')}${tile('Calls out', num(O.callsOut), num(O.minutesOut) + ' min')}
+        ${tile('Voicemails', num(O.voicemails), '')}${tile('Texts', num(O.textsIn + O.textsOut), num(O.textsOut) + ' sent · ' + num(O.textsIn) + ' received')}</div>
+      ${tw ? `<div class="phu-b">${[['calls', 'Phone calls'], ['calls-client', 'In-app calling'], ['sms', 'Texts'], ['phonenumbers', 'Number rental'], ['recordings', 'Recordings'], ['transcriptions', 'Transcriptions']].map(([k, l]) => `<div><span>${l}</span><span class="num">${num(Math.round((tw[k] || {}).usage || 0))} ${esc((tw[k] || {}).unit || '')}</span><b class="num">${usd((tw[k] || {}).price)}</b></div>`).join('')}</div>` : ''}
+      <div class="tablewrap"><table class="dept team" style="min-width:0"><thead><tr><th>Person</th><th>Calls made</th><th>Minutes</th><th>Answered</th><th>Texts sent</th></tr></thead><tbody>
+        ${u.people.map(p => `<tr><td><span class="nm"><span class="ava">${initials(p.name)}</span>${esc(p.name)}</span></td><td>${num(p.callsOut)}</td><td>${num(p.minutesOut)}</td><td>${num(p.answered)}</td><td>${num(p.texts)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="phu-s"><div class="opt"><div class="t"><b>Texting</b><span>${u.sms ? 'On' : 'Off until the number is approved for business texting (A2P 10DLC). Then set PHONE_SMS_ENABLED=1 on the server.'}</span></div></div>
+        <div class="opt"><div class="t"><b>Forward unanswered calls</b><span>${u.forward ? 'To ' + esc(u.forward) + ' for 20 seconds, then voicemail' : 'Off. Set PHONE_FORWARD_TO on the server to try a mobile before voicemail.'}</span></div></div>
+        ${u.missing.length ? `<div class="opt"><div class="t"><b>Missing on the server</b><span class="mono">${u.missing.map(esc).join(' · ')}</span></div></div>` : ''}
+        <div class="opt"><div class="t"><b>In Twilio, “A call comes in” and the TwiML App's voice URL</b><span class="mono">${esc(u.hooks.voice)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.voice)}">Copy</button></div>
+        <div class="opt"><div class="t"><b>In Twilio, “A message comes in”</b><span class="mono">${esc(u.hooks.sms)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.sms)}">Copy</button></div></div>
+    </section>`;
 }
 const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
 
@@ -348,7 +384,7 @@ function signIn(msg) {
     $('#signin').onsubmit = async ev => { ev.preventDefault(); const b = ev.target.querySelector('button'); b.disabled = true; b.textContent = 'Signing in…'; $('#aerr').textContent = '';
         const { error } = await sb.auth.signInWithPassword({ email: v('si-e').trim(), password: v('si-p') });
         if (error) { $('#aerr').textContent = /invalid/i.test(error.message) ? 'That email and password do not match.' : error.message; b.disabled = false; b.textContent = 'Sign in'; return; }
-        location.replace('crm.html'); };
+        location.reload(); };
     $('#forgot').onclick = async () => { const email = v('si-e').trim(); if (!email) { $('#aerr').textContent = 'Write your email first, then press this again.'; return; }
         const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/welcome.html' });
         $('#aerr').textContent = error ? error.message : 'If that email has an account, a link to set a new password is on its way.'; };
@@ -377,16 +413,16 @@ async function openLead(id) {
 function drawLead({ lead: l, activities, tasks, influencers, client }) {
     const si = st.meta.stages.findIndex(s => s.key === l.stage);
     const waNum = String(l.whatsapp || l.phone || '').replace(/\D/g, '');
-    const evIcon = { note: 'note', email_out: 'mail', email_in: 'reply', call: 'phone', whatsapp: 'wa', meeting: 'meet', stage: 'stage', task: 'task', system: 'note' };
+    const evIcon = { sms: 'reply', note: 'note', email_out: 'mail', email_in: 'reply', call: 'phone', whatsapp: 'wa', meeting: 'meet', stage: 'stage', task: 'task', system: 'note' };
     const evText = a => a.type === 'stage' ? `Moved to ${esc((st.meta.stages.find(s => s.key === (a.meta || {}).to) || { label: (a.meta || {}).to }).label)}${a.meta && a.meta.auto ? ' (a reply came in)' : ''}`
-        : a.type === 'email_out' ? 'Email sent' : a.type === 'email_in' ? 'Reply received' : a.type === 'call' ? `Call${a.meta && a.meta.minutes ? ' · ' + a.meta.minutes + ' min' : ''}${a.meta && a.meta.outcome ? ' · ' + esc(a.meta.outcome) : ''}`
-        : a.type === 'whatsapp' ? 'WhatsApp' : a.type === 'meeting' ? 'Meeting' : a.type === 'task' ? 'Task done' : a.type === 'note' ? 'Note' : esc(a.body || 'Update');
+        : a.type === 'email_out' ? 'Email sent' : a.type === 'email_in' ? 'Reply received' : a.type === 'call' && !(a.meta || {}).voicemail ? `Call${a.meta && a.meta.minutes ? ' · ' + a.meta.minutes + ' min' : ''}${a.meta && a.meta.outcome ? ' · ' + esc(a.meta.outcome) : ''}`
+        : a.type === 'sms' ? ((a.meta || {}).direction === 'inbound' ? 'Text received' : 'Text sent') : a.type === 'call' && (a.meta || {}).voicemail ? 'Voicemail' : a.type === 'whatsapp' ? 'WhatsApp' : a.type === 'meeting' ? 'Meeting' : a.type === 'task' ? 'Task done' : a.type === 'note' ? 'Note' : esc(a.body || 'Update');
     const sel = (field, opts, cur) => `<select data-field="${field}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
     const inp = (field, val, type = 'text', ph = '') => `<input data-field="${field}" type="${type}" value="${esc(val ?? '')}" placeholder="${esc(ph)}">`;
     $('.drawer').innerHTML = `<div class="dr-h"><div class="dr-top"><span class="ava" style="width:40px;height:40px;font-size:14px">${initials(l.full_name)}</span><div class="t"><h2>${esc(l.full_name)}</h2><p class="sub">${esc([l.title, l.company].filter(Boolean).join(', ') || 'No business yet')}${l.city || l.country ? ' · ' + esc([l.city, l.country && cname(l.country)].filter(Boolean).join(', ')) : ''}</p></div><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
       <div class="stepper" role="group" aria-label="Stage">${st.meta.stages.map((s, i) => `<button type="button" data-stage="${s.key}" class="${i < si && l.stage !== 'lost' ? 'past' : ''} ${i === si ? 'cur' : ''} ${s.key === 'lost' ? 'lost' : ''}" ${l.client_id && s.key !== 'won' ? 'disabled' : ''}>${s.label}</button>`).join('')}</div>
       <div class="acts">${l.email ? `<a class="btn sm pri" href="mailto:${esc(l.email)}">${ic('mail')}Email</a>` : ''}${waNum ? `<a class="btn sm" href="https://wa.me/${waNum}" target="_blank" rel="noopener">${ic('wa')}WhatsApp</a>` : ''}
-        <button class="btn sm" type="button" disabled title="The Twilio dialer comes after email automation">${ic('phone')}Call</button>
+        ${l.phone ? `<button class="btn sm" type="button" data-act="phcall">${ic('phone')}Call</button><button class="btn sm" type="button" data-act="phtext">${ic('reply')}Text</button>` : ''}
         <button class="btn sm" type="button" data-act="tonet">${ic('pin')}Add to influencer network</button>${l.client_id ? '' : `<button class="btn sm gold" type="button" data-act="convert">${ic('client')}Convert to client</button>`}</div></div>
     <div class="dr-b"><div class="feed">
       <div class="compose"><div class="tabs" role="tablist">${[['note', 'Note'], ['call', 'Log call'], ['whatsapp', 'WhatsApp'], ['email_out', 'Email sent'], ['email_in', 'Reply'], ['meeting', 'Meeting'], ['task', 'Task']].map(([k, t], i) => `<button type="button" data-ctab="${k}" class="${i ? '' : 'on'}">${t}</button>`).join('')}</div>
@@ -431,10 +467,10 @@ function modal(title, body, okText, onOk, wide) {
 const fieldHtml = (id, label, attrs = '', hint = '') => `<div class="field"><label for="${id}">${label}</label><input id="${id}" ${attrs}>${hint ? `<small>${hint}</small>` : ''}</div>`;
 const v = id => ($('#' + id) || {}).value || '';
 
-function newLead() {
+function newLead(pre = {}) {
     if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-    modal('New lead', `<div class="grid2">${fieldHtml('nl-n', 'Name', 'autocomplete="off" placeholder="Full name"')}${fieldHtml('nl-co', 'Business', 'placeholder="Business name"')}</div>
-      <div class="grid2">${fieldHtml('nl-e', 'Email', 'type="email" placeholder="name@business.com"')}${fieldHtml('nl-p', 'Phone or WhatsApp', 'type="tel" placeholder="+880 …"')}</div>
+    modal('New lead', `<div class="grid2">${fieldHtml('nl-n', 'Name', `autocomplete="off" placeholder="Full name" value="${esc(pre.full_name || '')}"`)}${fieldHtml('nl-co', 'Business', 'placeholder="Business name"')}</div>
+      <div class="grid2">${fieldHtml('nl-e', 'Email', 'type="email" placeholder="name@business.com"')}${fieldHtml('nl-p', 'Phone or WhatsApp', `type="tel" placeholder="+880 …" value="${esc(pre.phone || '')}"`)}</div>
       <div class="grid2"><div class="field"><label for="nl-s">Source</label><select id="nl-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div>
         <div class="field"><label for="nl-o">Owner</label><select id="nl-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
       <div class="grid2">${fieldHtml('nl-city', 'City', 'placeholder="Barishal"')}${fieldHtml('nl-c', 'Country', 'maxlength="2" placeholder="BD"', 'Two letters: BD, US, GB…')}</div>
@@ -497,6 +533,8 @@ document.addEventListener('click', async e => {
     if (a) {
         const k = a.dataset.act;
         if (k === 'import') return importCsv();
+        if ((k === 'phcall' || k === 'phtext') && st.openId && window.ELPhone) { const ld = (st.leads || []).find(x => x.id === st.openId) || {}; const ph = ld.phone || ($('.drawer [data-field="phone"]') || {}).value;
+            if (k === 'phcall') return ELPhone.call(ph, ld.full_name); $('#layer').innerHTML = ''; st.openId = null; return ELPhone.text(ph); }
         if (k === 'genpass') { $('#ap-p').value = makePass(); return; }
         if (k === 'clearsel') { st.sel.clear(); return render(); }
         if (k === 'fit') { st.fitAll = true; fit(null); st.fitAll = false; return; }
@@ -536,6 +574,7 @@ document.addEventListener('click', async e => {
         return;
     }
     const td = t.closest('[data-taskdone]'); if (td) { await api('/api/crm/tasks/' + td.dataset.taskdone, { method: 'PATCH', body: { done: true } }); st.leads = null; toast('Done'); return openLead(st.openId); }
+    const cp = t.closest('[data-copy]'); if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); toast('Copied'); } catch { toast(cp.dataset.copy); } return; }
     const ua = t.closest('[data-uact]'); if (ua) {
         const id = ua.dataset.uid, k = ua.dataset.uact, name = ua.dataset.name;
         if (k === 'on' || k === 'off') { try { await api('/api/admin/users/' + id, { method: 'PATCH', body: { isActive: k === 'on' } }); toast(k === 'on' ? 'Turned on' : 'Turned off. They are signed out within a minute.'); render(); } catch (err) { toast(err.message, true); } return; }
@@ -608,13 +647,15 @@ function palette() {
     const { data } = await sb.auth.getSession();
     if (AUTH_LINK && data.session) { history.replaceState(null, '', location.pathname); return setPassword(); }
     if (!data.session) return signIn();
-    if (!/crm\.html$/.test(location.pathname)) history.replaceState(null, '', 'crm.html' + (location.hash.includes('access_token') ? '' : location.hash));
+    if (!window.EL_PHONE_ONLY && !/crm\.html$/.test(location.pathname)) history.replaceState(null, '', 'crm.html' + (location.hash.includes('access_token') ? '' : location.hash));
     try { st.meta = await api('/api/crm/meta'); }
     catch (e) {
         if (e.status === 403) { await sb.auth.signOut(); return signIn('This workspace is for the EdgeLead team only.'); }
         if (e.status === 401) { await sb.auth.signOut(); return signIn('Your session ended. Sign in again.'); }
         $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
     }
+    if (window.EL_PHONE_ONLY) document.body.classList.add('phone-only');
+    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>'; newLead(pre); } }).then(() => { if (route === 'phone') render(); shell(); });
     addEventListener('hashchange', render);
     render();
     leads().then(shell).catch(() => {});
