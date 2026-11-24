@@ -294,9 +294,17 @@ function toolOn(key) {
     return toolState[key] === true;
 }
 function toolGate(req, res, next) {
-    const t = toolForPath(req.path.startsWith('/api') ? req.path : '/api' + req.path);
-    if (!t || toolOn(t)) return next();
-    res.status(403).json({ error: 'This tool is switched off. An admin can turn it on in Settings.', code: 'tool_off', tool: t });
+    const p = req.path.startsWith('/api') ? req.path : '/api' + req.path;
+    const t = toolForPath(p);
+    if (!t) return next();
+    if (!toolOn(t)) return res.status(403).json({ error: 'This tool is locked. The owner unlocks it in Admin → Tools.', code: 'tool_off', tool: t });
+    // Phase 89: the tools are the team's. A business-owner login never reaches them, whatever engines it was given.
+    if (p.startsWith('/api/public/') || !['leadfinder', 'reports', 'facebook'].includes(t)) return next();
+    return Promise.resolve(S.auth(req, res)).then(ctx => {
+        if (!ctx) return;
+        if (ctx.profile && ctx.profile.role === 'client') return res.status(403).json({ error: 'The tools are for the EdgeLead team.', code: 'tool_team_only', tool: t });
+        next();
+    }).catch(next);
 }
 Object.assign(S, { loadToolSwitch, toolOn, toolGate });
 
@@ -317,6 +325,129 @@ app.put('/api/admin/tools', async (req, res) => {
     // Background syncs start at boot, so a change to them restarts the server (Render brings it back in under a minute).
     res.json({ tools: TOOLS.map(t => ({ key: t.key, label: t.label, detail: t.detail, on: next[t.key] })), restarting: metaChanged });
     if (metaChanged && process.env.RENDER) setTimeout(() => { try { S.gracefulShutdown ? S.gracefulShutdown('tools_switch') : process.exit(0); } catch { process.exit(0); } }, 1500).unref?.();
+});
+
+// ---------------------------------------------------------------------------------------------------
+// phase 89: the Tools area (/tools). The Apify tools, outside the CRM. Two locks decide who gets in:
+//   assigned  the owner gives a teammate a tool (its engine grants) and the clients they may run it for
+//   unlocked  the tool's switch above is on
+// The owner is assigned everything. A tool opens only when both hold.
+// ---------------------------------------------------------------------------------------------------
+const TOOL_AREA = [
+    { key: 'leadfinder', label: 'Lead Finder', detail: 'Find businesses and creators on Instagram and Facebook', engines: ['leadgen'] },
+    { key: 'reports', label: 'Instagram report', detail: 'Audit an account against up to two rivals', engines: ['report'] },
+    { key: 'fbpage', switch: 'facebook', label: 'Facebook Page report', detail: 'Audit a Page, with one rival', engines: ['fb_page'] },
+    { key: 'fbgroups', switch: 'facebook', label: 'Facebook groups', detail: 'Read groups for demand and what works', engines: ['fb_community'] }
+];
+const TOOL_ENGINES = [...new Set(TOOL_AREA.flatMap(t => t.engines))];
+/** What one person sees in the Tools area, from their role, their engines and the switch. Plain, for tests. */
+function toolAccess(role, engines, sw) {
+    const mine = new Set(engines || []);
+    return TOOL_AREA.map(t => {
+        const assigned = role === 'admin' || t.engines.every(e => mine.has(e));
+        const unlocked = sw[t.switch || t.key] === true;
+        return { key: t.key, label: t.label, detail: t.detail, assigned, unlocked, open: assigned && unlocked };
+    });
+}
+/** A person's engines after the owner sets their tools: the tool engines are replaced, the rest kept. */
+function nextEngines(current, toolKeys) {
+    const keep = (current || []).filter(e => !TOOL_ENGINES.includes(e));
+    const add = TOOL_AREA.filter(t => (toolKeys || []).includes(t.key)).flatMap(t => t.engines);
+    return [...new Set([...keep, ...add])];
+}
+async function enginesOf(userId) {
+    const { data } = await supabase.from('user_engine_access').select('engine').eq('user_id', userId);
+    return (data || []).map(r => r.engine);
+}
+Object.assign(S, { TOOL_AREA, toolAccess, nextEngines });
+
+app.get('/api/tools/me', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try {
+        await loadToolSwitch();
+        const role = ctx.profile.role;
+        const tools = toolAccess(role, role === 'admin' ? TOOL_ENGINES : await enginesOf(ctx.user.id), toolState);
+        let clients = [];
+        if (tools.some(t => t.open)) {
+            if (role === 'admin') {
+                const { data } = await supabase.from('clients').select('id, name, archived').order('name');
+                clients = (data || []).filter(c => !c.archived);
+            } else {
+                const { data: own } = await supabase.from('clients').select('id, name, archived').eq('owner_user_id', ctx.user.id);
+                const { data: mem } = await supabase.from('client_members').select('client_id').eq('user_id', ctx.user.id).eq('role', 'editor');
+                const ids = (mem || []).map(m => m.client_id);
+                const { data: shared } = ids.length ? await supabase.from('clients').select('id, name, archived').in('id', ids) : { data: [] };
+                const seen = new Set();
+                clients = [...(own || []), ...(shared || [])].filter(c => !c.archived && !seen.has(c.id) && seen.add(c.id)).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+            }
+        }
+        const { data: u } = await supabase.from('app_users').select('full_name, email').eq('id', ctx.user.id).maybeSingle();
+        res.json({ me: { id: ctx.user.id, role, name: (u && (u.full_name || (u.email || '').split('@')[0])) || 'You' },
+            tools, clients: clients.map(c => ({ id: c.id, name: c.name })) });
+    } catch (e) { fail(res, e, 'tools_me'); }
+});
+
+app.get('/api/tools/jobs', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try {
+        const types = ['leadgen_campaign', 'leadgen_enrich', 'fb_lead_discovery', 'ig_report', 'fb_page_report', 'fb_community_audit'];
+        const { data, error } = await supabase.from('jobs').select('id, type, status, progress, current_step, error, input, result, created_at, finished_at')
+            .eq('user_id', ctx.user.id).in('type', types).order('created_at', { ascending: false }).limit(30);
+        if (error) throw error;
+        res.json({ jobs: (data || []).map(j => ({ id: j.id, type: j.type, status: j.status, progress: j.progress, step: j.current_step, error: j.error,
+            created_at: j.created_at, finished_at: j.finished_at,
+            target: j.input && (j.input.target || j.input.campaignName || (j.input.keywords || []).join(', ') || (j.input.location || '')) || null,
+            clientId: j.input && j.input.clientId || null,
+            reportId: j.result && (j.result.reportId || j.result.reportRef) || null, campaignId: (j.input && j.input.campaignId) || (j.result && j.result.campaignId) || null })) });
+    } catch (e) { fail(res, e, 'tools_jobs'); }
+});
+
+app.get('/api/admin/tools/access', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try {
+        await loadToolSwitch();
+        const [{ data: users }, { data: grants }, { data: clients }, { data: members }] = await Promise.all([
+            supabase.from('app_users').select('id, full_name, email, role, is_active').eq('role', 'user'),
+            supabase.from('user_engine_access').select('user_id, engine'),
+            supabase.from('clients').select('id, name, archived').order('name'),
+            supabase.from('client_members').select('client_id, user_id, role')]);
+        const eng = {}; (grants || []).forEach(g => (eng[g.user_id] = eng[g.user_id] || []).push(g.engine));
+        res.json({
+            switches: TOOLS.filter(t => ['leadfinder', 'reports', 'facebook'].includes(t.key)).map(t => ({ key: t.key, label: t.label, detail: t.detail, on: toolState[t.key] === true })),
+            background: TOOLS.filter(t => !['leadfinder', 'reports', 'facebook'].includes(t.key)).map(t => ({ key: t.key, label: t.label, on: toolState[t.key] === true })),
+            tools: TOOL_AREA.map(t => ({ key: t.key, label: t.label })),
+            clients: (clients || []).filter(c => !c.archived).map(c => ({ id: c.id, name: c.name })),
+            people: (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0], email: u.email, active: u.is_active,
+                tools: toolAccess('user', eng[u.id], toolState).filter(t => t.assigned).map(t => t.key),
+                clients: (members || []).filter(m => m.user_id === u.id && m.role === 'editor').map(m => m.client_id) }))
+        });
+    } catch (e) { fail(res, e, 'tools_access'); }
+});
+
+app.put('/api/admin/tools/access/:id', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try {
+        const id = String(req.params.id);
+        const { data: u } = await supabase.from('app_users').select('id, role').eq('id', id).maybeSingle();
+        if (!u || u.role !== 'user') return res.status(400).json({ error: 'Tools are given to teammates.' });
+        const b = req.body || {};
+        if (Array.isArray(b.tools)) {
+            const next = nextEngines(await enginesOf(id), b.tools.map(String));
+            await supabase.from('user_engine_access').delete().eq('user_id', id).in('engine', TOOL_ENGINES);
+            const add = next.filter(e => TOOL_ENGINES.includes(e));
+            if (add.length) await supabase.from('user_engine_access').upsert(add.map(engine => ({ user_id: id, engine, granted_by: ctx.user.id })), { onConflict: 'user_id,engine' });
+        }
+        if (Array.isArray(b.clients)) {
+            const want = [...new Set(b.clients.map(String).filter(x => S.UUID_RE.test(x)))];
+            const { data: have } = await supabase.from('client_members').select('client_id, role').eq('user_id', id);
+            const drop = (have || []).filter(m => m.role === 'editor' && !want.includes(m.client_id)).map(m => m.client_id);
+            if (drop.length) await supabase.from('client_members').delete().eq('user_id', id).in('client_id', drop);
+            if (want.length) await supabase.from('client_members').upsert(want.map(client_id => ({ client_id, user_id: id, role: 'editor', added_by: ctx.user.id })), { onConflict: 'client_id,user_id' });
+        }
+        S.invalidateEngineAccess(id);
+        logger.info('tools_access', { by: ctx.user.id, user: id, tools: b.tools, clients: Array.isArray(b.clients) ? b.clients.length : undefined });
+        res.json({ ok: true });
+    } catch (e) { fail(res, e, 'tools_access_put'); }
 });
 
 // ---------------------------------------------------------------------------------------------------
@@ -342,7 +473,7 @@ const LEAD_COLS = 'id, full_name, title, company, website, email, phone, whatsap
 app.get('/api/crm/meta', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     const { data: users } = await supabase.from('app_users').select('id, full_name, email, role').in('role', ['admin', 'user']).eq('is_active', true);
-    res.json({ sources: CRM_SOURCES, stages: CRM_STAGES, departments: CRM_DEPTS, currencies: CURRENCIES, me: { id: ctx.user.id, role: ctx.profile.role },
+    res.json({ sources: CRM_SOURCES, stages: CRM_STAGES, departments: CRM_DEPTS, currencies: CURRENCIES, me: { id: ctx.user.id, role: ctx.profile.role, tools: toolAccess(ctx.profile.role, ctx.profile.role === 'admin' ? TOOL_ENGINES : await enginesOf(ctx.user.id), toolState) },
         team: (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0], role: u.role })), tools: toolState });
 });
 

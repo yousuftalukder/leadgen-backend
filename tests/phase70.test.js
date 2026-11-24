@@ -201,21 +201,6 @@ test('the mention email is from a name, not an address, when the sender has no p
     for (const [k, q] of S._taskMail) { clearTimeout(q.timer); S._taskMail.delete(k); }
 });
 
-console.log('phase 70 :: what each kind of work is for (header.js)');
-const header = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'header.js'), 'utf8');
-test('every kind in New work has a note, and outreach sits apart from client work', () => {
-    const kinds = [...header.matchAll(/\{ kind: '(\w+)', group: '([^']+)'/g)].map(m => m[1]);
-    assert.deepStrictEqual(kinds, ['meta', 'team', 'tools', 'outreach']);
-    for (const k of kinds) assert.ok(new RegExp(`\\n\\s+${k}: `).test(header.slice(header.indexOf('const WORK_NOTE'))), 'note for ' + k);
-});
-test('the rail has a Clients section and an Outreach section holding Leads and Pipeline', () => {
-    const nav = header.slice(header.indexOf('const NAV = ['), header.indexOf('];', header.indexOf('const NAV = [')));
-    const at = s => nav.indexOf(s);
-    assert.ok(at("{ group: 'Clients' }") < at("'clients.html'"));
-    assert.ok(at("{ group: 'Outreach' }") < at("'crm.html#leads'") && at("'crm.html#leads'") < at("'crm.html#pipeline'"))   // phase 87: the CRM's Leads and Pipeline;
-    assert.ok(at("'schedules.html'") < at("{ group: 'Outreach' }"));
-});
-
 (async () => {
     console.log('phase 70 :: mentions and who hears about a task');
     for (const [name, fn] of tests) {

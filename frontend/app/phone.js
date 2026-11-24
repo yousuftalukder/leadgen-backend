@@ -2,7 +2,7 @@
  * EdgeLead CRM, phase 88: the phone. Calls, texts and voicemail on the business number, OpenPhone-style.
  *   Inbox (left) · conversation (middle) · contact (right). A keypad to dial, a bar while in a call,
  *   a card when a call comes in. Calls ring wherever the CRM or the Phone app is open.
- * The CRM (crm/app.js) hands in its helpers with ELPhone.init(); phone.html runs only this view.
+ * The CRM (app/app.js) hands in its helpers with ELPhone.init(); phone.html runs only this view.
  */
 window.ELPhone = (function () {
 'use strict';

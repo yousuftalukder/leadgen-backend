@@ -9,7 +9,7 @@ const SUPABASE_URL = 'https://sasbwgollyjpwegsbrty.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNhc2J3Z29sbHlqcHdlZ3NicnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4Mjg1MjEsImV4cCI6MjEwMTQwNDUyMX0.Ha6uDWqzC-T1Q49TE8WaqyjulPLntwt-2dSaknVtuKY';
 const BACKEND = 'https://leadgen-backend-1-mgzc.onrender.com';
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/positron';
-// A password reset or invite link lands here with its token in the address (welcome.html is served by this page).
+// A password reset or invite link lands here with its token in the address (old welcome.html links are moved to /).
 const AUTH_LINK = (location.hash.match(/type=(recovery|invite|signup)/) || [])[1] || null;
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -50,7 +50,8 @@ const ICONS = {
     phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/>', note: '<path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h5"/>', reply: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/>',
     stage: '<path d="M4 12h16M14 6l6 6-6 6"/>', wa: '<path d="M4 20l1.3-4A8 8 0 1 1 8 18.7z"/>', client: '<path d="M20 6 9 17l-5-5"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>', plus: '<path d="M12 5v14M5 12h14"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>', seo: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8M7.5 12l2-2 1.5 1.5L13.5 9"/>', mega: '<path d="M3 10v4h3l7 4V6L6 10z"/><path d="M16 9a4 4 0 0 1 0 6M19 6.5a8 8 0 0 1 0 11"/>', star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
-    shield: '<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'
+    shield: '<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    tools: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.3-.4-.4-2.3z"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>', unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>', out: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>', moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'
 };
 const ic = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
 function toast(t, bad) { const el = document.createElement('div'); el.className = 'toast'; el.setAttribute('role', 'status'); if (bad) el.style.background = 'var(--bad)'; el.textContent = t; document.body.appendChild(el); setTimeout(() => el.remove(), 3200); }
@@ -82,8 +83,26 @@ function shell() {
     $('#rail').innerHTML = `<div class="brand"><b>E</b>EdgeLead</div>` +
         NAV.slice(0, 6).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}" ${route === k ? 'aria-current="page"' : ''}>${ic(i)}${l}${k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${open}</span>` : k === 'phone' ? `<span class="ct hot" data-phbadge ${window.ELPhone && ELPhone.unread() ? '' : 'hidden'}>${window.ELPhone ? ELPhone.unread() || '' : ''}</span>` : ''}</a>`).join('') +
         `<div class="grp">Business</div>` + NAV.slice(6).filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
-        `<div class="foot"><span>${esc(teamName(st.meta.me.id))} · ${isAdmin() ? 'Owner' : 'Team'}</span><button class="btn sm ghost" id="theme" type="button">Light / dark</button><button class="btn sm ghost" id="signout" type="button">Sign out</button></div>`;
+        toolsLink() +
+        `<div class="foot"><div class="me"><span class="ava">${initials(teamName(st.meta.me.id))}</span><div style="min-width:0"><b>${esc(teamName(st.meta.me.id))}</b><span>${isAdmin() ? 'Owner' : 'Team'}</span></div></div><button class="btn sm ghost" id="theme" type="button">${ic('moon')}Light / dark</button><button class="btn sm ghost" id="signout" type="button">${ic('out')}Sign out</button></div>`;
+    const tb = $('#toolsTop'); if (tb) { const t = toolsState(); tb.hidden = !t.show; tb.classList.toggle('locked', !t.open); tb.innerHTML = `${ic('tools')}<span>Tools</span>${t.open ? '' : ic('lock').replace('class="ico"', 'class="ico lk"')}`; tb.title = t.open ? 'Open the Tools' : 'Tools are locked'; }
     $('#tabbar').innerHTML = NAV.filter(n => ['overview', 'leads', 'pipeline', 'phone', 'influencers'].includes(n[0])).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
+}
+// ------------------------------------------------------------------ the Tools door (phase 89)
+// The Tools live outside the CRM at /tools. The door shows for the owner and for anyone given a tool;
+// it opens only once a tool they have is unlocked (Admin → Tools). The server checks both again.
+function toolsState() {
+    const list = (st.meta && st.meta.me && st.meta.me.tools) || [];
+    return { show: isAdmin() || list.some(t => t.assigned), open: list.some(t => t.open) };
+}
+function toolsLink() {
+    const t = toolsState(); if (!t.show) return '';
+    return `<a href="/tools" class="tools-link" data-tools>${ic('tools')}Tools<span class="lock ${t.open ? 'open' : ''}">${ic(t.open ? 'unlock' : 'lock').replace('class="ico"', 'class="ico" style="width:12px;height:12px"')}${t.open ? 'Unlocked' : 'Locked'}</span></a>`;
+}
+function toolsLocked() {
+    $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" aria-label="Tools are locked"><div class="mh"><h2 style="display:flex;align-items:center;gap:8px">${ic('lock')}Tools are locked</h2></div>
+      <div class="mb"><p class="sub" style="margin:0">${isAdmin() ? 'Unlock a tool in Admin → Tools. While a tool is locked nothing runs for it and no Apify credit is spent.' : 'The owner has given you Tools, but they are locked right now. Ask the owner to unlock them.'}</p></div>
+      <div class="mf"><button class="btn" type="button" data-close>Close</button>${isAdmin() ? '<a class="btn pri" href="#admin" data-close>Open Admin</a>' : ''}</div></div>`;
 }
 async function render() {
     route = window.EL_PHONE_ONLY ? 'phone' : (location.hash || '#overview').slice(1).split('?')[0];
@@ -240,8 +259,19 @@ function profile(c) {
         <button type="button" class="lnk" data-act="crpost">${ic('plus')}Log a post for a client<small>marks them Worked with</small></button>
         <button type="button" class="lnk" data-act="credit">${ic('note')}Edit profile<small>stage, rate, location</small></button></div>`;
 }
+// The map library is about 800 KB, so it loads the first time the Influencers page opens, not with the CRM (phase 89).
+let mapLib = null;
+function loadMapLib() {
+    if (window.maplibregl) return Promise.resolve();
+    if (mapLib) return mapLib;
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'; document.head.appendChild(css);
+    mapLib = new Promise((ok, no) => { const sc = document.createElement('script'); sc.src = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js'; sc.onload = ok; sc.onerror = () => { mapLib = null; no(); }; document.head.appendChild(sc); });
+    return mapLib;
+}
 function mapInit() {
-    const el = $('#map'); if (!el || !window.maplibregl) { if (el) el.innerHTML = '<div class="empty">The map could not load. Check the connection and refresh.</div>'; return; }
+    const el0 = $('#map');
+    if (el0 && !window.maplibregl) { loadMapLib().then(() => route === 'influencers' && mapInit(), () => { const m = $('#map'); if (m) m.innerHTML = '<div class="empty">The map could not load. Check the connection and refresh.</div>'; }); return; }
+    const el = $('#map'); if (!el || !window.maplibregl) return;
     if (mapObj) { mapObj.remove(); mapObj = null; }
     const shown = crShown().filter(c => c.lat != null), clients = st.net.clients.filter(c => c.lat != null && (st.crCountry === 'all' || c.country === st.crCountry));
     mapObj = new maplibregl.Map({ container: el, style: MAP_STYLE, center: [90.37, 22.70], zoom: 11, attributionControl: { compact: true }, cooperativeGestures: matchMedia('(pointer: coarse)').matches });
@@ -315,14 +345,15 @@ async function vSettings() {
         <section class="card"><div class="card-h"><h2>Team</h2><span>${st.meta.team.length} people</span></div>${st.meta.team.map(m => `<div class="opt"><span class="ava">${initials(m.name)}</span><div class="t"><b>${esc(m.name)}</b><span>${m.role === 'admin' ? 'Owner' : 'Team'}</span></div></div>`).join('')}
           ${isAdmin() ? '<div class="opt"><div class="t"><span>Add, turn off or remove people in Admin.</span></div><a class="btn sm" href="#admin">Admin</a></div>' : ''}</section>
         <section class="card"><div class="card-h"><h2>Mailboxes</h2><span>Next phase</span></div><div class="opt"><div class="t"><b>Email automation</b><span>Connect a Google Workspace mailbox on edgelead.online to send sequences.</span></div><button class="btn sm" type="button" disabled>Coming next</button></div></section>
-        <section class="card"><div class="card-h"><h2>Calling</h2><span>After email</span></div><div class="opt"><div class="t"><b>Twilio dialer</b><span>Call from a lead's record; every call recorded and logged.</span></div><button class="btn sm" type="button" disabled>Coming next</button></div></section>
+        <section class="card"><div class="card-h"><h2>Calling</h2><span>Live</span></div><div class="opt"><div class="t"><b>Phone · (469) 819-4097</b><span>Calls, texts and voicemail, logged on each lead's timeline.</span></div><a class="btn sm" href="#phone">Open Phone</a></div></section>
       </div>`;
 }
 
 
 // ------------------------------------------------------------------ admin (the owner only; the server checks too)
 async function vAdmin() {
-    const [{ users }, { tools }, ph] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools'), api('/api/admin/phone/usage').catch(e => ({ error: e.message }))]);
+    const [{ users }, acc, ph, ak, gk] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools/access'), api('/api/admin/phone/usage').catch(e => ({ error: e.message })),
+        api('/api/apify-keys').catch(() => null), api('/api/gemini-keys').catch(() => null)]);
     const staff = users.filter(u => u.role !== 'client').sort((a, b) => (b.role === 'admin') - (a.role === 'admin') || (a.full_name || a.email).localeCompare(b.full_name || b.email));
     const owners = users.filter(u => u.role === 'client');
     const me = st.meta.me.id;
@@ -331,7 +362,6 @@ async function vAdmin() {
         ${u.id === me ? '' : `<div class="acts2"><button class="btn sm" type="button" data-uact="pass" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">New password</button>
           <button class="btn sm" type="button" data-uact="${u.is_active ? 'off' : 'on'}" data-uid="${u.id}">${u.is_active ? 'Turn off' : 'Turn on'}</button>
           <button class="btn sm ghost danger" type="button" data-uact="remove" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">Remove</button></div>`}</div>`;
-    const tools_ = tools;
     return `<div class="head"><div><h1>Admin</h1><p class="sub">Only you can open this. Teammates use the CRM but cannot see or change any of this.</p></div></div>
       <div class="set">
         <section class="card"><div class="card-h"><h2>Team</h2><span>${staff.filter(u => u.is_active).length} active</span></div>
@@ -339,15 +369,49 @@ async function vAdmin() {
           <form class="addp" id="addp" autocomplete="off"><div class="card-h" style="padding:0 0 4px"><span class="lbl">Add a teammate</span></div>
             <div class="grid3">${fieldHtml('ap-n', 'Name', 'placeholder="Full name"')}${fieldHtml('ap-e', 'Email', 'type="email" placeholder="name@edgelead.online"')}
             <div class="field"><label for="ap-p">Password</label><div class="inline"><input id="ap-p" type="text" minlength="8" placeholder="8 characters or more"><button class="btn sm" type="button" data-act="genpass">Make one</button></div></div></div>
-            <div class="bar"><span class="note" style="margin:0">They sign in at workspace.edgelead.online with this email and password, and see the CRM only.</span><button class="btn pri" type="submit">Add teammate</button></div>
+            <div class="bar"><span class="note" style="margin:0">They sign in at workspace.edgelead.online with this email and password, and see the CRM. Give them Tools below.</span><button class="btn pri" type="submit">Add teammate</button></div>
             <div id="ap-out"></div></form></section>
         ${phoneUsage(ph)}
-        ${tools_ ? `<section class="card"><div class="card-h"><h2>Social media tools</h2><span>${tools_.filter(t => t.on).length ? tools.filter(t => t.on).length + ' on' : 'All off'}</span></div>
-          <p class="note" style="margin:0 16px 8px">While a tool is off its pages stop working and nothing runs for it in the background: no Apify runs, no scheduled reports, no Meta sync. Turning Edge Meta AI or reports on or off restarts the server, about a minute.</p>
-          ${tools_.map(t => `<div class="opt"><div class="t"><b>${esc(t.label)}</b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="${esc(t.label)}"><i></i></label></div>`).join('')}</section>` : ''}
+        ${toolsAdmin(acc)}
+        ${keysAdmin(ak, gk)}
         ${owners.length ? `<section class="card"><div class="card-h"><h2>Client logins</h2><span>From the old Edge Meta AI</span></div>
-          <p class="note" style="margin:0 16px 8px">Business owners who had their own login. They cannot use the CRM; the old pages they used are closed for now.</p>${owners.map(person).join('')}</section>` : ''}
+          <p class="note" style="margin:0 16px 8px">Business owners who had their own login. They cannot use the CRM or the Tools; the old pages they used were removed.</p>${owners.map(person).join('')}</section>` : ''}
       </div>`;
+}
+/** Admin → Tools (phase 89): each tool's lock, then who may use which tool and for which clients. */
+function toolsAdmin(a) {
+    if (!a) return '';
+    const open = a.switches.filter(t => t.on).length;
+    const bg = (a.background || []).filter(t => t.on);
+    return `<section class="card" id="tools-admin"><div class="card-h"><h2>Tools</h2><span>${open ? open + ' unlocked' : 'All locked'}</span></div>
+      <p class="note" style="margin:0 18px 10px">The Tools open at <b>/tools</b>, outside the CRM. A tool opens only when it is unlocked here <i>and</i> given to the person. While a tool is locked nothing runs for it and no Apify credit is spent.</p>
+      ${a.switches.map(t => `<div class="opt lockrow"><div class="t"><b>${esc(t.label)}<span class="lockstate ${t.on ? 'open' : ''}">${t.on ? 'Unlocked' : 'Locked'}</span></b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="Unlock ${esc(t.label)}"><i></i></label></div>`).join('')}
+      ${bg.length ? `<div class="opt"><div class="t"><b>Still running in the background</b><span>${bg.map(t => esc(t.label)).join(', ')}: these have no page any more. Turn them off to stop their background work.</span></div><div class="acts2">${bg.map(t => `<button class="btn sm" type="button" data-tooloff="${t.key}">Turn off ${esc(t.label)}</button>`).join('')}</div></div>` : ''}
+      <div class="card-h" style="border-top:1px solid var(--line);margin-top:4px"><h2>Who has Tools</h2><span>You have every tool</span></div>
+      ${a.people.length ? a.people.map(p => `<form class="acc-row" data-access="${p.id}"><div class="acc-who"><span class="ava">${initials(p.name)}</span><div style="min-width:0"><b>${esc(p.name)}</b><span>${esc(p.email || '')}${p.active ? '' : ' · turned off'}</span></div></div>
+        <div class="acc-grp"><span class="lbl">Tools they can use</span><div class="tick">${a.tools.map(t => `<label><input type="checkbox" name="tool" value="${t.key}" ${p.tools.includes(t.key) ? 'checked' : ''}>${esc(t.label)}</label>`).join('')}</div>
+          <span class="lbl" style="margin-top:4px">Clients they can run them for</span><div class="tick">${a.clients.length ? a.clients.map(c => `<label><input type="checkbox" name="client" value="${c.id}" ${p.clients.includes(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('') : '<span class="sub" style="margin:0">No clients yet. Convert a won lead and it appears here.</span>'}</div>
+          <div><button class="btn sm pri" type="submit">Save ${esc(p.name.split(' ')[0])}'s access</button></div></div></form>`).join('') : '<div class="empty">No teammates yet. Add one above, then give them Tools here.</div>'}
+    </section>`;
+}
+/** Admin → the keys the Tools spend (phase 89): each tool's Apify key and credit, the failover pool, the Gemini keys. */
+const APIFY_TOOL_ENGINES = [['leadgen', 'Lead Finder'], ['report', 'Instagram report'], ['fb_page', 'Facebook Page report'], ['fb_community', 'Facebook groups']];
+function keysAdmin(a, g) {
+    if (!a) return '';
+    const usd = v => v == null ? '—' : '$' + Number(v).toFixed(2);
+    const pool = (a.keys || []).filter(k => !k.owner_user_id);
+    const gem = ((g && g.keys) || []).filter(k => !k.owner_user_id);
+    return `<section class="card" id="keys-admin"><div class="card-h"><h2>Apify and AI keys</h2><span>${esc(a.cycleMonth || '')}</span></div>
+      <p class="note" style="margin:0 18px 10px">Each tool spends its own Apify key first, then the shared pool, then the server's key. Credit renews monthly; spend is this month's.</p>
+      ${APIFY_TOOL_ENGINES.map(([e, l]) => { const p = (a.primaries || {})[e] || {}; return `<div class="opt"><div class="t"><b>${esc(l)}</b><span>${p.configured ? `${esc(p.masked || 'Key set')} · ${usd(p.spentUsd)} of ${usd(p.creditUsd)} spent` : 'No key of its own: uses the pool'}</span></div>
+        <div class="acts2"><button class="btn sm" type="button" data-keyset="${e}" data-label="${esc(l)}">${p.configured ? 'Replace key' : 'Add key'}</button>${p.configured ? `<button class="btn sm ghost" type="button" data-keycredit="${e}" data-cur="${p.creditUsd || ''}">Monthly credit</button>` : ''}</div></div>`; }).join('')}
+      <div class="card-h" style="border-top:1px solid var(--line)"><h2>Shared pool</h2><span>${pool.length} key${pool.length === 1 ? '' : 's'}</span></div>
+      ${pool.map(k => `<div class="opt"><div class="t"><b>${esc(k.label || k.apify_username || 'Apify key')}</b><span>${esc(k.engine === 'any' ? 'Any tool' : (APIFY_TOOL_ENGINES.find(x => x[0] === k.engine) || [0, k.engine])[1])} · ${esc(k.status)} · ${usd(k.remainingUsd)} left of ${usd(k.creditUsd)}</span></div><button class="btn sm ghost danger" type="button" data-keydel="${k.id}">Remove</button></div>`).join('') || '<div class="opt"><div class="t"><span>No pool keys. Add one so a run keeps going when a tool\'s own key runs dry.</span></div></div>'}
+      <form class="opt keyadd" id="poolAdd" autocomplete="off"><div class="inline" style="flex:1;flex-wrap:wrap"><input id="pk-t" type="password" placeholder="apify_api_…" aria-label="Apify token" required style="flex:2;min-width:180px"><input id="pk-l" placeholder="Label" aria-label="Label" style="flex:1;min-width:100px"><button class="btn sm pri" type="submit">Add to pool</button></div></form>
+      <div class="card-h" style="border-top:1px solid var(--line)"><h2>Gemini keys</h2><span>write the reports' summaries</span></div>
+      ${gem.map(k => `<div class="opt"><div class="t"><b>${esc(k.label || 'Gemini key')}</b><span>${esc(k.status)}${k.calls_total ? ' · ' + num(k.calls_total) + ' calls' : ''}${k.last_error ? ' · ' + esc(String(k.last_error).slice(0, 80)) : ''}</span></div><button class="btn sm ghost danger" type="button" data-gemdel="${k.id}">Remove</button></div>`).join('') || '<div class="opt"><div class="t"><span>No pool keys; the server\'s key is used.</span></div></div>'}
+      <form class="opt keyadd" id="gemAdd" autocomplete="off"><div class="inline" style="flex:1;flex-wrap:wrap"><input id="gk-t" type="password" placeholder="Gemini API key" aria-label="Gemini key" required style="flex:2;min-width:180px"><input id="gk-l" placeholder="Label" aria-label="Label" style="flex:1;min-width:100px"><button class="btn sm pri" type="submit">Add key</button></div></form>
+    </section>`;
 }
 function phoneUsage(u) {
     if (!u || u.error) return `<section class="card"><div class="card-h"><h2>Phone</h2><span>Usage</span></div><div class="empty">${esc((u && u.error) || 'Not available yet.')}</div></section>`;
@@ -371,7 +435,7 @@ function phoneUsage(u) {
 }
 const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
 
-// ------------------------------------------------------------------ sign in (the CRM is the front door; index.html and welcome.html serve this page)
+// ------------------------------------------------------------------ sign in (the CRM is the front door; it is index.html, at /)
 function authScreen(inner) {
     document.body.innerHTML = `<main class="auth"><section class="card authcard"><div class="brand"><b>E</b>EdgeLead</div>${inner}<div class="err" id="aerr" role="alert"></div></section><p class="authfoot">EdgeLead CRM · for the EdgeLead team</p></main>`;
     const f = $('.authcard input'); if (f) f.focus();
@@ -386,7 +450,7 @@ function signIn(msg) {
         if (error) { $('#aerr').textContent = /invalid/i.test(error.message) ? 'That email and password do not match.' : error.message; b.disabled = false; b.textContent = 'Sign in'; return; }
         location.reload(); };
     $('#forgot').onclick = async () => { const email = v('si-e').trim(); if (!email) { $('#aerr').textContent = 'Write your email first, then press this again.'; return; }
-        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/welcome.html' });
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/' });
         $('#aerr').textContent = error ? error.message : 'If that email has an account, a link to set a new password is on its way.'; };
 }
 function setPassword() {
@@ -398,7 +462,7 @@ function setPassword() {
         if (v('np-1') !== v('np-2')) { $('#aerr').textContent = 'The two passwords are different.'; return; }
         const { error } = await sb.auth.updateUser({ password: v('np-1') });
         if (error) { $('#aerr').textContent = error.message; return; }
-        location.replace('crm.html'); };
+        location.replace('/'); };
 }
 
 // ------------------------------------------------------------------ lead record
@@ -517,10 +581,22 @@ function creatorForm(c, onOk, title, ok) {
 // ------------------------------------------------------------------ events
 document.addEventListener('click', async e => {
     const t = e.target;
+    const ks = t.closest('[data-keyset]');
+    if (ks) { const k = prompt(`Paste the Apify token for ${ks.dataset.label}. The old key moves to the shared pool.`); if (!k) return;
+        try { await api('/api/update-apify-key', { method: 'POST', body: { newApiKey: k.trim(), engine: ks.dataset.keyset } }); toast('Key saved'); } catch (err) { toast(err.message, true); } return render(); }
+    const kc = t.closest('[data-keycredit]');
+    if (kc) { const n = prompt('Monthly Apify credit for this key, in US dollars', kc.dataset.cur || '5'); if (!n) return;
+        try { await api('/api/admin/engine-credit', { method: 'PATCH', body: { engine: kc.dataset.keycredit, monthlyCreditUsd: n } }); toast('Saved'); } catch (err) { toast(err.message, true); } return render(); }
+    const kd = t.closest('[data-keydel],[data-gemdel]');
+    if (kd) { if (!confirm('Remove this key? Runs stop using it at once.')) return;
+        try { await api(kd.dataset.keydel ? '/api/apify-keys/' + kd.dataset.keydel : '/api/gemini-keys/' + kd.dataset.gemdel, { method: 'DELETE' }); toast('Removed'); } catch (err) { toast(err.message, true); } return render(); }
+    const off = t.closest('[data-tooloff]');
+    if (off) { off.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [off.dataset.tooloff]: false } } }); toast(r.restarting ? 'Turned off. The server restarts and is back within a minute.' : 'Turned off'); } catch (err) { toast(err.message, true); } return render(); }
+    if (t.closest('[data-tools],#toolsTop')) { if (!toolsState().open) { e.preventDefault(); return toolsLocked(); } if (t.closest('#toolsTop')) location.href = '/tools'; return; }
     if (t.closest('[data-close]')) { $('#layer').innerHTML = ''; st.openId = null; return; }
     if (t.closest('[data-unsub]')) { $('#sub').innerHTML = ''; if (!st.openId) $('#layer').innerHTML = ''; return; }
     if (t.closest('#theme')) { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('crm-theme', r.dataset.theme); } catch {} if (route === 'influencers') mapInit(); return; }
-    if (t.closest('#signout')) { await sb.auth.signOut(); location.replace('crm.html'); return; }
+    if (t.closest('#signout')) { await sb.auth.signOut(); location.replace('/'); return; }
     if (t.closest('#newLead')) return newLead();
     if (t.closest('#openPal')) return palette();
     const pe = t.closest('[data-period]'); if (pe) { st.period = +pe.dataset.period; return render(); }
@@ -591,6 +667,22 @@ document.addEventListener('click', async e => {
     const o = t.closest('[data-open]'); if (o) { $('#sub') && ($('#sub').innerHTML = ''); return openLead(o.dataset.open); }
 });
 document.addEventListener('submit', async e => {
+    if (e.target.id === 'poolAdd' || e.target.id === 'gemAdd') {   // phase 89: keys
+        e.preventDefault(); const pool = e.target.id === 'poolAdd'; const b = e.target.querySelector('[type=submit]'); b.disabled = true;
+        try {
+            if (pool) await api('/api/apify-keys', { method: 'POST', body: { token: v('pk-t').trim(), label: v('pk-l').trim() || null, engine: 'any', global: true } });
+            else await api('/api/gemini-keys', { method: 'POST', body: { key: v('gk-t').trim(), label: v('gk-l').trim() || null, global: true } });
+            toast('Key added'); return render();
+        } catch (err) { toast(err.message, true); b.disabled = false; return; }
+    }
+    const acc = e.target.closest('[data-access]');
+    if (acc) {   // phase 89: a teammate's tools and clients
+        e.preventDefault(); const b = acc.querySelector('[type=submit]'); b.disabled = true;
+        const pick = n => [...acc.querySelectorAll(`input[name=${n}]:checked`)].map(x => x.value);
+        try { await api('/api/admin/tools/access/' + acc.dataset.access, { method: 'PUT', body: { tools: pick('tool'), clients: pick('client') } }); toast('Access saved'); }
+        catch (err) { toast(err.message, true); }
+        b.disabled = false; return;
+    }
     if (e.target.id !== 'addp') return; e.preventDefault();
     const b = e.target.querySelector('[type=submit]'); b.disabled = true;
     try {
@@ -606,7 +698,7 @@ document.addEventListener('change', async e => {
     const t = e.target;
     if (t.matches('[data-field]') && st.openId) return saveField(t);
     if (t.matches('[data-bulk]') && t.value) { try { await api('/api/crm/leads/bulk', { method: 'POST', body: { ids: [...st.sel], set: { [t.dataset.bulk]: t.value } } }); toast(st.sel.size + ' leads updated'); st.sel.clear(); await leads(true); render(); } catch (err) { toast(err.message, true); } return; }
-    if (t.matches('[data-tool]')) { t.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [t.dataset.tool]: t.checked } } }); st.meta.tools = Object.fromEntries(r.tools.map(x => [x.key, x.on])); toast(r.restarting ? 'Saved. The server restarts and is back within a minute.' : 'Saved'); } catch (err) { t.checked = !t.checked; toast(err.message, true); } t.disabled = false; return render(); }
+    if (t.matches('[data-tool]')) { t.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [t.dataset.tool]: t.checked } } }); st.meta.tools = Object.fromEntries(r.tools.map(x => [x.key, x.on])); st.meta = await api('/api/crm/meta'); toast(r.restarting ? 'Saved. The server restarts and is back within a minute.' : 'Saved'); } catch (err) { t.checked = !t.checked; toast(err.message, true); } t.disabled = false; return render(); }
     if (t.id === 'crcountry') { st.crCountry = t.value; return render(); }
 });
 document.addEventListener('input', e => {
@@ -647,7 +739,7 @@ function palette() {
     const { data } = await sb.auth.getSession();
     if (AUTH_LINK && data.session) { history.replaceState(null, '', location.pathname); return setPassword(); }
     if (!data.session) return signIn();
-    if (!window.EL_PHONE_ONLY && !/crm\.html$/.test(location.pathname)) history.replaceState(null, '', 'crm.html' + (location.hash.includes('access_token') ? '' : location.hash));
+    if (!window.EL_PHONE_ONLY && (location.pathname !== '/' || location.hash.includes('access_token'))) history.replaceState(null, '', '/' + (location.hash.includes('access_token') ? '' : location.hash));
     try { st.meta = await api('/api/crm/meta'); }
     catch (e) {
         if (e.status === 403) { await sb.auth.signOut(); return signIn('This workspace is for the EdgeLead team only.'); }

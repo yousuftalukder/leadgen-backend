@@ -167,13 +167,6 @@ const reset = () => { sent.length = 0; for (const q of S._taskMail.values()) cle
         assert.ok(/attached \$\{name\}\./.test(src), 'file');
         assert.ok(/marked it done\./.test(src), 'owner tick');
     });
-    const ui = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'ui.js'), 'utf8');
-    const ws = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workspace.html'), 'utf8');
-    await test('the link opens the task on its board, once', () => {
-        assert.ok(/openTask: qs\.get\('task'\)/.test(ws));
-        assert.ok(/if \(opts\.openTask\) \{/.test(ui) && /u\.searchParams\.delete\('task'\)/.test(ui));
-    });
-
     reset();
     console.log(`\n${passed} passed`);
 })();

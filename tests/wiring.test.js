@@ -34,12 +34,13 @@ const ROOT = path.join(__dirname, '..');
 const SERVER = [path.join(ROOT, 'server.js'), ...fs.readdirSync(path.join(ROOT, 'src')).filter(f => f.endsWith('.js')).sort().map(f => path.join(ROOT, 'src', f)), path.join(ROOT, 'xp', 'index.js')]
     .map(f => fs.readFileSync(f, 'utf8')).join('\n');
 const FRONT_DIR = path.join(ROOT, 'frontend');
-const PAGES = fs.readdirSync(FRONT_DIR).filter(f => f.endsWith('.html'));
-const HEADER = fs.readFileSync(path.join(FRONT_DIR, 'header.js'), 'utf8');
-// Shared scripts the pages load besides header.js (phase 33: ui.js holds the
-// workspace components). Their API calls are checked like any page's.
-const SCRIPTS = fs.readdirSync(FRONT_DIR).filter(f => f.endsWith('.js') && f !== 'header.js' && f !== 'sw.js');
-
+// Phase 89: two apps (the CRM at /, the Tools at /tools), the Phone and the legal pages. Pages and scripts
+// are read from every folder of frontend/ except the vendored library; the service workers fetch no API.
+const walk = d => fs.readdirSync(d, { withFileTypes: true }).flatMap(e => e.isDirectory() ? (e.name === 'vendor' ? [] : walk(path.join(d, e.name))) : [path.join(d, e.name)]);
+const FILES = walk(FRONT_DIR).map(f => path.relative(FRONT_DIR, f).split(path.sep).join('/'));
+const PAGES = FILES.filter(f => f.endsWith('.html'));
+const SCRIPTS = FILES.filter(f => f.endsWith('.js') && !/(^|\/)(sw|phone-sw)\.js$/.test(f));
+const HEADER = '';
 let pass = 0, fail = 0, skip = 0;
 const problems = [];
 function ok(msg)   { pass++; console.log('  ok   ' + msg); }
@@ -186,7 +187,7 @@ function splitOnPlus(text) {
 /** Every API call a page makes, with its real HTTP method. */
 function pageCalls(src) {
     const calls = [];
-    const re = /EL\.(api|runJob)\s*\(/g;
+    const re = /(?:\bEL\.|\bH\.|[^.\w])(api|runJob|start)\s*\(/g;   // phase 89: api(), H.api() and the Tools' start() too
     let m;
     while ((m = re.exec(src))) {
         const open = m.index + m[0].length - 1;
@@ -198,7 +199,7 @@ function pageCalls(src) {
 
         // runJob POSTs, always — it starts a job. Treating it as GET is what
         // produced most of the earlier false alarms.
-        let method = m[1] === 'runJob' ? 'POST' : 'GET';
+        let method = m[1] === 'runJob' || m[1] === 'start' ? 'POST' : 'GET';
         if (m[1] === 'api' && parts[1]) {
             const mm = /(?:^|[{,\s])method\s*:\s*['"](\w+)['"]/.exec(parts[1]);
             if (mm) method = mm[1].toUpperCase();
@@ -217,8 +218,7 @@ function pageCalls(src) {
 console.log('\npage → server: every endpoint a page calls must exist');
 {
     const missing = [], unresolved = [];
-    const sources = [...PAGES.map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')]), ['header.js', HEADER],
-        ...SCRIPTS.map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')])];
+    const sources = [...PAGES, ...SCRIPTS].map(f => [f, fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')]);
 
     let checked = 0;
     for (const [file, src] of sources) {
@@ -270,24 +270,7 @@ console.log('\nreport types: everything written must be labelable and openable')
         [...SERVER.matchAll(/report_type:\s*(['"`])([\w]+)\1/g)].map(m => m[2])
     )].sort();
 
-    // Phase 33: one pair of maps in ui.js, shared by every page that lists
-    // reports (the client's Reports tab, Home), instead of a copy per page.
-    const uiSrc = fs.readFileSync(path.join(FRONT_DIR, 'ui.js'), 'utf8');
-    const labelBlock = (uiSrc.match(/TYPE_LABEL\s*=\s*\{[^}]*\}/) || [''])[0];
-    const pageBlock  = (uiSrc.match(/TYPE_PAGE\s*=\s*\{[^}]*\}/) || [''])[0];
-
-    if (!labelBlock || !pageBlock) {
-        bad('ui.js still declares TYPE_LABEL and TYPE_PAGE', 'one of the maps could not be found');
-    } else {
-        // A timeline row with no label renders as "undefined"; with no page it
-        // links to '#'. Both are silent.
-        const unlabelled = written.filter(t => !new RegExp(`\\b${t}\\b`).test(labelBlock));
-        const unopenable = written.filter(t => !new RegExp(`\\b${t}\\b`).test(pageBlock));
-        check('every report_type the server writes has a label in the timeline', unlabelled
-            .map(t => `report_type '${t}' would render as "undefined" in the client timeline`));
-        check('every report_type the server writes has a page to open it', unopenable
-            .map(t => `report_type '${t}' would link to '#'`));
-
+    {
         // The client surface has its own naming, in owner language. It was
         // keyed by JOB type for two entries (fb_page_report, fb_community_audit)
         // that no row has ever carried, so a client's Facebook report read as
@@ -304,6 +287,9 @@ console.log('\nreport types: everything written must be labelable and openable')
         }
         ok(`${written.length} report types written: ${written.join(', ')}`);
     }
+    // Phase 89: the Tools open the three Apify report kinds; every one must have a route that serves it.
+    const tools = fs.readFileSync(path.join(FRONT_DIR, 'app', 'tools.js'), 'utf8');
+    check('the Tools open every Apify report kind they list', ['ig', 'fbpage', 'fbgroups'].filter(k => !new RegExp(`${k}: '/api/[\\w/-]+/'`).test(tools)).map(k => `no report route for ${k}`));
 }
 
 // ---------------------------------------------------------------------------
@@ -311,45 +297,28 @@ console.log('\nreport types: everything written must be labelable and openable')
 // ---------------------------------------------------------------------------
 console.log('\npages: shell, styles and auth on every one');
 {
-    // share.html is the read-only public view: no session, so no auth boot.
-    const PUBLIC = new Set(['share.html']);
-    // Legal and policy pages Meta's review links to. They deliberately carry
-    // no app shell — no header.js, no session, nothing to be signed in to —
-    // so a person can read them without an account. They still must parse
-    // and still must be reachable.
+    // Legal pages Meta's review links to: no app, no session, still must parse.
     const STATIC = new Set(['privacy.html', 'terms.html', 'data-deletion.html']);
-    // Pages that come before there is a session — a new account, a password
-    // chosen from an invite link — cannot boot through EL.init, which sends
-    // anyone without a session to the login page. signup.html used to pass
-    // this check only because a comment mentioned EL.init.
-    const PRE_SESSION = new Set(['signup.html', 'welcome.html']);
-    // The CRM (phase 87) is its own light app: crm/app.css and crm/app.js, no header.js,
-    // so it loads fast. It must still use the supabase client and send anyone without a
-    // session to its own sign-in screen — checked separately below.
-    const STANDALONE = new Set(['crm.html', 'phone.html']);   // phase 88: the Phone is the CRM's phone view on its own
-    const noCss = [], noHeader = [], noSupabase = [], noInit = [], badParse = [];
-
+    // The apps: each loads the shared design system, the supabase client and its own script, and sends
+    // anyone without a session to the sign-in (the CRM shows it; the Tools send people to /).
+    const APPS = { 'index.html': 'app.js', 'phone.html': 'app.js', 'tools/index.html': 'tools.js' };
+    const bad_ = [], badParse = [];
     for (const f of PAGES) {
         const src = fs.readFileSync(path.join(FRONT_DIR, f), 'utf8');
-        if (STANDALONE.has(f)) {
-            const js = fs.readFileSync(path.join(FRONT_DIR, 'crm', 'app.js'), 'utf8');
-            if (!/href=["']crm\/app\.css["']/.test(src)) noCss.push(f);
-            if (!/src=["']crm\/app\.js["']/.test(src)) noHeader.push(f);
-            if (!/if \(!data\.session\) return signIn\(\)/.test(js)) noInit.push(f);   // no session: the sign-in screen
-        }
-        if (!STANDALONE.has(f) && !/<link[^>]+href=["']app\.css["']/.test(src)) noCss.push(f);
-        if (!STATIC.has(f) && !STANDALONE.has(f) && !/<script[^>]+src=["']header\.js["']/.test(src)) noHeader.push(f);
-        if (!STATIC.has(f) && !/supabase-js/.test(src)) noSupabase.push(f);
-        if (!PUBLIC.has(f) && !STATIC.has(f) && !PRE_SESSION.has(f) && !STANDALONE.has(f) && !/EL\.(init|initShared|loadShared)/.test(src)) noInit.push(f);
-        for (const m of src.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
-            try { new Function(m[1]); } catch (e) { badParse.push(`${f}: ${e.message}`); }
-        }
+        for (const m of src.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) { try { new Function(m[1]); } catch (e) { badParse.push(`${f}: ${e.message}`); } }
+        if (STATIC.has(f)) { if (!/app\/legal\.css/.test(src)) bad_.push(`${f} has no stylesheet`); continue; }
+        const js = APPS[f];
+        if (!js) { bad_.push(`${f} is a page nobody planned: add it to APPS or STATIC`); continue; }
+        if (!/href=["']\/?app\/app\.css["']/.test(src)) bad_.push(`${f} does not load app/app.css`);
+        if (!new RegExp(`src=["']/?app/${js.replace('.', '\\.')}["']`).test(src)) bad_.push(`${f} does not load app/${js}`);
+        if (!/supabase-js/.test(src)) bad_.push(`${f} does not load the supabase client`);
+        const code = fs.readFileSync(path.join(FRONT_DIR, 'app', js), 'utf8');
+        if (!/if \(!data\.session\) return signIn\(\)|if \(!data\.session\) \{ location\.replace\('\/'\)/.test(code)) bad_.push(`app/${js} lets someone without a session in`);
     }
-    check('every page loads the shared stylesheet', noCss);
-    check('every page loads header.js', noHeader);
-    check('every page loads the supabase client', noSupabase);
-    check('every non-public page boots through EL.init', noInit);
+    check('every page is one of the apps or a legal page, with its styles, script and sign-in', bad_);
     check('every inline script parses', badParse);
+    for (const f of SCRIPTS) { try { new (require('vm').Script)(fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')); } catch (e) { badParse.push(`${f}: ${e.message}`); } }
+    check('every script parses', badParse);
     ok(`${PAGES.length} pages checked`);
 }
 
@@ -358,23 +327,14 @@ console.log('\npages: shell, styles and auth on every one');
 // ---------------------------------------------------------------------------
 console.log('\nnavigation: every destination exists, every page is reachable');
 {
-    const navHrefs = [...HEADER.matchAll(/href:\s*(['"`])([\w.-]+\.html)\1/g)].map(m => m[2]);
-    const missing = [...new Set(navHrefs)].filter(h => !PAGES.includes(h));
-    check('every nav entry points at a page that exists', missing
-        .map(h => `nav links to ${h}, which is not in frontend/`));
-
-    // Pages reachable some other way (a link, a redirect, a share URL) are
-    // fine; pages reachable NO way are the problem.
-    // The CRM's pages are built by its scripts (phase 87), so their links count too.
-    const CRM_JS = ['app.js', 'phone.js'].map(f => fs.readFileSync(path.join(FRONT_DIR, 'crm', f), 'utf8')).join('\n');
-    const allSrc = PAGES.map(f => fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')).join('\n') + HEADER + CRM_JS;
-    const orphans = PAGES.filter(f =>
-        f !== 'index.html' &&
-        !navHrefs.includes(f) &&
-        !new RegExp(`['"\`(/]${f.replace('.', '\\.')}`).test(allSrc));
-    check('no page is unreachable from anywhere', orphans
-        .map(f => `${f} is not linked from the nav or any page`));
-    ok(`${new Set(navHrefs).size} nav destinations, all present`);
+    // Every root-relative page the apps link to must exist (or be a rewrite Netlify serves).
+    const all = [...PAGES, ...SCRIPTS].map(f => fs.readFileSync(path.join(FRONT_DIR, f), 'utf8')).join('\n');
+    const toml = fs.readFileSync(path.join(FRONT_DIR, 'netlify.toml'), 'utf8');
+    const served = new Set(['/', ...PAGES.map(f => '/' + f), ...[...toml.matchAll(/from = "(\/[\w./-]*)"\s+to = "[^"]+"\s+status = 200/g)].map(m => m[1])]);
+    const links = [...new Set([...all.matchAll(/href=["'`](\/[\w./-]*)(?:#[^"'`]*)?["'`]/g)].map(m => m[1]))].filter(h => !/\.(css|png|js|webmanifest)$/.test(h));
+    check('every page the apps link to is served', links.filter(h => !served.has(h)).map(h => `a link to ${h}, which nothing serves`));
+    check('nothing links to the old pages or to crm.html', [...all.matchAll(/["'`(](?:\/)?(crm|leads|admin|workspace|ig-report|fb-report|client|clients|welcome)\.html/g)].map(m => `a link to ${m[1]}.html`));
+    ok(`${links.length} links checked`);
 }
 
 // ---------------------------------------------------------------------------
@@ -419,28 +379,19 @@ console.log('\nengines: everything the server gates must be grantable');
 {
     const m = /^const ENGINES\s*=\s*\[([^\]]*)\]/m.exec(SERVER);
     const engines = m ? [...m[1].matchAll(/'([\w]+)'/g)].map(x => x[1]) : [];
-    const admin = fs.readFileSync(path.join(FRONT_DIR, 'admin.html'), 'utf8');
-
     if (!engines.length) {
         bad('the server ENGINES list is findable', 'the pattern matched nothing — this check has gone stale');
     } else {
-        // Two shapes are acceptable: the page renders from a server-sent list,
-        // or it names every engine itself. Only the second needs auditing.
-        const derived = /allEngines/.test(admin);
-        if (derived) {
-            check('the admin panel renders engines from the server list',
-                /const ENGINES\s*=|data-eng="(leadgen|report|fb_community|fb_page)"/.test(admin)
-                    ? ['admin.html still has a hardcoded engine name alongside the server-sent list']
-                    : []);
-            // The server must actually send it, or the page renders nothing.
-            check('the server sends allEngines to the admin panel',
-                /allEngines:\s*ENGINES/.test(SERVER) ? [] : ['/api/admin/users does not send allEngines']);
-            ok(`${engines.length} engines, all grantable: ${engines.join(', ')}`);
-        } else {
-            check('every engine the server gates is offered in the admin panel',
-                engines.filter(e => !new RegExp(`["'\`]${e}["'\`]`).test(admin))
-                    .map(e => `engine '${e}' is enforced by requireEngine but has no checkbox — it can never be granted`));
-        }
+        // Phase 89: the owner gives the Apify engines through Admin → Tools (TOOL_AREA). Every Apify engine
+        // requireEngine checks on a tool route must be in a tool, or nobody can be given it.
+        const area = (/const TOOL_AREA = \[([\s\S]*?)\n\];/.exec(SERVER) || [])[1] || '';
+        const given = [...area.matchAll(/engines: \[([^\]]*)\]/g)].flatMap(m => [...m[1].matchAll(/'(\w+)'/g)].map(x => x[1]));
+        const apify = (/const APIFY_ENGINES = \[([^\]]*)\]/.exec(SERVER) || [])[1];
+        const need = apify ? [...apify.matchAll(/'(\w+)'/g)].map(x => x[1]) : [];
+        check('every Apify engine can be given in Admin → Tools', need.length ? need.filter(e => !given.includes(e)).map(e => `engine '${e}' is in no tool, so nobody can be given it`) : ['APIFY_ENGINES could not be found']);
+        const app = fs.readFileSync(path.join(FRONT_DIR, 'app', 'app.js'), 'utf8');
+        check('Admin renders the tools and saves access through the server', /\/api\/admin\/tools\/access/.test(app) && /a\.tools\.map/.test(app) ? [] : ['app.js no longer renders Admin → Tools from the server']);
+        ok(`${engines.length} engines; Apify engines given through Tools: ${need.join(', ')}`);
     }
 
     // Whatever the trial hands out must be a real engine, or a trial account
@@ -468,88 +419,15 @@ console.log('\nengines: everything the server gates must be grantable');
 // Every one of those was internally consistent. Nothing was broken; something
 // was simply unreachable. That is the class this section covers.
 // ---------------------------------------------------------------------------
-console.log('\nreachability: everything the server enforces must be reachable by a human');
+console.log('\nreachability: every admin endpoint has a control or is written down');
 {
-    const admin = fs.readFileSync(path.join(FRONT_DIR, 'admin.html'), 'utf8');
-
-    // --- roles ----------------------------------------------------------
-    // ACCOUNT roles only: the ones the auth gate branches on. A looser pattern
-    // also catches 'viewer' (a client_members role), and 'target'/'rival'
-    // (report comparison labels) — none of which belong on app_users, so
-    // demanding an admin control for them is noise.
-    // The deny-list is spelled out rather than inferred, so what this check
-    // ignores is visible instead of being an accident of a regex.
-    const NOT_ACCOUNT_ROLES = new Set([
-        'assistant', 'model', 'system',   // Gemini message roles
-        'viewer', 'editor', 'owner',      // client_members access levels
-        'target', 'rival'                 // report comparison labels
-    ]);
-    const roles = [...new Set(
-        [...SERVER.matchAll(/profile\.role\s*===\s*'(\w+)'/g)].map(m => m[1])
-            .concat([...SERVER.matchAll(/\brole\s*[=:]\s*'(\w+)'/g)].map(m => m[1]))
-    )].filter(r => !NOT_ACCOUNT_ROLES.has(r));
-
-    check('every account role the server recognises can be assigned in admin',
-        roles.filter(r => !new RegExp(`value="${r}"`).test(admin))
-            .map(r => `role '${r}' exists in the server but no admin control offers it`));
-
-    // Creating and editing are separate capabilities, and they drifted apart:
-    // the edit dropdown offered all three roles while the create form offered
-    // two, so onboarding a client meant making them an employee first and
-    // changing it afterwards. "Assignable somewhere" would have passed that.
-    const createSelect = (/<select id="nu-role">([\s\S]*?)<\/select>/.exec(admin) || [])[1] || '';
-    // Phase 57: every TEAM role can be chosen when creating; a business owner's login is never made here
-    // (it had no business and got a made-up one). Owners are invited from their client.
-    check('every team role can be chosen when CREATING an account, and a business owner login cannot',
-        createSelect
-            ? roles.filter(r => r !== 'client' && !new RegExp(`value="${r}"`).test(createSelect))
-                .map(r => `the create form cannot make a '${r}' account — it can only be set by editing afterwards`)
-                .concat(/value="client"/.test(createSelect) ? ['the create form can make a business owner login with no business'] : [])
-            : ['the create form\'s role select could not be found — this check has gone stale']);
-    ok(`roles assignable: ${roles.join(', ')}`);
-
-    // --- quota settings -------------------------------------------------
-    // A setting the server reads from system_settings and enforces, with no
-    // way to change it, is a limit nobody chose and nobody can move.
-    const settingKeys = [...new Set(
-        [...SERVER.matchAll(/\.eq\('key',\s*'(\w+)'\)/g)].map(m => m[1])
-            .concat([...SERVER.matchAll(/QUOTA_DEFAULT_KEY\s*=\s*\{([^}]*)\}/g)]
-                .flatMap(m => [...m[1].matchAll(/'(\w+)'/g)].map(x => x[1])))
-    )].filter(k => !/apify_token|heartbeat|cycle|encryption/.test(k));
-
-    check('every quota setting the server enforces is editable in admin',
-        settingKeys.filter(k => !admin.includes(k) && !/allEngines/.test(admin) === false && !adminReachesSetting(admin, k))
-            .map(k => `system_settings['${k}'] is enforced but can only be changed with SQL`));
-    ok(`quota settings reachable: ${settingKeys.join(', ')}`);
-
-    // --- admin endpoints ------------------------------------------------
-    // An admin route with no caller is either an ops endpoint (fine, but it
-    // must be written down) or a feature nobody can find.
-    const adminRoutes = [...new Set(
-        [...SERVER.matchAll(/app\.\w+\(\s*'(\/api\/admin\/[\w/:-]+)'/g)].map(m => m[1])
-    )];
-    const docs = fs.existsSync(path.join(ROOT, 'docs'))
-        ? fs.readdirSync(path.join(ROOT, 'docs')).map(f => fs.readFileSync(path.join(ROOT, 'docs', f), 'utf8')).join('\n')
-        : '';
+    const app = fs.readFileSync(path.join(FRONT_DIR, 'app', 'app.js'), 'utf8');
+    const adminRoutes = [...new Set([...SERVER.matchAll(/app\.\w+\(\s*'(\/api\/admin\/[\w/:-]+)'/g)].map(m => m[1]))];
+    const docs = fs.readdirSync(path.join(ROOT, 'docs')).map(f => fs.readFileSync(path.join(ROOT, 'docs', f), 'utf8')).join('\n');
     const readme = fs.existsSync(path.join(ROOT, 'README.md')) ? fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8') : '';
-    const unreachable = adminRoutes.filter(r => {
-        const tail = r.replace(/\/api\/admin\//, '').split('/')[0];
-        return !admin.includes(tail) && !docs.includes(tail) && !readme.includes(tail);
-    });
-    check('every admin endpoint has a control or is documented as ops-only', unreachable
-        .map(r => `${r} has no admin control and is not documented — nobody can reach or find it`));
+    const unreachable = adminRoutes.filter(r => { const tail = r.replace(/\/api\/admin\//, '').split('/')[0]; return !app.includes('/api/admin/' + tail) && !docs.includes(tail) && !readme.includes(tail); });
+    check('every admin endpoint has a control in the CRM or is documented as ops-only', unreachable.map(r => `${r} has no control and is not documented`));
     ok(`${adminRoutes.length} admin endpoints, all reachable or documented`);
-}
-
-/** Does admin.html offer a control for this system_settings key? */
-function adminReachesSetting(admin, key) {
-    if (admin.includes(key)) return true;
-    // A page that renders caps from the server's own metric list reaches every
-    // cap key without naming any of them.
-    if (/api\/admin\/settings/.test(admin) && /data-cap=/.test(admin)) {
-        return ['trial_caps', 'client_monthly_caps', 'trial_days'].includes(key);
-    }
-    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -561,37 +439,13 @@ function adminReachesSetting(admin, key) {
 // ended up filed under nothing. Same discipline as the engine list: one list,
 // and this makes sure it matches the code.
 // ---------------------------------------------------------------------------
-console.log('\nwork pages: every page that starts a job asks which client it is for');
+console.log('\nwork pages: every run the Tools start is filed under a client');
 {
-    const listed = (/const WORK_PAGES\s*=\s*\[([\s\S]*?)\]/.exec(HEADER) || [])[1];
-    const workPages = listed ? [...listed.matchAll(/'([\w.-]+\.html)'/g)].map(m => m[1]) : [];
-
-    // Routes that create a job: the enclosing route of every JOB_WORKERS[...] start.
-    const routeStarts = [...SERVER.matchAll(/app\.post\(\s*'(\/api\/[^']+)'/g)].map(m => ({ i: m.index, p: m[1] }));
-    const jobRoutes = new Set();
-    for (const m of SERVER.matchAll(/JOB_WORKERS\[/g)) {
-        const owner = routeStarts.filter(r => r.i < m.index).pop();
-        if (owner) jobRoutes.add(owner.p);
-    }
-    const jobMatchers = [...jobRoutes].map(routeMatcher);
-
-    const starters = [];
-    for (const f of PAGES) {
-        if (/^client-|^client\.html$|^share\.html$|^signup\.html$/.test(f)) continue;   // clients ARE their business; public pages start nothing
-        const src = fs.readFileSync(path.join(FRONT_DIR, f), 'utf8');
-        const engineNull = /EL\.init\(\s*\{[^}]*engine:\s*null/.test(src);
-        if (engineNull) continue;                                                    // workspace pages: work is scoped by the record itself
-        const posts = pageCalls(src).filter(c => c.method === 'POST' || c.method === 'ANY');
-        if (posts.some(c => c.paths.some(p => jobMatchers.some(re => re.test(p))))) starters.push(f);
-    }
-
-    check('every page that starts a job carries the work-for bar', starters
-        .filter(f => !workPages.includes(f))
-        .map(f => `${f} starts jobs but is not in WORK_PAGES — work can be launched with no client asked for`));
-    check('every WORK_PAGES entry is a real page that starts a job', workPages
-        .filter(f => !PAGES.includes(f) || !starters.includes(f))
-        .map(f => `${f} is in WORK_PAGES but ${PAGES.includes(f) ? 'starts no job' : 'does not exist'}`));
-    ok(`${starters.length} job-starting pages, all carrying the bar: ${starters.join(', ')}`);
+    const tools = fs.readFileSync(path.join(FRONT_DIR, 'app', 'tools.js'), 'utf8');
+    const startFn = tools.slice(tools.indexOf('async function start('), tools.indexOf('\n}', tools.indexOf('async function start(')));
+    check('start() refuses without a client and sends clientId with every run', /if \(!st\.client\)/.test(startFn) && /clientId: st\.client/.test(startFn) ? [] : ['start() can launch a run with no client']);
+    const direct = [...tools.matchAll(/api\(\s*'(\/api\/(?:run-campaign|generate-ig-report|fb\/page-report|fb\/audit-community|fb\/find-leads|enrich-campaign))'\s*,\s*\{\s*method:\s*'POST'/g)].map(m => m[1]);
+    check('no run is started around start()', direct.map(p => `${p} is POSTed directly, without the client check`));
 }
 
 // ---------------------------------------------------------------------------
@@ -628,27 +482,6 @@ console.log('\ntest runner: every test file actually runs');
         check('npm test does not &&-chain (one failure would hide the rest)',
             /&&/.test(script) ? ['"test" uses && — a failure in an early file silently skips the others'] : []);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 58: the tool pages wear the workspace layout — one page header each,
-// not a title inside the first card.
-// ---------------------------------------------------------------------------
-{
-    const TOOL_PAGES = ['admin', 'content-plan', 'creators', 'fb-advisor', 'fb-audit', 'fb-communities',
-        'fb-leads', 'fb-report', 'ig-competitors', 'ig-report', 'leads', 'pipeline', 'reviews', 'schedules'];
-    check('every tool page has exactly one workspace header (ws-head)', TOOL_PAGES.map(n => {
-        const f = path.join(FRONT_DIR, n + '.html');
-        if (!fs.existsSync(f)) return `${n}.html is missing`;
-        const c = (fs.readFileSync(f, 'utf8').match(/class="ws-head"/g) || []).length;
-        return c === 1 ? null : `${n}.html has ${c} ws-head headers`;
-    }).filter(Boolean));
-    // The first addRival() runs estimate(), which touches estTimer: a later
-    // `let` threw (temporal dead zone) and stopped the whole page script.
-    const ic = fs.readFileSync(path.join(FRONT_DIR, 'ig-competitors.html'), 'utf8');
-    const decl = ic.indexOf('let estTimer'), first = ic.indexOf('addRival();');
-    check('ig-competitors declares estTimer before its first addRival()',
-        decl >= 0 && first >= 0 && decl < first ? [] : ['let estTimer comes after the first addRival() call']);
 }
 
 // ---------------------------------------------------------------------------

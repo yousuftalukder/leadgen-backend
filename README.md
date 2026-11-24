@@ -13,21 +13,14 @@ Since phase 13 it is **two products on one backend**: the employee workbench abo
 ```
 server.js          Express backend, single file, Phase 17. Deployed to Render.
 package.json       start: node server.js · test: offline tests · live-checks: post-deploy script
-frontend/          Static site, deployed to Netlify. header.js is the shared runtime every page
-                   loads (menu, New work, drawer, toast); ui.js holds the workspace components
-                   (task board, add client); report-view.js lays out the report a client reads
-                   (monthly.html, client.html, share.html, and paper); app.css carries every shared
-                   rule including the shell and the print rules.
-                   Staff start at home.html; a client's page is workspace.html?client=<id>.
-                   Employee pages and the client surface (signup.html, client.html,
-                   client-assistant.html, client-leads.html, client-community.html, share.html)
-                   share it;
-                   header.js picks the
-                   nav from the caller's role.
+frontend/          Static site, deployed to Netlify (phase 89). Two apps sharing app/app.css:
+                   the CRM at / (index.html + app/app.js) and the Tools at /tools
+                   (tools/index.html + app/tools.js: the Apify work). Also the Phone (phone.html)
+                   and the legal pages. Every older page was removed; netlify.toml moves their addresses to /.
 sql/               Every migration, in order. History is kept: schema.sql, fb-schema.sql, fb-page-schema.sql, schema-phase1..17.sql
 docs/              DEPLOY-PHASE18.md covers phases 12-18 in one deploy; DEPLOY-PHASE*.md (per phase), PLAN-PHASE8.md §D (IG expansion spec), LIVE-CHECKS-*.md (dated certification)
 scripts/           live-checks.js — two-account concurrency + access checks against the real deployment
-tests/             phase11 / phase13 / phase14 / phase15 / phase16 / phase17.test.js (pure logic, all deps stubbed) · header.smoke.js (page contract in a stub DOM)
+tests/             phase11 / phase13 / phase14 / phase15 / phase16 / phase17.test.js (pure logic, all deps stubbed)
 .claude/           launch.json — serves frontend/ on :5500 for local checks
 netlify.toml       base = frontend
 ```
@@ -84,7 +77,7 @@ See `docs/DEPLOY-PHASE11.md`. After every deploy run `npm run live-checks` with 
 | Content plan | `CP_PLATFORMS`, `/api/content-plan`, `cpBoostCall(`, `content_plan_notes` |
 | Schedules, share links, instance guard | `// PHASE 11 :: SCHEDULED RUNS`, `// PHASE 11 :: READ-ONLY REPORT SHARE LINKS`, `// PHASE 11 :: SINGLE-INSTANCE GUARD` |
 | Accounts, trial, quota | `accountState(`, `accountDenial(`, `reserveQuota(`, `takeLeadQuota(`, `el_account_state` |
-| Client surface | `clientReportView(`, `clientStanding(`, `/api/client/`, `CLIENT_NAV` in header.js |
+| Client surface | `clientReportView(`, `clientStanding(`, `/api/client/` (its pages were removed in phase 89) |
 | Signup | `isLeakedPassword(`, `/api/public/signup/password-check`, `ensureProfile(` |
 | Owner assistant | `ASSISTANT_TOOLS`, `assistantAnswer(`, `geminiToolTurn(`, `/api/assistant/` |
 | Facebook leads | `fbPageToLead(`, `fbPageSearchRefs(`, `registerWorker('fb_lead_discovery'`, `/api/fb/find-leads` |

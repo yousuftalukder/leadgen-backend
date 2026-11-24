@@ -156,59 +156,6 @@ test('a plan with no briefs gives no ideas, not an error', () => assert.deepStri
 test('an older plan with its briefs in report_json reads the same', () =>
     assert.strictEqual(wbIdeas({ ...plan, ai_json: null, briefs: plan.ai_json }).briefs.length, 2));
 
-console.log('phase 69 :: rows pasted from a sheet (client-tools.js)');
-const sandbox = { window: {}, EL: { esc: v => String(v), icon: () => '' }, console };
-vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'frontend', 'client-tools.js'), 'utf8'), sandbox);
-const T = sandbox.window.Tools;
-test('the content sheet from the screenshot maps column by column', () => {
-    const text = [
-        'Timestamp\tWhich date you want the post\tWhich platform it goes on\twhat type of post\tWrite a short description of the script or the idea or the vision that you want to create the post with',
-        '\t27/10/2026\tFacebook\tStatics\tsiang oil',
-        '\t28/10/2026\tFacebook\tvedio reel\tseven sleep balm  only product',
-        '\t01/11/2026\tFacebook\tvedio reel\tCustomer review, last month sell',
-        '\t\t\t\t'
-    ].join('\n');
-    const m = T.mapSheet('content', T.parseSheet(text));
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(m.cols.map(c => c.k))), [null, 'planned_on', 'platform', 'post_type', 'idea']);
-    assert.strictEqual(m.items.length, 3);
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(m.items[0])), { planned_on: '2026-10-27', platform: 'Facebook', post_type: 'Statics', idea: 'siang oil' });
-    assert.strictEqual(m.items[2].planned_on, '2026-11-01');
-});
-test('the stock sheet from the screenshot maps column by column', () => {
-    const text = [
-        'SL\tProduct name\tQuantity\tIn Order\tBuying Price\tCustomer Price\tComboo Price',
-        '1\tLoreal Paris Elseve Glycolic Gloss Conditioner\t\t\t\t1490\t',
-        '3\tCathy Doll Bright Sakura Body Lotion (Glutathione & Vitamin B3)\t3\t\t392\t1600\t1250',
-        '4\tChoops Me Fruity Velvet Tint\tStock out\t\t\t320\t',
-        '20\t\t\t\t\t\t'
-    ].join('\n');
-    const m = T.mapSheet('products', T.parseSheet(text));
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(m.cols.map(c => c.k))), [null, 'name', 'stock', 'in_order', 'cost', 'price', 'combo_price']);
-    assert.strictEqual(m.items.length, 3);
-    assert.strictEqual(m.skipped, 1, 'the numbered row with no product is left out');
-    assert.strictEqual(m.items[1].combo_price, '1250');
-    assert.strictEqual(m.items[2].stock, '0', '"Stock out" is 0');
-    // and the server takes what the page sends
-    const r = wbClean('products', m.items[1], { create: true });
-    assert.deepStrictEqual([r.stock, r.cost, r.price, r.combo_price], [3, 392, 1600, 1250]);
-});
-test('a CSV with quoted cells and new lines inside a cell', () => {
-    const rows = T.parseSheet('Date,Description\n2026-10-30,"offer, sell\nposter"\n');
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(rows)), [['Date', 'Description'], ['2026-10-30', 'offer, sell\nposter']]);
-});
-test('dates are read day first, ISO passes through', () => {
-    assert.strictEqual(T.sheetDate('31/10/2026'), '2026-10-31');
-    assert.strictEqual(T.sheetDate('1.11.26'), '2026-11-01');
-    assert.strictEqual(T.sheetDate('2026-10-27'), '2026-10-27');
-});
-test('an idea from the tool becomes the start of a typed row', () => {
-    const r = T.ideaToRow({ format: 'Reel', hook: 'Hook', concept: 'Concept', script: ['a', 'b'], caption: 'Cap' });
-    assert.strictEqual(r.post_type, 'Video reel');
-    assert.strictEqual(r.idea, 'Hook\n\nConcept\n\n1. a\n2. b');
-    assert.strictEqual(r.caption, 'Cap');
-});
-
 console.log('phase 69 :: the schema, the server and the pages agree');
 const root = path.join(__dirname, '..');
 const sql = fs.readFileSync(path.join(root, 'sql', 'schema-phase69.sql'), 'utf8');
@@ -238,14 +185,6 @@ test('the routes are registered before the /api catch-all', () => {
         'DELETE /api/clients/:id/workbook/:kind/:rowId', 'POST /api/clients/:id/template-media', 'GET /api/clients/:id/workbook-ideas']) assert.ok(routes.includes(r), r);
     const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
     assert.ok(server.indexOf("require('./src/22-client-workbook')") < server.indexOf("require('./src/26-runtime')"));
-});
-const page = fs.readFileSync(path.join(root, 'frontend', 'workspace.html'), 'utf8');
-test('the client page loads the tools and has the three tabs', () => {
-    assert.ok(page.indexOf('<script src="ui.js"></script>') < page.indexOf('<script src="client-tools.js"></script>'));
-    for (const [k, l] of [['content', 'Content plan'], ['ledger', 'Ad ledger'], ['replies', 'Message templates']]) {
-        assert.ok(page.includes(`['${k}', '${l}']`), l);
-        assert.ok(new RegExp(`${k}: tab\\w+`).test(page), k + ' is drawn');
-    }
 });
 
 console.log(`\n${passed} passed`);

@@ -9,8 +9,8 @@
 <link rel="manifest" href="phone.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap">
-<link rel="stylesheet" href="crm/app.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap">
+<link rel="stylesheet" href="app/app.css">
 </head>
 <body>
 <!-- Phase 88: the Phone, on its own: the installable desktop and phone app. Same scripts as the CRM, phone view only. -->
@@ -29,8 +29,8 @@
 <nav class="tabbar" id="tabbar" aria-label="Main"></nav>
 <div id="layer"></div>
 <script src="vendor/supabase-js-2.116.0.js"></script>
-<script src="crm/phone.js" defer></script>
-<script src="crm/app.js" defer></script>
+<script src="app/phone.js" defer></script>
+<script src="app/app.js" defer></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('phone-sw.js').catch(() => {});</script>
 </body>
 </html>

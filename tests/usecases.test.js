@@ -1977,12 +1977,13 @@ test('the summary lists the industries and locations, and how many people found 
     assert.strictEqual(s.body.total, list.body.total, 'the tiles must count the list they sit above');
 });
 test('a client account never sees the agency\'s list, however it asks', async () => {
+    // Phase 89: the Apify tools are the team's. An owner login is refused at the door, list and export alike.
     const r = await call('GET', '/api/leads', { token: 't-client' });
-    assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
-    assert.strictEqual(r.body.scope, 'mine');
-    assert.ok(r.body.leads.length >= 1 && r.body.leads.every(l => l.owner_user_id === CLIENT.id), 'a client saw someone else\'s leads');
+    assert.strictEqual(r.statusCode, 403, JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'tool_team_only');
     const csv = await call('GET', '/api/leads/export.csv', { token: 't-client' });
-    assert.ok(!String(csv.body).includes('dhakabakes'), 'the client\'s export carried the agency\'s leads');
+    assert.strictEqual(csv.statusCode, 403);
+    assert.ok(!String(JSON.stringify(csv.body)).includes('dhakabakes'), 'the client\'s export carried the agency\'s leads');
 });
 test('the export carries industry, location and who found it', async () => {
     const r = await call('GET', '/api/leads/export.csv', { token: 't-admin', query: { industry: 'florist' } });
@@ -4166,7 +4167,7 @@ test('when the agency closes the business, the owner\'s access ends: no made-up 
         assert.strictEqual(g.body.code, 'no_business');
         const run = await call('POST', '/api/generate-ig-report', { token: 't-owner@kitesurf.test', body: { target: 'kitesurf' } });
         assert.strictEqual(run.statusCode, 403, 'work started for an owner with no business: ' + JSON.stringify(run.body));
-        assert.strictEqual(run.body.code, 'no_business');
+        assert.strictEqual(run.body.code, 'tool_team_only', 'phase 89: an owner login never reaches the Apify tools');
         MAIL.sent.length = 0;
         const code = await call('POST', '/api/public/owner-code', { body: { email: 'owner@kitesurf.test' }, ip: '10.52.0.1' });
         assert.strictEqual(code.statusCode, 200);
@@ -4202,24 +4203,6 @@ test('each person keeps their own chats: the owner never sees the team\'s, the t
     assert.notStrictEqual(r.body.conversationId, team.id, 'the owner continued the team\'s chat');
     assert.strictEqual(tbl('xp_ai_conversations').find(c => c.id === r.body.conversationId).user_id, CLIENT.id);
 });
-test('the owner app: refusals take the whole screen with a way out, the menus sit above the drawer, the shell precaches', () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
-    assert.ok(/code === 'no_business'/.test(h) && /blockNoBusiness/.test(h), 'no access-ended screen');
-    assert.ok(/data-el-out/.test(h), 'a refusal screen has no Sign out');
-    assert.ok(/if \(!app && !EL\.isEmbedded\(\)\) renderShell\(page, null\)/.test(h), 'the staff sidebar is drawn around the app\'s error screen');
-    const ai = fs.readFileSync(path.join(FRONT, 'ai', 'index.html'), 'utf8');
-    assert.ok(/error_code/.test(ai), 'an expired invite link is not explained in the app');
-    assert.ok(/me\.agency_owner && !me\.business/.test(ai));
-    const chat = fs.readFileSync(path.join(FRONT, 'meta-ai.js'), 'utf8');
-    assert.ok(/EL\.refused\(res\.status, data\)/.test(chat), 'the chat\'s own requests do not handle a lost session');
-    const css = fs.readFileSync(path.join(FRONT, 'meta-ai.css'), 'utf8');
-    assert.ok(/\.oa-menu \{ position: fixed; z-index: 80;/.test(css), 'a chat\'s menu opens under the drawer');
-    const sw = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
-    const shell = JSON.parse(sw.match(/const SHELL = (\[[\s\S]*?\]);/)[1].replace(/'/g, '"'));
-    assert.strictEqual(new Set(shell).size, shell.length, 'a duplicate in the shell list makes the whole precache fail');
-});
-
 section('\nphase 53: the agency\'s workflow');
 test('two people edit one task: the later save is refused with the newer version, never silently over it', async () => {
     const mk = await call('POST', `/api/clients/${state.C}/tasks`, { token: 't-emp', body: { title: 'Shoot the brunch menu' } });
@@ -4278,11 +4261,8 @@ test('a merge carries the calendar, picks, topics, pipeline and assistant chats'
     }
     assert.strictEqual(tbl('clients').find(c => c.id === B).archived, true);
 });
-test('an editor on the team invites the business owner, and the screens call the team\'s lead "Account lead"', async () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const ws = fs.readFileSync(path.join(FRONT, 'workspace.html'), 'utf8');
-    assert.ok(/'Account lead'/.test(ws) && !/<h2>Owner portal<\/h2>/.test(ws), 'the two meanings of "Owner" are still mixed');
-    assert.ok(/\$\{canEdit\(\) \? `<div class="ws-form">\s*<div class="ws-form two"><div><label for="o-email">/.test(ws), 'editors are not offered the invite');
+test('an editor on the team invites the business owner', async () => {
+    // Phase 89: the pages that offered this were removed; the server rule stays.
     const src = serverSource();
     const route = src.slice(src.indexOf("app.post('/api/clients/:id/portal-invite'"), src.indexOf("app.post('/api/clients/:id/portal-invite'") + 900);
     assert.ok(/clientAccess\(ctx\.user\.id, req\.params\.id, 'editor'\)/.test(route), 'the invite still needs the account lead');
@@ -4338,19 +4318,20 @@ test('a shutting-down server parks only its own jobs, never another instance\'s'
     assert.ok(S.LOCAL_JOBS instanceof Set);
     assert.ok(/LOCAL_JOBS\.add\(String\(jobId\)\)/.test(src) && /LOCAL_JOBS\.delete\(String\(jobId\)\)/.test(src));
 });
-test('Gemini calls time out; the pages load pinned CDN builds; the service worker answers a slow network from its cache', () => {
+test('Gemini calls time out; the pages load pinned CDN builds; the old service worker retires itself', () => {
     const src = serverSource();
     assert.ok((src.match(/signal: AbortSignal\.timeout\(GEMINI_TIMEOUT_MS\)/g) || []).length >= 2, 'a Gemini call can still hang for ever');
     const FRONT = path.join(__dirname, '..', 'frontend');
-    const pages = fs.readdirSync(FRONT).filter(f => f.endsWith('.html')).map(f => path.join(FRONT, f)).concat([path.join(FRONT, 'ai', 'index.html')]);
+    const pages = fs.readdirSync(FRONT).filter(f => f.endsWith('.html')).map(f => path.join(FRONT, f)).concat([path.join(FRONT, 'tools', 'index.html')]);
     for (const f of pages) {
         const html = fs.readFileSync(f, 'utf8');
-        for (const m of html.matchAll(/src="https:\/\/cdn\.jsdelivr\.net\/npm\/([^"]+)"/g)) {
+        for (const m of html.matchAll(/src="https:\/\/(?:cdn\.jsdelivr\.net\/npm|unpkg\.com)\/([^"]+)"/g)) {
             assert.ok(/@\d+\.\d+\.\d+\//.test(m[1]), `${path.basename(f)} loads an unpinned ${m[1]}`);
         }
     }
+    // Phase 89: sw.js only clears the old caches and unregisters, so an installed old app cannot serve deleted pages.
     const sw = fs.readFileSync(path.join(FRONT, 'sw.js'), 'utf8');
-    assert.ok(/NET_WAIT_MS/.test(sw) && /MAX_ENTRIES/.test(sw) && /u\.search = ''/.test(sw));
+    assert.ok(/registration\.unregister\(\)/.test(sw) && /caches\.delete/.test(sw) && !/addEventListener\('fetch'/.test(sw));
 });
 
 section('\nphase 56: the Clients hub — trials, stages, who signed in');
@@ -4503,20 +4484,6 @@ test('an owner whose trial ended still gets a code, so signing in can tell them;
     assert.strictEqual(g.body.code, 'no_business');
     assert.ok(g.body.trial && g.body.trial.name === 'Short Trial', 'the refusal does not say the trial ended');
 });
-test('the pages: sign-out lands on the app, not /ai/ai/; lists that cover every client are not narrowed to the last one opened', () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
-    // Phase 73: an owner signs out to their app's own address; staff to index.html, against the page's base.
-    assert.ok(/\(EL\._app \|\| EL\.isEmbedded\(\)\) && owner \? EL\.ownerAppHref\(\) : new URL\('index\.html', document\.baseURI\)/.test(h), 'sign-out resolves against the address, not the base');
-    assert.ok(/new URL\('ai\/', document\.baseURI\)/.test(h), 'off EdgeLead\'s domains the app is ai/ against the base, never /ai/ai/');
-    assert.ok(/opts\.scoped === false \? null : EL\.clientId\(\)/.test(h));
-    assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'pipeline.html'), 'utf8')), 'the pipeline is still narrowed to the remembered client');
-    assert.ok(/scoped: false/.test(fs.readFileSync(path.join(FRONT, 'home.html'), 'utf8')));
-    const html = fs.readdirSync(FRONT).filter(f => f.endsWith('.html'));
-    for (const f of html) assert.ok(!/cdn\.jsdelivr\.net\/npm\/@supabase/.test(fs.readFileSync(path.join(FRONT, f), 'utf8')), f + ' still loads the sign-in library from the CDN');
-    assert.ok(fs.existsSync(path.join(FRONT, 'vendor', 'supabase-js-2.116.0.js')));
-});
-
 section('\nphase 59: Websites — one label\'s work across every client');
 test('website work: a typed "website" is filed as Website and listed across clients, only where the caller can open the client', async () => {
     const a = await call('POST', `/api/clients/${state.D}/tasks`, { token: 't-emp', body: { title: 'Fix the booking form on the site', labels: ['website', 'Setup'], assignee: EMP.id } });
@@ -4556,22 +4523,6 @@ test('website work always has a client: no label, no list; owners and strangers 
     const src = serverSource();
     assert.ok(!/app\.post\('\/api\/tasks'/.test(src), 'a task could be created without a client');
 });
-test('the pages: Websites is in the menu and in New work; boards and My tasks filter by label', () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const h = fs.readFileSync(path.join(FRONT, 'header.js'), 'utf8');
-    assert.ok(/href: 'websites\.html',\s+icon: 'globe',\s+label: 'Websites'/.test(h), 'Websites is not in the menu');
-    assert.ok(/name: 'Website work'/.test(h), 'Website work is not in New work');
-    const ui = fs.readFileSync(path.join(FRONT, 'ui.js'), 'utf8');
-    assert.ok(/const LABELS = \['Website'/.test(ui));
-    assert.ok(/function labelBar\(/.test(ui) && /hasLabel\(t, label\)/.test(ui), 'the board does not filter by label');
-    const mt = fs.readFileSync(path.join(FRONT, 'my-tasks.html'), 'utf8');
-    assert.ok(/UI\.labelBar\(/.test(mt) && /UI\.hasLabel\(/.test(mt), 'My tasks does not filter by label');
-    const w = fs.readFileSync(path.join(FRONT, 'websites.html'), 'utf8');
-    assert.ok(/\/api\/tasks\?label=/.test(w));
-    assert.ok(/Which client is it for\?/.test(w), 'new website work does not ask for the client first');
-    assert.ok(/labels: \[LABEL\]/.test(w), 'new website work is not labelled Website');
-});
-
 section('\nphase 60: packages, the agreement the owner signs, and invoices');
 test('packages and invoice details: only an admin sets them; a bad price is refused', async () => {
     assert.strictEqual((await call('PUT', '/api/admin/billing', { token: 't-emp', body: { packages: [] } })).statusCode, 403);
@@ -4677,41 +4628,6 @@ test('invoices: made by hand, numbered, shown to the owner, marked paid; void on
     assert.ok(all.body.invoices.some(x => x.id === id && x.client.name === 'Bloom Florist'));
     assert.strictEqual((await call('GET', '/api/billing', { token: tok })).statusCode, 403, 'an owner read the agency’s billing');
 });
-test('the pages: Billing in the menu, Packages & billing in settings, the owner app signs first and shows invoices', () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const read = f => fs.readFileSync(path.join(FRONT, f), 'utf8');
-    const h = read('header.js');
-    assert.ok(/href: 'billing\.html',\s+icon: 'receipt',\s+label: 'Billing'/.test(h), 'Billing is not in the menu');
-    assert.ok(/OWNER_EMBEDS = \[[^\]]*'invoice\.html'/.test(h), 'an owner cannot open an invoice inside the app');
-    assert.ok(/data-tab="billing"/.test(read('admin.html')) && /\/api\/admin\/billing/.test(read('admin.html')));
-    const hub = read('owner-hub.js');
-    assert.ok(/needsSignature && !locked\) openSign\(\)/.test(hub), 'the owner is not asked to sign first');
-    assert.ok(/\{ locked: true \}/.test(hub) && /if \(locked\) return;/.test(hub), 'the agreement sheet can be closed unsigned');
-    assert.ok(/agree: true, version: a\.version/.test(hub));
-    assert.ok(/\/api\/billing'/.test(read('billing.html')) && /window\.print\(\)/.test(read('invoice.html')));
-});
-
-section('\nphase 61: pages draw after one trip to the server');
-test('the page shell remembers who you are and the clients for the tab, and forgets them when they change', () => {
-    const FRONT = path.join(__dirname, '..', 'frontend');
-    const read = f => fs.readFileSync(path.join(FRONT, f), 'utf8');
-    const h = read('header.js');
-    assert.ok(/const remembered = memo\.get\(meKey, ME_FRESH_MS\)/.test(h), 'the page still waits for /api/me before drawing');
-    assert.ok(/if \(shape\(fresh\) !== shape\(remembered\)\) location\.reload\(\)/.test(h), 'a changed role or set of tools is not picked up');
-    assert.ok(/memo\.clear\(\);\s*try \{ await EL\.supabase\.auth\.signOut\(\)/.test(h), 'signing out leaves the last person’s details in the tab');
-    // Every change to a client clears the tab's copy of the list.
-    const re = /if \(method !== 'GET' && (\/.*?\/)\.test\(path\)\) EL\.clientsChanged\(\);/.exec(h);
-    assert.ok(re, 'changing a client does not clear the remembered list');
-    const rx = eval(re[1]);
-    for (const p of ['/api/clients', '/api/clients/abc', '/api/clients/abc/merge', '/api/clients/abc/trial']) assert.ok(rx.test(p), p + ' does not clear the list');
-    assert.ok(!rx.test('/api/clients/abc/tasks'), 'a task change throws away the client list');
-    assert.ok(!/EL\._clients = null;/.test(read('workspace.html') + read('clients.html') + read('ui.js')), 'a page clears the list by hand and misses the tab copy');
-    // Home and a client's workspace ask for everything at once.
-    assert.ok(/EL\.api\('\/api\/reports-history\?limit=6'[^\n]*\n\s*\]\);/.test(read('home.html')), 'Home asks for its recent reports after everything else');
-    assert.ok(/const early = \{\s*timeline: EL\.api/.test(read('workspace.html')), 'the workspace waits for the client before asking for its board');
-    assert.ok(/onSaved: saved/.test(read('ui.js')) && /ctx\.onSaved\(r && r\.task\)/.test(read('ui.js')), 'a saved task waits for the whole board to reload');
-});
-
 (async () => {
     for (const run of pending) await run();
     console.log('\n' + passed + ' passed');

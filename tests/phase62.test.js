@@ -102,16 +102,5 @@ test('the migration creates client_task_files with row level security', () => {
     assert.ok(/client_task_files enable row level security/.test(sql));
     assert.ok(/on delete cascade/.test(sql));
 });
-const header = fs.readFileSync(path.join(root, 'frontend', 'header.js'), 'utf8');
-const css = fs.readFileSync(path.join(root, 'frontend', 'app.css'), 'utf8');
-test('the rail folds its account controls into one menu, keeping the old ids', () => {
-    assert.ok(header.includes('id="el-acct-btn"') && header.includes('id="el-acct-menu"'));
-    ['el-key-btn', 'el-ai-btn', 'el-out'].forEach(id => assert.ok(header.includes(`id="${id}"`), id));
-});
-test('rail links never shrink below their own height', () => assert.ok(/\.el-sidebar \.el-nav > \* \{ flex-shrink: 0; \}/.test(css)));
-test('the task page attaches documents through the phase-62 endpoint', () => {
-    const pages = ['ui.js', 'client.html', 'owner-hub.js'].map(f => fs.readFileSync(path.join(root, 'frontend', f), 'utf8')).join('\n');
-    assert.ok(/\/api\/tasks\/\$\{[^}]+\}\/files/.test(pages), 'no call to /api/tasks/:id/files');
-});
 
 console.log(`\n${passed} passed`);
