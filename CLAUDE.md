@@ -9,10 +9,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 ```
 
 - `src/01-core.js` connects with `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`; the
-  frontend hardcodes the same URL in `frontend/header.js`, `frontend/index.html`,
-  `frontend/signup.html` and `frontend/crm/app.js` (the CRM, which also hardcodes
-  the anon key and the Render backend URL, because it does not load header.js). The Render deploy's `SUPABASE_URL` is this same
-  project.
+  frontend hardcodes the same URL, the anon key and the Render backend URL in
+  `frontend/app/app.js` (the CRM) and `frontend/app/tools.js` (the Tools). The Render
+  deploy's `SUPABASE_URL` is this same project.
 - The schema lives in `sql/*.sql`, applied in phase order. The live database
   matches it through phase 69.
 - **Do not use `rxrgrrxwxkqiclwbvock`.** That is a different Supabase project
@@ -38,6 +37,19 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 - `npm run check` and `npm test` before every push; CI runs the same on every PR.
 - Each phase gets a `docs/DEPLOY-PHASEN.md` saying what to run and what changed.
 
+## The pages (phase 89)
+
+- `frontend/` holds two apps and nothing else old:
+  - **The CRM** at `/`: `index.html` with `app/app.js`.
+  - **The Tools** at `/tools`: `tools/index.html` with `app/tools.js`. These are the Apify work (Lead Finder,
+    Instagram report, Facebook Page report, Facebook groups), kept out of the CRM.
+  - **The Phone** at `phone.html`, and the three legal pages Meta reviews.
+  - Both apps share `app/app.css`. Never send anyone to `crm.html`: it and every old page address move to `/`.
+- **Who opens the Tools:** the person must be given the tool in Admin → Tools (their engine grants, plus the
+  clients they may run it for) and the tool must be unlocked (`tools_enabled`). The server checks both;
+  the button only reflects them.
+- `frontend/phone-codes.js` is not a page: the server requires it.
+
 ## Hosting
 
 - Pages: Netlify project **edgeleadworkspace** (prantoyousuf97's team), serving
@@ -49,7 +61,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 ## Setting up ads for a client
 
 When the user says "let's set up ads here" (or asks for an ad plan or ad set), follow
-`.claude/skills/ad-setup/SKILL.md`: work in the built-in browser on the client's
+`.claude/skills/ad-setup/SKILL.md`. The client page with the **Ad brief & plan** tab was removed in
+phase 89; its API (`/api/clients/:id/ad-brief`, `/ad-plans`) still works, but there is no page for it until
+one is rebuilt. Until then, tell the user before starting. The skill's steps: work in the built-in browser on the client's
 **Ad brief & plan** tab, look at their Page and Meta's Ad Library, research the season and
 market, fill in the brief, and save a **draft** plan. The user signs in themself; nothing
 is ever changed in Meta, and the plan is approved by a person.

@@ -1,456 +1,425 @@
 # Config for the site itself. Netlify reads this one AFTER the repo-root
 # netlify.toml has set base = "frontend", so this file is already inside the
-# base directory and must not set `base` again — doing so resolves to
-# frontend/frontend and the deploy finds nothing to publish.
+# base directory and must not set `base` again.
 [build]
   publish = "."
   command = ""
 
 # ---------------------------------------------------------------------------
-# DOMAIN
+# PHASE 89: TWO APPS, NOTHING ELSE
 #
-# The workspace lives at workspace.edgelead.online. The old Netlify address
-# still served the whole app, so bookmarks and older email links kept people
-# there, signed in on the wrong origin. Send it to the same path on the new
-# domain. The host is matched exactly, so deploy previews and branch deploys
-# (deploy-preview-N--edgeleadwork.netlify.app) are untouched.
+#   /         the CRM (index.html; sign-in included)
+#   /tools    the Tools (tools/index.html): the Apify work, outside the CRM
+#   /phone.html  the Phone app (installable)
+#   /privacy.html, /terms.html, /data-deletion.html  public, for Meta's review
+#
+# Every older page was deleted. Their addresses, /crm.html among them, answer
+# with a permanent move to /, so bookmarks and old email links still land
+# somewhere. Netlify uses the first rule that matches.
 # ---------------------------------------------------------------------------
-
-# The old Netlify address (see DOMAIN below) is matched before everything else.
 [[redirects]]
   from = "https://edgeleadwork.netlify.app/*"
   to = "https://workspace.edgelead.online/:splat"
   status = 301
   force = true
-
-# ---------------------------------------------------------------------------
-# PHASE 87: THE CRM IS THE WHOLE WORKSPACE
-#
-# Every older page is closed for now, for everyone, and opens the CRM instead.
-# The files stay in the repository; to bring a page back, delete its two lines
-# below. 302, not 301, so browsers do not remember the move.
-#   /, index.html and welcome.html serve the CRM in place (200): it has its own
-#   sign-in, and password-reset links from Supabase land on welcome.html.
-#   privacy, terms and data-deletion stay public for Meta's review.
-# These come first: Netlify uses the first rule that matches.
-# ---------------------------------------------------------------------------
 [[redirects]]
   from = "https://ai.edgelead.online/*"
-  to = "https://workspace.edgelead.online/crm.html"
-  status = 302
+  to = "https://workspace.edgelead.online/"
+  status = 301
   force = true
 [[redirects]]
-  from = "/"
-  to = "/crm.html"
+  from = "/tools"
+  to = "/tools/index.html"
   status = 200
-  force = true
 [[redirects]]
-  from = "/index.html"
-  to = "/crm.html"
+  from = "/tools/*"
+  to = "/tools/index.html"
   status = 200
-  force = true
-[[redirects]]
-  from = "/index"
-  to = "/crm.html"
-  status = 200
-  force = true
-[[redirects]]
-  from = "/welcome.html"
-  to = "/crm.html"
-  status = 200
-  force = true
-[[redirects]]
-  from = "/welcome"
-  to = "/crm.html"
-  status = 200
-  force = true
 [[redirects]]
   from = "/admin.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/admin"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/assistant.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/assistant"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/billing.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/billing"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-assistant.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-assistant"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-community.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-community"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-leads.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client-leads"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/client"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/clients.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/clients"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/content-plan.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/content-plan"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/creators.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/creators"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-advisor.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-advisor"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-audit.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-audit"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-communities.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-communities"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-leads.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-leads"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-report.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/fb-report"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/home.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/home"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/ig-competitors.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/ig-competitors"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/ig-report.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/ig-report"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/invoice.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/invoice"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/leads.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/leads"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/monthly.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/monthly"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/my-tasks.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/my-tasks"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/pipeline.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/pipeline"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/report.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/report"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/reviews.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/reviews"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/schedules.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/schedules"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/share.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/share"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/signup.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/signup"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/site.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/site"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/websites.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/websites"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/workspace.html"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/workspace"
-  to = "/crm.html"
-  status = 302
+  to = "/"
+  status = 301
+  force = true
+[[redirects]]
+  from = "/crm.html"
+  to = "/"
+  status = 301
+  force = true
+[[redirects]]
+  from = "/crm"
+  to = "/"
+  status = 301
+  force = true
+[[redirects]]
+  from = "/welcome.html"
+  to = "/"
+  status = 301
+  force = true
+[[redirects]]
+  from = "/welcome"
+  to = "/"
+  status = 301
   force = true
 [[redirects]]
   from = "/ai/*"
-  to = "/crm.html"
-  status = 302
-  force = true
-
-
-# Business owners use ai.edgelead.online: its front page is Edge Meta AI (ai/),
-# served in place so the address stays ai.edgelead.online/. ai/index.html sets
-# <base href="../">, which at / is still /, so its files load as they do at /ai/.
-# Every other path on that host is the same site as the workspace.
-[[redirects]]
-  from = "https://ai.edgelead.online/"
-  to = "/ai/"
-  status = 200
+  to = "/"
+  status = 301
   force = true
 
 # ---------------------------------------------------------------------------
 # CACHING
-#
-# Nothing here is fingerprinted — app.css is always app.css — so the shared
-# assets cannot be cached immutably or a deploy would not reach anyone until
-# their cache expired.
-#
-# must-revalidate with a zero max-age is the right trade for this: the browser
-# still holds the file and still sends a conditional request, but Netlify
-# answers 304 when nothing changed. A repeat visit re-uses the bytes and pays
-# only a round trip, and a deploy is picked up immediately.
+# Nothing is fingerprinted, so everything revalidates: the browser keeps the
+# bytes, Netlify answers 304 when nothing changed, and a deploy is seen at once.
 # ---------------------------------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
 
 [[headers]]
   for = "/*.html"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
 
 [[headers]]
-  for = "/*.css"
-  [headers.values]
-    Cache-Control = "public, max-age=0, must-revalidate"
-
-# Edge Meta AI, the app (phase 47): its page is ai/ — a folder, which the
-# *.html rule above does not match — and it has a manifest of its own.
-[[headers]]
-  for = "/ai/*"
-  [headers.values]
-    Cache-Control = "public, max-age=0, must-revalidate"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-
-[[headers]]
-  for = "/ai/manifest.webmanifest"
-  [headers.values]
-    Content-Type = "application/manifest+json"
-    Cache-Control = "public, max-age=0, must-revalidate"
-
-[[headers]]
-  for = "/app.css"
+  for = "/"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
-  for = "/*.js"
+  for = "/tools/*"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# The service worker must never be served stale, or an old shell outlives a
-# deploy; the manifest wants its own type; the icons never change by name.
+[[headers]]
+  for = "/app/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/vendor/*"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+# The service workers must never be served stale.
 [[headers]]
   for = "/sw.js"
   [headers.values]
     Cache-Control = "no-cache"
     Service-Worker-Allowed = "/"
+[[headers]]
+  for = "/phone-sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
 
 [[headers]]
-  for = "/manifest.webmanifest"
+  for = "/phone.webmanifest"
   [headers.values]
     Content-Type = "application/manifest+json"
     Cache-Control = "public, max-age=0, must-revalidate"
@@ -459,4 +428,3 @@
   for = "/icons/*"
   [headers.values]
     Cache-Control = "public, max-age=604800"
-

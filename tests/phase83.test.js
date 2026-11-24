@@ -27,8 +27,6 @@ Module._load = function (req, ...rest) {
 const chat = require(path.join(ROOT, 'xp', 'ai', 'chat.js'));
 Module._load = realLoad;
 global.window = {};
-require(path.join(ROOT, 'frontend', 'ai', 'i18n-bn.js'));
-const BN = global.window.I18N_DICTS.bn;
 
 let passed = 0;
 const tests = [];
@@ -44,26 +42,6 @@ test('both chat routes pass the page\'s language to the answer', () => {
     assert.strictEqual((src.match(/chat\.answer\(\{[^}]*lang: req\.body\.lang/g) || []).length, 2);
     const c = fs.readFileSync(path.join(ROOT, 'xp', 'ai', 'chat.js'), 'utf8');
     assert.match(c, /systemPrompt\(client, tz, cov\)\) \+ languageRule\(lang\)/);
-});
-test('the page sends the chosen language with each question', () => {
-    const src = fs.readFileSync(path.join(ROOT, 'frontend', 'meta-ai.js'), 'utf8');
-    assert.match(src, /JSON\.stringify\(\{ message, clientId: activeClient\.id, conversationId, lang: window\.ELLang \? ELLang\.current\(\) : 'en' \}\)/);
-});
-test('every Bangla phrase is there and keeps its changing parts and marks', () => {
-    const keys = Object.keys(BN);
-    assert.ok(keys.length > 250, 'the dictionary has ' + keys.length + ' phrases');
-    const marks = s => (s.match(/\{\d+\}|<\/?\d+>/g) || []).sort().join(' ');
-    for (const k of keys) {
-        assert.ok(typeof BN[k] === 'string' && BN[k].trim(), 'empty: ' + k);
-        assert.strictEqual(marks(BN[k]), marks(k), 'marks differ: ' + k);
-    }
-});
-test('the page loads the language before anything is drawn, and names Bangla in its own script', () => {
-    const html = fs.readFileSync(path.join(ROOT, 'frontend', 'ai', 'index.html'), 'utf8');
-    const head = html.slice(0, html.indexOf('</head>'));
-    assert.ok(head.indexOf('<base href="../">') < head.indexOf('src="ai/i18n.js'), 'i18n.js after <base>, in the head');
-    assert.match(html, /data-lang-pick="bn" lang="bn" aria-checked="false">বাংলা</);
-    assert.match(html, /html\.i18n-wait body \{ visibility: hidden; \}/);
 });
 
 for (const [name, fn] of tests) {
