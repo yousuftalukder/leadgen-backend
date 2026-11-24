@@ -12,8 +12,8 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
   frontend hardcodes the same URL, the anon key and the Render backend URL in
   `frontend/app/app.js` (the CRM) and `frontend/app/tools.js` (the Tools). The Render
   deploy's `SUPABASE_URL` is this same project.
-- The schema lives in `sql/*.sql`, applied in phase order. The live database
-  matches it through phase 69.
+- The schema lives in `sql/*.sql`, applied in phase order. Phase 90's SQL may not have run yet: the server checks
+  (`S.p90Ready()`) and keeps working without it.
 - **Do not use `rxrgrrxwxkqiclwbvock`.** That is a different Supabase project
   (the one the Claude Supabase connector may point at) and is unrelated to this
   app.
@@ -40,7 +40,13 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 ## The pages (phase 89)
 
 - `frontend/` holds two apps and nothing else old:
-  - **The CRM** at `/`: `index.html` with `app/app.js`.
+  - **The CRM** at `/`: `index.html` with `app/app.js` (shell, Overview, Leads with its map, Pipeline, Clients list,
+    the lead record, Influencers, Phone). The client page (`app/client.js`), email campaigns (`app/campaigns.js`)
+    and Admin (`app/admin.js`) load the first time they open, through the small `window.CRM` interface.
+  - **The lead flow (phase 90):** Leads holds every lead (cold or not) with an industry and a category (its source).
+    A lead is put in the pipeline on purpose (`in_pipeline`); email, calls and texts are worked from there. Won →
+    Convert to client → the client page. Campaign sending is `src/25-campaigns.js`; settings, today, history and the
+    map are `src/25-crm-plus.js`.
   - **The Tools** at `/tools`: `tools/index.html` with `app/tools.js`. These are the Apify work (Lead Finder,
     Instagram report, Facebook Page report, Facebook groups), kept out of the CRM.
   - **The Phone** at `phone.html`, and the three legal pages Meta reviews.

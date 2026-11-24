@@ -285,7 +285,7 @@ app.post('/api/phone/hook/transcription', ...hook(async (req, res, c) => {
     const from = prettyNumber(call.contact_number || b.From);
     S.sendMail && S.sendMail({ to: c.email, subject: `Voicemail from ${from}`,
         text: `New voicemail on ${prettyNumber(c.number)}.\n\nFrom: ${from}\nAt: ${new Date().toLocaleString('en-US', { timeZone: TZ })} (Central)\n\n` +
-              `${text ? 'What they said:\n' + text : 'The transcript was not available; listen in the Phone page of the CRM.'}\n\nListen and call back: https://workspace.edgelead.online/crm.html#phone` })
+              `${text ? 'What they said:\n' + text : 'The transcript was not available; listen in the Phone page of the CRM.'}\n\nListen and call back: https://workspace.edgelead.online/#phone` })
         .catch(e => logger.warn('phone_voicemail_mail_failed', { message: e.message }));
     if (call && call.lead_id && S.logActivityExternal) S.logActivityExternal(call.lead_id, 'call', text || 'Voicemail', { voicemail: true, sid: b.CallSid, direction: 'inbound' }, null);
 }));

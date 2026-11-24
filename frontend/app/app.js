@@ -1,7 +1,9 @@
 /**
- * EdgeLead CRM (phase 87): one page, its own small script. It does not load header.js.
- * Views live in the address hash: #overview, #leads, #pipeline, #sequences, #influencers, #clients, #settings.
- * Every number and record comes from /api/crm/* on the server (src/25-crm.js).
+ * EdgeLead CRM (phase 87, redrawn in phases 89 and 90): one page at /, its own script.
+ * Views live in the address hash: #overview, #leads, #pipeline, #campaigns, #phone, #clients, #client/<id>/<tab>,
+ * #influencers, #admin/<section>. The client page, email campaigns and Admin are their own files (app/client.js,
+ * app/campaigns.js, app/admin.js), loaded the first time they open, through the small CRM interface at the end.
+ * Every number and record comes from /api/crm/* and the client APIs on the server.
  */
 (function () {
 'use strict';
@@ -51,6 +53,9 @@ const ICONS = {
     stage: '<path d="M4 12h16M14 6l6 6-6 6"/>', wa: '<path d="M4 20l1.3-4A8 8 0 1 1 8 18.7z"/>', client: '<path d="M20 6 9 17l-5-5"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>', plus: '<path d="M12 5v14M5 12h14"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>', seo: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8M7.5 12l2-2 1.5 1.5L13.5 9"/>', mega: '<path d="M3 10v4h3l7 4V6L6 10z"/><path d="M16 9a4 4 0 0 1 0 6M19 6.5a8 8 0 0 1 0 11"/>', star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
     shield: '<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', task: '<path d="m5 12 5 5L20 7"/>', meet: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    menu: '<path d="M4 7h16M4 12h16M4 17h16"/>', cash: '<rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9v.01M18 15v.01"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>', table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/>', up: '<path d="M12 16V4M6 10l6-6 6 6M4 20h16"/>',
+    cal: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>', dot: '<circle cx="12" cy="12" r="3"/>',
+    arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>', grip: '<path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" stroke-width="2.6"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>', trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
     tools: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.3-.4-.4-2.3z"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>', unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>', out: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>', moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'
 };
 const ic = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
@@ -65,29 +70,52 @@ async function api(path, { method = 'GET', body } = {}) {
     if (!r.ok) { const e = new Error(j.error || `The server answered ${r.status}.`); e.status = r.status; e.data = j; throw e; }
     return j;
 }
-const st = { meta: null, leads: null, overview: {}, period: 30, filter: 'all', q: '', sel: new Set(), net: null, crOn: null, crStage: 'all', crQ: '', crCountry: 'all', picking: null, openId: null };
+const st = { meta: null, leads: null, period: 30, trange: 'today', view: 'all', q: '', cat: '', ind: '', owner: '', sel: new Set(), leadMode: 'table',
+    pCat: '', pInd: '', pOwner: '', pQ: '', hist: 'all', net: null, crOn: null, crStage: 'all', crQ: '', crCountry: 'all', picking: null, openId: null, cQ: '' };
 const teamName = id => { const t = st.meta && st.meta.team.find(x => x.id === id); return t ? t.name : '—'; };
 const srcOf = k => st.meta.sources.find(s => s.key === k) || { key: k, label: k };
 const srcChip = k => { const s = srcOf(k); return `<span class="src" style="--c:var(${SRC_VAR[k] || '--s-other'})" title="${esc(s.path || s.label)}"><i></i><b>${esc(s.label)}</b></span>`; };
 const stageChip = k => `<span class="stg" style="--c:var(${STAGE_VAR[k] || '--dim'})">${esc((st.meta.stages.find(s => s.key === k) || { label: k }).label)}</span>`;
-async function leads(force) { if (!st.leads || force) st.leads = (await api('/api/crm/leads')).leads; return st.leads; }
+const IND_VAR = ['--s-web', '--s-seo', '--s-google', '--s-meta', '--s-social', '--s-email', '--s-inf', '--s-ref'];
+const indVar = n => IND_VAR[[...String(n || 'x').toLowerCase()].reduce((a, c) => a + c.charCodeAt(0), 0) % IND_VAR.length];
+const indChip = n => n ? `<span class="ind" style="--c:var(${indVar(n)})">${esc(n)}</span>` : `<span class="ind none">No industry</span>`;
+async function leads(force) { if (!st.leads || force) st.leads = (await api('/api/crm/leads?limit=2000')).leads; return st.leads; }
 const isAdmin = () => st.meta && st.meta.me.role === 'admin';
+const p90 = () => !!(st.meta && st.meta.p90);
+/** Where a lead stands: a client, lost, being worked in the pipeline, or cold. Before the phase-90 SQL, any stage past New is the pipeline. */
+const inPipe = l => p90() ? !!l.in_pipeline || !!l.client_id : l.stage !== 'new';
+function leadState(l) { if (l.client_id || l.stage === 'won') return 'client'; if (l.stage === 'lost') return 'lost'; return inPipe(l) ? 'pipeline' : 'cold'; }
+const STATE = { cold: ['Cold', '--dim'], pipeline: ['In pipeline', '--acc'], client: ['Client', '--ok'], lost: ['Lost', '--bad'] };
+const stateChip = l => { const s = leadState(l); return `<span class="state ${s}"><i></i>${STATE[s][0]}</span>`; };
+const telHref = p => 'tel:' + String(p || '').replace(/[^\d+]/g, '');
+const webHref = w => /^https?:\/\//i.test(w) ? w : 'https://' + w;
+const webShort = w => String(w || '').replace(/^https?:\/\/(www\.)?/i, '').replace(/\/$/, '');
+const industries = () => { const set = new Map(); (st.meta.industries || []).forEach(i => set.set(i.toLowerCase(), i)); (st.leads || []).forEach(l => l.industry && !set.has(l.industry.toLowerCase()) && set.set(l.industry.toLowerCase(), l.industry)); return [...set.values()]; };
 
 // ------------------------------------------------------------------ shell
-const NAV = [['overview', 'Overview', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['sequences', 'Sequences', 'seq'], ['influencers', 'Influencers', 'pin'], ['phone', 'Phone', 'phone'], ['clients', 'Clients', 'clients'], ['settings', 'Settings', 'settings'], ['admin', 'Admin', 'shield']];
-let route = 'overview';
+const NAV = [
+    ['overview', 'Overview', 'overview', 'Work'], ['leads', 'Leads', 'leads', 'Work'], ['pipeline', 'Pipeline', 'pipeline', 'Work'], ['campaigns', 'Email campaigns', 'seq', 'Work'], ['phone', 'Phone', 'phone', 'Work'],
+    ['clients', 'Clients', 'clients', 'Business'], ['influencers', 'Influencers', 'pin', 'Business'], ['admin', 'Admin', 'shield', 'Owner']];
+let route = 'overview', routeArg = '';
+const navOf = r => r === 'client' ? 'clients' : r;
 function shell() {
-    const open = (st.leads || []).filter(l => !['won', 'lost'].includes(l.stage)).length;
-    const due = (st.leads || []).filter(l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)).length;
-    const toolsOn = st.meta ? Object.values(st.meta.tools || {}).filter(Boolean).length : 0;
-    $('#rail').innerHTML = `<div class="brand"><b>E</b>EdgeLead</div>` +
-        NAV.slice(0, 6).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}" ${route === k ? 'aria-current="page"' : ''}>${ic(i)}${l}${k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${open}</span>` : k === 'phone' ? `<span class="ct hot" data-phbadge ${window.ELPhone && ELPhone.unread() ? '' : 'hidden'}>${window.ELPhone ? ELPhone.unread() || '' : ''}</span>` : ''}</a>`).join('') +
-        `<div class="grp">Business</div>` + NAV.slice(6).filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('') +
-        toolsLink() +
+    const L = st.leads || [];
+    const cold = L.filter(l => leadState(l) === 'cold').length, pipe = L.filter(l => leadState(l) === 'pipeline').length;
+    const due = L.filter(l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)).length;
+    const badge = k => k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${num(cold)}</span>` : k === 'pipeline' && st.leads ? `<span class="ct">${num(pipe)}</span>`
+        : k === 'phone' ? `<span class="ct hot" data-phbadge ${window.ELPhone && ELPhone.unread() ? '' : 'hidden'}>${window.ELPhone ? ELPhone.unread() || '' : ''}</span>` : '';
+    let grp = '';
+    $('#rail').innerHTML = `<div class="brand"><b>E</b>EdgeLead</div>` + NAV.filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i, g]) => {
+        const head = g !== grp ? `<div class="grp">${g}</div>` : ''; grp = g;
+        const on = navOf(route) === k;
+        return head + `<a href="#${k}" class="${on ? 'on' : ''}" ${on ? 'aria-current="page"' : ''}>${ic(i)}${l}${badge(k)}</a>`;
+    }).join('') + toolsLink() +
         `<div class="foot"><div class="me"><span class="ava">${initials(teamName(st.meta.me.id))}</span><div style="min-width:0"><b>${esc(teamName(st.meta.me.id))}</b><span>${isAdmin() ? 'Owner' : 'Team'}</span></div></div><button class="btn sm ghost" id="theme" type="button">${ic('moon')}Light / dark</button><button class="btn sm ghost" id="signout" type="button">${ic('out')}Sign out</button></div>`;
     const tb = $('#toolsTop'); if (tb) { const t = toolsState(); tb.hidden = !t.show; tb.classList.toggle('locked', !t.open); tb.innerHTML = `${ic('tools')}<span>Tools</span>${t.open ? '' : ic('lock').replace('class="ico"', 'class="ico lk"')}`; tb.title = t.open ? 'Open the Tools' : 'Tools are locked'; }
-    $('#tabbar').innerHTML = NAV.filter(n => ['overview', 'leads', 'pipeline', 'phone', 'influencers'].includes(n[0])).map(([k, l, i]) => `<a href="#${k}" class="${route === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
+    $('#tabbar').innerHTML = [['overview', 'Home', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['clients', 'Clients', 'clients'], ['more', 'More', 'menu']]
+        .map(([k, l, i]) => k === 'more' ? `<button type="button" data-act="more" class="${['campaigns', 'phone', 'influencers', 'admin'].includes(route) ? 'on' : ''}">${ic(i)}${l}</button>` : `<a href="#${k}" class="${navOf(route) === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
 }
+
 // ------------------------------------------------------------------ the Tools door (phase 89)
 // The Tools live outside the CRM at /tools. The door shows for the owner and for anyone given a tool;
 // it opens only once a tool they have is unlocked (Admin → Tools). The server checks both again.
@@ -102,29 +130,51 @@ function toolsLink() {
 function toolsLocked() {
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" aria-label="Tools are locked"><div class="mh"><h2 style="display:flex;align-items:center;gap:8px">${ic('lock')}Tools are locked</h2></div>
       <div class="mb"><p class="sub" style="margin:0">${isAdmin() ? 'Unlock a tool in Admin → Tools. While a tool is locked nothing runs for it and no Apify credit is spent.' : 'The owner has given you Tools, but they are locked right now. Ask the owner to unlock them.'}</p></div>
-      <div class="mf"><button class="btn" type="button" data-close>Close</button>${isAdmin() ? '<a class="btn pri" href="#admin" data-close>Open Admin</a>' : ''}</div></div>`;
-}
-async function render() {
-    route = window.EL_PHONE_ONLY ? 'phone' : (location.hash || '#overview').slice(1).split('?')[0];
-    if (!NAV.some(n => n[0] === route) || (route === 'admin' && !isAdmin())) route = 'overview';
-    if (route !== 'influencers' && mapObj) { mapObj.remove(); mapObj = null; }
-    shell();
-    const v = $('#view');
-    try {
-        const html = await ({ overview: vOverview, leads: vLeads, pipeline: vPipeline, sequences: vSequences, influencers: vInfluencers, clients: vClients, settings: vSettings, admin: vAdmin, phone: async () => window.ELPhone ? ELPhone.view() : '' }[route])();
-        v.innerHTML = html; shell();
-        if (route === 'influencers') mapInit();
-        if (route === 'phone' && window.ELPhone) ELPhone.mounted();
-    } catch (e) { v.innerHTML = `<div class="empty err">Could not load this page: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; }
+      <div class="mf"><button class="btn" type="button" data-close>Close</button>${isAdmin() ? '<a class="btn pri" href="#admin/tools" data-close>Open Admin</a>' : ''}</div></div>`;
 }
 
+// ------------------------------------------------------------------ routing, and the parts that load when first opened
+// The CRM's own pages are in this file. The client page, email campaigns and Admin load the first time they open,
+// so opening the CRM stays fast: app/client.js, app/campaigns.js, app/admin.js.
+const MODULES = { client: 'client', campaigns: 'campaigns', admin: 'admin' };
+const loaded = {};
+function need(name) {
+    if (!loaded[name]) loaded[name] = new Promise((ok, no) => { const s = document.createElement('script'); s.src = '/app/' + name + '.js?v=90'; s.onload = ok; s.onerror = () => { delete loaded[name]; no(new Error('The ' + name + ' page could not load. Check the connection.')); }; document.head.appendChild(s); });
+    return loaded[name];
+}
+const ROUTES = ['overview', 'leads', 'pipeline', 'campaigns', 'phone', 'clients', 'client', 'influencers', 'admin'];
+let renderSeq = 0;
+async function render() {
+    const raw = window.EL_PHONE_ONLY ? 'phone' : (location.hash || '#overview').slice(1).split('?')[0];
+    const [r0, ...rest] = raw.split('/');
+    route = { sequences: 'campaigns', settings: 'admin' }[r0] || r0; routeArg = rest.join('/');
+    if (!ROUTES.includes(route) || (route === 'admin' && !isAdmin())) { route = 'overview'; routeArg = ''; }
+    if (route !== 'influencers' && route !== 'leads' && mapObj) { mapObj.remove(); mapObj = null; }
+    if (route !== 'leads' && leadMap) { leadMap.remove(); leadMap = null; }
+    shell();
+    const v = $('#view'), seq = ++renderSeq;
+    document.body.dataset.route = route;
+    try {
+        if (MODULES[route]) { if (!loaded[MODULES[route]]) v.innerHTML = '<div class="boot">Loading…</div>'; await need(MODULES[route]); }
+        const fn = { overview: vOverview, leads: vLeads, pipeline: vPipeline, clients: vClients, influencers: vInfluencers, phone: async () => window.ELPhone ? ELPhone.view() : '' }[route] || CRM.views[route];
+        const html = await fn(routeArg);
+        if (seq !== renderSeq) return;   // a newer page was asked for while this one loaded
+        v.innerHTML = html; shell();
+        if (route === 'influencers') mapInit();
+        if (route === 'leads' && st.leadMode === 'map') leadMapInit();
+        if (route === 'phone' && window.ELPhone) ELPhone.mounted();
+        if (CRM.mounted[route]) CRM.mounted[route](routeArg);
+    } catch (e) { if (seq === renderSeq) v.innerHTML = `<div class="empty err">Could not load this page: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; }
+}
+
+// ------------------------------------------------------------------ overview: the performance half
 // ------------------------------------------------------------------ overview
 const sparkSvg = (arr, c) => { const w = 120, h = 26, mx = Math.max(1, ...arr), pts = arr.map((v, i) => [i * w / Math.max(1, arr.length - 1), h - 3 - v / mx * (h - 6)]);
     const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(''); const e = pts[pts.length - 1];
     return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}L${w} ${h}L0 ${h}Z" fill="var(${c})" opacity=".12"/><path d="${d}" fill="none" stroke="var(${c})" stroke-width="1.6" vector-effect="non-scaling-stroke"/><circle cx="${e[0]}" cy="${e[1]}" r="2.2" fill="var(${c})"/></svg>`; };
-async function vOverview() {
+async function perfHtml() {
     const [o] = await Promise.all([api('/api/crm/overview?days=' + st.period), leads()]);
-    const T = o.totals, hr = new Date().getHours();
+    const T = o.totals;
     const row = (d, cls, cvar) => `<tr class="${cls} go" data-dept="${d.key}"><td><span class="nm" style="--c:var(${cvar})"><i></i>${esc(d.label)}</span></td><td>${num(d.leads)}</td><td>${num(d.sent)}</td><td>${num(d.calls)}</td><td>${num(d.replies)}</td>
         <td><span class="rate" style="--v:${Math.min(100, pct(d.replies, d.sent) * 4)}%;--c:var(${cvar})"><i></i>${pct(d.replies, d.sent)}%</span></td><td>${num(d.meetings)}</td><td>${num(d.won)}</td><td>${lakh(d.pipeline)}</td></tr>`;
     const strip = [['New leads', num(T.leads), '--ink', o.series.leads], ['Cold emails sent', num(T.sent), '--s-web', o.series.sent], ['Calls', num(T.calls), '--gold', o.series.calls],
@@ -142,8 +192,7 @@ async function vOverview() {
           <div class="jv"><span>${lakh(j.value)}</span>${j.periodCount ? `<em>+${num(j.periodCount)} · ${lakh(j.periodValue)} this period</em>` : '<em class="z">none this period</em>'}</div>
           <i class="jbar"><i style="width:${jAll ? Math.max(3, pct(j.value, jAll)) : 0}%"></i></i></div>`).join('')}
       </section>` : '';
-    return `<div class="head"><div><p class="greet">Good ${hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening'}, ${esc(teamName(st.meta.me.id).split(' ')[0])}.</p>
-        <p class="sub">${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · ${o.upNext.filter(l => new Date(l.next_step_at) < startOfTomorrow()).length} follow-ups due today</p></div><div class="sp"></div>
+    return `<div class="sechead"><h2>Performance</h2><span>${st.period === 90 ? 'This quarter' : 'Last ' + st.period + ' days'}</span><div class="sp"></div>
         <div class="period" role="group" aria-label="Period">${[[7, '7 days'], [30, '30 days'], [90, 'Quarter']].map(([v, t]) => `<button type="button" data-period="${v}" class="${st.period === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
       ${jobs}
       <section class="card strip">${strip.map(([l, v, c, s]) => `<div class="m"><small>${l}</small><b>${v}</b>${l === 'Won' ? `<em>${lakh(T.wonValue)} signed</em>` : '<em style="color:var(--dim)">' + (st.period === 90 ? 'this quarter' : 'last ' + st.period + ' days') + '</em>'}${sparkSvg(s, c)}</div>`).join('')}</section>
@@ -159,49 +208,186 @@ async function vOverview() {
           ${st.meta.team.map(m => { const t = o.team[m.id] || {}; return `<tr><td><span class="nm"><span class="ava">${initials(m.name)}</span>${esc(m.name)}</span></td><td>${num(t.sent)}</td><td>${num(t.calls)}</td><td>${num(t.replies)}</td><td>${num(t.won)}</td></tr>`; }).join('')}</tbody></table></div></section>
       </div>`;
 }
+// ------------------------------------------------------------------ overview: today first, then how the business is doing
+const GOAL = { calls: ['Calls', 'phone', '--s-web'], emails: ['Emails', 'mail', '--s-email'], prospects: ['Prospects found', 'search', '--s-meta'], followups: ['Follow-ups done', 'task', '--ok'] };
+const ring = (pct, c) => { const r = 30, C = 2 * Math.PI * r; return `<svg class="gring" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="${r}" class="trk"/><circle cx="36" cy="36" r="${r}" class="val" style="stroke:var(${c});stroke-dasharray:${(pct / 100 * C).toFixed(1)} ${C.toFixed(1)}"/></svg>`; };
+const PRIO = { highest: 'Highest', high: 'High', medium: '', low: 'Low', lowest: 'Lowest' };
+const dayLabel = d => { if (!d) return ''; const t = new Date(); t.setHours(0, 0, 0, 0); const x = new Date(d + 'T00:00:00'); const n = Math.round((x - t) / 864e5); return n < 0 ? `${-n} d overdue` : n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : x.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }); };
+function todayHtml(T) {
+    const tasks = T.clientTasks || [], calls = T.crmTasks || [];
+    const over = tasks.filter(t => t.overdue), due = tasks.filter(t => !t.overdue);
+    const row = t => `<a class="trow" href="#client/${t.client.id}/tasks/${t.id}"><span class="tdot ${t.status}"></span><div class="t"><b>${esc(t.title)}</b><span><span class="cl">${esc(t.client.name)}</span>${(t.labels || []).slice(0, 2).map(l => `<span class="lab">${esc(l)}</span>`).join('')}</span></div>
+        ${PRIO[t.priority] ? `<span class="prio ${t.priority}">${PRIO[t.priority]}</span>` : ''}<span class="due ${t.overdue ? 'over' : dayLabel(t.due_date) === 'Today' ? 'today' : ''}">${dayLabel(t.due_date)}</span>${t.assignee_user_id ? `<span class="ava" title="${esc(teamName(t.assignee_user_id))}">${initials(teamName(t.assignee_user_id))}</span>` : t.assigned_to_client ? '<span class="ava cli" title="The client">C</span>' : '<span class="ava nobody"></span>'}</a>`;
+    const callRow = t => `<div class="trow call"><span class="kind">${ic(t.kind === 'call' ? 'phone' : 'task')}</span><div class="t"><b>${esc(t.title)}</b><span>${t.lead ? esc([t.lead.full_name, t.lead.company].filter(Boolean).join(' · ')) : ''}</span></div>${dueLabel(t.due_at)}
+        ${t.lead && t.lead.phone && t.kind === 'call' ? `<button class="btn sm" type="button" data-callnow="${esc(t.lead.phone)}" data-name="${esc(t.lead.full_name || '')}">${ic('phone')}Call</button>` : ''}${t.lead ? `<button class="btn sm ghost" type="button" data-open="${t.lead_id}">Open</button>` : ''}<button class="btn sm ghost" type="button" data-taskdone2="${t.id}" title="Mark done">${ic('task')}</button></div>`;
+    const G = T.goals || [], met = G.filter(g => g.met).length;
+    return `<div class="today">
+      <section class="card tcard"><div class="card-h"><div><h2>Client work</h2><span>${tasks.length ? `${tasks.length} task${tasks.length === 1 ? '' : 's'} due${over.length ? ` · <b class="bad">${over.length} overdue</b>` : ''}` : 'Nothing due'}</span></div>
+          <div class="period sm" role="group" aria-label="Range">${[['today', 'Today'], ['7d', '7 days'], ['month', 'This month']].map(([k, l]) => `<button type="button" data-trange="${k}" class="${st.trange === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+        <div class="tlist">${over.length ? `<div class="tgrp bad">Overdue</div>${over.map(row).join('')}` : ''}${due.length ? `<div class="tgrp">${st.trange === 'today' ? 'Due today' : st.trange === '7d' ? 'Due in the next 7 days' : 'Due this month'}</div>${due.map(row).join('')}` : ''}
+          ${tasks.length ? '' : `<div class="empty sm">${ic('task')}<b>All clear.</b> No client task is due ${st.trange === 'today' ? 'today' : st.trange === '7d' ? 'this week' : 'this month'}. Tasks with a due date on any client's board show here.</div>`}</div>
+        ${calls.length ? `<div class="card-h sub2"><h2>Calls and follow-ups</h2><span>${calls.length} from leads and campaigns</span></div><div class="tlist">${calls.slice(0, 8).map(callRow).join('')}</div>` : ''}</section>
+      <section class="card gcard"><div class="card-h"><div><h2>Outreach today</h2><span>${met} of ${G.length} goals met · ${esc(T.timezone || '')}</span></div>${isAdmin() ? '<a class="btn sm ghost" href="#admin/goals">Set goals</a>' : ''}</div>
+        <div class="goals">${G.map(g => `<div class="goal ${g.met ? 'met' : ''}">${ring(g.pct, GOAL[g.key][2])}<div class="gn"><b>${num(g.done)}</b><small>of ${num(g.target)}</small></div><span>${GOAL[g.key][0]}</span></div>`).join('')}</div>
+        <div class="gteam">${(T.team || []).filter(p => p.calls + p.emails + p.prospects + p.followups || st.meta.team.some(m => m.id === p.id)).map(p => `<div><span class="ava">${initials(p.name)}</span><b>${esc(p.name)}</b><span title="Calls">${ic('phone')}${p.calls}</span><span title="Emails">${ic('mail')}${p.emails}</span><span title="Prospects">${ic('search')}${p.prospects}</span><span title="Follow-ups">${ic('task')}${p.followups}</span></div>`).join('')}</div></section>
+    </div>`;
+}
+async function vOverview() {
+    const [T, perf] = await Promise.all([api('/api/crm/today?range=' + st.trange).catch(e => ({ error: e.message })), perfHtml()]);
+    const hr = new Date().getHours();
+    return `<div class="head"><div><p class="greet">Good ${hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening'}, ${esc(teamName(st.meta.me.id).split(' ')[0])}.</p>
+        <p class="sub">${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}${T.total ? ` · ${num(T.total.calls)} calls and ${num(T.total.emails)} emails so far today` : ''}</p></div></div>
+      ${p90() ? '' : `<div class="banner">${ic('shield')}<div><b>One step left for this release:</b> run <span class="mono">sql/schema-phase90.sql</span> in Supabase. Until then, industries, the pipeline switch, the leads map and email campaigns wait.</div></div>`}
+      ${T.error ? `<div class="empty err">Today could not load: ${esc(T.error)}</div>` : todayHtml(T)}
+      ${perf}`;
+}
 
-// ------------------------------------------------------------------ leads
-const VIEWS = [['all', 'All open', l => !['won', 'lost'].includes(l.stage)], ['mine', 'Mine', l => l.owner_id === st.meta.me.id && !['won', 'lost'].includes(l.stage)],
-    ['due', 'Due', l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)], ['website', 'Website', l => l.source === 'website'], ['seo', 'SEO', l => l.source === 'seo'],
-    ['ads', 'Ads', l => ['ads_google', 'ads_meta'].includes(l.source)], ['marketing', 'Marketing', l => ['ads_google', 'ads_meta', 'social', 'email'].includes(l.source)], ['influencer', 'Influencer', l => l.source === 'influencer'],
-    ['other', 'Referral & other', l => ['referral', 'other'].includes(l.source)], ['closed', 'Won & lost', l => ['won', 'lost'].includes(l.stage)]];
+// ------------------------------------------------------------------ leads: every lead, cold or not, with what you need to reach them
+const LVIEWS = [['all', 'All', () => true], ['cold', 'Cold', l => leadState(l) === 'cold'], ['pipeline', 'In pipeline', l => leadState(l) === 'pipeline'], ['client', 'Clients', l => leadState(l) === 'client'],
+    ['lost', 'Lost', l => leadState(l) === 'lost'], ['mine', 'Mine', l => l.owner_id === st.meta.me.id], ['due', 'Follow-up due', l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)]];
+function leadFilter(l, { skip } = {}) {
+    const q = st.q.toLowerCase();
+    return (skip === 'view' || (LVIEWS.find(x => x[0] === st.view) || LVIEWS[0])[2](l))
+        && (skip === 'cat' || !st.cat || l.source === st.cat)
+        && (skip === 'ind' || !st.ind || (st.ind === '-' ? !l.industry : String(l.industry || '').toLowerCase() === st.ind.toLowerCase()))
+        && (!st.owner || l.owner_id === st.owner)
+        && (!q || [l.full_name, l.company, l.email, l.phone, l.city, l.website, l.industry].join(' ').toLowerCase().includes(q));
+}
+const countBy = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
+function contactCell(l) {
+    // Shown, not worked: calls and emails start from the pipeline. Here a click copies the number or address.
+    const parts = [l.phone ? `<span data-copy="${esc(l.phone)}" title="Copy ${esc(l.phone)}">${ic('phone')}${esc(l.phone)}</span>` : '',
+        l.email ? `<span data-copy="${esc(l.email)}" title="Copy ${esc(l.email)}">${ic('mail')}${esc(l.email)}</span>` : '',
+        l.website ? `<a href="${esc(webHref(l.website))}" target="_blank" rel="noopener" title="${esc(l.website)}">${ic('globe')}${esc(webShort(l.website))}</a>` : ''].filter(Boolean);
+    return parts.length ? `<div class="contact">${parts.join('')}</div>` : '<span class="dim">No contact yet</span>';
+}
 async function vLeads() {
     await leads();
-    const f = (VIEWS.find(v => v[0] === st.filter) || VIEWS[0])[2], q = st.q.toLowerCase();
-    const rows = st.leads.filter(f).filter(l => !q || [l.full_name, l.company, l.email, l.phone, l.city].join(' ').toLowerCase().includes(q));
-    return `<div class="head"><div><h1>Leads</h1><p class="sub">Cold leads until they sign. Convert a won lead and it becomes a client.</p></div><div class="sp"></div>
-        <input class="btn" style="cursor:text;min-width:220px" id="lq" type="search" placeholder="Filter by name, business, email" value="${esc(st.q)}" aria-label="Filter leads"><button class="btn" type="button" data-act="import">Import CSV</button></div>
-      <div class="views" role="tablist">${VIEWS.map(([k, l, fn]) => `<button type="button" role="tab" aria-selected="${st.filter === k}" class="${st.filter === k ? 'on' : ''}" data-view="${k}">${l}<span class="c">${st.leads.filter(fn).length}</span></button>`).join('')}</div>
-      <div class="card tablewrap">${rows.length ? `<table class="ltbl"><thead><tr><th style="width:36px"><input type="checkbox" class="chk" id="selall" aria-label="Select all"></th><th>Lead</th><th>Source</th><th>Stage</th><th>Next step</th><th>Value</th><th>Score</th><th>Owner</th><th>Last activity</th></tr></thead><tbody>
-        ${rows.map(l => `<tr data-open="${l.id}"><td class="c-chk"><input type="checkbox" class="chk" data-sel="${l.id}" ${st.sel.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.full_name)}"></td>
-          <td class="c-who who"><b>${esc(l.full_name)}</b><span>${esc([l.company, l.city].filter(Boolean).join(' · ') || l.email || '')}</span></td><td class="c-src">${srcChip(l.source)}</td><td class="c-stage">${stageChip(l.stage)}</td>
-          <td class="c-due">${dueLabel(l.next_step_at)}</td><td class="c-val num">${money(l.value, l.currency)}</td><td class="c-score">${l.score == null ? '—' : `<span class="score" style="--v:${l.score}%"><i></i>${l.score}</span>`}</td>
-          <td class="c-owner"><span class="ava" title="${esc(teamName(l.owner_id))}">${initials(teamName(l.owner_id))}</span></td><td class="c-last" style="color:var(--muted);font-size:12.5px;white-space:nowrap">${l.last_activity_at ? ago(l.last_activity_at) : '—'}</td></tr>`).join('')}
-        </tbody></table>` : `<div class="empty">${st.leads.length ? 'No leads in this view.' : 'No leads yet. Add one with New lead, or import a CSV.'}</div>`}</div>
-      ${st.sel.size ? `<div class="bulk"><span>${st.sel.size} selected</span>
-        <select class="btn sm" data-bulk="stage" aria-label="Move to stage"><option value="">Move to…</option>${st.meta.stages.filter(s => s.key !== 'won').map(s => `<option value="${s.key}">${s.label}</option>`).join('')}</select>
+    const all = st.leads, rows = all.filter(l => leadFilter(l));
+    const byInd = countBy(all.filter(l => leadFilter(l, { skip: 'ind' })), l => l.industry || '-');
+    const byCat = countBy(all.filter(l => leadFilter(l, { skip: 'cat' })), l => l.source);
+    const inds = Object.entries(byInd).sort((a, b) => b[1] - a[1]);
+    const states = countBy(all, leadState);
+    const filtered = st.cat || st.ind || st.owner || st.q;
+    const tableHtml = rows.length ? `<div class="card tablewrap"><table class="ltbl"><thead><tr><th style="width:40px"><input type="checkbox" class="chk" id="selall" aria-label="Select all shown"></th><th>Lead</th><th>Industry</th><th>Contact</th><th>Location</th><th>Category</th><th>Status</th><th>Owner</th><th>Last touch</th></tr></thead><tbody>
+        ${rows.slice(0, 500).map(l => `<tr data-open="${l.id}" class="${st.sel.has(l.id) ? 'sel' : ''}"><td class="c-chk"><input type="checkbox" class="chk" data-sel="${l.id}" ${st.sel.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.full_name)}"></td>
+          <td class="c-who who"><b>${esc(l.company || l.full_name)}</b><span>${esc(l.company ? (l.full_name && l.full_name !== '-' ? l.full_name : '') : (l.title || ''))}</span></td>
+          <td class="c-ind">${indChip(l.industry)}</td><td class="c-contact">${contactCell(l)}</td>
+          <td class="c-loc">${esc([l.city, l.country].filter(Boolean).join(', ') || '—')}</td><td class="c-src">${srcChip(l.source)}</td>
+          <td class="c-state">${stateChip(l)}${inPipe(l) && !['won', 'lost'].includes(l.stage) ? `<small>${esc((st.meta.stages.find(s => s.key === l.stage) || {}).label || '')}</small>` : ''}</td>
+          <td class="c-owner"><span class="ava" title="${esc(teamName(l.owner_id))}">${initials(teamName(l.owner_id))}</span></td><td class="c-last">${l.last_activity_at ? ago(l.last_activity_at) : '<span class="dim">Never</span>'}</td></tr>`).join('')}
+        </tbody></table>${rows.length > 500 ? `<div class="empty sm">Showing 500 of ${num(rows.length)}. Narrow the filters to see the rest.</div>` : ''}</div>`
+        : `<div class="card"><div class="empty">${all.length ? 'No lead matches these filters.' : 'No leads yet. Add one with New lead, import a CSV, or find them with the Tools.'}${filtered ? ' <button class="btn sm" type="button" data-act="clearf">Clear filters</button>' : ''}</div></div>`;
+    return `<div class="head"><div><h1>Leads</h1><p class="sub">${num(all.length)} leads · ${num(states.cold || 0)} cold · ${num(states.pipeline || 0)} in the pipeline · ${num(states.client || 0)} clients. Work the good ones from the pipeline.</p></div><div class="sp"></div>
+        <div class="seg" role="group" aria-label="View"><button type="button" data-lmode="table" class="${st.leadMode === 'table' ? 'on' : ''}">${ic('table')}Table</button><button type="button" data-lmode="map" class="${st.leadMode === 'map' ? 'on' : ''}">${ic('pin')}Map</button></div>
+        <button class="btn" type="button" data-act="import">${ic('up')}Import CSV</button></div>
+      <div class="views" role="tablist">${LVIEWS.map(([k, l, fn]) => `<button type="button" role="tab" aria-selected="${st.view === k}" class="${st.view === k ? 'on' : ''}" data-view="${k}">${l}<span class="c">${num(all.filter(x => fn(x) && leadFilter(x, { skip: 'view' })).length)}</span></button>`).join('')}</div>
+      <div class="filters"><div class="searchin">${ic('search')}<input id="lq" type="search" placeholder="Name, business, phone, email, website" value="${esc(st.q)}" aria-label="Search leads"></div>
+        <select id="fcat" aria-label="Category"><option value="">Every category</option>${st.meta.sources.map(s => `<option value="${s.key}" ${st.cat === s.key ? 'selected' : ''}>${esc(s.path || s.label)} · ${num(byCat[s.key] || 0)}</option>`).join('')}</select>
+        <select id="find" aria-label="Industry"><option value="">Every industry</option>${inds.map(([k, n]) => `<option value="${esc(k)}" ${st.ind.toLowerCase() === k.toLowerCase() ? 'selected' : ''}>${k === '-' ? 'No industry yet' : esc(k)} · ${num(n)}</option>`).join('')}</select>
+        <select id="fown" aria-label="Owner"><option value="">Everyone's</option>${st.meta.team.map(m => `<option value="${m.id}" ${st.owner === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+        ${filtered ? '<button class="btn ghost sm" type="button" data-act="clearf">Clear</button>' : ''}</div>
+      ${inds.length > 1 ? `<div class="facets" aria-label="Industries">${inds.slice(0, 14).map(([k, n]) => `<button type="button" data-ind="${esc(k)}" class="${st.ind.toLowerCase() === k.toLowerCase() ? 'on' : ''}" style="--c:var(${k === '-' ? '--dim' : indVar(k)})"><i></i>${k === '-' ? 'No industry' : esc(k)}<b>${num(n)}</b></button>`).join('')}</div>` : ''}
+      ${st.leadMode === 'map' ? leadMapHtml(rows) : tableHtml}
+      ${st.sel.size ? bulkBar() : ''}`;
+}
+function bulkBar() {
+    return `<div class="bulk" role="region" aria-label="Selected leads"><span><b>${st.sel.size}</b> selected</span>
+        ${p90() ? `<button class="btn sm pri" type="button" data-act="bulkpipe">${ic('pipeline')}Add to pipeline</button>` : ''}
+        ${p90() ? `<select class="btn sm" data-bulk="industry" aria-label="Set industry"><option value="">Industry…</option>${industries().map(i => `<option>${esc(i)}</option>`).join('')}</select>` : ''}
+        <select class="btn sm" data-bulk="source" aria-label="Set category"><option value="">Category…</option>${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select>
         <select class="btn sm" data-bulk="owner_id" aria-label="Assign to"><option value="">Assign to…</option>${st.meta.team.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>
-        <button class="btn sm" type="button" data-act="clearsel">Clear</button></div>` : ''}`;
+        ${p90() ? `<button class="btn sm" type="button" data-act="bulkcamp">${ic('seq')}Add to a campaign</button>` : ''}
+        <button class="btn sm ghost" type="button" data-act="clearsel">Clear</button></div>`;
 }
 
-// ------------------------------------------------------------------ pipeline
+// ------------------------------------------------------------------ the leads map: where our data is, and how warm it is
+let leadMap = null;
+function leadMapHtml(rows) {
+    const placed = rows.filter(l => l.lat != null), states = countBy(placed, leadState), missing = rows.length - placed.length;
+    return `<div class="lmap"><section class="card mapcard"><div class="map" id="lmap" aria-label="Map of leads"></div>
+        <div class="maplegend">${['client', 'pipeline', 'cold', 'lost'].map(s => `<span><i class="f" style="--c:var(${STATE[s][1]})"></i>${STATE[s][0]} <b>${num(states[s] || 0)}</b></span>`).join('')}</div>
+        <div class="maptools"><button class="btn sm" type="button" data-act="lfit">${ic('fit')}Fit</button></div></section>
+      <aside class="card lmside"><div class="card-h"><h2>On the map</h2><span>${num(placed.length)} of ${num(rows.length)}</span></div>
+        <div class="lmstats">${['client', 'pipeline', 'cold', 'lost'].map(s => `<div style="--c:var(${STATE[s][1]})"><i></i><span>${STATE[s][0]}</span><b>${num(countBy(rows, leadState)[s] || 0)}</b></div>`).join('')}</div>
+        ${!p90() ? '<p class="note" style="margin:0 16px 16px">The map needs the phase-90 SQL. Run it once in Supabase.</p>'
+          : missing ? `<p class="note" style="margin:0 16px 12px">${num(missing)} lead${missing === 1 ? ' has' : 's have'} no place yet. A place comes from the lead's city; new leads are placed on their own within a minute.</p>${isAdmin() ? '<div style="padding:0 16px 16px"><button class="btn sm" type="button" data-act="geocode">Place them now</button></div>' : ''}` : ''}
+        <div class="lmtop"><span class="lbl">Busiest places</span>${Object.entries(countBy(rows.filter(l => l.city), l => l.city)).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([c, n]) => `<div><span>${esc(c)}</span><b>${n}</b></div>`).join('') || '<div class="dim">No cities yet.</div>'}</div></aside></div>`;
+}
+function leadMapInit() {
+    const el = $('#lmap'); if (!el) return;
+    if (!window.maplibregl) { loadMapLib().then(() => route === 'leads' && st.leadMode === 'map' && leadMapInit(), () => { el.innerHTML = '<div class="empty">The map could not load. Check the connection and refresh.</div>'; }); return; }
+    if (leadMap) { leadMap.remove(); leadMap = null; }
+    const rows = st.leads.filter(l => leadFilter(l) && l.lat != null);
+    const css = getComputedStyle(document.documentElement), col = s => css.getPropertyValue(STATE[s][1]).trim() || '#888';
+    leadMap = new maplibregl.Map({ container: el, style: MAP_STYLE, center: [-95.37, 29.76], zoom: 8, attributionControl: { compact: true }, cooperativeGestures: matchMedia('(pointer: coarse)').matches });
+    leadMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    leadMap.on('load', () => {
+        leadMap.addSource('leads', { type: 'geojson', cluster: true, clusterRadius: 44, clusterMaxZoom: 13,
+            data: { type: 'FeatureCollection', features: rows.map(l => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [l.lng, l.lat] }, properties: { id: l.id, s: leadState(l), n: l.company || l.full_name } })) } });
+        leadMap.addLayer({ id: 'cl', type: 'circle', source: 'leads', filter: ['has', 'point_count'], paint: { 'circle-color': col('pipeline'), 'circle-opacity': .9, 'circle-stroke-width': 4, 'circle-stroke-color': 'rgba(61,90,254,.22)', 'circle-radius': ['step', ['get', 'point_count'], 15, 10, 19, 30, 24, 100, 30] } });
+        // The count uses a font the base map already loads: a font it does not have would stop the whole layer drawing.
+        const styleFont = ((leadMap.getStyle().layers || []).find(x => x.layout && Array.isArray(x.layout['text-font'])) || { layout: {} }).layout['text-font'];
+        if (styleFont) leadMap.addLayer({ id: 'cln', type: 'symbol', source: 'leads', filter: ['has', 'point_count'], layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 12, 'text-font': styleFont, 'text-allow-overlap': true }, paint: { 'text-color': '#fff' } });
+        leadMap.addLayer({ id: 'pt', type: 'circle', source: 'leads', filter: ['!', ['has', 'point_count']], paint: { 'circle-radius': 7, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
+            'circle-color': ['match', ['get', 's'], 'client', col('client'), 'pipeline', col('pipeline'), 'lost', col('lost'), col('cold')] } });
+        leadMap.on('click', 'cl', e => { const f = e.features[0]; leadMap.getSource('leads').getClusterExpansionZoom(f.properties.cluster_id).then(z => leadMap.easeTo({ center: f.geometry.coordinates, zoom: z })); });
+        leadMap.on('click', 'pt', e => openLead(e.features[0].properties.id));
+        const pop = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
+        leadMap.on('mouseenter', 'pt', e => { leadMap.getCanvas().style.cursor = 'pointer'; const p = e.features[0].properties; pop.setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.n)}</b><br><small>${STATE[p.s][0]}</small>`).addTo(leadMap); });
+        leadMap.on('mouseleave', 'pt', () => { leadMap.getCanvas().style.cursor = ''; pop.remove(); });
+        leadMap.on('mouseenter', 'cl', () => { leadMap.getCanvas().style.cursor = 'pointer'; }); leadMap.on('mouseleave', 'cl', () => { leadMap.getCanvas().style.cursor = ''; });
+        lfit(rows);
+    });
+}
+function lfit(rows) {
+    if (!leadMap || !rows.length) return;
+    const b = new maplibregl.LngLatBounds([rows[0].lng, rows[0].lat], [rows[0].lng, rows[0].lat]); rows.forEach(l => b.extend([l.lng, l.lat]));
+    leadMap.fitBounds(b, { padding: 60, maxZoom: 12, duration: 900 });
+}
+
+// ------------------------------------------------------------------ pipeline: the leads being worked, by stage
+function pipeFilter(l, skip) {
+    const q = st.pQ.toLowerCase();
+    return inPipe(l) && (skip === 'cat' || !st.pCat || l.source === st.pCat) && (skip === 'ind' || !st.pInd || String(l.industry || '-').toLowerCase() === st.pInd.toLowerCase())
+        && (!st.pOwner || l.owner_id === st.pOwner) && (!q || [l.full_name, l.company, l.email, l.phone, l.industry].join(' ').toLowerCase().includes(q));
+}
+const toBdt = l => (Number(l.value) || 0) * ({ BDT: 1, USD: 120, GBP: 152, EUR: 130, CAD: 87, AUD: 79, INR: 1.4 }[l.currency] || 1);
 async function vPipeline() {
     await leads();
-    return `<div class="head"><div><h1>Pipeline</h1><p class="sub">Drag a lead to move it. Dropping on Won asks to create the client.</p></div></div>
-      <div class="board">${st.meta.stages.map(s => { const ls = st.leads.filter(l => l.stage === s.key); const sum = ls.reduce((a, l) => a + (Number(l.value) || 0) * ({ BDT: 1, USD: 120, GBP: 152, EUR: 130, CAD: 87, AUD: 79, INR: 1.4 }[l.currency] || 1), 0);
-        return `<div class="col" data-col="${s.key}"><div class="col-h"><i style="width:8px;height:8px;border-radius:50%;background:var(${STAGE_VAR[s.key]})"></i><b>${s.label}</b><span>${ls.length} · ${lakh(sum)}</span></div>
-          ${ls.slice(0, 80).map(l => `<div class="deal" draggable="true" data-drag="${l.id}" data-open="${l.id}"><b>${esc(l.company || l.full_name)}</b><span style="color:var(--muted);font-size:12.5px">${esc(l.full_name)}</span><div class="m">${srcChip(l.source)}<span class="v">${money(l.value, l.currency)}</span></div><div class="m">${dueLabel(l.next_step_at)}<span class="ava">${initials(teamName(l.owner_id))}</span></div></div>`).join('')}
-          ${ls.length > 80 ? `<div class="empty" style="padding:8px">+${ls.length - 80} more in Leads</div>` : ''}</div>`; }).join('')}</div>`;
+    const P = st.leads.filter(l => pipeFilter(l));
+    const cats = countBy(st.leads.filter(l => pipeFilter(l, 'cat')), l => l.source);
+    const inds = Object.entries(countBy(st.leads.filter(l => pipeFilter(l, 'ind')), l => l.industry || '-')).sort((a, b) => b[1] - a[1]);
+    const open = P.filter(l => !['won', 'lost'].includes(l.stage));
+    const card = l => `<div class="deal" draggable="true" data-drag="${l.id}" data-open="${l.id}"><div class="dh"><b>${esc(l.company || l.full_name)}</b>${l.value ? `<span class="v">${money(l.value, l.currency)}</span>` : ''}</div>
+        <span class="dn">${esc(l.company && l.full_name !== '-' ? l.full_name : '')}</span><div class="m">${indChip(l.industry)}${srcChip(l.source)}</div>
+        <div class="m"><span class="dicons">${l.phone ? `<a href="${telHref(l.phone)}" data-tel="${esc(l.phone)}" data-name="${esc(l.full_name)}" title="${esc(l.phone)}">${ic('phone')}</a>` : ''}${l.email ? `<a href="mailto:${esc(l.email)}" title="${esc(l.email)}">${ic('mail')}</a>` : ''}${l.website ? `<a href="${esc(webHref(l.website))}" target="_blank" rel="noopener" title="${esc(l.website)}">${ic('globe')}</a>` : ''}</span>${dueLabel(l.next_step_at)}<span class="ava">${initials(teamName(l.owner_id))}</span></div></div>`;
+    return `<div class="head"><div><h1>Pipeline</h1><p class="sub">${num(open.length)} open · ${lakh(open.reduce((a, l) => a + toBdt(l), 0))} in play. Email, call and text from here; drag a card to move it, drop on Won to make it a client.</p></div><div class="sp"></div>
+        <div class="searchin">${ic('search')}<input id="pq" type="search" placeholder="Search the pipeline" value="${esc(st.pQ)}" aria-label="Search the pipeline"></div>
+        <select id="pown" aria-label="Owner"><option value="">Everyone's</option>${st.meta.team.map(m => `<option value="${m.id}" ${st.pOwner === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
+      ${p90() ? '' : `<div class="banner">${ic('pipeline')}<div>Until the phase-90 SQL runs, the pipeline shows every lead past New. After it, a lead joins with <b>Add to pipeline</b>.</div></div>`}
+      <div class="facetrow"><span class="lbl">Category</span><div class="facets"><button type="button" data-pcat="" class="${!st.pCat ? 'on' : ''}">All<b>${num(Object.values(cats).reduce((a, b) => a + b, 0))}</b></button>${st.meta.sources.filter(s => cats[s.key]).map(s => `<button type="button" data-pcat="${s.key}" class="${st.pCat === s.key ? 'on' : ''}" style="--c:var(${SRC_VAR[s.key]})"><i></i>${esc(s.label)}<b>${num(cats[s.key])}</b></button>`).join('')}</div></div>
+      <div class="facetrow"><span class="lbl">Industry</span><div class="facets"><button type="button" data-pind="" class="${!st.pInd ? 'on' : ''}">All</button>${inds.map(([k, n]) => `<button type="button" data-pind="${esc(k)}" class="${st.pInd.toLowerCase() === k.toLowerCase() ? 'on' : ''}" style="--c:var(${k === '-' ? '--dim' : indVar(k)})"><i></i>${k === '-' ? 'No industry' : esc(k)}<b>${num(n)}</b></button>`).join('')}</div></div>
+      ${P.length || st.leads.some(inPipe) ? `<div class="board">${st.meta.stages.map(s => { const ls = P.filter(l => l.stage === s.key); const sum = ls.reduce((a, l) => a + toBdt(l), 0);
+        return `<div class="col" data-col="${s.key}"><div class="col-h"><i style="background:var(${STAGE_VAR[s.key]})"></i><b>${s.label}</b><span>${ls.length}${sum ? ' · ' + lakh(sum) : ''}</span></div>
+          <div class="cards">${ls.slice(0, 80).map(card).join('') || '<div class="colempty">Drop a lead here</div>'}${ls.length > 80 ? `<div class="empty sm">+${ls.length - 80} more. Filter to see them.</div>` : ''}</div></div>`; }).join('')}</div>`
+        : `<div class="card"><div class="empty">${ic('pipeline')}<b>The pipeline is empty.</b> On the Leads page, select the leads worth working and press <b>Add to pipeline</b>, or open a lead and add it there.<div style="margin-top:12px"><a class="btn pri" href="#leads">Go to Leads</a></div></div></div>`}`;
 }
 
-// ------------------------------------------------------------------ sequences (email automation: next phase)
-async function vSequences() {
-    return `<div class="head"><div><h1>Sequences</h1><p class="sub">Email steps that send on their own and stop when someone replies.</p></div></div>
-      <div class="banner">${ic('mail')}<div><b style="color:var(--ink)">Email automation is the next phase.</b> It needs a mailbox on your own domain, ideally Google Workspace on edgelead.online, so replies are detected and your main inbox is never at risk.</div></div>
-      <section class="card"><div class="card-h"><h2>What arrives with it</h2></div><div class="list">
-        ${[['Sequences', 'Email, wait, follow-up and task steps, per department'], ['Send windows and daily caps', 'Per mailbox, in the lead\'s own time zone'], ['Stops on reply, meeting or unsubscribe', 'Replies land on the lead\'s timeline and move it to Replied'],
-           ['Open and click tracking', 'Counted on the Overview, by department'], ['Unsubscribe link in every email', 'Unsubscribed leads are never emailed again']].map(([a, b]) => `<div class="row" style="cursor:default"><span class="kind">${ic('seq')}</span><div class="t"><b>${a}</b><span>${b}</span></div></div>`).join('')}
-      </div></section>`;
+// ------------------------------------------------------------------ clients
+async function vClients() {
+    const [{ clients }] = await Promise.all([api('/api/clients'), leads(), net().catch(() => ({ clients: [] }))]);
+    const fromLead = id => st.leads.find(l => l.client_id === id);
+    const loc = new Map(((st.net && st.net.clients) || []).map(c => [c.id, c]));
+    const q = st.cQ.toLowerCase();
+    const list = (clients || []).filter(c => !c.archived && (!q || [c.name, c.brand, c.niche, c.location].join(' ').toLowerCase().includes(q)));
+    return `<div class="head"><div><h1>Clients</h1><p class="sub">${num(list.length)} businesses we work for. Open one for its task board and everything else we do for it.</p></div><div class="sp"></div>
+        <div class="searchin">${ic('search')}<input id="cq" type="search" placeholder="Search clients" value="${esc(st.cQ)}" aria-label="Search clients"></div></div>
+      ${list.length ? `<div class="cgrid">${list.map(c => { const l = fromLead(c.id), m = loc.get(c.id);
+        return `<a class="card ccard" href="#client/${c.id}"><div class="ch"><span class="ava big" style="--c:var(${indVar(c.niche || c.name)})">${initials(c.brand || c.name)}</span><div style="min-width:0"><b>${esc(c.name)}</b><span>${esc([c.niche, c.location || [m && m.city, m && m.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ') || 'No details yet')}</span></div></div>
+          <div class="cm">${l ? `<span>${ic('leads')}From a ${esc(srcOf(l.source).label)} lead</span>` : '<span class="dim">Added directly</span>'}${c.converted_at || c.created_at ? `<span>${ic('cal')}Since ${new Date(c.converted_at || c.created_at).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}</span>` : ''}</div>
+          <span class="go">Open ${ic('arrow')}</span></a>`; }).join('')}</div>`
+        : `<div class="card"><div class="empty">${q ? 'No client matches.' : 'No clients yet. Win a lead in the pipeline and convert it: it arrives here with its history.'}</div></div>`}`;
 }
 
 // ------------------------------------------------------------------ influencers: the network on a real map
@@ -323,118 +509,6 @@ function fit(focus) {
     mapObj.fitBounds(b, { padding: 70, maxZoom: 13, duration: 1600 });
 }
 
-// ------------------------------------------------------------------ clients
-async function vClients() {
-    const [{ clients }] = await Promise.all([api('/api/clients'), leads(), net()]);
-    const fromLead = id => st.leads.find(l => l.client_id === id);
-    const loc = new Map(st.net.clients.map(c => [c.id, c]));
-    return `<div class="head"><div><h1>Clients</h1><p class="sub">Businesses we work for. A converted lead arrives here with its history.</p></div></div>
-      <section class="card">${(clients || []).filter(c => !c.archived).map(c => { const l = fromLead(c.id), m = loc.get(c.id);
-        return `<div class="row" style="cursor:default"><span class="kind">${ic('clients')}</span><div class="t"><b>${esc(c.name)}</b><span>${esc([c.location || [m && m.city, m && m.country].filter(Boolean).join(', '), l ? 'from a ' + srcOf(l.source).label + ' lead' : null].filter(Boolean).join(' · ') || 'No location yet')}</span></div>
-          ${l ? `<button class="btn sm ghost" type="button" data-open="${l.id}">Lead history</button>` : ''}<button class="btn sm" type="button" data-pinclient="${c.id}" data-name="${esc(c.name)}">${m && m.lat != null ? 'Move pin' : 'Pin on map'}</button></div>`; }).join('') || '<div class="empty">No clients yet.</div>'}</section>`;
-}
-
-// ------------------------------------------------------------------ settings
-async function vSettings() {
-    const tree = st.meta.sources;
-    return `<div class="head"><div><h1>Settings</h1><p class="sub">How the CRM is set up.${isAdmin() ? ' People and tools are in Admin.' : ''}</p></div></div>
-      <div class="set">
-        <section class="card"><div class="card-h"><h2>Lead sources</h2><span>Every lead has one</span></div><div class="tree">
-          ${tree.filter(s => s.dept !== 'marketing').slice(0, 2).map(s => `<div>${srcChip(s.key)}</div>`).join('')}<div><span class="src"><b>Marketing</b></span></div><div class="l2"><span class="src"><b>Ads</b></span></div>
-          ${['ads_google', 'ads_meta'].map(k => `<div class="l3">${srcChip(k)}</div>`).join('')}${['social', 'email'].map(k => `<div class="l2">${srcChip(k)}</div>`).join('')}${['influencer', 'referral', 'other'].map(k => `<div>${srcChip(k)}</div>`).join('')}</div></section>
-        <section class="card"><div class="card-h"><h2>Team</h2><span>${st.meta.team.length} people</span></div>${st.meta.team.map(m => `<div class="opt"><span class="ava">${initials(m.name)}</span><div class="t"><b>${esc(m.name)}</b><span>${m.role === 'admin' ? 'Owner' : 'Team'}</span></div></div>`).join('')}
-          ${isAdmin() ? '<div class="opt"><div class="t"><span>Add, turn off or remove people in Admin.</span></div><a class="btn sm" href="#admin">Admin</a></div>' : ''}</section>
-        <section class="card"><div class="card-h"><h2>Mailboxes</h2><span>Next phase</span></div><div class="opt"><div class="t"><b>Email automation</b><span>Connect a Google Workspace mailbox on edgelead.online to send sequences.</span></div><button class="btn sm" type="button" disabled>Coming next</button></div></section>
-        <section class="card"><div class="card-h"><h2>Calling</h2><span>Live</span></div><div class="opt"><div class="t"><b>Phone · (469) 819-4097</b><span>Calls, texts and voicemail, logged on each lead's timeline.</span></div><a class="btn sm" href="#phone">Open Phone</a></div></section>
-      </div>`;
-}
-
-
-// ------------------------------------------------------------------ admin (the owner only; the server checks too)
-async function vAdmin() {
-    const [{ users }, acc, ph, ak, gk] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools/access'), api('/api/admin/phone/usage').catch(e => ({ error: e.message })),
-        api('/api/apify-keys').catch(() => null), api('/api/gemini-keys').catch(() => null)]);
-    const staff = users.filter(u => u.role !== 'client').sort((a, b) => (b.role === 'admin') - (a.role === 'admin') || (a.full_name || a.email).localeCompare(b.full_name || b.email));
-    const owners = users.filter(u => u.role === 'client');
-    const me = st.meta.me.id;
-    const person = u => `<div class="opt person ${u.is_active ? '' : 'off'}"><span class="ava">${initials(u.full_name || u.email)}</span>
-        <div class="t"><b>${esc(u.full_name || u.email.split('@')[0])}${u.id === me ? ' <small class="pill">you</small>' : ''}</b><span>${esc(u.email)} · ${u.role === 'admin' ? 'Owner' : u.role === 'client' ? 'Client login' : 'Team'}${u.is_active ? '' : ' · turned off'} · added ${new Date(u.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
-        ${u.id === me ? '' : `<div class="acts2"><button class="btn sm" type="button" data-uact="pass" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">New password</button>
-          <button class="btn sm" type="button" data-uact="${u.is_active ? 'off' : 'on'}" data-uid="${u.id}">${u.is_active ? 'Turn off' : 'Turn on'}</button>
-          <button class="btn sm ghost danger" type="button" data-uact="remove" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">Remove</button></div>`}</div>`;
-    return `<div class="head"><div><h1>Admin</h1><p class="sub">Only you can open this. Teammates use the CRM but cannot see or change any of this.</p></div></div>
-      <div class="set">
-        <section class="card"><div class="card-h"><h2>Team</h2><span>${staff.filter(u => u.is_active).length} active</span></div>
-          ${staff.map(person).join('')}
-          <form class="addp" id="addp" autocomplete="off"><div class="card-h" style="padding:0 0 4px"><span class="lbl">Add a teammate</span></div>
-            <div class="grid3">${fieldHtml('ap-n', 'Name', 'placeholder="Full name"')}${fieldHtml('ap-e', 'Email', 'type="email" placeholder="name@edgelead.online"')}
-            <div class="field"><label for="ap-p">Password</label><div class="inline"><input id="ap-p" type="text" minlength="8" placeholder="8 characters or more"><button class="btn sm" type="button" data-act="genpass">Make one</button></div></div></div>
-            <div class="bar"><span class="note" style="margin:0">They sign in at workspace.edgelead.online with this email and password, and see the CRM. Give them Tools below.</span><button class="btn pri" type="submit">Add teammate</button></div>
-            <div id="ap-out"></div></form></section>
-        ${phoneUsage(ph)}
-        ${toolsAdmin(acc)}
-        ${keysAdmin(ak, gk)}
-        ${owners.length ? `<section class="card"><div class="card-h"><h2>Client logins</h2><span>From the old Edge Meta AI</span></div>
-          <p class="note" style="margin:0 16px 8px">Business owners who had their own login. They cannot use the CRM or the Tools; the old pages they used were removed.</p>${owners.map(person).join('')}</section>` : ''}
-      </div>`;
-}
-/** Admin → Tools (phase 89): each tool's lock, then who may use which tool and for which clients. */
-function toolsAdmin(a) {
-    if (!a) return '';
-    const open = a.switches.filter(t => t.on).length;
-    const bg = (a.background || []).filter(t => t.on);
-    return `<section class="card" id="tools-admin"><div class="card-h"><h2>Tools</h2><span>${open ? open + ' unlocked' : 'All locked'}</span></div>
-      <p class="note" style="margin:0 18px 10px">The Tools open at <b>/tools</b>, outside the CRM. A tool opens only when it is unlocked here <i>and</i> given to the person. While a tool is locked nothing runs for it and no Apify credit is spent.</p>
-      ${a.switches.map(t => `<div class="opt lockrow"><div class="t"><b>${esc(t.label)}<span class="lockstate ${t.on ? 'open' : ''}">${t.on ? 'Unlocked' : 'Locked'}</span></b><span>${esc(t.detail)}</span></div><label class="sw"><input type="checkbox" data-tool="${t.key}" ${t.on ? 'checked' : ''} aria-label="Unlock ${esc(t.label)}"><i></i></label></div>`).join('')}
-      ${bg.length ? `<div class="opt"><div class="t"><b>Still running in the background</b><span>${bg.map(t => esc(t.label)).join(', ')}: these have no page any more. Turn them off to stop their background work.</span></div><div class="acts2">${bg.map(t => `<button class="btn sm" type="button" data-tooloff="${t.key}">Turn off ${esc(t.label)}</button>`).join('')}</div></div>` : ''}
-      <div class="card-h" style="border-top:1px solid var(--line);margin-top:4px"><h2>Who has Tools</h2><span>You have every tool</span></div>
-      ${a.people.length ? a.people.map(p => `<form class="acc-row" data-access="${p.id}"><div class="acc-who"><span class="ava">${initials(p.name)}</span><div style="min-width:0"><b>${esc(p.name)}</b><span>${esc(p.email || '')}${p.active ? '' : ' · turned off'}</span></div></div>
-        <div class="acc-grp"><span class="lbl">Tools they can use</span><div class="tick">${a.tools.map(t => `<label><input type="checkbox" name="tool" value="${t.key}" ${p.tools.includes(t.key) ? 'checked' : ''}>${esc(t.label)}</label>`).join('')}</div>
-          <span class="lbl" style="margin-top:4px">Clients they can run them for</span><div class="tick">${a.clients.length ? a.clients.map(c => `<label><input type="checkbox" name="client" value="${c.id}" ${p.clients.includes(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('') : '<span class="sub" style="margin:0">No clients yet. Convert a won lead and it appears here.</span>'}</div>
-          <div><button class="btn sm pri" type="submit">Save ${esc(p.name.split(' ')[0])}'s access</button></div></div></form>`).join('') : '<div class="empty">No teammates yet. Add one above, then give them Tools here.</div>'}
-    </section>`;
-}
-/** Admin → the keys the Tools spend (phase 89): each tool's Apify key and credit, the failover pool, the Gemini keys. */
-const APIFY_TOOL_ENGINES = [['leadgen', 'Lead Finder'], ['report', 'Instagram report'], ['fb_page', 'Facebook Page report'], ['fb_community', 'Facebook groups']];
-function keysAdmin(a, g) {
-    if (!a) return '';
-    const usd = v => v == null ? '—' : '$' + Number(v).toFixed(2);
-    const pool = (a.keys || []).filter(k => !k.owner_user_id);
-    const gem = ((g && g.keys) || []).filter(k => !k.owner_user_id);
-    return `<section class="card" id="keys-admin"><div class="card-h"><h2>Apify and AI keys</h2><span>${esc(a.cycleMonth || '')}</span></div>
-      <p class="note" style="margin:0 18px 10px">Each tool spends its own Apify key first, then the shared pool, then the server's key. Credit renews monthly; spend is this month's.</p>
-      ${APIFY_TOOL_ENGINES.map(([e, l]) => { const p = (a.primaries || {})[e] || {}; return `<div class="opt"><div class="t"><b>${esc(l)}</b><span>${p.configured ? `${esc(p.masked || 'Key set')} · ${usd(p.spentUsd)} of ${usd(p.creditUsd)} spent` : 'No key of its own: uses the pool'}</span></div>
-        <div class="acts2"><button class="btn sm" type="button" data-keyset="${e}" data-label="${esc(l)}">${p.configured ? 'Replace key' : 'Add key'}</button>${p.configured ? `<button class="btn sm ghost" type="button" data-keycredit="${e}" data-cur="${p.creditUsd || ''}">Monthly credit</button>` : ''}</div></div>`; }).join('')}
-      <div class="card-h" style="border-top:1px solid var(--line)"><h2>Shared pool</h2><span>${pool.length} key${pool.length === 1 ? '' : 's'}</span></div>
-      ${pool.map(k => `<div class="opt"><div class="t"><b>${esc(k.label || k.apify_username || 'Apify key')}</b><span>${esc(k.engine === 'any' ? 'Any tool' : (APIFY_TOOL_ENGINES.find(x => x[0] === k.engine) || [0, k.engine])[1])} · ${esc(k.status)} · ${usd(k.remainingUsd)} left of ${usd(k.creditUsd)}</span></div><button class="btn sm ghost danger" type="button" data-keydel="${k.id}">Remove</button></div>`).join('') || '<div class="opt"><div class="t"><span>No pool keys. Add one so a run keeps going when a tool\'s own key runs dry.</span></div></div>'}
-      <form class="opt keyadd" id="poolAdd" autocomplete="off"><div class="inline" style="flex:1;flex-wrap:wrap"><input id="pk-t" type="password" placeholder="apify_api_…" aria-label="Apify token" required style="flex:2;min-width:180px"><input id="pk-l" placeholder="Label" aria-label="Label" style="flex:1;min-width:100px"><button class="btn sm pri" type="submit">Add to pool</button></div></form>
-      <div class="card-h" style="border-top:1px solid var(--line)"><h2>Gemini keys</h2><span>write the reports' summaries</span></div>
-      ${gem.map(k => `<div class="opt"><div class="t"><b>${esc(k.label || 'Gemini key')}</b><span>${esc(k.status)}${k.calls_total ? ' · ' + num(k.calls_total) + ' calls' : ''}${k.last_error ? ' · ' + esc(String(k.last_error).slice(0, 80)) : ''}</span></div><button class="btn sm ghost danger" type="button" data-gemdel="${k.id}">Remove</button></div>`).join('') || '<div class="opt"><div class="t"><span>No pool keys; the server\'s key is used.</span></div></div>'}
-      <form class="opt keyadd" id="gemAdd" autocomplete="off"><div class="inline" style="flex:1;flex-wrap:wrap"><input id="gk-t" type="password" placeholder="Gemini API key" aria-label="Gemini key" required style="flex:2;min-width:180px"><input id="gk-l" placeholder="Label" aria-label="Label" style="flex:1;min-width:100px"><button class="btn sm pri" type="submit">Add key</button></div></form>
-    </section>`;
-}
-function phoneUsage(u) {
-    if (!u || u.error) return `<section class="card"><div class="card-h"><h2>Phone</h2><span>Usage</span></div><div class="empty">${esc((u && u.error) || 'Not available yet.')}</div></section>`;
-    const O = u.ours, tw = Array.isArray(u.twilio) ? Object.fromEntries(u.twilio.map(r => [r.category, r])) : null;
-    const usd = v => '$' + (Number(v) || 0).toFixed(2);
-    const month = new Date(u.month + '-01T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-    const tile = (l, v, sub) => `<div><small>${l}</small><b>${v}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
-    return `<section class="card phu"><div class="card-h"><h2>Phone · ${esc(u.number)}</h2><span class="phstate ${u.ready ? 'ready' : 'error'}"><i></i>${u.ready ? 'Live' : 'Not set up'}</span></div>
-      <div class="phu-t">${tile('Twilio spend · ' + esc(month), tw ? usd((tw.totalprice || {}).price) : '—', u.balance ? 'Balance ' + usd(u.balance.amount) : (u.twilio && u.twilio.error ? esc(u.twilio.error) : ''))}
-        ${tile('Calls in', num(O.callsIn), num(O.minutesIn) + ' min · ' + num(O.missed) + ' missed')}${tile('Calls out', num(O.callsOut), num(O.minutesOut) + ' min')}
-        ${tile('Voicemails', num(O.voicemails), '')}${tile('Texts', num(O.textsIn + O.textsOut), num(O.textsOut) + ' sent · ' + num(O.textsIn) + ' received')}</div>
-      ${tw ? `<div class="phu-b">${[['calls', 'Phone calls'], ['calls-client', 'In-app calling'], ['sms', 'Texts'], ['phonenumbers', 'Number rental'], ['recordings', 'Recordings'], ['transcriptions', 'Transcriptions']].map(([k, l]) => `<div><span>${l}</span><span class="num">${num(Math.round((tw[k] || {}).usage || 0))} ${esc((tw[k] || {}).unit || '')}</span><b class="num">${usd((tw[k] || {}).price)}</b></div>`).join('')}</div>` : ''}
-      <div class="tablewrap"><table class="dept team" style="min-width:0"><thead><tr><th>Person</th><th>Calls made</th><th>Minutes</th><th>Answered</th><th>Texts sent</th></tr></thead><tbody>
-        ${u.people.map(p => `<tr><td><span class="nm"><span class="ava">${initials(p.name)}</span>${esc(p.name)}</span></td><td>${num(p.callsOut)}</td><td>${num(p.minutesOut)}</td><td>${num(p.answered)}</td><td>${num(p.texts)}</td></tr>`).join('')}</tbody></table></div>
-      <div class="phu-s"><div class="opt"><div class="t"><b>Texting</b><span>${u.sms ? 'On' : 'Off until the number is approved for business texting (A2P 10DLC). Then set PHONE_SMS_ENABLED=1 on the server.'}</span></div></div>
-        <div class="opt"><div class="t"><b>Forward unanswered calls</b><span>${u.forward ? 'To ' + esc(u.forward) + ' for 20 seconds, then voicemail' : 'Off. Set PHONE_FORWARD_TO on the server to try a mobile before voicemail.'}</span></div></div>
-        ${u.missing.length ? `<div class="opt"><div class="t"><b>Missing on the server</b><span class="mono">${u.missing.map(esc).join(' · ')}</span></div></div>` : ''}
-        <div class="opt"><div class="t"><b>In Twilio, “A call comes in” and the TwiML App's voice URL</b><span class="mono">${esc(u.hooks.voice)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.voice)}">Copy</button></div>
-        <div class="opt"><div class="t"><b>In Twilio, “A message comes in”</b><span class="mono">${esc(u.hooks.sms)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.sms)}">Copy</button></div></div>
-    </section>`;
-}
-const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
-
 // ------------------------------------------------------------------ sign in (the CRM is the front door; it is index.html, at /)
 function authScreen(inner) {
     document.body.innerHTML = `<main class="auth"><section class="card authcard"><div class="brand"><b>E</b>EdgeLead</div>${inner}<div class="err" id="aerr" role="alert"></div></section><p class="authfoot">EdgeLead CRM · for the EdgeLead team</p></main>`;
@@ -471,95 +545,145 @@ async function openLead(id) {
     $('#layer').innerHTML = `<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Lead"><div class="boot">Loading…</div></aside><div id="sub"></div>`;
     try {
         const d = await api('/api/crm/leads/' + id); if (st.openId !== id) return;
-        drawLead(d);
+        st.lead = d; drawLead(d);
+        const i = st.leads ? st.leads.findIndex(x => x.id === id) : -1; if (i >= 0) st.leads[i] = { ...st.leads[i], ...d.lead };
     } catch (e) { $('.drawer').innerHTML = `<div class="empty err">${esc(e.message)}</div>`; }
 }
-function drawLead({ lead: l, activities, tasks, influencers, client }) {
-    const si = st.meta.stages.findIndex(s => s.key === l.stage);
+const HK = { note: ['note', 'Note'], email_out: ['mail', 'Email sent'], email_in: ['reply', 'Reply received'], call: ['phone', 'Call'], sms: ['reply', 'Text'], whatsapp: ['wa', 'WhatsApp'],
+    meeting: ['meet', 'Meeting'], stage: ['stage', 'Stage'], task: ['task', 'Task done'], system: ['dot', 'Update'], campaign_email: ['mail', 'Campaign email'] };
+const HFILTER = [['all', 'All', () => true], ['call', 'Calls', i => i.kind === 'call'], ['sms', 'Texts', i => i.kind === 'sms' || i.kind === 'whatsapp'], ['email', 'Emails', i => ['email_out', 'email_in', 'campaign_email'].includes(i.kind)], ['note', 'Notes', i => ['note', 'meeting'].includes(i.kind)]];
+function histItem(i) {
+    const m = i.meta || {}, [icon, label] = HK[i.kind] || ['note', 'Update'];
+    const dir = m.direction === 'inbound' ? 'in' : m.direction === 'outbound' ? 'out' : '';
+    let title = label;
+    if (i.kind === 'stage') title = `Moved to ${esc((st.meta.stages.find(s => s.key === m.to) || { label: m.to || '' }).label)}${m.auto ? ' <small>(a reply came in)</small>' : ''}`;
+    else if (i.kind === 'call') title = m.voicemail ? 'Voicemail' : `${dir === 'in' ? 'Call in' : dir === 'out' ? 'Call out' : 'Call'}${m.minutes ? ' · ' + m.minutes + ' min' : ''}${m.outcome ? ' · ' + esc(m.outcome) : ''}`;
+    else if (i.kind === 'sms') title = dir === 'in' ? 'Text received' : 'Text sent' + (m.auto ? ' <small>(automatic)</small>' : '');
+    else if (i.kind === 'email_out' && m.campaign) title = `Campaign email${m.campaignName ? ' · ' + esc(m.campaignName) : ''}`;
+    else if (i.kind === 'system') title = esc(i.body || 'Update');
+    const subject = m.subject ? `<p class="subj">${esc(m.subject)}</p>` : '';
+    const opened = m.opened ? `<span class="pill ok">Opened${m.opens > 1 ? ' ×' + m.opens : ''}</span>` : m.status === 'failed' ? '<span class="pill bad">Failed</span>' : '';
+    const body = i.body && i.kind !== 'system' ? `<p class="hb ${i.body.length > 280 ? 'clamp' : ''}">${esc(i.body)}</p>${i.body.length > 280 ? '<button type="button" class="linkbtn" data-more>Show all</button>' : ''}` : '';
+    return `<div class="ev k-${i.kind} ${dir}"><span class="k">${ic(icon)}</span><div class="x"><div class="xh"><b>${title}</b>${opened}<span class="w" title="${new Date(i.at).toLocaleString('en-GB')}">${ago(i.at)}${i.actor ? ' · ' + esc(teamName(i.actor)) : ''}</span></div>${subject}${body}</div></div>`;
+}
+function drawLead({ lead: l, activities, history, tasks, influencers, client }) {
+    const items = history ? history.items : activities.map(a => ({ kind: a.type, at: a.at, id: a.id, actor: a.actor_id, body: a.body, meta: a.meta || {} }));
+    const counts = Object.fromEntries(HFILTER.map(([k, , f]) => [k, items.filter(f).length]));
+    const hf = (HFILTER.find(h => h[0] === st.hist) || HFILTER[0])[2];
+    const si = st.meta.stages.findIndex(s => s.key === l.stage), work = inPipe(l) || leadState(l) === 'client';
     const waNum = String(l.whatsapp || l.phone || '').replace(/\D/g, '');
-    const evIcon = { sms: 'reply', note: 'note', email_out: 'mail', email_in: 'reply', call: 'phone', whatsapp: 'wa', meeting: 'meet', stage: 'stage', task: 'task', system: 'note' };
-    const evText = a => a.type === 'stage' ? `Moved to ${esc((st.meta.stages.find(s => s.key === (a.meta || {}).to) || { label: (a.meta || {}).to }).label)}${a.meta && a.meta.auto ? ' (a reply came in)' : ''}`
-        : a.type === 'email_out' ? 'Email sent' : a.type === 'email_in' ? 'Reply received' : a.type === 'call' && !(a.meta || {}).voicemail ? `Call${a.meta && a.meta.minutes ? ' · ' + a.meta.minutes + ' min' : ''}${a.meta && a.meta.outcome ? ' · ' + esc(a.meta.outcome) : ''}`
-        : a.type === 'sms' ? ((a.meta || {}).direction === 'inbound' ? 'Text received' : 'Text sent') : a.type === 'call' && (a.meta || {}).voicemail ? 'Voicemail' : a.type === 'whatsapp' ? 'WhatsApp' : a.type === 'meeting' ? 'Meeting' : a.type === 'task' ? 'Task done' : a.type === 'note' ? 'Note' : esc(a.body || 'Update');
-    const sel = (field, opts, cur) => `<select data-field="${field}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
-    const inp = (field, val, type = 'text', ph = '') => `<input data-field="${field}" type="${type}" value="${esc(val ?? '')}" placeholder="${esc(ph)}">`;
-    $('.drawer').innerHTML = `<div class="dr-h"><div class="dr-top"><span class="ava" style="width:40px;height:40px;font-size:14px">${initials(l.full_name)}</span><div class="t"><h2>${esc(l.full_name)}</h2><p class="sub">${esc([l.title, l.company].filter(Boolean).join(', ') || 'No business yet')}${l.city || l.country ? ' · ' + esc([l.city, l.country && cname(l.country)].filter(Boolean).join(', ')) : ''}</p></div><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
-      <div class="stepper" role="group" aria-label="Stage">${st.meta.stages.map((s, i) => `<button type="button" data-stage="${s.key}" class="${i < si && l.stage !== 'lost' ? 'past' : ''} ${i === si ? 'cur' : ''} ${s.key === 'lost' ? 'lost' : ''}" ${l.client_id && s.key !== 'won' ? 'disabled' : ''}>${s.label}</button>`).join('')}</div>
-      <div class="acts">${l.email ? `<a class="btn sm pri" href="mailto:${esc(l.email)}">${ic('mail')}Email</a>` : ''}${waNum ? `<a class="btn sm" href="https://wa.me/${waNum}" target="_blank" rel="noopener">${ic('wa')}WhatsApp</a>` : ''}
-        ${l.phone ? `<button class="btn sm" type="button" data-act="phcall">${ic('phone')}Call</button><button class="btn sm" type="button" data-act="phtext">${ic('reply')}Text</button>` : ''}
-        <button class="btn sm" type="button" data-act="tonet">${ic('pin')}Add to influencer network</button>${l.client_id ? '' : `<button class="btn sm gold" type="button" data-act="convert">${ic('client')}Convert to client</button>`}</div></div>
+    const lock = work ? '' : ' disabled title="Add the lead to the pipeline first"';
+    const sel = (field, opts, cur) => `<select data-field="${field}" id="pf-${field}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+    const inp = (field, val, type = 'text', ph = '', extra = '') => `<input data-field="${field}" id="pf-${field}" type="${type}" value="${esc(val ?? '')}" placeholder="${esc(ph)}" ${extra}>`;
+    const box = (title, icon, rows) => `<section class="pbox"><h3>${ic(icon)}${title}</h3><dl>${rows.join('')}</dl></section>`;
+    const prow = (label, field, html) => `<div><dt><label for="pf-${field}">${label}</label></dt><dd>${html}</dd></div>`;
+    $('.drawer').innerHTML = `<div class="dr-h"><div class="dr-top"><span class="ava big" style="--c:var(${indVar(l.industry || l.company)})">${initials(l.company || l.full_name)}</span>
+        <div class="t"><h2>${esc(l.company || l.full_name)}</h2><p class="sub">${esc([l.company && l.full_name !== '-' ? l.full_name : '', l.title].filter(Boolean).join(', '))}${l.city || l.country ? ' · ' + esc([l.city, l.country && cname(l.country)].filter(Boolean).join(', ')) : ''}</p>
+          <div class="lchips">${indChip(l.industry)}${stateChip(l)}${srcChip(l.source)}</div></div><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
+      ${work ? `<div class="stepper" role="group" aria-label="Stage">${st.meta.stages.map((s, i) => `<button type="button" data-stage="${s.key}" class="${i < si && l.stage !== 'lost' ? 'past' : ''} ${i === si ? 'cur' : ''} ${s.key === 'lost' ? 'lost' : ''}" ${l.client_id && s.key !== 'won' ? 'disabled' : ''}>${s.label}</button>`).join('')}</div>`
+        : `<div class="coldbar">${ic('lock')}<div><b>Cold lead.</b> Email, calls and texts are worked from the pipeline. Add it when it is worth working.</div><button class="btn pri sm" type="button" data-act="topipe">${ic('pipeline')}Add to pipeline</button></div>`}
+      <div class="acts">${l.email ? `<a class="btn sm ${work ? 'pri' : ''}" ${work ? `href="mailto:${esc(l.email)}"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('mail')}Email</a>` : ''}
+        ${l.phone ? `<button class="btn sm" type="button" data-act="phcall"${lock}>${ic('phone')}Call</button><button class="btn sm" type="button" data-act="phtext"${lock}>${ic('reply')}Text</button>` : ''}
+        ${waNum ? `<a class="btn sm" ${work ? `href="https://wa.me/${waNum}" target="_blank" rel="noopener"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('wa')}WhatsApp</a>` : ''}
+        ${p90() && l.email ? `<button class="btn sm" type="button" data-act="tocamp"${lock}>${ic('seq')}Add to campaign</button>` : ''}
+        <button class="btn sm ghost" type="button" data-act="tonet">${ic('pin')}Influencer network</button>
+        ${work && inPipe(l) && p90() && !l.client_id ? `<button class="btn sm ghost" type="button" data-act="frompipe">Take out of pipeline</button>` : ''}
+        ${l.client_id ? `<a class="btn sm" href="#client/${l.client_id}" data-close>${ic('clients')}Open client</a>` : work ? `<button class="btn sm gold" type="button" data-act="convert">${ic('client')}Convert to client</button>` : ''}</div></div>
     <div class="dr-b"><div class="feed">
-      <div class="compose"><div class="tabs" role="tablist">${[['note', 'Note'], ['call', 'Log call'], ['whatsapp', 'WhatsApp'], ['email_out', 'Email sent'], ['email_in', 'Reply'], ['meeting', 'Meeting'], ['task', 'Task']].map(([k, t], i) => `<button type="button" data-ctab="${k}" class="${i ? '' : 'on'}">${t}</button>`).join('')}</div>
+      <div class="compose"><div class="tabs" role="tablist">${[['note', 'Note'], ['call', 'Log call'], ['email_out', 'Email sent'], ['email_in', 'Reply'], ['whatsapp', 'WhatsApp'], ['meeting', 'Meeting'], ['task', 'Task']].map(([k, t]) => `<button type="button" role="tab" data-ctab="${k}" class="${ctab === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <textarea id="cbody" aria-label="Write here" placeholder="Write a note"></textarea>
         <div class="inline" id="cextra" hidden></div>
-        <div class="bar"><span id="chint">Saved to this lead's timeline</span><button class="btn sm pri" type="button" data-act="csave">Save</button></div></div>
-      ${tasks.filter(t => !t.done_at).map(t => `<div class="ev"><span class="k" style="background:var(--gold-soft);color:var(--ink)">${ic('task')}</span><div class="x"><b>${esc(t.title)}</b><span class="w">${t.due_at ? dueLabel(t.due_at) : ''}</span> <button class="btn sm" type="button" data-taskdone="${t.id}">Done</button></div></div>`).join('')}
-      ${activities.map(a => `<div class="ev"><span class="k ${a.type === 'email_out' ? 'mail' : a.type === 'email_in' ? 'reply' : a.type === 'call' ? 'call' : ''}">${ic(evIcon[a.type] || 'note')}</span><div class="x"><b>${evText(a)}</b><span class="w">${ago(a.at)}${a.actor_id ? ' · ' + esc(teamName(a.actor_id)) : ''}</span>${a.body && a.type !== 'system' ? `<p style="white-space:pre-wrap">${esc(a.body)}</p>` : ''}</div></div>`).join('') || '<div class="empty">No activity yet.</div>'}
+        <div class="bar"><span id="chint">Saved on this lead's history</span><button class="btn sm pri" type="button" data-act="csave">Save</button></div></div>
+      ${tasks.filter(t => !t.done_at).map(t => `<div class="ev task"><span class="k">${ic('task')}</span><div class="x"><div class="xh"><b>${esc(t.title)}</b>${t.due_at ? dueLabel(t.due_at) : ''}<button class="btn sm" type="button" data-taskdone="${t.id}">Done</button></div></div></div>`).join('')}
+      <div class="hhead"><h3>History</h3><div class="hf" role="tablist">${HFILTER.map(([k, lab]) => `<button type="button" role="tab" data-hist="${k}" class="${st.hist === k ? 'on' : ''}">${lab}<span>${counts[k]}</span></button>`).join('')}</div></div>
+      <div class="hist">${items.filter(hf).map(histItem).join('') || '<div class="empty sm">Nothing here yet.</div>'}</div>
     </div>
-    <div class="props"><dl>
-      <div><dt>Next step</dt><dd>${inp('next_step', l.next_step, 'text', 'What happens next')}${inp('next_step_at', l.next_step_at ? new Date(new Date(l.next_step_at) - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16) : '', 'datetime-local')}</dd></div>
-      <div><dt>Source</dt><dd>${sel('source', st.meta.sources.map(s => [s.key, s.path || s.label]), l.source)}</dd></div>
-      <div><dt>Deal value</dt><dd class="inline">${inp('value', l.value, 'number')}${sel('currency', st.meta.currencies.map(c => [c, c]), l.currency)}</dd></div>
-      <div><dt>Owner</dt><dd>${sel('owner_id', [['', 'Nobody'], ...st.meta.team.map(m => [m.id, m.name])], l.owner_id)}</dd></div>
-      <div><dt>Email</dt><dd>${inp('email', l.email, 'email')}</dd></div>
-      <div><dt>Phone</dt><dd>${inp('phone', l.phone, 'tel', '+880 …')}</dd></div>
-      <div><dt>Business</dt><dd>${inp('company', l.company)}</dd></div>
-      <div><dt>Website</dt><dd>${inp('website', l.website, 'url', 'https://')}</dd></div>
-      <div><dt>City · country</dt><dd class="inline">${inp('city', l.city)}${inp('country', l.country, 'text', 'BD')}</dd></div>
-      <div><dt>Score</dt><dd>${inp('score', l.score, 'number', '0–100')}</dd></div>
-      ${l.stage === 'lost' ? `<div><dt>Why lost</dt><dd>${inp('lost_reason', l.lost_reason)}</dd></div>` : ''}
-    </dl>
-    <div class="links"><span class="lbl">Linked</span>
-      ${client ? `<a class="lnk" href="#clients">${ic('clients')}${esc(client.name)}<small>client</small></a>` : ''}
-      ${influencers.map(c => `<button type="button" class="lnk" data-crgo="${c.id}">${ic('pin')}@${esc(c.handle)}<small>creator</small></button>`).join('')}
-      <button type="button" class="lnk" data-dept="${srcOf(l.source).dept}">${ic('overview')}${esc(srcOf(l.source).path || srcOf(l.source).label)}<small>department</small></button></div></div></div>`;
+    <div class="props">
+      ${box('Contact', 'phone', [prow('Email', 'email', inp('email', l.email, 'email', 'name@business.com')), prow('Phone', 'phone', inp('phone', l.phone, 'tel', '+1 …')), prow('WhatsApp', 'whatsapp', inp('whatsapp', l.whatsapp, 'tel', 'If not the phone')), prow('Website', 'website', inp('website', l.website, 'url', 'https://'))])}
+      ${box('Business', 'clients', [prow('Business', 'company', inp('company', l.company)), prow('Contact person', 'full_name', inp('full_name', l.full_name)), ...(p90() ? [prow('Industry', 'industry', inp('industry', l.industry, 'text', 'Roofing, Plumbing…', 'list="indlist" required'))] : []),
+          prow('Category', 'source', sel('source', st.meta.sources.map(s => [s.key, s.path || s.label]), l.source)), prow('City', 'city', inp('city', l.city)), prow('Country', 'country', inp('country', l.country, 'text', 'US', 'maxlength="2"'))])}
+      ${box('Deal', 'stage', [prow('Value', 'value', `<div class="inline">${inp('value', l.value, 'number', '0')}${sel('currency', st.meta.currencies.map(c => [c, c]), l.currency)}</div>`), prow('Score', 'score', inp('score', l.score, 'number', '0–100', 'min="0" max="100"')),
+          prow('Owner', 'owner_id', sel('owner_id', [['', 'Nobody'], ...st.meta.team.map(m => [m.id, m.name])], l.owner_id)), ...(l.stage === 'lost' ? [prow('Why lost', 'lost_reason', inp('lost_reason', l.lost_reason))] : [])])}
+      ${box('Next step', 'cal', [prow('What', 'next_step', inp('next_step', l.next_step, 'text', 'What happens next')), prow('When', 'next_step_at', inp('next_step_at', l.next_step_at ? new Date(new Date(l.next_step_at) - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16) : '', 'datetime-local'))])}
+      <section class="pbox"><h3>${ic('link')}Linked</h3><div class="links">
+        ${client ? `<a class="lnk" href="#client/${client.id}" data-close>${ic('clients')}${esc(client.name)}<small>client</small></a>` : ''}
+        ${influencers.map(c => `<button type="button" class="lnk" data-crgo="${c.id}">${ic('pin')}@${esc(c.handle)}<small>creator</small></button>`).join('')}
+        <button type="button" class="lnk" data-dept="${srcOf(l.source).dept}">${ic('overview')}${esc(srcOf(l.source).path || srcOf(l.source).label)}<small>department</small></button>
+        <span class="dim small">Added ${ago(l.created_at)}${l.tags && l.tags.length ? ' · ' + l.tags.map(esc).join(', ') : ''}</span></div></section>
+      <datalist id="indlist">${industries().map(i => `<option value="${esc(i)}">`).join('')}</datalist>
+    </div></div>`;
+    setCtab(ctab);
 }
 let ctab = 'note';
+function setCtab(k) {
+    ctab = k; document.querySelectorAll('[data-ctab]').forEach(b => b.classList.toggle('on', b.dataset.ctab === k));
+    const ex = $('#cextra'); if (!ex) return; ex.hidden = !['call', 'task'].includes(k);
+    ex.innerHTML = k === 'call' ? `<input id="c-min" type="number" min="0" placeholder="Minutes" aria-label="Minutes"><select id="c-out" aria-label="Outcome"><option value="">Outcome</option><option>Spoke</option><option>No answer</option><option>Left voicemail</option><option>Wrong number</option><option>Call back later</option></select>`
+        : k === 'task' ? `<input id="c-due" type="datetime-local" aria-label="Due">` : '';
+    $('#cbody').placeholder = { note: 'Write a note', call: 'What was said', whatsapp: 'What was said on WhatsApp', email_out: 'Paste or sum up the email you sent', email_in: 'Paste or sum up their reply (moves them to Replied and stops their campaigns)', meeting: 'Notes from the meeting', task: 'What needs doing' }[k];
+}
 async function saveField(el) {
-    const f = el.dataset.field; let v = el.value;
-    if (f === 'next_step_at') v = v ? new Date(v).toISOString() : null;
-    if (f === 'tags') v = v.split(',').map(x => x.trim()).filter(Boolean);
-    try { const { lead } = await api('/api/crm/leads/' + st.openId, { method: 'PATCH', body: { [f]: v === '' ? null : v } }); const i = st.leads ? st.leads.findIndex(x => x.id === lead.id) : -1; if (i >= 0) st.leads[i] = lead; toast('Saved'); }
+    const f = el.dataset.field; let val = el.value;
+    if (f === 'next_step_at') val = val ? new Date(val).toISOString() : null;
+    if (f === 'industry' && !val.trim()) { toast('A lead keeps an industry. Pick one, or Other.', true); el.value = (st.lead && st.lead.lead.industry) || ''; return; }
+    try { const { lead } = await api('/api/crm/leads/' + st.openId, { method: 'PATCH', body: { [f]: val === '' ? null : val } }); const i = st.leads ? st.leads.findIndex(x => x.id === lead.id) : -1; if (i >= 0) st.leads[i] = lead; if (st.lead) st.lead.lead = lead; toast('Saved'); }
     catch (e) { toast(e.message, true); }
 }
+async function setPipeline(ids, on) {
+    if (ids.length === 1) await api('/api/crm/leads/' + ids[0], { method: 'PATCH', body: { in_pipeline: on } });
+    else await api('/api/crm/leads/bulk', { method: 'POST', body: { ids, set: { in_pipeline: on } } });
+    await leads(true);
+}
 function modal(title, body, okText, onOk, wide) {
-    $('#sub').innerHTML = `<div class="scrim" data-unsub style="z-index:30"></div><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" ${wide ? 'style="width:min(680px,calc(100% - 32px))"' : ''}><div class="mh"><h2>${esc(title)}</h2></div><div class="mb">${body}<div class="err" id="merr" role="alert"></div></div>
+    if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
+    $('#sub').innerHTML = `<div class="scrim" data-unsub style="z-index:30"></div><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" ${wide ? 'style="width:min(680px,calc(100% - 32px))"' : ''}><div class="mh"><h2>${esc(title)}</h2><button class="btn ghost sm" type="button" data-unsub aria-label="Close">${ic('x')}</button></div><div class="mb">${body}<div class="err" id="merr" role="alert"></div></div>
       <div class="mf"><button class="btn" type="button" data-unsub>Cancel</button><button class="btn pri" type="button" id="mok">${esc(okText)}</button></div></div>`;
     const first = $('#sub .modal input, #sub .modal select, #sub .modal textarea'); if (first) first.focus();
     $('#mok').onclick = async () => { const b = $('#mok'); b.disabled = true; try { await onOk(); } catch (e) { $('#merr').textContent = e.message; } b.disabled = false; };
 }
 const fieldHtml = (id, label, attrs = '', hint = '') => `<div class="field"><label for="${id}">${label}</label><input id="${id}" ${attrs}>${hint ? `<small>${hint}</small>` : ''}</div>`;
 const v = id => ($('#' + id) || {}).value || '';
+const indField = (id, val = '', req = true) => p90() ? `<div class="field"><label for="${id}">Industry${req ? ' <span class="req">required</span>' : ''}</label><input id="${id}" list="${id}-l" value="${esc(val)}" placeholder="Roofing, Plumbing, Appliance repair…" autocomplete="off"><datalist id="${id}-l">${industries().map(i => `<option value="${esc(i)}">`).join('')}</datalist></div>` : '';
 
 function newLead(pre = {}) {
-    if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-    modal('New lead', `<div class="grid2">${fieldHtml('nl-n', 'Name', `autocomplete="off" placeholder="Full name" value="${esc(pre.full_name || '')}"`)}${fieldHtml('nl-co', 'Business', 'placeholder="Business name"')}</div>
-      <div class="grid2">${fieldHtml('nl-e', 'Email', 'type="email" placeholder="name@business.com"')}${fieldHtml('nl-p', 'Phone or WhatsApp', `type="tel" placeholder="+880 …" value="${esc(pre.phone || '')}"`)}</div>
-      <div class="grid2"><div class="field"><label for="nl-s">Source</label><select id="nl-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div>
-        <div class="field"><label for="nl-o">Owner</label><select id="nl-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
-      <div class="grid2">${fieldHtml('nl-city', 'City', 'placeholder="Barishal"')}${fieldHtml('nl-c', 'Country', 'maxlength="2" placeholder="BD"', 'Two letters: BD, US, GB…')}</div>
+    modal('New lead', `<div class="grid2">${fieldHtml('nl-co', 'Business', `placeholder="Business name" value="${esc(pre.company || '')}"`)}${fieldHtml('nl-n', 'Contact person', `autocomplete="off" placeholder="Full name" value="${esc(pre.full_name || '')}"`)}</div>
+      <div class="grid2">${indField('nl-i')}<div class="field"><label for="nl-s">Category</label><select id="nl-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div></div>
+      <div class="grid2">${fieldHtml('nl-e', 'Email', 'type="email" placeholder="name@business.com"')}${fieldHtml('nl-p', 'Phone', `type="tel" placeholder="+1 …" value="${esc(pre.phone || '')}"`)}</div>
+      <div class="grid2">${fieldHtml('nl-w', 'Website', 'type="url" placeholder="business.com"')}<div class="field"><label for="nl-o">Owner</label><select id="nl-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
+      <div class="grid2">${fieldHtml('nl-city', 'City', 'placeholder="Houston"')}${fieldHtml('nl-c', 'Country', 'maxlength="2" placeholder="US"', 'Two letters: US, BD, GB…')}</div>
+      ${p90() ? '<label class="check"><input type="checkbox" id="nl-pipe"> Put it straight in the pipeline</label>' : ''}
       <p class="note" style="margin:0">If the email or phone already belongs to a lead, you'll be shown that lead instead of a duplicate.</p>`, 'Add lead', async () => {
+        if (p90() && !v('nl-i').trim()) throw new Error('Pick the industry: what the business does.');
         try {
-            const { lead } = await api('/api/crm/leads', { method: 'POST', body: { full_name: v('nl-n'), company: v('nl-co'), email: v('nl-e'), phone: v('nl-p'), source: v('nl-s'), owner_id: v('nl-o'), city: v('nl-city'), country: v('nl-c') } });
-            st.leads = null; $('#layer').innerHTML = ''; toast(lead.full_name + ' added'); await render(); openLead(lead.id);
+            const { lead } = await api('/api/crm/leads', { method: 'POST', body: { full_name: v('nl-n') || v('nl-co'), company: v('nl-co'), industry: v('nl-i') || undefined, email: v('nl-e'), phone: v('nl-p'), website: v('nl-w'), source: v('nl-s'), owner_id: v('nl-o'), city: v('nl-city'), country: v('nl-c'), ...(p90() ? { in_pipeline: $('#nl-pipe').checked } : {}) } });
+            st.leads = null; $('#layer').innerHTML = ''; toast((lead.company || lead.full_name) + ' added'); await render(); openLead(lead.id);
         } catch (e) { if (e.status === 409 && e.data.duplicate) { $('#merr').innerHTML = `<div class="dupe">${esc(e.message)} <button class="btn sm" type="button" data-open="${e.data.duplicate.id}">Open that lead</button></div>`; return; } throw e; }
-    });
+    }, true);
 }
 function importCsv() {
-    if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-    modal('Import leads from a CSV', `<div class="field"><label for="ic-f">CSV file</label><input id="ic-f" type="file" accept=".csv,text/csv"><small>Columns are matched by name: Name, Company, Email, Phone, Website, City, Country, Value. Others are ignored.</small></div>
-      <div class="grid2"><div class="field"><label for="ic-s">Category for these leads</label><select id="ic-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div>
-        <div class="field"><label for="ic-o">Owner</label><select id="ic-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
-      ${fieldHtml('ic-t', 'Tag (optional)', 'maxlength="40" placeholder="e.g. Dhaka salons, November"', 'Added to every lead in this file, so you can find the batch later.')}
-      <label class="check"><input type="checkbox" id="ic-u"> The file has its own Source column: use it where a row has one</label><div id="ic-out"></div>`, 'Import', async () => {
+    modal('Import leads from a CSV', `<div class="field"><label for="ic-f">CSV file</label><input id="ic-f" type="file" accept=".csv,text/csv"><small>Columns are matched by name: Name, Company, Industry, Email, Phone, Website, City, Country, Value. Others are ignored.</small></div>
+      <div class="grid2"><div class="field"><label for="ic-s">Category for these leads</label><select id="ic-s">${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select></div>${indField('ic-i')}</div>
+      <div class="grid2"><div class="field"><label for="ic-o">Owner</label><select id="ic-o">${st.meta.team.map(m => `<option value="${m.id}" ${m.id === st.meta.me.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>${fieldHtml('ic-t', 'Tag (optional)', 'maxlength="40" placeholder="e.g. Houston roofers, November"')}</div>
+      <label class="check"><input type="checkbox" id="ic-u"> The file has its own Source column: use it where a row has one</label>${p90() ? '<p class="note" style="margin:0">Rows with their own Industry column keep it; the rest get the industry chosen here.</p>' : ''}<div id="ic-out"></div>`, 'Import', async () => {
         const file = $('#ic-f').files[0]; if (!file) throw new Error('Choose a CSV file first.');
         const csv = await file.text();
-        const r = await api('/api/crm/leads/import', { method: 'POST', body: { csv, source: v('ic-s'), owner_id: v('ic-o'), tag: v('ic-t').trim(), useFileSource: $('#ic-u').checked } });
+        const r = await api('/api/crm/leads/import', { method: 'POST', body: { csv, source: v('ic-s'), industry: v('ic-i') || undefined, owner_id: v('ic-o'), tag: v('ic-t').trim(), useFileSource: $('#ic-u').checked } });
         st.leads = null;
         $('#ic-out').innerHTML = `<div class="note"><b>${r.added} added.</b> ${r.duplicates.length ? r.duplicates.length + ' already in the CRM were skipped. ' : ''}${r.skipped.length ? r.skipped.length + ' rows could not be used: ' + r.skipped.slice(0, 5).map(s => 'row ' + s.row + ' (' + esc(s.reason) + ')').join('; ') : ''}</div>`;
         $('#mok').textContent = 'Done'; $('#mok').onclick = () => { $('#layer').innerHTML = ''; render(); };
+    }, true);
+}
+async function toCampaign(ids) {
+    const { campaigns } = await api('/api/crm/campaigns');
+    const live = campaigns.filter(c => c.status !== 'archived');
+    if (!live.length) { toast('Make a campaign first: Email campaigns → New campaign.'); location.hash = 'campaigns'; $('#layer').innerHTML = ''; return; }
+    modal(`Add ${ids.length === 1 ? 'this lead' : ids.length + ' leads'} to a campaign`, `<div class="field"><label for="tc-c">Campaign</label><select id="tc-c">${live.map(c => `<option value="${c.id}">${esc(c.name)} · ${esc(c.status)}</option>`).join('')}</select><small>Leads without an email, or who unsubscribed, are left out. A lead already on it stays where it is.</small></div>`, 'Add', async () => {
+        const r = await api('/api/crm/campaigns/' + v('tc-c') + '/enroll', { method: 'POST', body: { leadIds: ids } });
+        $('#sub').innerHTML = ''; toast(`${r.added} added${r.already ? ', ' + r.already + ' already on it' : ''}${r.skipped ? ', ' + r.skipped + ' left out' : ''}`);
+        if (st.openId) openLead(st.openId); else { st.sel.clear(); render(); }
     });
 }
+
 function convertLead(lead) {
     modal(`Make ${lead.company || lead.full_name} a client?`, `<p style="margin:0;color:var(--muted)">This creates the client with ${esc(lead.full_name)} as its contact, keeps the whole lead history and marks the lead Won.</p>
       <div class="grid2"><div class="field"><label for="cv-svc">First service</label><select id="cv-svc">${['Website', 'SEO', 'Meta ads', 'Google ads', 'Social media', 'Influencer marketing', 'Lead generation', 'Reporting'].map(x => `<option>${x}</option>`).join('')}</select></div>
@@ -579,50 +703,67 @@ function creatorForm(c, onOk, title, ok) {
 }
 
 // ------------------------------------------------------------------ events
+const closeLayer = () => { $('#layer').innerHTML = ''; st.openId = null; st.lead = null; };
+function moreMenu() {
+    $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true" aria-label="More"><div class="sh-h"><b>More</b><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
+      ${[['campaigns', 'Email campaigns', 'seq'], ['phone', 'Phone', 'phone'], ['influencers', 'Influencers', 'pin'], ...(isAdmin() ? [['admin', 'Admin', 'shield']] : [])].map(([k, l, i]) => `<a href="#${k}" data-close>${ic(i)}${l}</a>`).join('')}
+      ${toolsState().show ? `<a href="/tools" data-tools>${ic('tools')}Tools<small>${toolsState().open ? 'Unlocked' : 'Locked'}</small></a>` : ''}
+      <button type="button" id="theme">${ic('moon')}Light / dark</button><button type="button" id="signout">${ic('out')}Sign out</button></div>`;
+}
+function phoneTo(num, name) { if (window.ELPhone) { closeLayer(); return ELPhone.call(num, name); } location.href = telHref(num); }
 document.addEventListener('click', async e => {
     const t = e.target;
-    const ks = t.closest('[data-keyset]');
-    if (ks) { const k = prompt(`Paste the Apify token for ${ks.dataset.label}. The old key moves to the shared pool.`); if (!k) return;
-        try { await api('/api/update-apify-key', { method: 'POST', body: { newApiKey: k.trim(), engine: ks.dataset.keyset } }); toast('Key saved'); } catch (err) { toast(err.message, true); } return render(); }
-    const kc = t.closest('[data-keycredit]');
-    if (kc) { const n = prompt('Monthly Apify credit for this key, in US dollars', kc.dataset.cur || '5'); if (!n) return;
-        try { await api('/api/admin/engine-credit', { method: 'PATCH', body: { engine: kc.dataset.keycredit, monthlyCreditUsd: n } }); toast('Saved'); } catch (err) { toast(err.message, true); } return render(); }
-    const kd = t.closest('[data-keydel],[data-gemdel]');
-    if (kd) { if (!confirm('Remove this key? Runs stop using it at once.')) return;
-        try { await api(kd.dataset.keydel ? '/api/apify-keys/' + kd.dataset.keydel : '/api/gemini-keys/' + kd.dataset.gemdel, { method: 'DELETE' }); toast('Removed'); } catch (err) { toast(err.message, true); } return render(); }
-    const off = t.closest('[data-tooloff]');
-    if (off) { off.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [off.dataset.tooloff]: false } } }); toast(r.restarting ? 'Turned off. The server restarts and is back within a minute.' : 'Turned off'); } catch (err) { toast(err.message, true); } return render(); }
     if (t.closest('[data-tools],#toolsTop')) { if (!toolsState().open) { e.preventDefault(); return toolsLocked(); } if (t.closest('#toolsTop')) location.href = '/tools'; return; }
-    if (t.closest('[data-close]')) { $('#layer').innerHTML = ''; st.openId = null; return; }
+    if (t.closest('[data-close]')) { closeLayer(); return; }
     if (t.closest('[data-unsub]')) { $('#sub').innerHTML = ''; if (!st.openId) $('#layer').innerHTML = ''; return; }
-    if (t.closest('#theme')) { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('crm-theme', r.dataset.theme); } catch {} if (route === 'influencers') mapInit(); return; }
+    if (t.closest('#theme')) { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('crm-theme', r.dataset.theme); } catch {} if (route === 'influencers') mapInit(); if (route === 'leads' && st.leadMode === 'map') leadMapInit(); return; }
     if (t.closest('#signout')) { await sb.auth.signOut(); location.replace('/'); return; }
     if (t.closest('#newLead')) return newLead();
     if (t.closest('#openPal')) return palette();
+    if (t.closest('[data-more]')) { const p = t.closest('.x').querySelector('.hb'); p.classList.remove('clamp'); t.remove(); return; }
+    const tel = t.closest('[data-tel]'); if (tel && window.ELPhone) { e.preventDefault(); return phoneTo(tel.dataset.tel, tel.dataset.name); }
+    const cn = t.closest('[data-callnow]'); if (cn) return phoneTo(cn.dataset.callnow, cn.dataset.name);
     const pe = t.closest('[data-period]'); if (pe) { st.period = +pe.dataset.period; return render(); }
-    const dp = t.closest('[data-dept]'); if (dp) { st.filter = { website: 'website', seo: 'seo', marketing: 'marketing', ads_google: 'ads', ads_meta: 'ads', social: 'marketing', email: 'marketing', influencer: 'influencer', other: 'other' }[dp.dataset.dept] || 'all'; $('#layer').innerHTML = ''; location.hash = 'leads'; return; }
-    const vw = t.closest('[data-view]'); if (vw) { st.filter = vw.dataset.view; st.sel.clear(); return render(); }
+    const tr = t.closest('[data-trange]'); if (tr) { st.trange = tr.dataset.trange; return render(); }
+    const dp = t.closest('[data-dept]'); if (dp) { const d = dp.dataset.dept; st.cat = ''; st.view = 'all'; st.ind = '';
+        if (['website', 'seo', 'influencer'].includes(d)) st.cat = d; else if (st.meta.sources.some(s => s.key === d)) st.cat = d;
+        closeLayer(); location.hash = 'leads'; return render(); }
+    const vw = t.closest('[data-view]'); if (vw) { st.view = vw.dataset.view; st.sel.clear(); return render(); }
+    const lm = t.closest('[data-lmode]'); if (lm) { st.leadMode = lm.dataset.lmode; return render(); }
+    const fi = t.closest('[data-ind]'); if (fi) { st.ind = st.ind.toLowerCase() === fi.dataset.ind.toLowerCase() ? '' : fi.dataset.ind; st.sel.clear(); return render(); }
+    const pc = t.closest('[data-pcat]'); if (pc) { st.pCat = pc.dataset.pcat; return render(); }
+    const pi = t.closest('[data-pind]'); if (pi) { st.pInd = pi.dataset.pind; return render(); }
+    const hfb = t.closest('[data-hist]'); if (hfb) { st.hist = hfb.dataset.hist; if (st.lead) drawLead(st.lead); return; }
     if (t.matches('[data-sel]')) { const id = t.dataset.sel; t.checked ? st.sel.add(id) : st.sel.delete(id); return render(); }
-    if (t.id === 'selall') { const f = (VIEWS.find(x => x[0] === st.filter) || VIEWS[0])[2]; st.leads.filter(f).forEach(l => t.checked ? st.sel.add(l.id) : st.sel.delete(l.id)); return render(); }
+    if (t.id === 'selall') { const rows = st.leads.filter(l => leadFilter(l)).slice(0, 500); rows.forEach(l => t.checked ? st.sel.add(l.id) : st.sel.delete(l.id)); return render(); }
     if (t.closest('.c-chk')) return;
+    if (t.closest('.contact a, .dicons a') && !t.closest('[data-tel]')) return;   // mail and web links open as they are
+    if (t.closest('.contact [data-copy]')) { e.stopPropagation(); const c = t.closest('[data-copy]'); try { await navigator.clipboard.writeText(c.dataset.copy); toast('Copied ' + c.dataset.copy); } catch { toast(c.dataset.copy); } return; }
     const a = t.closest('[data-act]');
-    if (a) {
+    if (a && !a.disabled) {
         const k = a.dataset.act;
+        if (k === 'more') return moreMenu();
         if (k === 'import') return importCsv();
-        if ((k === 'phcall' || k === 'phtext') && st.openId && window.ELPhone) { const ld = (st.leads || []).find(x => x.id === st.openId) || {}; const ph = ld.phone || ($('.drawer [data-field="phone"]') || {}).value;
-            if (k === 'phcall') return ELPhone.call(ph, ld.full_name); $('#layer').innerHTML = ''; st.openId = null; return ELPhone.text(ph); }
-        if (k === 'genpass') { $('#ap-p').value = makePass(); return; }
+        if ((k === 'phcall' || k === 'phtext') && st.openId) { const ld = (st.lead && st.lead.lead) || {}; const ph = ld.phone || ($('.drawer [data-field="phone"]') || {}).value;
+            if (!window.ELPhone) { location.href = (k === 'phcall' ? 'tel:' : 'sms:') + String(ph).replace(/[^\d+]/g, ''); return; }
+            if (k === 'phcall') return phoneTo(ph, ld.full_name); closeLayer(); return ELPhone.text(ph); }
         if (k === 'clearsel') { st.sel.clear(); return render(); }
+        if (k === 'clearf') { st.cat = st.ind = st.owner = st.q = ''; return render(); }
         if (k === 'fit') { st.fitAll = true; fit(null); st.fitAll = false; return; }
-        if (k === 'newcr') { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>'; return creatorForm({}, async body => { const { influencer } = await api('/api/crm/influencers', { method: 'POST', body }); st.crOn = influencer.id; await net(true); $('#layer').innerHTML = ''; toast('@' + influencer.handle + ' added'); render(); }, 'Add a creator', 'Add creator'); }
+        if (k === 'lfit') return lfit(st.leads.filter(l => leadFilter(l) && l.lat != null));
+        if (k === 'geocode') { try { const r = await api('/api/admin/crm/geocode', { method: 'POST', body: {} }); toast(r.queued ? `Placing ${r.queued} leads: about ${Math.ceil(r.seconds / 60)} min. Refresh after.` : 'Every lead with a city is placed already.'); } catch (err) { toast(err.message, true); } return; }
+        if (k === 'bulkpipe') { const ids = [...st.sel]; try { await setPipeline(ids, true); toast(`${ids.length} lead${ids.length === 1 ? '' : 's'} added to the pipeline`); st.sel.clear(); render(); } catch (err) { toast(err.message, true); } return; }
+        if (k === 'bulkcamp') return toCampaign([...st.sel]);
+        if (k === 'topipe' && st.openId) { try { await setPipeline([st.openId], true); toast('In the pipeline. Email, call and text it from here on.'); openLead(st.openId); shell(); if (route === 'leads' || route === 'pipeline') render(); } catch (err) { toast(err.message, true); } return; }
+        if (k === 'frompipe' && st.openId) { try { await setPipeline([st.openId], false); toast('Taken out of the pipeline'); openLead(st.openId); if (route === 'pipeline') render(); } catch (err) { toast(err.message, true); } return; }
+        if (k === 'tocamp' && st.openId) return toCampaign([st.openId]);
+        if (k === 'newcr') return creatorForm({}, async body => { const { influencer } = await api('/api/crm/influencers', { method: 'POST', body }); st.crOn = influencer.id; await net(true); closeLayer(); toast('@' + influencer.handle + ' added'); render(); }, 'Add a creator', 'Add creator');
         const cr = st.net && st.net.influencers.find(x => x.id === st.crOn);
-        if (k === 'credit' && cr) { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>'; return creatorForm(cr, async body => { await api('/api/crm/influencers/' + cr.id, { method: 'PATCH', body }); await net(true); $('#layer').innerHTML = ''; toast('Saved'); render(); }, 'Edit ' + (cr.name || '@' + cr.handle), 'Save'); }
+        if (k === 'credit' && cr) return creatorForm(cr, async body => { await api('/api/crm/influencers/' + cr.id, { method: 'PATCH', body }); await net(true); closeLayer(); toast('Saved'); render(); }, 'Edit ' + (cr.name || '@' + cr.handle), 'Save');
         if (k === 'crpick' && cr) { st.picking = { kind: 'creator', id: cr.id, label: cr.name || '@' + cr.handle }; return render(); }
-        if (k === 'crpost' && cr) { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-            return modal('Log a post by ' + (cr.name || '@' + cr.handle), `<div class="field"><label for="po-c">For client</label><select id="po-c">${st.net.clients.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
+        if (k === 'crpost' && cr) return modal('Log a post by ' + (cr.name || '@' + cr.handle), `<div class="field"><label for="po-c">For client</label><select id="po-c">${st.net.clients.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
               <div class="grid2">${fieldHtml('po-d', 'Posted on', `type="date" value="${new Date().toISOString().slice(0, 10)}"`)}${fieldHtml('po-v', 'Views', 'type="number" min="0"')}</div>${fieldHtml('po-u', 'Link to the post', 'type="url" placeholder="https://instagram.com/p/…"')}`, 'Log post', async () => {
-                await api('/api/crm/influencers/' + cr.id + '/posts', { method: 'POST', body: { client_id: v('po-c'), posted_at: v('po-d'), views: v('po-v'), url: v('po-u') } }); await net(true); $('#layer').innerHTML = ''; toast('Post logged'); render(); }); }
-        const lead = st.leads && st.leads.find(x => x.id === st.openId);
+                await api('/api/crm/influencers/' + cr.id + '/posts', { method: 'POST', body: { client_id: v('po-c'), posted_at: v('po-d'), views: v('po-v'), url: v('po-u') } }); await net(true); closeLayer(); toast('Post logged'); render(); });
         if (k === 'convert' && st.openId) { const { lead: fresh } = await api('/api/crm/leads/' + st.openId); return convertLead(fresh); }
         if (k === 'tonet' && st.openId) return modal('Add to the influencer network', `${fieldHtml('tn-h', 'Their Instagram handle or link', 'placeholder="@handle"')}<div class="grid2">${fieldHtml('tn-f', 'Followers', 'type="number"')}${fieldHtml('tn-ni', 'Niche', 'placeholder="Food, fashion…"')}</div>`, 'Add to network', async () => {
             const { influencer } = await api('/api/crm/leads/' + st.openId + '/influencer', { method: 'POST', body: { handle: v('tn-h'), followers: v('tn-f'), niche: v('tn-ni') } }); st.net = null; toast('@' + influencer.handle + ' is in the network'); openLead(st.openId); });
@@ -631,107 +772,78 @@ document.addEventListener('click', async e => {
             try {
                 if (ctab === 'task') { if (!body) throw new Error('Write what needs doing.'); await api('/api/crm/tasks', { method: 'POST', body: { lead_id: st.openId, title: body, due_at: v('c-due') ? new Date(v('c-due')).toISOString() : null } }); }
                 else await api('/api/crm/leads/' + st.openId + '/activities', { method: 'POST', body: { type: ctab, body, minutes: v('c-min'), outcome: v('c-out') } });
-                st.leads = null; toast('Saved'); openLead(st.openId); leads(true).then(shell);
+                toast('Saved'); openLead(st.openId); leads(true).then(shell);
             } catch (err) { toast(err.message, true); }
             return;
         }
-        return void lead;
+        if (CRM.onAct[k]) return CRM.onAct[k](a, e);
+        return;
     }
-    const ct = t.closest('[data-ctab]'); if (ct) { ctab = ct.dataset.ctab; document.querySelectorAll('[data-ctab]').forEach(b => b.classList.toggle('on', b === ct));
-        const ex = $('#cextra'); ex.hidden = !['call', 'task'].includes(ctab);
-        ex.innerHTML = ctab === 'call' ? `<input id="c-min" type="number" min="0" placeholder="Minutes" class="btn sm" style="width:110px" aria-label="Minutes"><select id="c-out" class="btn sm" aria-label="Outcome"><option value="">Outcome</option><option>Spoke</option><option>No answer</option><option>Left voicemail</option><option>Wrong number</option><option>Call back later</option></select>`
-            : ctab === 'task' ? `<input id="c-due" type="datetime-local" class="btn sm" aria-label="Due">` : '';
-        $('#cbody').placeholder = { note: 'Write a note', call: 'What was said', whatsapp: 'What was said on WhatsApp', email_out: 'Paste or sum up the email you sent', email_in: 'Paste or sum up their reply (moves them to Replied)', meeting: 'Notes from the meeting', task: 'What needs doing' }[ctab];
-        return; }
+    const ct = t.closest('[data-ctab]'); if (ct) return setCtab(ct.dataset.ctab);
     const sg = t.closest('.stepper [data-stage]'); if (sg && st.openId) {
         const to = sg.dataset.stage;
         if (to === 'won') { const { lead } = await api('/api/crm/leads/' + st.openId); return convertLead(lead); }
-        try { await api('/api/crm/leads/' + st.openId, { method: 'PATCH', body: { stage: to } }); st.leads = null; toast('Moved to ' + to); openLead(st.openId); leads(true).then(() => route !== 'overview' && render()); } catch (err) { toast(err.message, true); }
+        try { await api('/api/crm/leads/' + st.openId, { method: 'PATCH', body: { stage: to } }); toast('Moved to ' + (st.meta.stages.find(s => s.key === to) || {}).label); openLead(st.openId); leads(true).then(() => route !== 'overview' && !MODULES[route] && render()); } catch (err) { toast(err.message, true); }
         return;
     }
-    const td = t.closest('[data-taskdone]'); if (td) { await api('/api/crm/tasks/' + td.dataset.taskdone, { method: 'PATCH', body: { done: true } }); st.leads = null; toast('Done'); return openLead(st.openId); }
+    const td = t.closest('[data-taskdone]'); if (td) { await api('/api/crm/tasks/' + td.dataset.taskdone, { method: 'PATCH', body: { done: true } }); toast('Done'); return openLead(st.openId); }
+    const td2 = t.closest('[data-taskdone2]'); if (td2) { td2.disabled = true; try { await api('/api/crm/tasks/' + td2.dataset.taskdone2, { method: 'PATCH', body: { done: true } }); toast('Done'); render(); } catch (err) { toast(err.message, true); td2.disabled = false; } return; }
     const cp = t.closest('[data-copy]'); if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); toast('Copied'); } catch { toast(cp.dataset.copy); } return; }
-    const ua = t.closest('[data-uact]'); if (ua) {
-        const id = ua.dataset.uid, k = ua.dataset.uact, name = ua.dataset.name;
-        if (k === 'on' || k === 'off') { try { await api('/api/admin/users/' + id, { method: 'PATCH', body: { isActive: k === 'on' } }); toast(k === 'on' ? 'Turned on' : 'Turned off. They are signed out within a minute.'); render(); } catch (err) { toast(err.message, true); } return; }
-        if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>';
-        if (k === 'pass') { const pw = makePass(); return modal('New password for ' + name, `${fieldHtml('up-p', 'New password', `type="text" value="${pw}" minlength="8"`, 'Copy it now and give it to them. It is not shown again.')}`, 'Save password', async () => {
-            if (v('up-p').length < 8) throw new Error('Use 8 characters or more.'); await api('/api/admin/users/' + id, { method: 'PATCH', body: { password: v('up-p') } }); $('#layer').innerHTML = ''; toast('Password changed'); }); }
-        if (k === 'remove') return modal('Remove ' + name + '?', `<p style="margin:0;color:var(--muted)">Their login is deleted. Their leads, clients and work move to you, so nothing is lost.</p>`, 'Remove', async () => {
-            await api('/api/admin/users/' + id, { method: 'DELETE' }); $('#layer').innerHTML = ''; toast(name + ' removed'); render(); });
-    }
     const sc = t.closest('[data-crstage]'); if (sc) { st.crStage = sc.dataset.crstage; return render(); }
-    const cg = t.closest('[data-crgo]'); if (cg) { st.crOn = cg.dataset.crgo; $('#layer').innerHTML = ''; st.openId = null; location.hash = 'influencers'; return render(); }
+    const cg = t.closest('[data-crgo]'); if (cg) { st.crOn = cg.dataset.crgo; closeLayer(); location.hash = 'influencers'; return render(); }
     const crr = t.closest('[data-cr]'); if (crr) { st.crOn = crr.dataset.cr; return render(); }
-    const pc = t.closest('[data-pinclient]'); if (pc) { st.picking = { kind: 'client', id: pc.dataset.pinclient, label: pc.dataset.name }; location.hash = 'influencers'; return; }
+    const pcl = t.closest('[data-pinclient]'); if (pcl) { e.preventDefault(); st.picking = { kind: 'client', id: pcl.dataset.pinclient, label: pcl.dataset.name }; location.hash = 'influencers'; return; }
     const o = t.closest('[data-open]'); if (o) { $('#sub') && ($('#sub').innerHTML = ''); return openLead(o.dataset.open); }
-});
-document.addEventListener('submit', async e => {
-    if (e.target.id === 'poolAdd' || e.target.id === 'gemAdd') {   // phase 89: keys
-        e.preventDefault(); const pool = e.target.id === 'poolAdd'; const b = e.target.querySelector('[type=submit]'); b.disabled = true;
-        try {
-            if (pool) await api('/api/apify-keys', { method: 'POST', body: { token: v('pk-t').trim(), label: v('pk-l').trim() || null, engine: 'any', global: true } });
-            else await api('/api/gemini-keys', { method: 'POST', body: { key: v('gk-t').trim(), label: v('gk-l').trim() || null, global: true } });
-            toast('Key added'); return render();
-        } catch (err) { toast(err.message, true); b.disabled = false; return; }
-    }
-    const acc = e.target.closest('[data-access]');
-    if (acc) {   // phase 89: a teammate's tools and clients
-        e.preventDefault(); const b = acc.querySelector('[type=submit]'); b.disabled = true;
-        const pick = n => [...acc.querySelectorAll(`input[name=${n}]:checked`)].map(x => x.value);
-        try { await api('/api/admin/tools/access/' + acc.dataset.access, { method: 'PUT', body: { tools: pick('tool'), clients: pick('client') } }); toast('Access saved'); }
-        catch (err) { toast(err.message, true); }
-        b.disabled = false; return;
-    }
-    if (e.target.id !== 'addp') return; e.preventDefault();
-    const b = e.target.querySelector('[type=submit]'); b.disabled = true;
-    try {
-        const email = v('ap-e').trim(), password = v('ap-p');
-        if (!email || password.length < 8) throw new Error('Write their email and a password of 8 characters or more.');
-        await api('/api/admin/users', { method: 'POST', body: { email, password, fullName: v('ap-n').trim(), role: 'user' } });
-        toast('Teammate added'); await render();
-        $('#ap-out').innerHTML = `<div class="note"><b>Send them this:</b> sign in at workspace.edgelead.online with ${esc(email)} and the password ${esc(password)}. They can change it with “Forgot your password?”.</div>`;
-        st.meta = await api('/api/crm/meta');
-    } catch (err) { toast(err.message, true); b.disabled = false; }
 });
 document.addEventListener('change', async e => {
     const t = e.target;
-    if (t.matches('[data-field]') && st.openId) return saveField(t);
+    if (t.matches('[data-field]') && st.openId && t.closest('.drawer')) return saveField(t);
     if (t.matches('[data-bulk]') && t.value) { try { await api('/api/crm/leads/bulk', { method: 'POST', body: { ids: [...st.sel], set: { [t.dataset.bulk]: t.value } } }); toast(st.sel.size + ' leads updated'); st.sel.clear(); await leads(true); render(); } catch (err) { toast(err.message, true); } return; }
-    if (t.matches('[data-tool]')) { t.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [t.dataset.tool]: t.checked } } }); st.meta.tools = Object.fromEntries(r.tools.map(x => [x.key, x.on])); st.meta = await api('/api/crm/meta'); toast(r.restarting ? 'Saved. The server restarts and is back within a minute.' : 'Saved'); } catch (err) { t.checked = !t.checked; toast(err.message, true); } t.disabled = false; return render(); }
     if (t.id === 'crcountry') { st.crCountry = t.value; return render(); }
+    if (t.id === 'fcat') { st.cat = t.value; st.sel.clear(); return render(); }
+    if (t.id === 'find') { st.ind = t.value; st.sel.clear(); return render(); }
+    if (t.id === 'fown') { st.owner = t.value; st.sel.clear(); return render(); }
+    if (t.id === 'pown') { st.pOwner = t.value; return render(); }
 });
 document.addEventListener('input', e => {
-    const t = e.target;
-    if (t.id === 'lq' || t.id === 'crq') { const pos = t.selectionStart; if (t.id === 'lq') st.q = t.value; else st.crQ = t.value; clearTimeout(t._d); t._d = setTimeout(async () => { await render(); const n = $('#' + t.id); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }, 180); }
+    const t = e.target, key = { lq: 'q', crq: 'crQ', pq: 'pQ', cq: 'cQ' }[t.id];
+    if (key) { const pos = t.selectionStart; st[key] = t.value; clearTimeout(t._d); t._d = setTimeout(async () => { await render(); const n = $('#' + t.id); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }, 200); }
 });
 document.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); palette(); }
-    else if (e.key === 'Escape') { if ($('#sub') && $('#sub').innerHTML) $('#sub').innerHTML = ''; else { $('#layer').innerHTML = ''; st.openId = null; } if (st.picking) { st.picking = null; render(); } }
-    else if (e.key.toLowerCase() === 'n' && !e.target.matches('input,textarea,select') && !$('#layer').innerHTML && !e.metaKey && !e.ctrlKey) newLead();
+    else if (e.key === 'Escape') { if ($('#sub') && $('#sub').innerHTML) $('#sub').innerHTML = ''; else closeLayer(); if (st.picking) { st.picking = null; render(); } }
+    else if (e.key.toLowerCase() === 'n' && !e.target.matches('input,textarea,select,[contenteditable]') && !$('#layer').innerHTML && !e.metaKey && !e.ctrlKey && !MODULES[route]) newLead();
 });
-document.addEventListener('dragstart', e => { const c = e.target.closest('[data-drag]'); if (c) e.dataTransfer.setData('text/plain', c.dataset.drag); });
-document.addEventListener('dragover', e => { const c = e.target.closest('.col'); if (c) { e.preventDefault(); c.classList.add('drop'); } });
-document.addEventListener('dragleave', e => { const c = e.target.closest('.col'); if (c && !c.contains(e.relatedTarget)) c.classList.remove('drop'); });
+document.addEventListener('dragstart', e => { const c = e.target.closest && e.target.closest('[data-drag]'); if (c) e.dataTransfer.setData('text/plain', c.dataset.drag); });
+document.addEventListener('dragover', e => { const c = e.target.closest && e.target.closest('.board .col'); if (c) { e.preventDefault(); c.classList.add('drop'); } });
+document.addEventListener('dragleave', e => { const c = e.target.closest && e.target.closest('.board .col'); if (c && !c.contains(e.relatedTarget)) c.classList.remove('drop'); });
 document.addEventListener('drop', async e => {
-    const c = e.target.closest('.col'); if (!c) return; e.preventDefault(); c.classList.remove('drop');
+    const c = e.target.closest && e.target.closest('.board .col'); if (!c) return; e.preventDefault(); c.classList.remove('drop');
     const id = e.dataTransfer.getData('text/plain'), to = c.dataset.col, l = st.leads.find(x => x.id === id); if (!l || l.stage === to) return;
     if (to === 'won') { st.openId = id; $('#layer').innerHTML = '<div id="sub"></div>'; const { lead } = await api('/api/crm/leads/' + id); return convertLead(lead); }
     try { await api('/api/crm/leads/' + id, { method: 'PATCH', body: { stage: to } }); await leads(true); render(); toast((l.company || l.full_name) + ' moved'); } catch (err) { toast(err.message, true); }
 });
 function palette() {
-    const items = [...(st.leads || []).slice(0, 400).map(l => ({ g: 'Leads', t: l.full_name + (l.company ? ' · ' + l.company : ''), s: srcOf(l.source).label, go: () => { $('#layer').innerHTML = ''; openLead(l.id); } })),
-        ...NAV.map(([k, l]) => ({ g: 'Go to', t: l, s: '', go: () => { $('#layer').innerHTML = ''; location.hash = k; } })),
-        { g: 'Actions', t: 'New lead', s: 'N', go: () => { $('#layer').innerHTML = '<div id="sub"></div>'; newLead(); } }, { g: 'Actions', t: 'Import CSV', s: '', go: () => { $('#layer').innerHTML = '<div id="sub"></div>'; importCsv(); } }];
+    const items = [...(st.leads || []).slice(0, 600).map(l => ({ g: 'Leads', t: (l.company || l.full_name) + (l.company && l.full_name !== '-' ? ' · ' + l.full_name : ''), s: l.industry || srcOf(l.source).label, go: () => { closeLayer(); openLead(l.id); } })),
+        ...NAV.filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l]) => ({ g: 'Go to', t: l, s: '', go: () => { closeLayer(); location.hash = k; } })),
+        { g: 'Actions', t: 'New lead', s: 'N', go: () => { closeLayer(); newLead(); } }, { g: 'Actions', t: 'Import CSV', s: '', go: () => { closeLayer(); importCsv(); } },
+        { g: 'Actions', t: 'New email campaign', s: '', go: () => { closeLayer(); location.hash = 'campaigns/new'; } }];
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal pal" role="dialog" aria-modal="true" aria-label="Search"><input id="palIn" placeholder="Search leads, pages, actions" autocomplete="off" aria-label="Search"><div class="res" id="palRes"></div></div><div id="sub"></div>`;
     let cur = 0, shown = [];
-    const draw = q => { q = q.toLowerCase(); shown = items.filter(i => i.t.toLowerCase().includes(q)).slice(0, 10); cur = Math.max(0, Math.min(cur, shown.length - 1)); let g = '';
+    const draw = q => { q = q.toLowerCase(); shown = items.filter(i => i.t.toLowerCase().includes(q) || String(i.s).toLowerCase().includes(q)).slice(0, 12); cur = Math.max(0, Math.min(cur, shown.length - 1)); let g = '';
         $('#palRes').innerHTML = shown.map((i, n) => { const h = i.g !== g ? `<div class="grp">${i.g}</div>` : ''; g = i.g; return h + `<button type="button" data-i="${n}" class="${n === cur ? 'on' : ''}">${esc(i.t)}<small>${esc(i.s)}</small></button>`; }).join('') || '<div class="empty">Nothing matches.</div>'; };
     const inp = $('#palIn'); inp.focus(); draw('');
     inp.oninput = () => { cur = 0; draw(inp.value); };
     inp.onkeydown = ev => { if (ev.key === 'ArrowDown') { cur++; draw(inp.value); ev.preventDefault(); } if (ev.key === 'ArrowUp') { cur--; draw(inp.value); ev.preventDefault(); } if (ev.key === 'Enter' && shown[cur]) shown[cur].go(); };
     $('#palRes').onclick = ev => { const b = ev.target.closest('[data-i]'); if (b) shown[+b.dataset.i].go(); };
 }
+const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
+
+// ------------------------------------------------------------------ what the lazily loaded pages use
+const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, pct, initials, ago, dueLabel, dayLabel, teamName, srcOf, srcChip, stageChip, indChip, indVar, stateChip, leadState, inPipe,
+    isAdmin, p90, leads, industries, modal, fieldHtml, v, openLead, render, shell, makePass, closeLayer, countBy, toBdt, ICONS, need, phoneTo, cname,
+    token: async () => (await sb.auth.getSession()).data.session.access_token, toolsState,
+    views: {}, mounted: {}, onAct: {}, get route() { return route; }, get arg() { return routeArg; }, backend: BACKEND };
 
 // ------------------------------------------------------------------ boot
 (async function boot() {
@@ -747,7 +859,7 @@ function palette() {
         $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
     }
     if (window.EL_PHONE_ONLY) document.body.classList.add('phone-only');
-    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => { if (!$('#sub')) $('#layer').innerHTML = '<div id="sub"></div>'; newLead(pre); } }).then(() => { if (route === 'phone') render(); shell(); });
+    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre) }).then(() => { if (route === 'phone') render(); shell(); });
     addEventListener('hashchange', render);
     render();
     leads().then(shell).catch(() => {});

@@ -133,6 +133,8 @@ const PLAN = {
     sources: t.text('What this plan is based on', 1500)
 };
 
+S.AD_SCHEMA = { brief: BRIEF, plan: PLAN };   // phase 90: the CRM's client page draws the brief and plan forms from these
+
 class Bad extends Error {}
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function cleanField(spec, v) {

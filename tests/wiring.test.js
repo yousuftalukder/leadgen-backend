@@ -389,7 +389,7 @@ console.log('\nengines: everything the server gates must be grantable');
         const apify = (/const APIFY_ENGINES = \[([^\]]*)\]/.exec(SERVER) || [])[1];
         const need = apify ? [...apify.matchAll(/'(\w+)'/g)].map(x => x[1]) : [];
         check('every Apify engine can be given in Admin → Tools', need.length ? need.filter(e => !given.includes(e)).map(e => `engine '${e}' is in no tool, so nobody can be given it`) : ['APIFY_ENGINES could not be found']);
-        const app = fs.readFileSync(path.join(FRONT_DIR, 'app', 'app.js'), 'utf8');
+        const app = fs.readdirSync(path.join(FRONT_DIR, 'app')).filter(f => f.endsWith('.js')).map(f => fs.readFileSync(path.join(FRONT_DIR, 'app', f), 'utf8')).join('\n');   // phase 90: Admin is app/admin.js
         check('Admin renders the tools and saves access through the server', /\/api\/admin\/tools\/access/.test(app) && /a\.tools\.map/.test(app) ? [] : ['app.js no longer renders Admin → Tools from the server']);
         ok(`${engines.length} engines; Apify engines given through Tools: ${need.join(', ')}`);
     }
@@ -421,7 +421,7 @@ console.log('\nengines: everything the server gates must be grantable');
 // ---------------------------------------------------------------------------
 console.log('\nreachability: every admin endpoint has a control or is written down');
 {
-    const app = fs.readFileSync(path.join(FRONT_DIR, 'app', 'app.js'), 'utf8');
+    const app = fs.readdirSync(path.join(FRONT_DIR, 'app')).filter(f => f.endsWith('.js')).map(f => fs.readFileSync(path.join(FRONT_DIR, 'app', f), 'utf8')).join('\n');
     const adminRoutes = [...new Set([...SERVER.matchAll(/app\.\w+\(\s*'(\/api\/admin\/[\w/:-]+)'/g)].map(m => m[1]))];
     const docs = fs.readdirSync(path.join(ROOT, 'docs')).map(f => fs.readFileSync(path.join(ROOT, 'docs', f), 'utf8')).join('\n');
     const readme = fs.existsSync(path.join(ROOT, 'README.md')) ? fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8') : '';

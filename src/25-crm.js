@@ -84,6 +84,13 @@ function normPhone(v) {
 function sourceInfo(key) { return CRM_SOURCES.find(s => s.key === key) || null; }
 function departmentOf(source) { const s = sourceInfo(source); return s ? s.dept : 'other'; }
 
+/** Phase 90: an industry as people write it, tidied: "  roofing " → "Roofing". Empty is null. */
+function cleanIndustry(v) {
+    const s = str(v, 60);
+    if (!s) return null;
+    const t = s.replace(/\s+/g, ' ');
+    return t === t.toLowerCase() ? t.replace(/(^|[\s/&-])([a-z])/g, (m, a, c) => a + c.toUpperCase()) : t;
+}
 /** Validate a lead body. `partial` for edits: only the fields sent are checked and returned. */
 function cleanLeadBody(b, { partial = false } = {}) {
     b = b || {};
@@ -116,6 +123,9 @@ function cleanLeadBody(b, { partial = false } = {}) {
     if (has('next_step_at')) { if (!b.next_step_at) out.next_step_at = null; else { const d = new Date(b.next_step_at); if (isNaN(d)) throw bad('Next step date is not a date.'); out.next_step_at = d.toISOString(); } }
     if (has('owner_id')) out.owner_id = b.owner_id || null;
     if (has('unsubscribed')) out.unsubscribed = !!b.unsubscribed;
+    // Phase 90: what the business does, and whether it is in the pipeline (both columns arrive with schema-phase90.sql).
+    if (has('industry')) out.industry = cleanIndustry(b.industry);
+    if (has('in_pipeline')) out.in_pipeline = b.in_pipeline === true;
     if (out.stage === 'won') throw bad('Use Convert to client to win a lead, so the client is created with it.');
     return out;
 }
@@ -145,10 +155,11 @@ const CSV_FIELDS = {
     full_name: ['name', 'full name', 'contact', 'contact name', 'person'], company: ['company', 'business', 'business name', 'organisation', 'organization'],
     email: ['email', 'e-mail', 'email address'], phone: ['phone', 'mobile', 'phone number', 'whatsapp'], website: ['website', 'site', 'url'],
     title: ['title', 'role', 'position', 'job title'], city: ['city', 'town'], country: ['country', 'country code'],
-    source: ['source', 'lead source'], value: ['value', 'deal value', 'budget'], next_step: ['next step', 'note', 'notes']
+    source: ['source', 'lead source'], value: ['value', 'deal value', 'budget'], next_step: ['next step', 'note', 'notes'],
+    industry: ['industry', 'niche', 'trade', 'business type', 'type of business']
 };
 /** Map CSV rows (first row = headers) to lead bodies; unknown columns are ignored, the source falls back. */
-function csvToLeads(rows, fallbackSource = 'other', { useFileSource = true } = {}) {
+function csvToLeads(rows, fallbackSource = 'other', { useFileSource = true, industry = null } = {}) {
     if (!rows.length) return { leads: [], skipped: [] };
     const head = rows[0].map(h => String(h).trim().toLowerCase());
     const col = {};
@@ -163,6 +174,7 @@ function csvToLeads(rows, fallbackSource = 'other', { useFileSource = true } = {
         if (!body.full_name) body.full_name = body.company;
         // The category chosen for the import wins, unless the file's own Source column was asked for (and the row has one).
         body.source = (useFileSource && srcByLabel[String(body.source || '').toLowerCase()]) || fallbackSource;
+        if (!body.industry && industry) body.industry = industry;   // phase 90: the file's industry fills rows without their own
         try { leads.push(cleanLeadBody(body)); } catch (e) { skipped.push({ row: n + 2, reason: e.message }); }
     });
     return { leads, skipped };
@@ -266,7 +278,7 @@ function cleanInfluencerBody(b, { partial = false } = {}) {
 }
 
 Object.assign(S, { jobKind: (...a) => jobKind(...a), jobsWon: (...a) => jobsWon(...a) });
-Object.assign(S, { CRM_SOURCES, CRM_STAGES, CRM_DEPTS, CRM_TOOLS: TOOLS, normEmail, normPhone, cleanLeadBody, findDuplicate, parseCsv, csvToLeads,
+Object.assign(S, { CRM_SOURCES, CRM_STAGES, CRM_DEPTS, CRM_TOOLS: TOOLS, normEmail, normPhone, cleanLeadBody, cleanIndustry, findDuplicate, parseCsv, csvToLeads,
     crmOverview, toolForPath, parseToolSwitch, cleanInfluencerBody, departmentOf, toBdt });
 
 // ---------------------------------------------------------------------------------------------------
@@ -469,21 +481,41 @@ async function logActivity(lead_id, type, body, meta, actor_id) {
 }
 S.logActivityExternal = (...a) => logActivity(...a).catch(e => logger.warn('crm_activity_failed', { message: e.message }));   // phase 88: the phone files calls and texts on the lead
 const LEAD_COLS = 'id, full_name, title, company, website, email, phone, whatsapp, city, country, timezone, source, source_detail, stage, lost_reason, value, currency, score, tags, next_step, next_step_at, last_activity_at, unsubscribed, owner_id, client_id, created_at, updated_at, stage_at';
+// Phase 90: industry, the pipeline and the map. Until schema-phase90.sql has run the columns are not there, so every
+// lead route asks once a minute whether they are, reads the old columns if not, and drops the new fields from writes.
+const P90_COLS = ', industry, in_pipeline, pipeline_at, lat, lng';
+const P90_FIELDS = ['industry', 'in_pipeline', 'pipeline_at', 'lat', 'lng'];
+let _p90 = { ok: false, at: 0 };
+async function p90Ready() {
+    if (_p90.ok || Date.now() - _p90.at < 60000) return _p90.ok;
+    const { error } = await supabase.from('crm_leads').select('industry, in_pipeline, lat').limit(1);
+    _p90 = { ok: !error, at: Date.now() };
+    if (error) logger.warn('phase90_sql_missing', { message: error.message });
+    return _p90.ok;
+}
+const leadCols = async () => LEAD_COLS + (await p90Ready() ? P90_COLS : '');
+async function p90Body(body) {
+    if (await p90Ready()) return body;
+    const out = { ...body }; for (const k of P90_FIELDS) delete out[k]; return out;
+}
+Object.assign(S, { p90Ready, leadCols });
 
 app.get('/api/crm/meta', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     const { data: users } = await supabase.from('app_users').select('id, full_name, email, role').in('role', ['admin', 'user']).eq('is_active', true);
     res.json({ sources: CRM_SOURCES, stages: CRM_STAGES, departments: CRM_DEPTS, currencies: CURRENCIES, me: { id: ctx.user.id, role: ctx.profile.role, tools: toolAccess(ctx.profile.role, ctx.profile.role === 'admin' ? TOOL_ENGINES : await enginesOf(ctx.user.id), toolState) },
-        team: (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0], role: u.role })), tools: toolState });
+        team: (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0], role: u.role, email: u.email })), tools: toolState,
+        ...(S.crmMetaExtra ? await S.crmMetaExtra(ctx).catch(e => { logger.warn('crm_meta_extra_failed', { message: e.message }); return {}; }) : {}) });
 });
 
 app.get('/api/crm/leads', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        let q = supabase.from('crm_leads').select(LEAD_COLS).order('updated_at', { ascending: false }).limit(Math.min(2000, parseInt(req.query.limit, 10) || 1000));
+        let q = supabase.from('crm_leads').select(await leadCols()).order('updated_at', { ascending: false }).limit(Math.min(2000, parseInt(req.query.limit, 10) || 1000));
         if (req.query.stage) q = q.eq('stage', String(req.query.stage));
         if (req.query.owner) q = q.eq('owner_id', String(req.query.owner));
         if (req.query.source) q = q.in('source', String(req.query.source).split(','));
+        if (req.query.pipeline === '1' && await p90Ready()) q = q.eq('in_pipeline', true);
         if (req.query.q) { const s = String(req.query.q).replace(/[%,()]/g, ' ').trim().slice(0, 80); if (s) q = q.or(`full_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`); }
         const { data, error } = await q; if (error) throw error;
         res.json({ leads: data || [] });
@@ -493,7 +525,10 @@ app.get('/api/crm/leads', async (req, res) => {
 app.post('/api/crm/leads', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        const body = cleanLeadBody(req.body);
+        const ready = await p90Ready();
+        const body = await p90Body(cleanLeadBody(req.body));
+        if (ready && !body.industry) throw bad('Pick the industry: what the business does, like Roofing or Plumbing.');
+        if (body.in_pipeline) body.pipeline_at = new Date().toISOString();
         const or = [body.email_norm && `email_norm.eq.${body.email_norm}`, body.phone_norm && `phone_norm.eq.${body.phone_norm}`].filter(Boolean).join(',');
         if (or) {
             const { data: hits } = await supabase.from('crm_leads').select('id, full_name, company, email_norm, phone_norm').or(or).limit(5);
@@ -501,8 +536,9 @@ app.post('/api/crm/leads', async (req, res) => {
             if (dup) return res.status(409).json({ error: `${dup.full_name}${dup.company ? ' at ' + dup.company : ''} already has this ${dup.email_norm === body.email_norm ? 'email' : 'phone number'}.`, duplicate: dup });
         }
         const row = { ...body, owner_id: body.owner_id || ctx.user.id, created_by: ctx.user.id, stage: body.stage || 'new' };
-        const { data, error } = await supabase.from('crm_leads').insert(row).select(LEAD_COLS).single(); if (error) throw error;
+        const { data, error } = await supabase.from('crm_leads').insert(row).select(await leadCols()).single(); if (error) throw error;
         await logActivity(data.id, 'system', 'Lead created', { source: data.source }, ctx.user.id);
+        if (S.geocodeLater && (data.city || data.country)) S.geocodeLater(data);
         res.status(201).json({ lead: data });
     } catch (e) { fail(res, e, 'crm_lead_create'); }
 });
@@ -510,29 +546,40 @@ app.post('/api/crm/leads', async (req, res) => {
 app.get('/api/crm/leads/:id', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        const { data: lead, error } = await supabase.from('crm_leads').select(LEAD_COLS).eq('id', req.params.id).maybeSingle(); if (error) throw error;
+        const { data: lead, error } = await supabase.from('crm_leads').select(await leadCols()).eq('id', req.params.id).maybeSingle(); if (error) throw error;
         if (!lead) return res.status(404).json({ error: 'That lead was not found. It may have been deleted.' });
         const [acts, tasks, cr, client] = await Promise.all([
-            supabase.from('crm_activities').select('id, type, body, meta, actor_id, at').eq('lead_id', lead.id).order('at', { ascending: false }).limit(200),
+            supabase.from('crm_activities').select('id, type, body, meta, actor_id, at').eq('lead_id', lead.id).order('at', { ascending: false }).limit(300),
             supabase.from('crm_tasks').select('id, title, due_at, done_at, owner_id').eq('lead_id', lead.id).order('due_at', { ascending: true }),
             supabase.from('crm_influencers').select('id, handle, name, stage').eq('lead_id', lead.id),
             lead.client_id ? supabase.from('clients').select('id, name, brand').eq('id', lead.client_id).maybeSingle() : Promise.resolve({ data: null })
         ]);
-        res.json({ lead, activities: acts.data || [], tasks: tasks.data || [], influencers: cr.data || [], client: client.data || null });
+        // Phase 90: the whole history in one place: the timeline, every call and text on the lead's number (also those
+        // from before it was a lead), and every campaign email. Calls already on the timeline are not shown twice.
+        const history = S.leadHistory ? await S.leadHistory(lead, acts.data || []).catch(e => { logger.warn('lead_history_failed', { message: e.message }); return null; }) : null;
+        res.json({ lead, activities: acts.data || [], history, tasks: tasks.data || [], influencers: cr.data || [], client: client.data || null });
     } catch (e) { fail(res, e, 'crm_lead_get'); }
 });
 
 app.patch('/api/crm/leads/:id', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        const body = cleanLeadBody(req.body, { partial: true });
-        const { data: before } = await supabase.from('crm_leads').select('id, stage, owner_id').eq('id', req.params.id).maybeSingle();
+        const ready = await p90Ready();
+        const body = await p90Body(cleanLeadBody(req.body, { partial: true }));
+        const { data: before } = await supabase.from('crm_leads').select('id, stage, owner_id, city, country' + (ready ? ', in_pipeline' : '')).eq('id', req.params.id).maybeSingle();
         if (!before) return res.status(404).json({ error: 'That lead was not found.' });
+        if (ready && Object.prototype.hasOwnProperty.call(body, 'industry') && !body.industry) throw bad('A lead keeps an industry. Pick one, or Other.');
         const now = new Date().toISOString();
         const patch = { ...body, updated_at: now };
         if (body.stage && body.stage !== before.stage) patch.stage_at = now;
-        const { data, error } = await supabase.from('crm_leads').update(patch).eq('id', before.id).select(LEAD_COLS).single(); if (error) throw error;
+        // Moving a lead on in the pipeline puts it in the pipeline.
+        if (ready && body.stage && body.stage !== 'new' && !before.in_pipeline) patch.in_pipeline = true;
+        if (ready && patch.in_pipeline && !before.in_pipeline) patch.pipeline_at = now;
+        const { data, error } = await supabase.from('crm_leads').update(patch).eq('id', before.id).select(await leadCols()).single(); if (error) throw error;
         if (body.stage && body.stage !== before.stage) await logActivity(before.id, 'stage', null, { from: before.stage, to: body.stage }, ctx.user.id);
+        if (ready && patch.in_pipeline !== undefined && patch.in_pipeline !== !!before.in_pipeline) await logActivity(before.id, 'system', patch.in_pipeline ? 'Added to the pipeline' : 'Taken out of the pipeline', {}, ctx.user.id);
+        if (body.stage && body.stage !== before.stage && S.campaignStageChanged) S.campaignStageChanged(before.id, body.stage).catch(() => {});
+        if (S.geocodeLater && ((body.city !== undefined && body.city !== before.city) || (body.country !== undefined && body.country !== before.country))) S.geocodeLater(data);
         if (body.owner_id && body.owner_id !== before.owner_id) await logActivity(before.id, 'system', 'Owner changed', { to: body.owner_id }, ctx.user.id);
         res.json({ lead: data });
     } catch (e) { fail(res, e, 'crm_lead_update'); }
@@ -543,12 +590,16 @@ app.post('/api/crm/leads/bulk', async (req, res) => {
     try {
         const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids.slice(0, 500) : [];
         if (!ids.length) throw bad('Select at least one lead.');
-        const set = cleanLeadBody(req.body.set || {}, { partial: true });
-        const allowed = Object.fromEntries(Object.entries(set).filter(([k]) => ['stage', 'owner_id', 'tags', 'source'].includes(k)));
+        const set = await p90Body(cleanLeadBody(req.body.set || {}, { partial: true }));
+        const allowed = Object.fromEntries(Object.entries(set).filter(([k]) => ['stage', 'owner_id', 'tags', 'source', 'industry', 'in_pipeline'].includes(k)));
         if (!Object.keys(allowed).length) throw bad('Nothing to change.');
+        if (Object.prototype.hasOwnProperty.call(allowed, 'industry') && !allowed.industry) throw bad('Pick the industry to set.');
         const now = new Date().toISOString();
+        if (allowed.in_pipeline === true) allowed.pipeline_at = now;
+        if (allowed.stage && allowed.stage !== 'new' && await p90Ready()) { allowed.in_pipeline = true; allowed.pipeline_at = allowed.pipeline_at || now; }
         const { error } = await supabase.from('crm_leads').update({ ...allowed, updated_at: now, ...(allowed.stage ? { stage_at: now } : {}) }).in('id', ids); if (error) throw error;
         if (allowed.stage) await supabase.from('crm_activities').insert(ids.map(id => ({ lead_id: id, type: 'stage', meta: { to: allowed.stage, bulk: true }, actor_id: ctx.user.id })));
+        if (allowed.in_pipeline === true && !allowed.stage) await supabase.from('crm_activities').insert(ids.map(id => ({ lead_id: id, type: 'system', body: 'Added to the pipeline', meta: { bulk: true }, actor_id: ctx.user.id })));
         res.json({ updated: ids.length });
     } catch (e) { fail(res, e, 'crm_lead_bulk'); }
 });
@@ -575,6 +626,7 @@ app.post('/api/crm/leads/:id/activities', async (req, res) => {
         if (type === 'email_in') { const { data: l } = await supabase.from('crm_leads').select('stage').eq('id', req.params.id).maybeSingle(); if (l && ['new', 'contacted'].includes(l.stage)) { lead.stage = 'replied'; lead.stage_at = data.at; } }
         await supabase.from('crm_leads').update(lead).eq('id', req.params.id);
         if (lead.stage) await logActivity(req.params.id, 'stage', null, { to: 'replied', auto: true }, ctx.user.id);
+        if (type === 'email_in' && S.campaignStageChanged) S.campaignStageChanged(req.params.id, 'replied').catch(() => {});   // phase 90: a reply stops its campaigns
         res.status(201).json({ activity: data });
     } catch (e) { fail(res, e, 'crm_activity_create'); }
 });
@@ -596,8 +648,9 @@ app.post('/api/crm/leads/:id/convert', async (req, res) => {
         if (error) throw error;
         const now = new Date().toISOString();
         const won = { stage: 'won', stage_at: now, client_id: client.id, value, service: service || null, next_step: null, next_step_at: null, updated_at: now };
+        if (await p90Ready()) won.in_pipeline = true;
         const { error: wErr } = await supabase.from('crm_leads').update(won).eq('id', lead.id);
-        if (wErr) { delete won.service; const { error: e2 } = await supabase.from('crm_leads').update(won).eq('id', lead.id); if (e2) throw e2; }   // before phase 88's SQL there is no service column
+        if (wErr) { delete won.service; delete won.in_pipeline; const { error: e2 } = await supabase.from('crm_leads').update(won).eq('id', lead.id); if (e2) throw e2; }   // before phase 88's SQL there is no service column
         await logActivity(lead.id, 'stage', null, { from: lead.stage, to: 'won' }, ctx.user.id);
         await logActivity(lead.id, 'system', `Became a client: ${client.name}`, { client_id: client.id, service }, ctx.user.id);
         res.json({ client, lead_id: lead.id });
@@ -608,7 +661,10 @@ app.post('/api/crm/leads/import', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
         const b = req.body || {};
-        const { leads, skipped } = csvToLeads(parseCsv(b.csv), sourceInfo(b.source) ? b.source : 'other', { useFileSource: b.useFileSource === true });
+        const ready = await p90Ready();
+        const { leads: parsed, skipped } = csvToLeads(parseCsv(b.csv), sourceInfo(b.source) ? b.source : 'other', { useFileSource: b.useFileSource === true, industry: cleanIndustry(b.industry) });
+        if (ready && parsed.some(l => !l.industry)) throw bad('Choose the industry for this file. Rows with their own Industry column keep theirs.');
+        const leads = await Promise.all(parsed.map(p90Body));
         const owner = S.UUID_RE && S.UUID_RE.test(String(b.owner_id || '')) ? b.owner_id : ctx.user.id;
         const tag = str(b.tag, 40);
         if (leads.length > 2000) throw bad('Import up to 2,000 rows at a time.');
@@ -622,6 +678,7 @@ app.post('/api/crm/leads/import', async (req, res) => {
             const { error } = await supabase.from('crm_leads').insert(fresh.slice(i, i + 200).map(l => ({ ...l, owner_id: owner, created_by: ctx.user.id, stage: 'new', tags: [...new Set([...(l.tags || []), 'Imported', ...(tag ? [tag] : [])])] })));
             if (error) throw error;
         }
+        if (S.geocodeBackfill && fresh.length) S.geocodeBackfill().catch(() => {});
         res.json({ added: fresh.length, duplicates: dupes, skipped });
     } catch (e) { fail(res, e, 'crm_import'); }
 });
