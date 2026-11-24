@@ -230,7 +230,7 @@ async function vFinder() {
               <td class="r">${kfmt(l.followers_count)}</td>
               <td>${l.email || l.phone || l.whatsapp ? `<div class="contact">${l.email ? `<span title="${esc(l.email)}">${ic('mail', 'xs')}${esc(l.email)}</span>` : ''}${l.phone || l.whatsapp ? `<span>${ic('phone', 'xs')}${esc(l.phone || l.whatsapp)}</span>` : ''}</div>` : '<span class="dim">Not read yet</span>'}</td>
               <td>${l.fit_score == null ? '<span class="dim">—</span>' : `<span class="fit" style="--v:${l.fit_score}%"><i></i>${l.fit_score}</span>`}</td>
-              <td class="r"><button class="btn sm" type="button" title="Add to the CRM as a lead" data-tocrm='${esc(JSON.stringify({ n: l.full_name || l.username, u: l.username, e: l.email || '', p: l.phone || l.whatsapp || '', c: l.city || '', w: l.website || '', pl: l.platform || 'instagram' }))}'>${ic('plus')}Add</button></td></tr>`).join('')}
+              <td class="r"><button class="btn sm" type="button" title="Add to the CRM as a lead" data-tocrm='${esc(JSON.stringify({ n: l.full_name || l.username, u: l.username, e: l.email || '', p: l.phone || l.whatsapp || '', c: l.city || '', w: l.website || '', pl: l.platform || 'instagram', i: l.industry || l.category || '' }))}'>${ic('plus')}Add</button></td></tr>`).join('')}
             </tbody></table></div>
             <div class="pager"><button class="btn sm" type="button" data-page="${f.page - 1}" ${f.page <= 1 ? 'disabled' : ''}>Previous</button><span>Page ${f.page} of ${res.pages || 1}</span><button class="btn sm" type="button" data-page="${f.page + 1}" ${f.page >= (res.pages || 1) ? 'disabled' : ''}>Next</button></div>`
             : `<div class="empty">${f.q || f.kind || f.platform ? 'Nothing matches these filters.' : 'Nothing found yet. Run a search and the accounts land here.'}</div>`}
@@ -367,7 +367,7 @@ document.addEventListener('click', async e => {
     if (tc) {
         const d = JSON.parse(tc.dataset.tocrm); tc.disabled = true;
         try {
-            await api('/api/crm/leads', { method: 'POST', body: { full_name: d.n, company: d.n, email: d.e || null, phone: d.p || null, city: d.c || null, website: d.w || null, source: 'social', source_detail: `Lead Finder · ${d.pl === 'facebook' ? 'Facebook' : 'Instagram'} @${d.u}`, tags: ['Lead Finder'] } });
+            await api('/api/crm/leads', { method: 'POST', body: { full_name: d.n, company: d.n, email: d.e || null, phone: d.p || null, city: d.c || null, website: d.w || null, source: 'social', source_detail: `Lead Finder · ${d.pl === 'facebook' ? 'Facebook' : 'Instagram'} @${d.u}`, tags: ['Lead Finder'], industry: d.i || 'Other' } });
             tc.innerHTML = ic('check') + 'In the CRM'; tc.classList.add('done'); toast(d.n + ' is a lead in the CRM');
         } catch (err) { tc.disabled = false; toast(err.status === 409 ? err.message + ' It is already in the CRM.' : err.message, true); }
     }

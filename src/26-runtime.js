@@ -462,6 +462,11 @@ async function start() {
         // and the boot-time pass that provisions every connected client into it.
         if (tools.metaai) { try { logger.info('xp_start', xp.start()); } catch (e) { logger.error('xp_start_failed', { message: e.message }); } }
         else logger.info('xp_off', { reason: 'Edge Meta AI is switched off' });
+        // Phase 90: email campaigns send on their own clock. Nothing goes out unless a campaign is active and the mailbox
+        // is connected; the leads map fills in any lead that has a city and no place yet.
+        setTimeout(() => S.campaignTick && S.campaignTick().catch(() => {}), 30000).unref?.();
+        setInterval(() => S.campaignTick && S.campaignTick().catch(() => {}), 120000).unref?.();
+        setTimeout(() => S.geocodeBackfill && S.geocodeBackfill().catch(() => {}), 60000).unref?.();
         logger.info('phase11_ready', { instance: INSTANCE_ID, scheduler: SCHEDULER_ENABLED, pollMs: SCHEDULER_POLL_MS });
     });
 

@@ -14,7 +14,8 @@ Since phase 13 it is **two products on one backend**: the employee workbench abo
 server.js          Express backend, single file, Phase 17. Deployed to Render.
 package.json       start: node server.js · test: offline tests · live-checks: post-deploy script
 frontend/          Static site, deployed to Netlify (phase 89). Two apps sharing app/app.css:
-                   the CRM at / (index.html + app/app.js) and the Tools at /tools
+                   the CRM at / (index.html + app/app.js; client.js, campaigns.js and admin.js load on demand)
+                   and the Tools at /tools
                    (tools/index.html + app/tools.js: the Apify work). Also the Phone (phone.html)
                    and the legal pages. Every older page was removed; netlify.toml moves their addresses to /.
 sql/               Every migration, in order. History is kept: schema.sql, fb-schema.sql, fb-page-schema.sql, schema-phase1..17.sql
