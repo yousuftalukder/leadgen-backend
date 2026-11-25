@@ -519,6 +519,7 @@ S.campaignTick = async () => {
                         });
                         await supabase.from('crm_emails').update({ message_id: info && info.messageId || null }).eq('id', row.id);
                         await supabase.from('crm_activities').insert({ lead_id: lead.id, type: 'email_out', body: text.slice(0, 5000), meta: { campaign: c.id, campaignName: c.name, step: e.step, emailId: row.id, subject }, actor_id: null });
+                        if (S.refreshOutreach) await S.refreshOutreach(lead.id);   // phase 91: the Leads page shows who was emailed
                         await supabase.from('crm_leads').update({ last_activity_at: new Date().toISOString(), ...(lead.stage === 'new' ? { stage: 'contacted', stage_at: new Date().toISOString() } : {}) }).eq('id', lead.id);
                         budget--; done.sent++;
                     } catch (err) {

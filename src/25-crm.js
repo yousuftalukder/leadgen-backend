@@ -126,6 +126,8 @@ function cleanLeadBody(b, { partial = false } = {}) {
     // Phase 90: what the business does, and whether it is in the pipeline (both columns arrive with schema-phase90.sql).
     if (has('industry')) out.industry = cleanIndustry(b.industry);
     if (has('in_pipeline')) out.in_pipeline = b.in_pipeline === true;
+    // Phase 91: "What we noticed" on a lead, one line each (the dialer shows it; the SEO tools will fill it later).
+    if (has('insights')) out.insights = (Array.isArray(b.insights) ? b.insights : String(b.insights || '').split('\n')).map(x => str(x, 300)).filter(Boolean).slice(0, 15);
     if (out.stage === 'won') throw bad('Use Convert to client to win a lead, so the client is created with it.');
     return out;
 }
@@ -478,6 +480,7 @@ function fail(res, e, where) {
 async function logActivity(lead_id, type, body, meta, actor_id) {
     await supabase.from('crm_activities').insert({ lead_id, type, body: body || null, meta: meta || {}, actor_id: actor_id || null });
     await supabase.from('crm_leads').update({ last_activity_at: new Date().toISOString() }).eq('id', lead_id);
+    if ((type === 'call' || type === 'email_out') && S.refreshOutreach) await S.refreshOutreach(lead_id);   // phase 91: called / emailed on the lead
 }
 S.logActivityExternal = (...a) => logActivity(...a).catch(e => logger.warn('crm_activity_failed', { message: e.message }));   // phase 88: the phone files calls and texts on the lead
 const LEAD_COLS = 'id, full_name, title, company, website, email, phone, whatsapp, city, country, timezone, source, source_detail, stage, lost_reason, value, currency, score, tags, next_step, next_step_at, last_activity_at, unsubscribed, owner_id, client_id, created_at, updated_at, stage_at';
@@ -493,12 +496,24 @@ async function p90Ready() {
     if (error) logger.warn('phase90_sql_missing', { message: error.message });
     return _p90.ok;
 }
-const leadCols = async () => LEAD_COLS + (await p90Ready() ? P90_COLS : '');
-async function p90Body(body) {
-    if (await p90Ready()) return body;
-    const out = { ...body }; for (const k of P90_FIELDS) delete out[k]; return out;
+// Phase 91: who was called and emailed, and where each lead stands in the dialer (schema-phase91.sql). Same rule as 90.
+const P91_COLS = ', call_status, calls_count, last_call_at, last_call_outcome, callback_at, emails_count, last_email_at, insights';
+let _p91 = { ok: false, at: 0 };
+async function p91Ready() {
+    if (_p91.ok || Date.now() - _p91.at < 60000) return _p91.ok;
+    const { error } = await supabase.from('crm_leads').select('call_status, calls_count, insights').limit(1);
+    _p91 = { ok: !error, at: Date.now() };
+    if (error) logger.warn('phase91_sql_missing', { message: error.message });
+    return _p91.ok;
 }
-Object.assign(S, { p90Ready, leadCols });
+const leadCols = async () => LEAD_COLS + (await p90Ready() ? P90_COLS : '') + (await p91Ready() ? P91_COLS : '');
+async function p90Body(body) {
+    const out = { ...body };
+    if (!await p90Ready()) for (const k of P90_FIELDS) delete out[k];
+    if (!await p91Ready()) delete out.insights;
+    return out;
+}
+Object.assign(S, { p90Ready, p91Ready, leadCols });
 
 app.get('/api/crm/meta', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
@@ -627,6 +642,7 @@ app.post('/api/crm/leads/:id/activities', async (req, res) => {
         await supabase.from('crm_leads').update(lead).eq('id', req.params.id);
         if (lead.stage) await logActivity(req.params.id, 'stage', null, { to: 'replied', auto: true }, ctx.user.id);
         if (type === 'email_in' && S.campaignStageChanged) S.campaignStageChanged(req.params.id, 'replied').catch(() => {});   // phase 90: a reply stops its campaigns
+        if ((type === 'call' || type === 'email_out') && S.refreshOutreach) await S.refreshOutreach(req.params.id);
         res.status(201).json({ activity: data });
     } catch (e) { fail(res, e, 'crm_activity_create'); }
 });

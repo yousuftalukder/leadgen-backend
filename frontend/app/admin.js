@@ -12,7 +12,8 @@
  *   Leads           industries, categories, and where leads without a country are (for the map)
  *   Client pages    which tabs a client's page shows, by kind of client or for one client
  *   Billing         packages and the business details on invoices
- *   Phone           the business number, its usage and its Twilio set-up
+ *   Phone           who may use the phone and when, how calls are routed, the number's usage and its Twilio set-up
+ *   Dialer          the call lists, when to try a lead again, and their business hours (phase 91)
  *   Client logins   business owners' old logins
  */
 (function () {
@@ -21,7 +22,7 @@ const C = window.CRM;
 const { api, esc, ic, toast, st, $, num, initials, modal, v } = C;
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const SECTIONS = [['overview', 'Overview', 'overview'], ['team', 'Team', 'leads'], ['tools', 'Tools', 'tools'], ['keys', 'Apify and AI keys', 'lock'], ['email', 'Email sending', 'mail'],
-    ['goals', 'Goals', 'task'], ['leads', 'Leads and industries', 'pin'], ['clientpages', 'Client pages', 'clients'], ['billing', 'Billing', 'cash'], ['phone', 'Phone', 'phone'], ['logins', 'Client logins', 'shield']];
+    ['goals', 'Goals', 'task'], ['leads', 'Leads and industries', 'pin'], ['clientpages', 'Client pages', 'clients'], ['billing', 'Billing', 'cash'], ['phone', 'Phone', 'phone'], ['dialer', 'Dialer', 'seq'], ['logins', 'Client logins', 'shield']];
 const A = { data: {}, sec: 'overview' };
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const card = (title, sub, body, { open = true, id = '', right = '' } = {}) => `<details class="acard card" ${open ? 'open' : ''} ${id ? `id="${id}"` : ''}><summary><div><h2>${title}</h2>${sub ? `<span>${sub}</span>` : ''}</div>${right}<span class="chev">${ic('stage')}</span></summary><div class="acb">${body}</div></details>`;
@@ -31,9 +32,10 @@ const usd = x => x == null ? '—' : '$' + Number(x).toFixed(2);
 // everything the cockpit shows, read at once and kept while Admin is open
 async function load(force) {
     if (A.data.at && !force && Date.now() - A.data.at < 20000) return A.data;
-    const [users, access, phone, ak, gk, crm, mail, billing] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools/access'), api('/api/admin/phone/usage').catch(e => ({ error: e.message })),
-        api('/api/apify-keys').catch(() => null), api('/api/gemini-keys').catch(() => null), api('/api/admin/crm-settings').catch(e => ({ error: e.message })), api('/api/admin/mailbox').catch(e => ({ error: e.message })), api('/api/admin/billing').catch(() => null)]);
-    A.data = { at: Date.now(), users: users.users || [], access, phone, ak, gk, crm, mail, billing };
+    const [users, access, phone, ak, gk, crm, mail, billing, phset, dialer] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools/access'), api('/api/admin/phone/usage').catch(e => ({ error: e.message })),
+        api('/api/apify-keys').catch(() => null), api('/api/gemini-keys').catch(() => null), api('/api/admin/crm-settings').catch(e => ({ error: e.message })), api('/api/admin/mailbox').catch(e => ({ error: e.message })), api('/api/admin/billing').catch(() => null),
+        api('/api/admin/phone/settings').catch(e => ({ error: e.message })), api('/api/admin/dialer').catch(e => ({ error: e.message }))]);
+    A.data = { at: Date.now(), users: users.users || [], access, phone, ak, gk, crm, mail, billing, phset, dialer };
     return A.data;
 }
 function status(d) {
@@ -46,7 +48,8 @@ function status(d) {
         email: [d.mail.state && d.mail.state.connected ? (d.mail.state.paused ? 'warn' : 'ok') : 'warn', d.mail.state && d.mail.state.connected ? (d.mail.state.paused ? 'Paused' : `${d.mail.sentToday || 0} sent today`) : 'Not connected'],
         goals: ['ok', d.crm.goals ? `${d.crm.goals.calls} calls · ${d.crm.goals.emails} emails a day` : ''], leads: [d.crm.p90 ? 'ok' : 'warn', d.crm.p90 ? `${(d.crm.industries || []).length} industries` : 'Run the phase-90 SQL'],
         clientpages: ['ok', `${((d.crm.clientTabs || {}).default || []).length} tabs by default`], billing: [d.billing && (d.billing.packages || []).length ? 'ok' : 'off', d.billing ? `${(d.billing.packages || []).length} packages` : ''],
-        phone: [d.phone && d.phone.ready ? 'ok' : 'warn', d.phone && d.phone.ready ? 'Live' : 'Not set up'], logins: ['off', `${d.users.filter(u => u.role === 'client').length}`], overview: ['ok', '']
+        phone: [d.phone && d.phone.ready ? (d.phset && !d.phset.error && d.phset.saved && !d.phset.access.enabled ? 'off' : 'ok') : 'warn', d.phone && d.phone.ready ? (d.phset && d.phset.saved ? (d.phset.access.enabled ? `${Object.values(d.phset.access.people || {}).filter(p => p.on).length} with the phone` : 'Locked') : 'Live') : 'Not set up'],
+        dialer: [d.dialer && d.dialer.p91 ? 'ok' : 'warn', d.dialer && !d.dialer.error ? (d.dialer.p91 ? `${(d.dialer.rules.lists || []).length} call list${(d.dialer.rules.lists || []).length === 1 ? '' : 's'}` : 'Run the phase-91 SQL') : ''], logins: ['off', `${d.users.filter(u => u.role === 'client').length}`], overview: ['ok', '']
     };
 }
 
@@ -54,7 +57,7 @@ C.views.admin = async arg => {
     A.sec = SECTIONS.some(s => s[0] === arg) ? arg : 'overview';
     const d = await load(A.force); A.force = false;
     const S = status(d);
-    const main = await ({ overview: secOverview, team: secTeam, tools: secTools, keys: secKeys, email: secEmail, goals: secGoals, leads: secLeads, clientpages: secClientPages, billing: secBilling, phone: secPhone, logins: secLogins }[A.sec])(d, S);
+    const main = await ({ overview: secOverview, team: secTeam, tools: secTools, keys: secKeys, email: secEmail, goals: secGoals, leads: secLeads, clientpages: secClientPages, billing: secBilling, phone: secPhone, dialer: secDialer, logins: secLogins }[A.sec])(d, S);
     const strip = [['team', 'Team'], ['tools', 'Tools'], ['email', 'Email'], ['phone', 'Phone'], ['keys', 'Keys'], ['leads', 'Database']].map(([k, l]) => `<a class="sstat ${S[k][0]}" href="#admin/${k}">${light(S[k][0])}<small>${l}</small><b>${esc(S[k][1])}</b></a>`).join('');
     return `<div class="head"><div><h1>Admin</h1><p class="sub">Only you can open this. Everything about how the CRM, the Tools and the phone run.</p></div></div>
       <div class="sstrip">${strip}</div>
@@ -203,13 +206,76 @@ async function secBilling(d) {
 }
 
 // ------------------------------------------------------------------ phone
+const TZL = { 'America/New_York': 'Eastern (New York)', 'America/Chicago': 'Central (Chicago)', 'America/Denver': 'Mountain (Denver)', 'America/Los_Angeles': 'Pacific (Los Angeles)', 'America/Phoenix': 'Arizona', 'Asia/Dhaka': 'Bangladesh (Dhaka)', 'Europe/London': 'UK (London)' };
+const hoursHtml = (id, h) => { h = h || { days: [1, 2, 3, 4, 5], from: '09:00', to: '17:00' }; return `<div class="hrs" id="${id}"><div class="tick">${DAYS.map((x, i) => `<label><input type="checkbox" value="${i}" ${(h.days || []).includes(i) ? 'checked' : ''}>${x}</label>`).join('')}</div>
+    <div class="inline"><input type="time" data-h="from" value="${esc(h.from)}" aria-label="From"><span>to</span><input type="time" data-h="to" value="${esc(h.to)}" aria-label="To"></div></div>`; };
+const readHours = el => el ? { days: $$('.tick input:checked', el).map(x => +x.value), from: $('[data-h="from"]', el).value, to: $('[data-h="to"]', el).value } : null;
+/** Phase 91: who may use the phone, and when. The server checks it on every call, text and ring. */
+function phoneAccessCards(d) {
+    const ps = d.phset; if (!ps || ps.error) return card('Who can use the phone', '', `<div class="empty">${esc((ps && ps.error) || 'Not available.')}</div>`);
+    const a = ps.access, team = ps.people.filter(p => p.role !== 'admin'), owners = ps.people.filter(p => p.role === 'admin');
+    const anyTime = !a.hours;
+    const edge = (ps.voice || {}).edge || 'roaming';
+    const EDGE = { roaming: 'Nearest automatically (recommended)', ashburn: 'Ashburn, US East', umatilla: 'Umatilla, US West', dublin: 'Dublin, Ireland', frankfurt: 'Frankfurt, Germany', singapore: 'Singapore', tokyo: 'Tokyo, Japan', sydney: 'Sydney, Australia', 'sao-paulo': 'São Paulo, Brazil' };
+    return card('Who can use the phone', ps.saved ? (a.enabled ? `${team.filter(p => (a.people[p.id] || {}).on).length} of ${team.length} teammates` : 'Locked for the team') : 'Not set yet: everyone can call at any time', `
+        ${ps.saved ? '' : '<p class="note" style="margin:0 0 12px">Until you save this, everyone on the team can call, text and answer at any time, as before. You are never locked out.</p>'}
+        <div class="opt"><div class="t"><b>The phone is on for the team</b><span>Off locks calls, texts and the keypad for every teammate. They can still open the Phone and look.</span></div><label class="switch"><input type="checkbox" id="pa-on" ${a.enabled ? 'checked' : ''}><i></i></label></div>
+        <div class="wform"><div class="field wide"><label>When it works</label><div class="seg" role="group"><label><input type="radio" name="pa-when" value="any" ${anyTime ? 'checked' : ''}> Any time</label><label><input type="radio" name="pa-when" value="hours" ${anyTime ? '' : 'checked'}> These hours</label></div>
+          ${hoursHtml('pa-hours', a.hours)}<small>Outside these hours a teammate sees “Calling opens …” and every call control is off; incoming calls ring only people who may answer.</small></div>
+          <div class="field"><label for="pa-tz">In this time zone</label><select id="pa-tz">${(ps.tzs || []).concat(ps.tzs.includes(a.tz) ? [] : [a.tz]).map(z => `<option value="${esc(z)}" ${a.tz === z ? 'selected' : ''}>${esc(TZL[z] || z)}</option>`).join('')}</select></div></div>
+        <div class="patable">${owners.map(p => `<div class="opt person"><span class="ava">${initials(p.name)}</span><div class="t"><b>${esc(p.name)}</b><span>Owner · always on</span></div></div>`).join('')}
+          ${team.map(p => { const x = a.people[p.id] || {}; return `<div class="opt person pa" data-pa="${p.id}"><span class="ava">${initials(p.name)}</span><div class="t"><b>${esc(p.name)}</b><span class="${p.now.allowed ? 'okc' : 'dim'}">${esc(p.now.allowed ? (p.now.why === 'open' ? 'Can call (not set yet)' : 'Can call now') : p.now.text || 'Cannot call now')}</span>
+              <label class="check sm"><input type="checkbox" data-paown ${x.own ? 'checked' : ''}> Their own hours</label>${hoursHtml('pa-h-' + p.id, x.hours || a.hours)}</div>
+            <label class="switch" title="Give ${esc(p.name)} the phone"><input type="checkbox" data-paon ${x.on || !ps.saved ? 'checked' : ''}><i></i></label></div>`; }).join('') || '<p class="dim">No teammates yet. Add them in Team.</p>'}</div>
+        <div class="tbar"><span class="dim small">The server checks this on every call, text and ring.</span><span class="sp"></span><button class="btn pri" type="button" data-aact="pasave">Save who can call</button></div>`) +
+      card('Call quality', 'How calls reach Twilio', `<div class="wform"><div class="field wide"><label for="pv-edge">Twilio data centre for calls from the app</label><select id="pv-edge">${(ps.edges || ['roaming']).map(k => `<option value="${k}" ${edge === k ? 'selected' : ''}>${esc(EDGE[k] || k)}</option>`).join('')}</select>
+          <small>Nearest picks the closest one to each caller, which gives the shortest delay; for a team in Bangladesh that is usually Singapore. Pick one only if the call-quality test in the Phone's Settings says the nearest is poor. The nearest stays the fallback.</small></div></div>
+        <p class="note" style="margin:0">Already on: Opus (wideband) sound with G.711 as the fallback, echo and noise removal in the browser, and live call-quality warnings. Each teammate picks their microphone and runs a call-quality test in Phone → Settings. A wired headset and a cable instead of Wi-Fi make the biggest difference.</p>
+        <div class="tbar"><span class="sp"></span><button class="btn pri" type="button" data-aact="pvsave">Save</button></div>`, { open: false });
+}
+// ------------------------------------------------------------------ dialer: call lists, retries, their business hours (phase 91)
+/** One call list's editor. */
+function dlistHtml(l, i) {
+    const team = st.meta.team, srcs = st.meta.sources, inds = C.industries();
+    return `<div class="dlist" data-dl="${i}" data-id="${esc(l.id || '')}"><div class="dlh"><input data-k="name" value="${esc(l.name || '')}" placeholder="List name, e.g. Houston HVAC, cold" aria-label="List name"><button type="button" class="btn ghost sm danger" data-dlrm>${ic('x')}Remove</button></div>
+        <div class="grid3"><div class="field"><label>Categories</label><div class="tick col">${srcs.map(s => `<label><input type="checkbox" data-src value="${s.key}" ${(l.sources || []).includes(s.key) ? 'checked' : ''}>${esc(s.path || s.label)}</label>`).join('')}</div><small>None ticked: every category.</small></div>
+          <div class="field"><label>Trades (industries)</label><div class="tick col">${inds.map(x => `<label><input type="checkbox" data-ind value="${esc(x)}" ${(l.industries || []).some(y => y.toLowerCase() === x.toLowerCase()) ? 'checked' : ''}>${esc(x)}</label>`).join('')}</div><small>None ticked: every trade.</small></div>
+          <div class="field"><label>Who</label><select data-k="pipeline"><option value="any" ${l.pipeline === 'any' ? 'selected' : ''}>Cold and pipeline leads</option><option value="cold" ${l.pipeline === 'cold' ? 'selected' : ''}>Cold leads only</option><option value="pipeline" ${l.pipeline === 'pipeline' ? 'selected' : ''}>Pipeline leads only</option></select>
+            <label style="margin-top:8px">Emailed</label><select data-k="emailed"><option value="any" ${l.emailed === 'any' ? 'selected' : ''}>Emailed or not</option><option value="yes" ${l.emailed === 'yes' ? 'selected' : ''}>Only leads we emailed (call after the email)</option><option value="no" ${l.emailed === 'no' ? 'selected' : ''}>Only leads never emailed</option></select>
+            <label style="margin-top:8px">Lowest prospect score</label><input type="number" min="0" max="100" data-k="minScore" value="${esc(l.minScore || 0)}">
+            <label style="margin-top:8px">Who sees this list</label><div class="tick col">${team.filter(m => m.role !== 'admin').map(m => `<label><input type="checkbox" data-person value="${m.id}" ${(l.people || []).includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('') || '<span class="dim">No teammates</span>'}</div><small>None ticked: everyone.</small></div></div></div>`;
+}
+async function secDialer(d) {
+    const D = d.dialer; if (!D || D.error) return card('Dialer', '', `<div class="empty">${esc((D && D.error) || 'Not available.')}</div>`);
+    const r = D.rules;
+    const R = [['no_answer', 'No answer'], ['voicemail', 'Left a voicemail'], ['busy', 'Busy'], ['gatekeeper', 'Owner not in'], ['spoke', 'Talked, follow up']];
+    return `${D.p91 ? '' : `<div class="banner">${ic('shield')}<div><b>Run <span class="mono">sql/schema-phase91.sql</span> in the Supabase SQL editor.</b> It adds who was called and emailed to every lead, and where each lead is in the dialer. Until then the dialer shows every lead as not called.</div></div>`}
+      ${card('Call lists', `${r.lists.length} list${r.lists.length === 1 ? '' : 's'} · plus “Every call list”`, `<p class="note" style="margin:0 0 12px">The lists in the dialer's “call list” menu. A teammate sees the lists open to everyone and the ones that name them. In each list, Today puts callbacks that are due first, then warm leads, then leads never called (best score first), then retries.</p>
+        <div id="dlists">${r.lists.map(dlistHtml).join('')}</div><div class="tbar"><button class="btn sm" type="button" data-aact="dladd">${ic('plus')}Add a call list</button></div>`)}
+      ${card('When to try a lead again', 'After each outcome', `<div class="goaledit">${R.map(([k, l]) => `<div class="field"><label for="dr-${k}">${l}</label><div class="inline"><input id="dr-${k}" type="number" min="0" max="1440" step="0.5" value="${esc(r.retry[k])}"><span>hours</span></div></div>`).join('')}
+          <div class="field"><label for="dr-max">Tries before a lead is closed</label><input id="dr-max" type="number" min="1" max="50" value="${esc(r.maxAttempts)}"><small>Calls without a conversation.</small></div></div>
+        <p class="note" style="margin:8px 0 0">Interested and Booked a meeting put the lead in the pipeline. Call back at a set time makes a call task. Not interested, Not a fit, a wrong number and Do not call close it. “They asked for an email” makes an email task.</p>`)}
+      ${card('Their business hours', 'Call while they are open', `<label class="check"><input type="checkbox" id="dh-on" ${r.localHours.on ? 'checked' : ''}> Put leads whose business is open now first</label>${hoursHtml('dh-hours', r.localHours)}
+        <p class="note" style="margin:8px 0 0">In each lead's own time zone: from its address, else its area code. A closed business stays in the list, marked Closed, at the end of Today.</p>`)}
+      <div class="savebar"><span class="sp"></span><button class="btn pri" type="button" data-aact="dlsave">Save the dialer</button></div>`;
+}
+function readDialer() {
+    const num = id => +($('#' + id) || {}).value;
+    return {
+        retry: Object.fromEntries(['no_answer', 'voicemail', 'busy', 'gatekeeper', 'spoke'].map(k => [k, num('dr-' + k)])), maxAttempts: num('dr-max'),
+        localHours: { on: $('#dh-on').checked, ...readHours($('#dh-hours')) },
+        lists: $$('#dlists .dlist').map(el => ({ id: el.dataset.id || undefined, name: $('[data-k="name"]', el).value, pipeline: $('[data-k="pipeline"]', el).value, emailed: $('[data-k="emailed"]', el).value, minScore: +$('[data-k="minScore"]', el).value,
+            sources: $$('[data-src]:checked', el).map(x => x.value), industries: $$('[data-ind]:checked', el).map(x => x.value), people: $$('[data-person]:checked', el).map(x => x.value) }))
+    };
+}
 async function secPhone(d) {
     const u = d.phone;
-    if (!u || u.error) return card('Phone', 'Usage', `<div class="empty">${esc((u && u.error) || 'Not available yet.')}</div>`);
+    const access = phoneAccessCards(d);
+    if (!u || u.error) return access + card('Phone', 'Usage', `<div class="empty">${esc((u && u.error) || 'Not available yet.')}</div>`);
     const O = u.ours, tw = Array.isArray(u.twilio) ? Object.fromEntries(u.twilio.map(r => [r.category, r])) : null;
     const month = new Date(u.month + '-01T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     const tile = (l, x, sub) => `<div><small>${l}</small><b>${x}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
-    return `<section class="card phu"><div class="card-h"><h2>Phone · ${esc(u.number)}</h2><span class="phstate ${u.ready ? 'ready' : 'error'}"><i></i>${u.ready ? 'Live' : 'Not set up'}</span></div>
+    return access + `<section class="card phu"><div class="card-h"><h2>Phone · ${esc(u.number)}</h2><span class="phstate ${u.ready ? 'ready' : 'error'}"><i></i>${u.ready ? 'Live' : 'Not set up'}</span></div>
       <div class="phu-t">${tile('Twilio spend · ' + esc(month), tw ? usd((tw.totalprice || {}).price) : '—', u.balance ? 'Balance ' + usd(u.balance.amount) : (u.twilio && u.twilio.error ? esc(u.twilio.error) : ''))}
         ${tile('Calls in', num(O.callsIn), num(O.minutesIn) + ' min · ' + num(O.missed) + ' missed')}${tile('Calls out', num(O.callsOut), num(O.minutesOut) + ' min')}
         ${tile('Voicemails', num(O.voicemails), '')}${tile('Texts', num(O.textsIn + O.textsOut), num(O.textsOut) + ' sent · ' + num(O.textsIn) + ' received')}</div>
@@ -254,6 +320,7 @@ document.addEventListener('click', async e => {
         const dl = t.closest('[data-inddel]'); if (dl) { dl.closest('.indrow').remove(); return; }
         const uc = t.closest('[data-unclient]'); if (uc) { const ct = readTabs(); delete ct.byClient[uc.dataset.unclient]; return settings({ clientTabs: ct }, 'It uses its kind again'); }
         const rm = t.closest('[data-alrm]'); if (rm) { rm.closest('.aline').remove(); return; }
+        const dr = t.closest('[data-dlrm]'); if (dr) { dr.closest('.dlist').remove(); return; }
         const a = t.closest('[data-aact]'); if (!a) return;
         const k = a.dataset.aact;
         if (k === 'genpass') { $('#ap-p').value = C.makePass(); return; }
@@ -265,6 +332,14 @@ document.addEventListener('click', async e => {
             await api('/api/admin/mailbox', { method: 'PUT', body }); st.meta = await api('/api/crm/meta'); toast('Mailbox saved'); return again(); } finally { a.disabled = false; } }
         if (k === 'phcheck') { a.disabled = true; try { const r = await api('/api/admin/phone/check', { method: 'POST', body: {} });
             $('#phchk').innerHTML = r.checks.map(x => `<span style="display:block;color:${x.ok ? 'var(--ok,#1f9d55)' : 'var(--danger,#c0392b)'}">${x.ok ? '✓' : '✗'} <b>${esc(x.name)}</b>: ${esc(x.note)}</span>`).join('') || 'Nothing to check.'; } finally { a.disabled = false; } return; }
+        if (k === 'pasave') { a.disabled = true; try {
+            const people = Object.fromEntries($$('[data-pa]').map(el => [el.dataset.pa, { on: $('[data-paon]', el).checked, own: $('[data-paown]', el).checked, hours: $('[data-paown]', el).checked ? readHours($('#pa-h-' + el.dataset.pa)) : null }]));
+            const anyTime = (($$('input[name="pa-when"]').find(x => x.checked)) || {}).value === 'any';
+            await api('/api/admin/phone/settings', { method: 'PUT', body: { access: { enabled: $('#pa-on').checked, tz: v('pa-tz'), anyTime, hours: anyTime ? null : readHours($('#pa-hours')), people } } });
+            toast('Saved. It applies to the next call; open phones update within a minute.'); return again(); } finally { a.disabled = false; } }
+        if (k === 'pvsave') { await api('/api/admin/phone/settings', { method: 'PUT', body: { voice: { edge: v('pv-edge') } } }); toast('Saved. Phones use it the next time they open.'); return again(); }
+        if (k === 'dladd') { const n = $$('#dlists .dlist').length; $('#dlists').insertAdjacentHTML('beforeend', dlistHtml({ name: '', pipeline: 'any', emailed: 'any', minScore: 0 }, n)); $('#dlists .dlist:last-child [data-k="name"]').focus(); return; }
+        if (k === 'dlsave') { a.disabled = true; try { await api('/api/admin/dialer', { method: 'PUT', body: { rules: readDialer() } }); toast('Dialer saved'); return again(); } finally { a.disabled = false; } }
         if (k === 'mailoff') { if (!confirm('Disconnect the mailbox? Campaign email stops until it is connected again.')) return; await api('/api/admin/mailbox', { method: 'DELETE' }); toast('Disconnected'); return again(); }
         if (k === 'goals') return settings({ goals: Object.fromEntries(['calls', 'emails', 'prospects', 'followups'].map(x => [x, +v('go-' + x)])) }, 'Goals saved');
         if (k === 'tz') return settings({ timezone: v('go-tz') }, 'Time zone saved');
