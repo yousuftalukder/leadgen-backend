@@ -1,6 +1,6 @@
 {
-  "name": "EdgeLead Phone",
-  "short_name": "Phone",
+  "name": "EdgeLead Dialer",
+  "short_name": "Dialer",
   "description": "Calls, texts and voicemail on (469) 819-4097.",
   "id": "/phone.html",
   "start_url": "/phone.html",

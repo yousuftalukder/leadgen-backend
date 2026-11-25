@@ -164,7 +164,7 @@ test('an outcome sets the status and when to try again; tries run out; a callbac
     assert.deepStrictEqual(S.dispositionPatch('no_answer', { rules: R, now: NOW }), { call_status: 'tried', last_call_outcome: 'No answer', callback_at: '2026-11-26T17:00:00.000Z' });
     assert.strictEqual(S.dispositionPatch('voicemail', { rules: R, now: NOW }).callback_at, '2026-11-27T17:00:00.000Z');
     const out = S.dispositionPatch('no_answer', { rules: R, now: NOW, attempts: 6 });
-    assert.strictEqual(out.call_status, 'closed'); assert.strictEqual(out.callback_at, null); assert.match(out.last_call_outcome, /out of tries/);
+    assert.strictEqual(out.call_status, 'closed'); assert.strictEqual(out.callback_at, '2026-12-25T17:00:00.000Z'); assert.match(out.last_call_outcome, /6 tries in a row/);   // phase 92: back after 30 days
     assert.deepStrictEqual(S.dispositionPatch('interested', { rules: R, now: NOW }), { call_status: 'in_play', last_call_outcome: 'Interested', callback_at: null });
     assert.strictEqual(S.dispositionPatch('callback', { rules: R, now: NOW, callbackAt: '2026-11-27T15:00:00Z' }).callback_at, '2026-11-27T15:00:00.000Z');
     assert.throws(() => S.dispositionPatch('callback', { rules: R, now: NOW }), /when to call them back/);

@@ -1580,3 +1580,82 @@ body.resizing,body.resizing *{cursor:col-resize!important;user-select:none!impor
 }
 body:not(.phone-only) .phx{padding-bottom:0}
 @media (max-width:860px){body:not(.phone-only) .view:has(> .phx){padding-bottom:calc(62px + env(safe-area-inset-bottom,0px))}}
+
+/* ==================================================================================================
+   PHASE 92: CALLS AND THE DIALER, REMINDERS, MY NUMBERS, THE FOLDING RAIL
+   ================================================================================================== */
+/* the rail: the EdgeLead mark, and a button that folds it to icons */
+.brand{position:relative}
+.brand .logo{width:22px;height:26px;object-fit:contain;flex:none;filter:drop-shadow(0 2px 6px rgba(227,162,38,.35))}
+.brand .bname{flex:1;min-width:0;white-space:nowrap}
+.railbtn{border:0;background:transparent;color:var(--rail-dim);width:28px;height:28px;border-radius:7px;display:grid;place-items:center;flex:none;margin-right:-4px}
+.railbtn:hover{background:rgba(255,255,255,.07);color:var(--rail-ink)}
+.rail a .lbl2,.rail .foot .lbl2{white-space:nowrap}
+.app{transition:grid-template-columns .18s ease}
+@media (min-width:861px){
+  :root[data-rail="mini"] .app{grid-template-columns:68px minmax(0,1fr)}
+  :root[data-rail="mini"] .rail{padding-left:10px;padding-right:10px;align-items:center}
+  :root[data-rail="mini"] .brand{flex-direction:column;padding:4px 0 14px;gap:10px}
+  :root[data-rail="mini"] .brand .bname,:root[data-rail="mini"] .rail .grp,:root[data-rail="mini"] .rail .lbl2,:root[data-rail="mini"] .rail .lock,:root[data-rail="mini"] .rail .me div{display:none}
+  :root[data-rail="mini"] .railbtn{margin:0;transform:scaleX(-1)}
+  :root[data-rail="mini"] .rail a{width:44px;height:40px;justify-content:center;padding:0;margin:1px 0}
+  :root[data-rail="mini"] .rail a .ct{position:absolute;top:3px;right:2px;margin:0;font-size:10px;line-height:15px;min-width:15px;padding:0 4px;text-align:center}
+  :root[data-rail="mini"] .rail a .ct:not(.hot){display:none}
+  :root[data-rail="mini"] .rail a.on::before{left:-10px}
+  :root[data-rail="mini"] .rail .grp:not(:first-of-type){display:block;height:1px;padding:0;margin:8px 6px;background:var(--rail-line);font-size:0}
+  :root[data-rail="mini"] .rail .foot{padding:10px 0 0;justify-items:center}
+  :root[data-rail="mini"] .rail .me{padding:6px 0 8px}
+  :root[data-rail="mini"] .rail .foot .btn{width:40px;justify-content:center;padding:0}
+}
+/* flags on a lead: do not call, a wrong number */
+.flag{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.flag.bad{background:var(--bad-soft);color:var(--bad)}.flag.warn{background:var(--warn-soft);color:var(--warn)}
+.lp-num.wrong b{text-decoration:line-through;text-decoration-color:var(--warn);color:var(--muted)}
+.oc.camp .ico{color:var(--s-email)}.oc.camp em{color:var(--ink)}
+.outr .flag{justify-self:start}
+.dl-row.task{border-left-color:var(--acc)}
+.dl-row small .ico{width:11px;height:11px;vertical-align:-1px}
+.effect{margin:0;display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--ink);background:var(--acc-soft);border-radius:9px;padding:8px 10px}
+.effect .ico{color:var(--acc);margin-top:2px}
+.effects{margin-top:12px;font-size:13px}.effects ul{margin:6px 0 0;padding-left:18px;display:grid;gap:4px;color:var(--muted)}.effects b{color:var(--ink)}
+.phx-tabs a{display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:8px;color:var(--muted);font-weight:600;font-size:14px;position:relative;text-decoration:none}
+.phx-tabs a:hover{color:var(--ink);background:var(--sunk)}
+.phx-tabs a.on{color:var(--ink)}
+.phx-tabs a.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-9px;height:2px;border-radius:2px;background:var(--acc)}
+/* Calls → My numbers */
+.nums{overflow:auto;padding:16px 18px 40px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-content:start;min-height:0}
+.nbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.nbar .sp{flex:1}
+.nbar select{height:34px;border:1px solid var(--line2);background:var(--surface);border-radius:8px;padding:0 28px 0 10px;color:var(--ink)}
+.ngrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.ncard{border:1px solid var(--line);border-radius:12px;padding:14px 14px 12px;background:var(--surface);display:grid;gap:2px;align-content:start}
+.ncard b{font-size:26px;letter-spacing:-.03em;font-weight:700;font-variant-numeric:tabular-nums}
+.ncard span{font-weight:600;font-size:13px}.ncard small{color:var(--muted);font-size:12px}
+.ncard.hi{border-color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok-soft)}
+.ncard.warn{border-color:var(--bad)}.ncard.warn b{color:var(--bad)}
+.ninsight{display:flex;gap:10px;align-items:center;padding:12px 16px;border-radius:12px;background:var(--ok-soft);font-size:13.5px}.ninsight .ico{color:var(--ok)}
+.nchart .legend{display:flex;flex-wrap:wrap;gap:6px 14px;padding:0 16px;font-size:12px;color:var(--muted)}
+.nchart .legend i{display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--c);margin-right:5px}
+.nm-bars{display:flex;align-items:flex-end;gap:3px;height:180px;padding:14px 16px 8px}
+.nm-col{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
+.nm-stack{width:100%;max-width:34px;display:flex;flex-direction:column-reverse;border-radius:4px 4px 0 0;overflow:hidden;min-height:0}
+.nm-stack i{display:block;background:var(--c);min-height:2px}
+.nm-col small{font-size:10.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.obars{display:grid;gap:6px;padding:4px 16px 16px}
+.obars div{display:grid;grid-template-columns:200px 1fr 40px;gap:10px;align-items:center;font-size:13px}
+.obars i{height:8px;border-radius:99px;background:linear-gradient(90deg,var(--acc) var(--v),var(--sunk) var(--v))}.obars b{text-align:right;font-variant-numeric:tabular-nums}
+/* Calls → Settings */
+.phset .card.wide{grid-column:1/-1}
+.remsteps{display:flex;flex-wrap:wrap;gap:8px}
+.remsteps label{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line2);border-radius:99px;padding:6px 12px;font-size:13px;cursor:pointer;background:var(--surface)}
+.remsteps label.on,.remsteps label:has(input:checked){border-color:var(--ok);background:var(--ok-soft);font-weight:600}
+.remsteps input{width:auto;margin:0;accent-color:var(--ok)}
+.phset .inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.phset .inline select{height:34px;border:1px solid var(--line2);border-radius:8px;padding:0 10px;background:var(--surface)}
+.phset .card-h .linkbtn{color:var(--acc)}
+/* reminders: they pop up on every page */
+.reminders{position:fixed;right:18px;top:68px;z-index:75;display:grid;gap:10px;width:min(380px,calc(100vw - 24px))}
+.remc{display:grid;grid-template-columns:auto 1fr auto;gap:4px 12px;padding:14px;border-radius:16px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--gold);box-shadow:var(--shadow-lg);animation:rise2 .2s ease-out}
+.remc .ri{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:var(--gold-soft);color:var(--gold-ink)}
+.remc .rt{display:grid;min-width:0}.remc .rt small{font-size:11.5px;color:var(--warn);font-weight:600}.remc .rt b{font-size:14.5px}.remc .rt span{font-size:12.5px;color:var(--muted)}
+.remc .ra{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+@keyframes rise2{from{opacity:0;transform:translateY(-8px)}to{opacity:1}}
+@media (max-width:860px){.reminders{left:8px;right:8px;top:8px;width:auto}.nums{padding:12px}.obars div{grid-template-columns:120px 1fr 32px}.nm-bars{height:140px}}

@@ -13,7 +13,8 @@
  *   Client pages    which tabs a client's page shows, by kind of client or for one client
  *   Billing         packages and the business details on invoices
  *   Phone           who may use the phone and when, how calls are routed, the number's usage and its Twilio set-up
- *   Dialer          the call lists, when to try a lead again, and their business hours (phase 91)
+ *   Calls           the call lists, when to try a lead again, when lost leads come back, the office's reminder times
+ *                   and their business hours (phase 91; phase 92 renamed it from Dialer)
  *   Client logins   business owners' old logins
  */
 (function () {
@@ -22,7 +23,7 @@ const C = window.CRM;
 const { api, esc, ic, toast, st, $, num, initials, modal, v } = C;
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const SECTIONS = [['overview', 'Overview', 'overview'], ['team', 'Team', 'leads'], ['tools', 'Tools', 'tools'], ['keys', 'Apify and AI keys', 'lock'], ['email', 'Email sending', 'mail'],
-    ['goals', 'Goals', 'task'], ['leads', 'Leads and industries', 'pin'], ['clientpages', 'Client pages', 'clients'], ['billing', 'Billing', 'cash'], ['phone', 'Phone', 'phone'], ['dialer', 'Dialer', 'seq'], ['logins', 'Client logins', 'shield']];
+    ['goals', 'Goals', 'task'], ['leads', 'Leads and industries', 'pin'], ['clientpages', 'Client pages', 'clients'], ['billing', 'Billing', 'cash'], ['phone', 'Phone', 'keypad'], ['calls', 'Calls', 'phone'], ['logins', 'Client logins', 'shield']];
 const A = { data: {}, sec: 'overview' };
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const card = (title, sub, body, { open = true, id = '', right = '' } = {}) => `<details class="acard card" ${open ? 'open' : ''} ${id ? `id="${id}"` : ''}><summary><div><h2>${title}</h2>${sub ? `<span>${sub}</span>` : ''}</div>${right}<span class="chev">${ic('stage')}</span></summary><div class="acb">${body}</div></details>`;
@@ -49,15 +50,16 @@ function status(d) {
         goals: ['ok', d.crm.goals ? `${d.crm.goals.calls} calls · ${d.crm.goals.emails} emails a day` : ''], leads: [d.crm.p90 ? 'ok' : 'warn', d.crm.p90 ? `${(d.crm.industries || []).length} industries` : 'Run the phase-90 SQL'],
         clientpages: ['ok', `${((d.crm.clientTabs || {}).default || []).length} tabs by default`], billing: [d.billing && (d.billing.packages || []).length ? 'ok' : 'off', d.billing ? `${(d.billing.packages || []).length} packages` : ''],
         phone: [d.phone && d.phone.ready ? (d.phset && !d.phset.error && d.phset.saved && !d.phset.access.enabled ? 'off' : 'ok') : 'warn', d.phone && d.phone.ready ? (d.phset && d.phset.saved ? (d.phset.access.enabled ? `${Object.values(d.phset.access.people || {}).filter(p => p.on).length} with the phone` : 'Locked') : 'Live') : 'Not set up'],
-        dialer: [d.dialer && d.dialer.p91 ? 'ok' : 'warn', d.dialer && !d.dialer.error ? (d.dialer.p91 ? `${(d.dialer.rules.lists || []).length} call list${(d.dialer.rules.lists || []).length === 1 ? '' : 's'}` : 'Run the phase-91 SQL') : ''], logins: ['off', `${d.users.filter(u => u.role === 'client').length}`], overview: ['ok', '']
+        calls: [d.dialer && d.dialer.p91 ? 'ok' : 'warn', d.dialer && !d.dialer.error ? (d.dialer.p91 ? `${(d.dialer.rules.lists || []).length} call list${(d.dialer.rules.lists || []).length === 1 ? '' : 's'}` : 'Run the phase-91 SQL') : ''], logins: ['off', `${d.users.filter(u => u.role === 'client').length}`], overview: ['ok', '']
     };
 }
 
 C.views.admin = async arg => {
+    if (arg === 'dialer') arg = 'calls';   // phase 92: Admin → Dialer is now Admin → Calls
     A.sec = SECTIONS.some(s => s[0] === arg) ? arg : 'overview';
     const d = await load(A.force); A.force = false;
     const S = status(d);
-    const main = await ({ overview: secOverview, team: secTeam, tools: secTools, keys: secKeys, email: secEmail, goals: secGoals, leads: secLeads, clientpages: secClientPages, billing: secBilling, phone: secPhone, dialer: secDialer, logins: secLogins }[A.sec])(d, S);
+    const main = await ({ overview: secOverview, team: secTeam, tools: secTools, keys: secKeys, email: secEmail, goals: secGoals, leads: secLeads, clientpages: secClientPages, billing: secBilling, phone: secPhone, calls: secDialer, logins: secLogins }[A.sec])(d, S);
     const strip = [['team', 'Team'], ['tools', 'Tools'], ['email', 'Email'], ['phone', 'Phone'], ['keys', 'Keys'], ['leads', 'Database']].map(([k, l]) => `<a class="sstat ${S[k][0]}" href="#admin/${k}">${light(S[k][0])}<small>${l}</small><b>${esc(S[k][1])}</b></a>`).join('');
     return `<div class="head"><div><h1>Admin</h1><p class="sub">Only you can open this. Everything about how the CRM, the Tools and the phone run.</p></div></div>
       <div class="sstrip">${strip}</div>
@@ -219,7 +221,7 @@ function phoneAccessCards(d) {
     const EDGE = { roaming: 'Nearest automatically (recommended)', ashburn: 'Ashburn, US East', umatilla: 'Umatilla, US West', dublin: 'Dublin, Ireland', frankfurt: 'Frankfurt, Germany', singapore: 'Singapore', tokyo: 'Tokyo, Japan', sydney: 'Sydney, Australia', 'sao-paulo': 'São Paulo, Brazil' };
     return card('Who can use the phone', ps.saved ? (a.enabled ? `${team.filter(p => (a.people[p.id] || {}).on).length} of ${team.length} teammates` : 'Locked for the team') : 'Not set yet: everyone can call at any time', `
         ${ps.saved ? '' : '<p class="note" style="margin:0 0 12px">Until you save this, everyone on the team can call, text and answer at any time, as before. You are never locked out.</p>'}
-        <div class="opt"><div class="t"><b>The phone is on for the team</b><span>Off locks calls, texts and the keypad for every teammate. They can still open the Phone and look.</span></div><label class="switch"><input type="checkbox" id="pa-on" ${a.enabled ? 'checked' : ''}><i></i></label></div>
+        <div class="opt"><div class="t"><b>The phone is on for the team</b><span>For Calls and the Dialer. Off locks calls, texts, outcomes and the keypad for every teammate. They can still open both and look.</span></div><label class="switch"><input type="checkbox" id="pa-on" ${a.enabled ? 'checked' : ''}><i></i></label></div>
         <div class="wform"><div class="field wide"><label>When it works</label><div class="seg" role="group"><label><input type="radio" name="pa-when" value="any" ${anyTime ? 'checked' : ''}> Any time</label><label><input type="radio" name="pa-when" value="hours" ${anyTime ? '' : 'checked'}> These hours</label></div>
           ${hoursHtml('pa-hours', a.hours)}<small>Outside these hours a teammate sees “Calling opens …” and every call control is off; incoming calls ring only people who may answer.</small></div>
           <div class="field"><label for="pa-tz">In this time zone</label><select id="pa-tz">${(ps.tzs || []).concat(ps.tzs.includes(a.tz) ? [] : [a.tz]).map(z => `<option value="${esc(z)}" ${a.tz === z ? 'selected' : ''}>${esc(TZL[z] || z)}</option>`).join('')}</select></div></div>
@@ -233,7 +235,7 @@ function phoneAccessCards(d) {
         <p class="note" style="margin:0">Already on: Opus (wideband) sound with G.711 as the fallback, echo and noise removal in the browser, and live call-quality warnings. Each teammate picks their microphone and runs a call-quality test in Phone → Settings. A wired headset and a cable instead of Wi-Fi make the biggest difference.</p>
         <div class="tbar"><span class="sp"></span><button class="btn pri" type="button" data-aact="pvsave">Save</button></div>`, { open: false });
 }
-// ------------------------------------------------------------------ dialer: call lists, retries, their business hours (phase 91)
+// ------------------------------------------------------------------ calls: call lists, retries, revisits, reminders, their business hours (phases 91, 92)
 /** One call list's editor. */
 function dlistHtml(l, i) {
     const team = st.meta.team, srcs = st.meta.sources, inds = C.industries();
@@ -246,24 +248,38 @@ function dlistHtml(l, i) {
             <label style="margin-top:8px">Who sees this list</label><div class="tick col">${team.filter(m => m.role !== 'admin').map(m => `<label><input type="checkbox" data-person value="${m.id}" ${(l.people || []).includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('') || '<span class="dim">No teammates</span>'}</div><small>None ticked: everyone.</small></div></div></div>`;
 }
 async function secDialer(d) {
-    const D = d.dialer; if (!D || D.error) return card('Dialer', '', `<div class="empty">${esc((D && D.error) || 'Not available.')}</div>`);
+    const D = d.dialer; if (!D || D.error) return card('Calls', '', `<div class="empty">${esc((D && D.error) || 'Not available.')}</div>`);
     const r = D.rules;
     const R = [['no_answer', 'No answer'], ['voicemail', 'Left a voicemail'], ['busy', 'Busy'], ['gatekeeper', 'Owner not in'], ['spoke', 'Talked, follow up']];
-    return `${D.p91 ? '' : `<div class="banner">${ic('shield')}<div><b>Run <span class="mono">sql/schema-phase91.sql</span> in the Supabase SQL editor.</b> It adds who was called and emailed to every lead, and where each lead is in the dialer. Until then the dialer shows every lead as not called.</div></div>`}
-      ${card('Call lists', `${r.lists.length} list${r.lists.length === 1 ? '' : 's'} · plus “Every call list”`, `<p class="note" style="margin:0 0 12px">The lists in the dialer's “call list” menu. A teammate sees the lists open to everyone and the ones that name them. In each list, Today puts callbacks that are due first, then warm leads, then leads never called (best score first), then retries.</p>
+    return `${D.p91 ? '' : `<div class="banner">${ic('shield')}<div><b>Run <span class="mono">sql/schema-phase91.sql</span> in the Supabase SQL editor.</b> It adds who was called and emailed to every lead, and where each lead is in Calls. Until then Calls shows every lead as not called.</div></div>`}
+      ${card('Call lists', `${r.lists.length} list${r.lists.length === 1 ? '' : 's'} · plus “Every call list”`, `<p class="note" style="margin:0 0 12px">The lists in the “call list” menu on Calls → Home. A teammate sees the lists open to everyone and the ones that name them. In each list, Today puts call tasks and callbacks that are due first (a campaign's call step too), then warm leads, then leads never called (best score first), then retries and leads back from a rest.</p>
         <div id="dlists">${r.lists.map(dlistHtml).join('')}</div><div class="tbar"><button class="btn sm" type="button" data-aact="dladd">${ic('plus')}Add a call list</button></div>`)}
       ${card('When to try a lead again', 'After each outcome', `<div class="goaledit">${R.map(([k, l]) => `<div class="field"><label for="dr-${k}">${l}</label><div class="inline"><input id="dr-${k}" type="number" min="0" max="1440" step="0.5" value="${esc(r.retry[k])}"><span>hours</span></div></div>`).join('')}
-          <div class="field"><label for="dr-max">Tries before a lead is closed</label><input id="dr-max" type="number" min="1" max="50" value="${esc(r.maxAttempts)}"><small>Calls without a conversation.</small></div></div>
-        <p class="note" style="margin:8px 0 0">Interested and Booked a meeting put the lead in the pipeline. Call back at a set time makes a call task. Not interested, Not a fit, a wrong number and Do not call close it. “They asked for an email” makes an email task.</p>`)}
+          <div class="field"><label for="dr-max">Tries in a row before a lead rests</label><input id="dr-max" type="number" min="1" max="50" value="${esc(r.maxAttempts)}"><small>Calls with no conversation.</small></div></div>`)}
+      ${card('When a closed lead comes back', 'So no lead is lost for good by accident', `<div class="goaledit">
+          <div class="field"><label for="rv-ni">Not interested, or not a fit</label><div class="inline"><input id="rv-ni" type="number" min="0" max="730" value="${esc((r.revisit || {}).notInterested ?? 90)}"><span>days</span></div><small>The lead is marked Lost and its emails stop; after this it is in Today again. 0: never.</small></div>
+          <div class="field"><label for="rv-ot">Out of tries</label><div class="inline"><input id="rv-ot" type="number" min="0" max="730" value="${esc((r.revisit || {}).outOfTries ?? 30)}"><span>days</span></div><small>After the tries above, it rests, then starts again with a fresh count. 0: never.</small></div></div>
+        <div class="effects"><b>What each outcome does</b><ul>
+          <li><b>No answer, voicemail, busy, owner not in:</b> back after the hours above.</li>
+          <li><b>Call back at a set time:</b> a call task, with reminders before it.</li>
+          <li><b>Interested, Booked a meeting:</b> into the pipeline (Contacted, or Meeting); its email campaign stops.</li>
+          <li><b>Not interested, Not a fit:</b> Lost, with the reason; email stops; back after the days above.</li>
+          <li><b>Wrong number:</b> marked on the lead; it comes back when someone puts in a new number.</li>
+          <li><b>Do not call:</b> never called, texted or emailed again. Only you can allow calls again, from the lead.</li>
+          <li><b>They asked for an email:</b> an email task, due now.</li></ul></div>`)}
+      ${card('Reminders', 'The office’s standard times', `<p class="note" style="margin:0 0 10px">Before a call-back or a to-do with a time, a reminder pops up on whatever page the caller has open. Each caller can choose their own times in Calls → Settings; these are for everyone who has not.</p>
+        <div class="tick" id="dr-rem">${(D.steps || [1440, 120, 60, 30, 15, 10, 5, 0]).map(x => `<label><input type="checkbox" value="${x}" ${(r.reminders || []).includes(x) ? 'checked' : ''}>${({ 1440: '1 day', 120: '2 hours', 60: '1 hour', 30: '30 minutes', 15: '15 minutes', 10: '10 minutes', 5: '5 minutes', 0: 'When it starts' })[x]}${x ? ' before' : ''}</label>`).join('')}</div>
+        <div class="wform" style="margin-top:10px"><div class="field"><label for="dr-snooze">Snooze brings a reminder back after</label><select id="dr-snooze">${[1, 5, 10, 15, 30].map(m => `<option value="${m}" ${(r.snooze || 5) === m ? 'selected' : ''}>${m} minute${m === 1 ? '' : 's'}</option>`).join('')}</select></div></div>`)}
       ${card('Their business hours', 'Call while they are open', `<label class="check"><input type="checkbox" id="dh-on" ${r.localHours.on ? 'checked' : ''}> Put leads whose business is open now first</label>${hoursHtml('dh-hours', r.localHours)}
         <p class="note" style="margin:8px 0 0">In each lead's own time zone: from its address, else its area code. A closed business stays in the list, marked Closed, at the end of Today.</p>`)}
-      <div class="savebar"><span class="sp"></span><button class="btn pri" type="button" data-aact="dlsave">Save the dialer</button></div>`;
+      <div class="savebar"><span class="sp"></span><button class="btn pri" type="button" data-aact="dlsave">Save Calls settings</button></div>`;
 }
 function readDialer() {
     const num = id => +($('#' + id) || {}).value;
     return {
         retry: Object.fromEntries(['no_answer', 'voicemail', 'busy', 'gatekeeper', 'spoke'].map(k => [k, num('dr-' + k)])), maxAttempts: num('dr-max'),
         localHours: { on: $('#dh-on').checked, ...readHours($('#dh-hours')) },
+        revisit: { notInterested: num('rv-ni'), outOfTries: num('rv-ot') }, reminders: $$('#dr-rem input:checked').map(x => +x.value), snooze: num('dr-snooze'),
         lists: $$('#dlists .dlist').map(el => ({ id: el.dataset.id || undefined, name: $('[data-k="name"]', el).value, pipeline: $('[data-k="pipeline"]', el).value, emailed: $('[data-k="emailed"]', el).value, minScore: +$('[data-k="minScore"]', el).value,
             sources: $$('[data-src]:checked', el).map(x => x.value), industries: $$('[data-ind]:checked', el).map(x => x.value), people: $$('[data-person]:checked', el).map(x => x.value) }))
     };
@@ -339,7 +355,7 @@ document.addEventListener('click', async e => {
             toast('Saved. It applies to the next call; open phones update within a minute.'); return again(); } finally { a.disabled = false; } }
         if (k === 'pvsave') { await api('/api/admin/phone/settings', { method: 'PUT', body: { voice: { edge: v('pv-edge') } } }); toast('Saved. Phones use it the next time they open.'); return again(); }
         if (k === 'dladd') { const n = $$('#dlists .dlist').length; $('#dlists').insertAdjacentHTML('beforeend', dlistHtml({ name: '', pipeline: 'any', emailed: 'any', minScore: 0 }, n)); $('#dlists .dlist:last-child [data-k="name"]').focus(); return; }
-        if (k === 'dlsave') { a.disabled = true; try { await api('/api/admin/dialer', { method: 'PUT', body: { rules: readDialer() } }); toast('Dialer saved'); return again(); } finally { a.disabled = false; } }
+        if (k === 'dlsave') { a.disabled = true; try { await api('/api/admin/dialer', { method: 'PUT', body: { rules: readDialer() } }); toast('Calls settings saved'); return again(); } finally { a.disabled = false; } }
         if (k === 'mailoff') { if (!confirm('Disconnect the mailbox? Campaign email stops until it is connected again.')) return; await api('/api/admin/mailbox', { method: 'DELETE' }); toast('Disconnected'); return again(); }
         if (k === 'goals') return settings({ goals: Object.fromEntries(['calls', 'emails', 'prospects', 'followups'].map(x => [x, +v('go-' + x)])) }, 'Goals saved');
         if (k === 'tz') return settings({ timezone: v('go-tz') }, 'Time zone saved');
