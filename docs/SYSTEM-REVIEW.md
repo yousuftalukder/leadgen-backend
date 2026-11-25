@@ -1,4 +1,4 @@
-# System review (November 2026, after phase 93)
+# System review (November 2026, after phase 94)
 
 What the system is for: **calling and lead management, with email campaigns.** Prospecting automation, scoring and the
 social media tools come after, and must never slow those down. This review measures the system against that.
@@ -26,6 +26,18 @@ social media tools come after, and must never slow those down. This review measu
 - **Everything loaded at once.** Every CRM page load fetched the whole phone inbox and downloaded Twilio before
   drawing anything else. Both now wait.
 - **The Overview read every column of every lead.** It reads the ten it uses.
+
+## Phase 94: the first page
+
+- **Opening the CRM downloaded every lead.** The Overview and the menu's counts loaded the whole lead list (2.4 MB,
+  112 KB gzipped, at 5,000 leads) before anything else. The Overview is now one answer of about 2 KB gzipped, built
+  once for the whole team every 20 seconds, and the menu's counts are three row counts. The lead list loads when
+  Leads, the Pipeline or Clients opens, as before.
+- **Time zones were worked out from scratch thousands of times.** Building a time-zone formatter costs ~80 µs and
+  the call queue built one per lead. Formatters, days and hours are now kept, so Calls and the Overview do this
+  work once per zone and minute.
+- **Live without load.** The Overview's pulse (new activity, today's counts, who is on a call) runs only while it
+  is open and in view, at most every 30 seconds, and is shared by everyone who asks within 10.
 
 ## Risks, in the order I would tackle them
 

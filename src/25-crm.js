@@ -782,8 +782,8 @@ app.get('/api/crm/overview', async (req, res) => {
             selectAll('crm_leads', cols + ', service').catch(() => selectAll('crm_leads', cols)).then(data => ({ data }), error => ({ error })),   // service: the job a won lead was for, when the column is there
             selectAll('crm_activities', 'id, lead_id, type, actor_id, at, meta', q => q.gte('at', since.toISOString()).in('type', ['email_out', 'email_in', 'call', 'meeting', 'stage'])).then(data => ({ data }), () => ({ data: [] })),
             supabase.from('crm_leads').select('id, full_name, company, next_step, next_step_at, owner_id').not('next_step_at', 'is', null).not('stage', 'in', '(won,lost)').order('next_step_at', { ascending: true }).limit(8),
-            supabase.from('crm_influencers').select('id, stage').limit(20000),
-            supabase.from('crm_influencer_posts').select('views, posted_at').gte('posted_at', since.toISOString().slice(0, 10)).limit(20000)
+            selectAll('crm_influencers', 'id, stage').then(data => ({ data }), () => ({ data: [] })),
+            selectAll('crm_influencer_posts', 'views, posted_at', q => q.gte('posted_at', since.toISOString().slice(0, 10)), { order: 'posted_at' }).then(data => ({ data }), () => ({ data: [] }))
         ]);
         if (l.error) throw l.error;
         const o = crmOverview({ leads: l.data || [], activities: a.data || [], since });

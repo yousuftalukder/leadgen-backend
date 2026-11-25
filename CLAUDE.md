@@ -39,6 +39,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
 - The Dialer and Email campaigns are locked per person until the owner unlocks them in Admin → Team
   (`feature_access`; `S.needFeature(ctx, res, 'dialer' | 'campaigns')` on the server).
 - `docs/SYSTEM-REVIEW.md` holds the current review: what is solid, the risks in order, and what comes next.
+- The Overview is an operations console (phase 94): one request, `GET /api/crm/console` (`src/25-console.js`), built at
+  most once every 20 seconds for everybody; `GET /api/crm/pulse` every 30 seconds only while it is open and in view;
+  the menu's counts come from `GET /api/crm/badges`. Nothing on the first page loads the lead list: keep it that way.
 - `npm run check` and `npm test` before every push; CI runs the same on every PR.
 - Each phase gets a `docs/DEPLOY-PHASEN.md` saying what to run and what changed.
 

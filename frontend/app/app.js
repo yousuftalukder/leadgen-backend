@@ -58,7 +58,7 @@ const ICONS = {
     arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>', grip: '<path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" stroke-width="2.6"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>', trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
     keypad: '<circle cx="6" cy="5" r="1.2"/><circle cx="12" cy="5" r="1.2"/><circle cx="18" cy="5" r="1.2"/><circle cx="6" cy="11" r="1.2"/><circle cx="12" cy="11" r="1.2"/><circle cx="18" cy="11" r="1.2"/><circle cx="6" cy="17" r="1.2"/><circle cx="12" cy="17" r="1.2"/><circle cx="18" cy="17" r="1.2"/><circle cx="12" cy="22" r="1.2"/>',
     side: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 10l-2 2 2 2"/>', ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>', redo: '<path d="M20 8a8 8 0 1 0 1 6"/><path d="M20 3v5h-5"/>',
-    tools: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.3-.4-.4-2.3z"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>', unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>', out: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>', moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'
+    tools: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.3-.4-.4-2.3z"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', down: '<path d="m6 9 6 6 6-6"/>', lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>', unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>', out: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>', moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'
 };
 const ic = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[k] || ''}</svg>`;
 function toast(t, bad) { document.querySelectorAll('.toast').forEach(x => x.remove()); const el = document.createElement('div'); el.className = 'toast'; el.setAttribute('role', 'status'); if (bad) el.style.background = 'var(--bad)'; el.textContent = t; document.body.appendChild(el); setTimeout(() => el.remove(), 3200); }
@@ -72,7 +72,7 @@ async function api(path, { method = 'GET', body } = {}) {
     if (!r.ok) { const e = new Error(j.error || `The server answered ${r.status}.`); e.status = r.status; e.data = j; throw e; }
     return j;
 }
-const st = { meta: null, leads: null, period: 30, trange: 'today', view: 'all', q: '', cat: '', ind: '', owner: '', out: '', sel: new Set(), leadMode: 'table',
+const st = { meta: null, leads: null, period: 30, badges: null, view: 'all', q: '', cat: '', ind: '', owner: '', out: '', sel: new Set(), leadMode: 'table',
     pCat: '', pInd: '', pOwner: '', pQ: '', hist: 'all', net: null, crOn: null, crStage: 'all', crQ: '', crCountry: 'all', picking: null, openId: null, cQ: '' };
 const teamName = id => { const t = st.meta && st.meta.team.find(x => x.id === id); return t ? t.name : '—'; };
 const srcOf = k => st.meta.sources.find(s => s.key === k) || { key: k, label: k };
@@ -106,10 +106,11 @@ const NAV = [
 let route = 'overview', routeArg = '';
 const navOf = r => r === 'client' ? 'clients' : r;
 function shell() {
-    const L = st.leads || [];
-    const cold = L.filter(l => leadState(l) === 'cold').length, pipe = L.filter(l => leadState(l) === 'pipeline').length;
-    const due = L.filter(l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)).length;
-    const badge = k => k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && st.leads ? `<span class="ct">${num(cold)}</span>` : k === 'pipeline' && st.leads ? `<span class="ct">${num(pipe)}</span>`
+    // Phase 94: from the lead list when it is loaded, else the counts the Overview brought (it never loads the list).
+    const L = st.leads, B = L ? { cold: L.filter(l => leadState(l) === 'cold').length, pipeline: L.filter(l => leadState(l) === 'pipeline').length,
+        due: L.filter(l => l.next_step_at && new Date(l.next_step_at) < startOfTomorrow() && !['won', 'lost'].includes(l.stage)).length } : st.badges;
+    const due = B ? B.due : 0;
+    const badge = k => k === 'overview' && due ? `<span class="ct hot" title="Follow-ups due">${due}</span>` : k === 'leads' && B ? `<span class="ct">${num(B.cold)}</span>` : k === 'pipeline' && B ? `<span class="ct">${num(B.pipeline)}</span>`
         : k === 'dialer' ? `<span class="ct hot" data-phbadge ${window.ELPhone && ELPhone.unread() ? '' : 'hidden'}>${window.ELPhone ? ELPhone.unread() || '' : ''}</span>` : '';
     let grp = '';
     const mini = document.documentElement.dataset.rail === 'mini';
@@ -165,6 +166,7 @@ async function render() {
     if (!ROUTES.includes(route) || (route === 'admin' && !isAdmin())) { route = 'overview'; routeArg = ''; }
     if (route !== 'influencers' && route !== 'leads' && mapObj) { mapObj.remove(); mapObj = null; }
     if (route !== 'leads' && leadMap) { leadMap.remove(); leadMap = null; }
+    if (route !== 'overview') ccStop();
     shell();
     const v = $('#view'), seq = ++renderSeq;
     document.body.dataset.route = route;
@@ -175,6 +177,7 @@ async function render() {
         const html = await fn(routeArg);
         if (seq !== renderSeq) return;   // a newer page was asked for while this one loaded
         v.innerHTML = html; shell();
+        if (route === 'overview') ccMount();
         if (route === 'influencers') mapInit();
         if (route === 'leads' && st.leadMode === 'map') leadMapInit();
         if ((route === 'calls' || route === 'dialer') && window.ELPhone) ELPhone.mounted();
@@ -182,79 +185,274 @@ async function render() {
     } catch (e) { if (seq === renderSeq) v.innerHTML = `<div class="empty err">Could not load this page: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; }
 }
 
-// ------------------------------------------------------------------ overview: the performance half
-// ------------------------------------------------------------------ overview
-const sparkSvg = (arr, c) => { const w = 120, h = 26, mx = Math.max(1, ...arr), pts = arr.map((v, i) => [i * w / Math.max(1, arr.length - 1), h - 3 - v / mx * (h - 6)]);
-    const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(''); const e = pts[pts.length - 1];
-    return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}L${w} ${h}L0 ${h}Z" fill="var(${c})" opacity=".12"/><path d="${d}" fill="none" stroke="var(${c})" stroke-width="1.6" vector-effect="non-scaling-stroke"/><circle cx="${e[0]}" cy="${e[1]}" r="2.2" fill="var(${c})"/></svg>`; };
-async function perfHtml() {
-    const [o] = await Promise.all([api('/api/crm/overview?days=' + st.period), leads()]);
-    const T = o.totals;
-    const row = (d, cls, cvar) => `<tr class="${cls} go" data-dept="${d.key}"><td><span class="nm" style="--c:var(${cvar})"><i></i>${esc(d.label)}</span></td><td>${num(d.leads)}</td><td>${num(d.sent)}</td><td>${num(d.calls)}</td><td>${num(d.replies)}</td>
-        <td><span class="rate" style="--v:${Math.min(100, pct(d.replies, d.sent) * 4)}%;--c:var(${cvar})"><i></i>${pct(d.replies, d.sent)}%</span></td><td>${num(d.meetings)}</td><td>${num(d.won)}</td><td>${lakh(d.pipeline)}</td></tr>`;
-    const strip = [['New leads', num(T.leads), '--ink', o.series.leads], ['Cold emails sent', num(T.sent), '--s-web', o.series.sent], ['Calls', num(T.calls), '--gold', o.series.calls],
-                   ['Replies', num(T.replies), '--ok', o.series.replies], ['Meetings', num(T.meetings), '--s-meta', o.series.meetings], ['Won', num(T.won), '--ok', o.series.won]];
-    const I = o.influencers;
-    const JOB = { website: ['--s-web', 'globe'], seo: ['--s-seo', 'seo'], marketing: ['--s-meta', 'mega'], influencer: ['--s-inf', 'star'] };
-    const J = o.jobs || [], jAll = J.reduce((a, j) => a + j.value, 0), jP = J.reduce((a, j) => a + j.periodValue, 0), jPc = J.reduce((a, j) => a + j.periodCount, 0), jC = J.reduce((a, j) => a + j.count, 0);
-    const jobs = J.length ? `<section class="jobs">
-        <div class="card jhero"><small class="lbl">Revenue won · ${st.period === 90 ? 'this quarter' : 'last ' + st.period + ' days'}</small><b class="big">${lakh(jP)}</b>
-          <em>${num(jPc)} new job${jPc === 1 ? '' : 's'} · ${lakh(jAll)} from ${num(jC)} job${jC === 1 ? '' : 's'} all time</em>
-          <div class="stack" role="img" aria-label="Revenue by job type">${J.filter(j => j.value).map(j => `<i style="--c:var(${JOB[j.key][0]});flex:${j.value}" title="${esc(j.label)}: ${lakh(j.value)}"></i>`).join('') || '<i style="flex:1;--c:var(--line2)"></i>'}</div>
-          <div class="slegend">${J.map(j => `<span style="--c:var(${JOB[j.key][0]})"><i></i>${esc(j.label)}<b>${jAll ? pct(j.value, jAll) : 0}%</b></span>`).join('')}</div></div>
-        ${J.map(j => `<div class="card job" style="--c:var(${JOB[j.key][0]})"><div class="jh"><span class="ji">${ic(JOB[j.key][1])}</span>${esc(j.label)}</div>
-          <b class="jn">${num(j.count)}</b><small>${j.count === 1 ? 'job' : 'jobs'} won · all time</small>
-          <div class="jv"><span>${lakh(j.value)}</span>${j.periodCount ? `<em>+${num(j.periodCount)} · ${lakh(j.periodValue)} this period</em>` : '<em class="z">none this period</em>'}</div>
-          <i class="jbar"><i style="width:${jAll ? Math.max(3, pct(j.value, jAll)) : 0}%"></i></i></div>`).join('')}
-      </section>` : '';
-    return `<div class="sechead"><h2>Performance</h2><span>${st.period === 90 ? 'This quarter' : 'Last ' + st.period + ' days'}</span><div class="sp"></div>
-        <div class="period" role="group" aria-label="Period">${[[7, '7 days'], [30, '30 days'], [90, 'Quarter']].map(([v, t]) => `<button type="button" data-period="${v}" class="${st.period === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
-      ${jobs}
-      <section class="card strip">${strip.map(([l, v, c, s]) => `<div class="m"><small>${l}</small><b>${v}</b>${l === 'Won' ? `<em>${lakh(T.wonValue)} signed</em>` : '<em style="color:var(--dim)">' + (st.period === 90 ? 'this quarter' : 'last ' + st.period + ' days') + '</em>'}${sparkSvg(s, c)}</div>`).join('')}</section>
-      <section class="card"><div class="card-h"><h2>By department</h2><span>Click a row to see its leads</span></div><div class="tablewrap"><table class="dept"><thead><tr><th>Department</th><th>Leads</th><th>Emails sent</th><th>Calls</th><th>Replies</th><th>Reply rate</th><th>Meetings</th><th>Won</th><th>Open pipeline</th></tr></thead><tbody>
-        ${o.departments.map(d => row(d, 'parent', DEPT_VAR[d.key]) + d.children.map(c => row(c, 'child', SRC_VAR[c.key])).join('')).join('')}</tbody>
-        <tfoot><tr><td>All departments</td><td>${num(T.leads)}</td><td>${num(T.sent)}</td><td>${num(T.calls)}</td><td>${num(T.replies)}</td><td>${pct(T.replies, T.sent)}%</td><td>${num(T.meetings)}</td><td>${num(T.won)}</td><td>${lakh(T.pipeline)}</td></tr></tfoot></table></div></section>
-      <section class="card" style="margin-top:16px"><div class="card-h"><h2>Influencer network</h2><a class="btn sm ghost" href="#influencers">Open the map</a></div>
-        <div class="infl"><div><b>${num(I.total)}</b><small>creators in the network</small></div><div><b>${num(I.partners)}</b><small>worked with us</small></div><div><b>${num(I.posts)}</b><small>posts for clients this period</small></div><div><b>${kfmt(I.views)}</b><small>views on those posts</small></div></div></section>
-      <div class="cols3">
-        <section class="card"><div class="card-h"><h2>Up next</h2><span>${o.upNext.length ? 'Soonest first' : ''}</span></div><div class="list">${o.upNext.length ? o.upNext.map(l => `<div class="row" data-open="${l.id}"><span class="kind">${ic(/call|meet/i.test(l.next_step || '') ? 'phone' : 'mail')}</span><div class="t"><b>${esc(l.next_step || 'Follow up')}</b><span>${esc(l.full_name)}${l.company ? ' · ' + esc(l.company) : ''}</span></div>${dueLabel(l.next_step_at)}</div>`).join('') : '<div class="empty">Nothing scheduled. Add a next step on a lead and it appears here.</div>'}</div></section>
-        <section class="card"><div class="card-h"><h2>Funnel</h2><span>Leads created this period</span></div><div class="funnel">${o.funnel.map(([l, v], i) => `<div><span>${l}</span><em><i style="--v:${o.funnel[0][1] ? Math.max(2, pct(v, o.funnel[0][1])) : 0}%;--o:${1 - i * .12}"></i></em><b>${num(v)}<small>${i ? pct(v, o.funnel[i - 1][1]) + '%' : ''}</small></b></div>`).join('')}</div></section>
-        <section class="card"><div class="card-h"><h2>Team</h2><span>This period</span></div><div class="tablewrap"><table class="dept team" style="min-width:0"><thead><tr><th>Person</th><th>Emails</th><th>Calls</th><th>Replies</th><th>Won</th></tr></thead><tbody>
-          ${st.meta.team.map(m => { const t = o.team[m.id] || {}; return `<tr><td><span class="nm"><span class="ava">${initials(m.name)}</span>${esc(m.name)}</span></td><td>${num(t.sent)}</td><td>${num(t.calls)}</td><td>${num(t.replies)}</td><td>${num(t.won)}</td></tr>`; }).join('')}</tbody></table></div></section>
-      </div>`;
-}
-// ------------------------------------------------------------------ overview: today first, then how the business is doing
-const GOAL = { calls: ['Calls', 'phone', '--s-web'], emails: ['Emails', 'mail', '--s-email'], prospects: ['Prospects found', 'search', '--s-meta'], followups: ['Follow-ups done', 'task', '--ok'] };
-const ring = (pct, c) => { const r = 30, C = 2 * Math.PI * r; return `<svg class="gring" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="${r}" class="trk"/><circle cx="36" cy="36" r="${r}" class="val" style="stroke:var(${c});stroke-dasharray:${(pct / 100 * C).toFixed(1)} ${C.toFixed(1)}"/></svg>`; };
-const PRIO = { highest: 'Highest', high: 'High', medium: '', low: 'Low', lowest: 'Lowest' };
+// ------------------------------------------------------------------ overview: the operations console (phase 94)
+// One request draws it: /api/crm/console, built once for everybody every 20 seconds. While the Overview is open and in
+// view, the pulse (/api/crm/pulse) brings new activity, today's counts and who is on a call every 30 seconds; nothing
+// runs on any other page or in a hidden tab. It never needs the lead list. Motion plays once, and not at all for
+// people who ask for less.
+const CC = { timers: [], d: null, seen: new Set(), first: true, bound: false, pulseAt: 0, ms: null, synced: 0 };
+const $all = (q, r = document) => [...r.querySelectorAll(q)];
+const lessMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const JOB_C = { website: '--s-web', seo: '--s-seo', marketing: '--s-meta', influencer: '--s-inf' };
+const GOAL_L = { calls: ['CALLS', 'var(--glow)'], emails: ['EMAILS', '#a587ff'], prospects: ['LEADS FOUND', '#35c2d6'], followups: ['FOLLOW-UPS', '#3ccf8e'] };
+const RING = 2 * Math.PI * 19, DONUT = 2 * Math.PI * 56;
+const hhmm = at => new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+const hourL = h => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM');
+const tzCity = tz => String(tz || '').split('/').pop().replace(/_/g, ' ').toUpperCase();
+const clock = s => `${Math.floor(s / 60)}:${String(Math.max(0, Math.floor(s % 60))).padStart(2, '0')}`;
+const span = ms => { const m = Math.max(0, Math.round(ms / 60000)); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
+const feedText = x => x.parts.map(p => Array.isArray(p) ? `<b>${esc(p[0])}</b>` : esc(p)).join('');
+const feedLi = (x, fresh) => `<li class="${fresh ? 'new' : ''}"${x.lead ? ` data-open="${esc(x.lead)}"` : ''}><time>${hhmm(x.at)}</time><i class="d ${esc(x.tone)}"></i><p>${feedText(x)}</p></li>`;
+// The client page reads this through window.CRM: a due date as "Today", "Tomorrow" or "2 d overdue".
 const dayLabel = d => { if (!d) return ''; const t = new Date(); t.setHours(0, 0, 0, 0); const x = new Date(d + 'T00:00:00'); const n = Math.round((x - t) / 864e5); return n < 0 ? `${-n} d overdue` : n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : x.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }); };
-function todayHtml(T) {
-    const tasks = T.clientTasks || [], calls = T.crmTasks || [];
-    const over = tasks.filter(t => t.overdue), due = tasks.filter(t => !t.overdue);
-    const row = t => `<a class="trow" href="#client/${t.client.id}/tasks/${t.id}"><span class="tdot ${t.status}"></span><div class="t"><b>${esc(t.title)}</b><span><span class="cl">${esc(t.client.name)}</span>${(t.labels || []).slice(0, 2).map(l => `<span class="lab">${esc(l)}</span>`).join('')}</span></div>
-        ${PRIO[t.priority] ? `<span class="prio ${t.priority}">${PRIO[t.priority]}</span>` : ''}<span class="due ${t.overdue ? 'over' : dayLabel(t.due_date) === 'Today' ? 'today' : ''}">${dayLabel(t.due_date)}</span>${t.assignee_user_id ? `<span class="ava" title="${esc(teamName(t.assignee_user_id))}">${initials(teamName(t.assignee_user_id))}</span>` : t.assigned_to_client ? '<span class="ava cli" title="The client">C</span>' : '<span class="ava nobody"></span>'}</a>`;
-    const callRow = t => `<div class="trow call"><span class="kind">${ic(t.kind === 'call' ? 'phone' : 'task')}</span><div class="t"><b>${esc(t.title)}</b><span>${t.lead ? esc([t.lead.full_name, t.lead.company].filter(Boolean).join(' · ')) : ''}</span></div>${dueLabel(t.due_at)}
-        ${t.lead && t.lead.phone && t.kind === 'call' ? `<button class="btn sm" type="button" data-callnow="${esc(t.lead.phone)}" data-name="${esc(t.lead.company || t.lead.full_name || '')}" data-lead="${t.lead_id}">${ic('phone')}Call</button>` : ''}${t.lead ? `<button class="btn sm ghost" type="button" data-open="${t.lead_id}">Open</button>` : ''}<button class="btn sm ghost" type="button" data-taskdone2="${t.id}" title="Mark done">${ic('task')}</button></div>`;
-    const G = T.goals || [], met = G.filter(g => g.met).length;
-    return `<div class="today">
-      <section class="card tcard"><div class="card-h"><div><h2>Client work</h2><span>${tasks.length ? `${tasks.length} task${tasks.length === 1 ? '' : 's'} due${over.length ? ` · <b class="bad">${over.length} overdue</b>` : ''}` : 'Nothing due'}</span></div>
-          <div class="period sm" role="group" aria-label="Range">${[['today', 'Today'], ['7d', '7 days'], ['month', 'This month']].map(([k, l]) => `<button type="button" data-trange="${k}" class="${st.trange === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
-        <div class="tlist">${over.length ? `<div class="tgrp bad">Overdue</div>${over.map(row).join('')}` : ''}${due.length ? `<div class="tgrp">${st.trange === 'today' ? 'Due today' : st.trange === '7d' ? 'Due in the next 7 days' : 'Due this month'}</div>${due.map(row).join('')}` : ''}
-          ${tasks.length ? '' : `<div class="empty sm">${ic('task')}<b>All clear.</b> No client task is due ${st.trange === 'today' ? 'today' : st.trange === '7d' ? 'this week' : 'this month'}. Tasks with a due date on any client's board show here.</div>`}</div>
-        ${calls.length ? `<div class="card-h sub2"><h2>Calls and follow-ups</h2><span>${calls.length} from leads and campaigns</span></div><div class="tlist">${calls.slice(0, 8).map(callRow).join('')}</div>` : ''}</section>
-      <section class="card gcard"><div class="card-h"><div><h2>Outreach today</h2><span>${met} of ${G.length} goals met · ${esc(T.timezone || '')}</span></div>${isAdmin() ? '<a class="btn sm ghost" href="#admin/goals">Set goals</a>' : ''}</div>
-        <div class="goals">${G.map(g => `<div class="goal ${g.met ? 'met' : ''}">${ring(g.pct, GOAL[g.key][2])}<div class="gn"><b>${num(g.done)}</b><small>of ${num(g.target)}</small></div><span>${GOAL[g.key][0]}</span></div>`).join('')}</div>
-        <div class="gteam">${(T.team || []).filter(p => p.calls + p.emails + p.prospects + p.followups || st.meta.team.some(m => m.id === p.id)).map(p => `<div><span class="ava">${initials(p.name)}</span><b>${esc(p.name)}</b><span title="Calls">${ic('phone')}${p.calls}</span><span title="Emails">${ic('mail')}${p.emails}</span><span title="Prospects">${ic('search')}${p.prospects}</span><span title="Follow-ups">${ic('task')}${p.followups}</span></div>`).join('')}</div></section>
+
+function ccSpark(v, i) {
+    const W = 120, H = 36, P = 5, max = Math.max(1, ...v), anim = CC.first && !lessMotion();
+    const pt = j => [j * W / Math.max(1, v.length - 1), H - P - v[j] / max * (H - P * 2)];
+    const line = v.map((_, j) => (j ? 'L' : 'M') + pt(j).map(n => n.toFixed(1)).join(',')).join('');
+    return `<svg class="cc-spk" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="ccg${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".32"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient>`
+        + `<clipPath id="ccc${i}"><rect x="-2" y="-4" height="${H + 8}" width="${anim ? 0 : W + 4}">${anim ? `<animate attributeName="width" from="0" to="${W + 4}" dur="1s" begin="${(0.1 + i * 0.07).toFixed(2)}s" fill="freeze"/>` : ''}</rect></clipPath></defs>`
+        + `<g clip-path="url(#ccc${i})"><path class="ar" d="${line}L${W},${H}L0,${H}Z" fill="url(#ccg${i})"/><path class="ln" d="${line}"/></g><line class="xh" x1="0" x2="0" y1="0" y2="${H}" visibility="hidden"/></svg>`;
+}
+function ccGoal(g) {
+    const [l, c] = GOAL_L[g.key] || [String(g.key).toUpperCase(), 'var(--glow)'];
+    const off = RING * (1 - Math.min(1, g.target ? g.done / g.target : 1));
+    return `<div class="cc-goal ${g.met ? 'met' : ''}" style="--c:${c}" data-goal="${g.key}"><svg viewBox="0 0 48 48" aria-hidden="true"><circle class="tr" cx="24" cy="24" r="19"/><circle class="pg" cx="24" cy="24" r="19" style="stroke-dasharray:${RING.toFixed(1)};stroke-dashoffset:${off.toFixed(1)}"/></svg>
+        <div><small>${l}</small><b><span class="gv">${num(g.done)}</span><i>/${num(g.target)}</i></b><span class="gs">${g.met ? 'goal met ✓' : num(Math.max(0, g.target - g.done)) + ' to go'}</span></div></div>`;
+}
+function ccSys(d) {
+    const s = d.sys, m = s.mailbox, lights = [];
+    lights.push(s.phone.ready ? ['ok', `PHONE LINE <b>${esc(s.phone.number || '')}</b> READY`] : ['bad', 'PHONE LINE <b>NOT SET UP</b>']);
+    lights.push(!m.connected ? ['warn', 'MAILBOX <b>NOT CONNECTED</b>'] : m.paused ? ['warn', 'MAILBOX <b>PAUSED</b>'] : m.cap ? ['ok', `MAILBOX <b>${num(m.left)}/${num(m.cap)}</b> SENDS LEFT`] : ['ok', 'MAILBOX <b>CONNECTED</b>']);
+    if (d.campaigns !== null) lights.push(s.sender.running ? ['ok', `CAMPAIGN SENDER · NEXT RUN <b data-cc="sender">${s.sender.nextAt ? clock(Math.max(0, (new Date(s.sender.nextAt) - Date.now()) / 1000)) : '—'}</b>`] : ['idle', 'CAMPAIGN SENDER · <b>NO CAMPAIGN RUNNING</b>']);
+    if (p90()) lights.push(s.mapWaiting ? ['warn', `LEAD MAP <b>${num(s.mapWaiting)}</b> WAITING FOR A PLACE`] : ['ok', 'LEAD MAP <b>UP TO DATE</b>']);
+    lights.push(['ok', `SERVER <b data-cc="ms">${CC.ms == null ? '—' : CC.ms + ' ms'}</b>`]);
+    return lights.map(([c, t]) => `<span class="cc-s ${c}"${c === 'ok' && t.startsWith('SERVER') ? ' data-cc="srv"' : ''}><i></i>${t}</span>`).join('');
+}
+function ccHours(a) {
+    if (!a) return ['off', '—'];
+    if (['owner', 'open', 'any_time'].includes(a.why)) return ['ok', a.why === 'owner' ? 'OPEN · always, for you' : 'OPEN · any time'];
+    if (a.allowed && a.closesAt) return ['ok', `OPEN · ${span(new Date(a.closesAt) - Date.now())} left`];
+    if (a.opensAt) return ['off', `CLOSED · opens in ${span(new Date(a.opensAt) - Date.now())}`];
+    return ['off', a.why === 'locked' ? 'LOCKED for the team' : a.why === 'no_access' ? 'NOT GIVEN TO YOU YET' : 'CLOSED'];
+}
+function ccUpNext(d) {
+    if (!d.upNext.length) return `<div class="cc-empty">${ic('phone')}<span><b>Nothing due in Calls right now.</b> New leads with a phone number show here the moment they are due.</span></div>`;
+    const tag = r => r.task ? ['cb', 'Callback'] : r.campaign ? ['cp', 'Campaign'] : r.tab === 'spoke' || r.tab === 'callback' ? ['fu', 'Follow-up'] : r.tab === 'not_called' ? ['', 'Fresh'] : r.tab === 'closed' ? ['', 'Revisit'] : ['', 'Retry'];
+    const when = r => { const t = r.task ? r.taskAt : r.tab === 'callback' ? r.callback_at : null; if (r.task || t) return t ? [new Date(t) < new Date() ? 'due' : '', hhmm(t)] : ['due', 'NOW'];
+        return r.openNow ? ['open', 'OPEN'] : r.opensAt ? ['', 'OPENS ' + new Date(r.opensAt).toLocaleTimeString('en-US', { hour: 'numeric' })] : ['', '—']; };
+    const W = { hot: 'Hot', warm: 'Warm', lukewarm: 'Lukewarm', cold: '' };
+    return `<div class="cc-q">${d.upNext.map((r, i) => { const [tc, tl] = tag(r), [wc, wl] = when(r);
+        const sub = [r.city, r.score ? 'score ' + r.score : '', W[r.warmth], r.calls ? `${r.calls} call${r.calls === 1 ? '' : 's'}${r.last ? ' · last: ' + r.last : ''}` : 'never called', r.campaign ? '“' + r.campaign + '”' : ''].filter(Boolean).map(esc).join(' · ');
+        return `<div class="cc-qr"><span class="cc-qt ${wc}">${esc(wl)}</span><div class="t" data-open="${esc(r.id)}"><b>${r.task ? esc(r.task) + ': ' : ''}${esc(r.name || '')}</b><span>${sub}</span></div><span class="cc-tag ${tc}">${tl}</span>
+          <a class="btn sm ${i === 0 ? 'pri' : ''}" href="#calls/home/${esc(r.id)}" title="Open in Calls to call and log how it went">${ic('phone')}Call</a></div>`; }).join('')}</div>`;
+}
+function ccNeeds(d) {
+    const N = d.needs, row = (n, hot, label, small, inner) => `<details class="cc-need ${n ? (hot ? 'hot' : '') : 'ok'}"${n ? '' : ' aria-disabled="true"'}><summary><b${n ? ` class="cc-n" data-n="${n}"` : ''}>${n ? num(n) : '✓'}</b><div><span>${label}</span><small>${small}</small></div>${n ? ic('down') : ''}</summary>${n ? `<div class="cc-nl">${inner}</div>` : ''}</details>`;
+    const leadBtns = (arr, f) => arr.map(x => `<button type="button" data-open="${esc(x.id)}">${esc(x.name)}${f ? `<small>${f(x)}</small>` : ''}</button>`).join('');
+    const ct = N.clientTasks || { n: 0, tasks: [] };
+    return row(N.replies.n, true, 'Replies to answer', N.replies.n ? esc(N.replies.leads.slice(0, 2).map(x => x.name).join(', ')) : 'every reply has an answer', leadBtns(N.replies.leads, x => ago(x.at)))
+        + row(N.interested.n, false, 'Interested, no next step', N.interested.n ? 'said yes on a call, nothing booked' : 'every yes has a next step', leadBtns(N.interested.leads, x => x.at ? ago(x.at) : ''))
+        + row(N.callbacks.n, true, 'Call-backs overdue', N.callbacks.n ? 'oldest: ' + esc(ago(N.callbacks.oldest)) : 'none waiting', leadBtns(N.callbacks.leads, x => hhmm(x.at)))
+        + row(ct.n, ct.overdue > 0, 'Client tasks due', ct.n ? esc(ct.tasks.slice(0, 1).map(t => t.client.name + ' · ' + t.title).join('')) + (ct.overdue ? ` · <em>${num(ct.overdue)} overdue</em>` : '') : 'nothing due today',
+            ct.tasks.map(t => `<a href="#client/${esc(t.client.id)}/tasks/${esc(t.id)}">${esc(t.title)}<small>${esc(t.client.name)}${t.late ? ' · overdue' : ''}</small></a>`).join(''));
+}
+function ccHeat(h) {
+    const max = Math.max(1, ...h.cells.flat());
+    const dn = k => new Date(k + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+    return `<div class="cc-heat" role="img" aria-label="Calls by hour over the last 7 days"><span></span>${h.hours.map(x => `<span class="hl">${x % 12 || 12}${x < 12 ? 'a' : 'p'}</span>`).join('')}
+        ${h.days.map((k, i) => `<span class="dl${i === 6 ? ' today' : ''}">${i === 6 ? 'Today' : dn(k)}</span>` + h.hours.map((x, j) => { const n = h.cells[i][j];
+            return `<span class="c${n ? '' : ' z'}" style="--a:${n ? Math.round(14 + 80 * n / max) : 0}%;--i:${i * 12 + j}" data-hd="${i === 6 ? 'Today' : dn(k)}" data-hh="${x}" data-hn="${n}" data-ho="${h.owners[i][j]}"></span>`; }).join('')).join('')}</div>
+      <div class="cc-heatf"><span>${h.busiest ? `Busiest hour: <b>${hourL(h.busiest.hour)}</b> · ${num(h.busiest.calls)} calls` : 'No calls in the last 7 days yet'}${h.bestOwner ? ` · owners pick up most at <b>${hourL(h.bestOwner.hour)}</b> (${h.bestOwner.pct}%)` : ''}</span>
+        <span class="cc-scale"><small>fewer</small>${[14, 34, 54, 74, 94].map(a => `<i style="--a:${a}%"></i>`).join('')}<small>more</small></span></div>`;
+}
+function ccRevenue(d) {
+    const J = (d.jobs || []).filter(j => j.key in JOB_C), all = J.reduce((a, j) => a + j.value, 0), jobs = J.reduce((a, j) => a + j.count, 0);
+    const pv = J.reduce((a, j) => a + j.periodValue, 0), pc = J.reduce((a, j) => a + j.periodCount, 0), GAP = 2.5;
+    let off = 0;
+    const segs = all ? J.filter(j => j.value).map(j => { const len = j.value / all * DONUT, s = `<circle class="seg" cx="70" cy="70" r="56" style="--c:var(${JOB_C[j.key]});stroke-dasharray:${Math.max(0.5, len - GAP).toFixed(1)} ${(DONUT - len + GAP).toFixed(1)};stroke-dashoffset:${(-off).toFixed(1)}" data-job="${esc(j.label)}" data-v="${esc(lakh(j.value))}" data-p="${pct(j.value, all)}"/>`; off += len; return s; }).join('') : '';
+    const per = d.period === 90 ? 'this quarter' : `the last ${d.period} days`;
+    return `<div class="cc-rev"><div class="cc-donut"><svg viewBox="0 0 140 140" role="img" aria-label="Revenue won by kind of job"><circle class="trk" cx="70" cy="70" r="56"/>${segs}</svg><div class="cc-dc"><b>${lakh(all)}</b><small>${num(jobs)} JOB${jobs === 1 ? '' : 'S'}</small></div></div>
+        <ul class="cc-revl">${J.map(j => `<li style="--c:var(${JOB_C[j.key]})"><i></i><span>${esc(j.label)}</span><b>${lakh(j.value)}</b><small>${j.periodCount ? `+${num(j.periodCount)} · ${lakh(j.periodValue)} in ${per}` : 'none in ' + per}</small></li>`).join('')}</ul></div>
+      <div class="cc-revf"><b>${lakh(pv)}</b> won in ${per} from ${num(pc)} new job${pc === 1 ? '' : 's'}</div>`;
+}
+function ccDept(d) {
+    const T = d.totals;
+    const row = (x, cls, cvar) => `<tr class="${cls} go" data-dept="${x.key}"><td><span class="nm" style="--c:var(${cvar})"><i></i>${esc(x.label)}</span></td><td>${num(x.leads)}</td><td>${num(x.sent)}</td><td>${num(x.calls)}</td><td>${num(x.replies)}</td>
+        <td><span class="rate" style="--v:${Math.min(100, pct(x.replies, x.sent) * 4)}%;--c:var(${cvar})"><i></i>${pct(x.replies, x.sent)}%</span></td><td>${num(x.meetings)}</td><td>${num(x.won)}</td><td>${lakh(x.pipeline)}</td></tr>`;
+    return `<div class="tablewrap"><table class="dept"><thead><tr><th>Department</th><th>Leads</th><th>Emails</th><th>Calls</th><th>Replies</th><th>Reply rate</th><th>Meetings</th><th>Won</th><th>Open pipeline</th></tr></thead><tbody>
+        ${d.departments.map(x => row(x, 'parent', DEPT_VAR[x.key] || '--s-ref') + x.children.map(c => row(c, 'child', SRC_VAR[c.key] || '--s-ref')).join('')).join('')}</tbody>
+        <tfoot><tr><td>All departments</td><td>${num(T.leads)}</td><td>${num(T.sent)}</td><td>${num(T.calls)}</td><td>${num(T.replies)}</td><td>${pct(T.replies, T.sent)}%</td><td>${num(T.meetings)}</td><td>${num(T.won)}</td><td>${lakh(T.pipeline)}</td></tr></tfoot></table></div>`;
+}
+function ccCampaigns(d) {
+    if (d.campaigns === null) return `<div class="cc-empty">${ic('lock')}<span><b>Email campaigns are locked for you.</b> The owner unlocks them in Admin → Team.</span></div>`;
+    if (!d.campaigns.length) return `<div class="cc-empty">${ic('seq')}<span><b>No campaign is running.</b> <a href="#campaigns">Start one</a> to email a list on its own schedule.</span></div>`;
+    return `<div class="cc-camps">${d.campaigns.map(c => `<a href="#campaigns/${esc(c.id)}" style="--v:${pct(c.opened, c.sent)}%"><b>${esc(c.name)}</b><span>${num(c.active)} on it · ${num(c.sent)} sent · ${num(c.replied)} repl${c.replied === 1 ? 'y' : 'ies'}</span><i><i></i></i><small>${pct(c.opened, c.sent)}% opened</small></a>`).join('')}</div>`;
+}
+function ccStatus(r) {
+    if (r.live) return `<span class="cc-st on" data-live="${esc(r.live.since)}"><i></i>On a call · <span data-cc="livefor">${clock((Date.now() - new Date(r.live.since)) / 1000)}</span></span>`;
+    return r.lastCallAt ? `<span class="cc-st"><i></i>Last call ${esc(ago(r.lastCallAt))}</span>` : '<span class="cc-st"><i></i>No calls yet</span>';
+}
+function ccTeam(d) {
+    const per = d.period === 90 ? 'quarter' : d.period + ' days', most = Math.max(1, ...d.team.map(r => r.pCalls));
+    return `<div class="tablewrap"><table class="dept cc-team"><thead><tr><th>Person</th><th>Status</th><th>Calls today</th><th>Talked</th><th>Emails</th><th>Interested</th><th>Calls · ${per}</th><th>Talked · ${per}</th><th>Meetings</th><th>Won</th></tr></thead><tbody>
+        ${d.team.map(r => `<tr data-person="${esc(r.id)}"><td><span class="cc-nm"><span class="ava">${initials(r.name)}</span>${esc(r.name)}</span></td><td data-cc="status">${ccStatus(r)}</td><td data-cc="pcalls">${num(r.calls)}</td><td>${num(r.talked)}</td><td>${num(r.emails)}</td><td>${num(r.interested)}</td>
+          <td><span class="cc-mini" style="--v:${pct(r.pCalls, most)}%"><i></i>${num(r.pCalls)}</span></td><td>${num(r.pTalked)}</td><td>${num(r.meetings)}</td><td>${num(r.won)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function ccHtml(d) {
+    const T = d.today, sp = d.spark, mine = d.team.find(r => r.id === d.me);
+    const hr = new Date().getHours(), greet = hr < 5 ? 'Working late' : hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
+    const split = d.team.filter(r => r.calls).sort((a, b) => b.calls - a.calls).slice(0, 3).map(r => (r.id === d.me ? 'you' : esc(r.name.split(' ')[0])) + ' ' + num(r.calls)).join(' · ');
+    const sent = (d.campaigns || []).reduce((a, c) => a + c.sent, 0), opened = (d.campaigns || []).reduce((a, c) => a + c.opened, 0);
+    const mw = T.meetingsWeek - T.meetingsLastWeek;
+    const [hc, ht] = ccHours(d.sys.access);
+    const kpi = (i, label, key, n, em, cls, k, series, name) => `<div class="cc-kpi" style="--k:${k}" data-s="${series}" data-name="${name}"><small>${label}</small><b${typeof n === 'number' ? ` class="cc-n" data-n="${n}" data-cc="${key}"` : ''}>${typeof n === 'number' ? num(n) : n}</b><em class="${cls}">${em}</em>${ccSpark(sp[series], i)}</div>`;
+    const per = d.period === 90 ? 'This quarter' : `Last ${d.period} days`;
+    return `<div class="cc-view${CC.first && !lessMotion() ? ' cc-anim' : ''}">
+      ${p90() ? '' : `<div class="banner">${ic('shield')}<div><b>One step left for this release:</b> run <span class="mono">sql/schema-phase90.sql</span> in Supabase. Until then, industries, the pipeline switch, the leads map and email campaigns wait.</div></div>`}
+      <section class="cc-deck" aria-label="Right now"><div class="cc-scan" aria-hidden="true"></div>
+        <div class="cc-head"><div class="cc-hello"><div class="cc-line"><span class="cc-live"><i></i>LIVE</span><span>EDGELEAD · OPERATIONS</span><span data-cc="sync">SYNCED NOW</span>${isAdmin() ? '<a class="cc-setg" href="#admin/goals">SET GOALS</a>' : ''}</div>
+            <h1>${greet}, ${esc(teamName(st.meta.me.id).split(' ')[0])}.</h1>
+            <p>${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · the team has made <b data-cc="calls">${num(T.calls)}</b> call${T.calls === 1 ? '' : 's'} and sent <b data-cc="emails">${num(T.emails)}</b> email${T.emails === 1 ? '' : 's'} today</p></div>
+          <div class="cc-clocks"><div><small>YOU · ${esc(tzCity(Intl.DateTimeFormat().resolvedOptions().timeZone) || 'LOCAL')}</small><b data-cc="you">—</b></div><div><small>BUSINESS · ${esc(tzCity(d.tz))}</small><b data-cc="biz">—</b></div><div><small>CALLING HOURS</small><b data-cc="hours" class="${hc}">${ht}</b></div></div></div>
+        <div class="cc-sys" aria-label="Systems">${ccSys(d)}</div>
+        <div class="cc-kpis">
+          ${kpi(0, 'CALLS TODAY', 'calls', T.calls, split || `avg ${num(T.callsAvg)} a day, 2 weeks`, split ? '' : '', 'var(--glow)', 'calls', 'calls')}
+          ${kpi(1, 'CONVERSATIONS', 'conversations', T.conversations, `${num(T.owners)} with the owner`, '', '#35c2d6', 'conversations', 'conversations')}
+          ${kpi(2, 'EMAILS SENT', 'emails', T.emails, sent ? `${pct(opened, sent)}% of campaign email opened` : 'today, all senders', '', '#a587ff', 'emails', 'emails')}
+          ${kpi(3, 'REPLIES', 'replies', T.replies, d.needs.replies.n ? `${num(d.needs.replies.n)} to answer` : 'all answered', d.needs.replies.n ? 'warn' : 'up', '#3ccf8e', 'replies', 'replies')}
+          ${kpi(4, 'MEETINGS · 7 DAYS', 'meetings', T.meetingsWeek, mw > 0 ? `▲ ${mw} on the week before` : mw < 0 ? `▼ ${-mw} on the week before` : 'same as the week before', mw > 0 ? 'up' : '', '#f0b84a', 'meetings', 'meetings')}
+          ${kpi(5, 'WON · ' + new Date().toLocaleDateString('en-US', { month: 'long' }).toUpperCase(), 'won', lakh(T.wonMonthValue), `${num(T.wonMonth)} job${T.wonMonth === 1 ? '' : 's'} · ${lakh(d.pipeline.value)} in play`, '', '#7088ff', 'won', 'jobs won')}
+        </div>
+        <div class="cc-goals" aria-label="Today against the goals">${d.goals.map(ccGoal).join('')}</div>
+      </section>
+      <div class="cc-g">
+        <section class="cc-p s7"><header class="cc-ph"><span class="cc-ix">01</span><h2>Up next</h2><small>From Calls · ${num(d.dueToday)} due now${mine && mine.calls ? ` · you have made ${num(mine.calls)} today` : ''}</small><a class="btn sm" href="#calls/home">Open Calls${ic('arrow')}</a></header>${ccUpNext(d)}</section>
+        <section class="cc-p s5"><header class="cc-ph"><span class="cc-ix">02</span><h2>Live activity</h2><small>Everyone, as it happens</small><span class="cc-live sm"><i></i>LIVE</span></header>
+          <ol class="cc-feed" data-cc="feed">${d.feed.length ? d.feed.map(x => feedLi(x)).join('') : '<li class="cc-quiet"><p>Quiet so far. Calls, emails, replies and new leads show here as they happen.</p></li>'}</ol></section>
+      </div>
+      <div class="cc-g">
+        <section class="cc-p s4"><header class="cc-ph"><span class="cc-ix">03</span><h2>Needs you</h2><small>Slips if nobody looks</small></header>${ccNeeds(d)}</section>
+        <section class="cc-p s4"><header class="cc-ph"><span class="cc-ix">04</span><h2>Pipeline</h2><small>${num(d.pipeline.open)} open · ${lakh(d.pipeline.value)} in play</small><a class="btn sm ghost" href="#pipeline">Open</a></header>
+          <div class="cc-stg">${(() => { const mx = Math.max(1, ...d.pipeline.stages.map(s => s.n)); return d.pipeline.stages.map(s => `<div style="--v:${pct(s.n, mx)}%;--c:var(${STAGE_VAR[s.key] || '--dim'})"><span>${esc(s.label)}</span><i><i></i></i><b>${num(s.n)}</b><small>${lakh(s.value)}</small></div>`).join(''); })()}</div>
+          ${d.pipeline.stuck ? `<div class="cc-stuck">${ic('clock')}<span><b>${num(d.pipeline.stuck)}</b> stuck in Contacted over ${d.pipeline.stuckDays} days</span><a href="#pipeline">See them</a></div>` : ''}</section>
+        <section class="cc-p s4"><header class="cc-ph"><span class="cc-ix">05</span><h2>Lead flow</h2><small>${per} · added to won</small></header>
+          <div class="cc-flow">${d.flow.map((f, i) => `<div style="--v:${d.flow[0].n ? Math.max(1, f.n / d.flow[0].n * 100).toFixed(1) : 0}%"><span>${esc(f.label)}</span><i><i></i></i><b>${num(f.n)}</b><small>${i ? pct(f.n, d.flow[i - 1].n) + '%' : ''}</small></div>`).join('')}</div></section>
+      </div>
+      <div class="cc-g">
+        <section class="cc-p s7"><header class="cc-ph"><span class="cc-ix">06</span><h2>Calls by hour</h2><small>Last 7 days · the lead's own clock · brighter is more calls</small></header>${ccHeat(d.heat)}</section>
+        <section class="cc-p s5"><header class="cc-ph"><span class="cc-ix">07</span><h2>Revenue won</h2><small>By kind of job · all time</small></header>${ccRevenue(d)}</section>
+      </div>
+      <div class="cc-g">
+        <section class="cc-p s8"><header class="cc-ph"><span class="cc-ix">08</span><h2>By department</h2><small>${per} · click a row for its leads</small>
+          <div class="cc-seg" role="group" aria-label="Period">${[[7, '7 days'], [30, '30 days'], [90, 'Quarter']].map(([v, t]) => `<button type="button" data-period="${v}" class="${d.period === v ? 'on' : ''}">${t}</button>`).join('')}</div></header>${ccDept(d)}</section>
+        <section class="cc-p s4"><header class="cc-ph"><span class="cc-ix">09</span><h2>Email campaigns</h2><small>${d.campaigns ? num(d.campaigns.length) + ' running' : ''}</small></header>${ccCampaigns(d)}
+          <header class="cc-ph sub"><span class="cc-ix">10</span><h2>Influencer network</h2><a class="btn sm ghost" href="#influencers">Open</a></header>
+          <div class="cc-infl"><div><b>${num(d.influencers.total)}</b><small>creators</small></div><div><b>${num(d.influencers.partners)}</b><small>worked with</small></div><div><b>${num(d.influencers.posts)}</b><small>posts · ${per.toLowerCase()}</small></div><div><b>${kfmt(d.influencers.views)}</b><small>views</small></div></div></section>
+      </div>
+      <section class="cc-p"><header class="cc-ph"><span class="cc-ix">11</span><h2>Team</h2><small>Today, and ${per.toLowerCase()}</small></header>${ccTeam(d)}</section>
     </div>`;
 }
 async function vOverview() {
-    const [T, perf] = await Promise.all([api('/api/crm/today?range=' + st.trange).catch(e => ({ error: e.message })), perfHtml()]);
-    const hr = new Date().getHours();
-    return `<div class="head"><div><p class="greet">Good ${hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening'}, ${esc(teamName(st.meta.me.id).split(' ')[0])}.</p>
-        <p class="sub">${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}${T.total ? ` · ${num(T.total.calls)} calls and ${num(T.total.emails)} emails so far today` : ''}</p></div></div>
-      ${p90() ? '' : `<div class="banner">${ic('shield')}<div><b>One step left for this release:</b> run <span class="mono">sql/schema-phase90.sql</span> in Supabase. Until then, industries, the pipeline switch, the leads map and email campaigns wait.</div></div>`}
-      ${T.error ? `<div class="empty err">Today could not load: ${esc(T.error)}</div>` : todayHtml(T)}
-      ${perf}`;
+    const t0 = performance.now();
+    let d;
+    try { d = await api('/api/crm/console?days=' + st.period); }
+    catch (e) {   // the pages can go live a minute before the server they need: wait for it, then draw
+        if (e.status !== 404) throw e;
+        setTimeout(() => route === 'overview' && render(), 20000);
+        return `<div class="card"><div class="empty">${ic('clock')}<b>The server is updating.</b> The Overview comes back on its own in a moment.</div></div>`;
+    }
+    CC.ms = Math.round(performance.now() - t0);
+    CC.d = d; CC.seen = new Set(d.feed.map(x => x.id)); CC.pulseAt = Date.now(); CC.synced = Date.now();
+    if (d.badges) st.badges = d.badges;   // the menu's counts, without the lead list
+    return ccHtml(d);
+}
+
+// While the Overview is on screen: the clocks, the countdowns, the pulse. Stopped the moment it is left.
+function ccStop() { CC.timers.forEach(clearInterval); CC.timers = []; }
+function ccMount() {
+    ccStop();
+    const d = CC.d, v = $('#view'); if (!d || !v.querySelector('.cc-view')) return;
+    if (CC.first && !lessMotion()) $all('.cc-n', v).forEach(el => { const n = +el.dataset.n, t0 = performance.now(); el.textContent = '0';
+        const step = t => { const k = Math.min(1, (t - t0) / 900); el.textContent = num(Math.round(n * (1 - Math.pow(1 - k, 3)))); if (k < 1) requestAnimationFrame(step); }; requestAnimationFrame(step); });
+    CC.first = false;
+    const wrap = v.querySelector('.cc-view'); if (wrap.classList.contains('cc-anim')) setTimeout(() => wrap.classList.remove('cc-anim'), 2600);   // the entrance plays once
+    ccDots();
+    const fYou = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    let fBiz; try { fBiz = new Intl.DateTimeFormat('en-US', { timeZone: d.tz, hour: 'numeric', minute: '2-digit', second: '2-digit' }); } catch { fBiz = fYou; }
+    const tick = () => {
+        if (route !== 'overview') return ccStop();
+        const now = new Date(), set = (k, t) => { const el = v.querySelector(`[data-cc="${k}"]`); if (el && el.textContent !== t) el.textContent = t; };
+        set('you', fYou.format(now)); set('biz', fBiz.format(now));
+        const [hc, ht] = ccHours(d.sys.access), h = v.querySelector('[data-cc="hours"]'); if (h) { h.className = hc; if (h.textContent !== ht) h.textContent = ht; }
+        if (d.sys.sender.nextAt) { let left = (new Date(d.sys.sender.nextAt) - now) / 1000; while (left < 0) { d.sys.sender.nextAt = new Date(new Date(d.sys.sender.nextAt).getTime() + d.sys.sender.every).toISOString(); left += d.sys.sender.every / 1000; } set('sender', clock(left)); }
+        const s = Math.round((Date.now() - CC.synced) / 1000); set('sync', s < 2 ? 'SYNCED NOW' : `SYNCED ${s}s AGO`);
+        $all('[data-live]', v).forEach(el => { const x = el.querySelector('[data-cc="livefor"]'); if (x) x.textContent = clock((now - new Date(el.dataset.live)) / 1000); });
+    };
+    tick();
+    CC.timers.push(setInterval(tick, 1000));
+    CC.timers.push(setInterval(() => { if (document.visibilityState === 'visible') ccPulse(); }, 30000));
+    if (!CC.bound) {
+        CC.bound = true;
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && route === 'overview' && Date.now() - CC.pulseAt > 30000) ccPulse(); });
+        addEventListener('resize', () => route === 'overview' && ccDots());
+        const tip = document.createElement('div'); tip.className = 'cc-tip'; tip.hidden = true; tip.setAttribute('role', 'tooltip'); document.body.append(tip);
+        const show = (x, y, html) => { tip.innerHTML = html; tip.hidden = false; tip.style.left = x + 'px'; tip.style.top = y + 'px'; };
+        document.addEventListener('mousemove', e => {
+            if (route !== 'overview') return;
+            const t = e.target, spk = t.closest && t.closest('.cc-spk');
+            $all('.cc-kpi .hov').forEach(x => { if (!spk || x.parentElement !== spk.parentElement) x.hidden = true; });
+            if (spk) {
+                const k = spk.parentElement, arr = (CC.d.spark || {})[k.dataset.s] || [], r = spk.getBoundingClientRect(), n = arr.length;
+                const i = Math.max(0, Math.min(n - 1, Math.round((e.clientX - r.left) / r.width * (n - 1)))), max = Math.max(1, ...arr);
+                const x = r.left + i / Math.max(1, n - 1) * r.width, y = r.top + (36 - 5 - arr[i] / max * 26) / 36 * r.height;
+                let hov = k.querySelector('.hov'); if (!hov) { hov = document.createElement('span'); hov.className = 'hov'; k.append(hov); }
+                const kr = k.getBoundingClientRect(); hov.hidden = false; hov.style.left = (x - kr.left) + 'px'; hov.style.top = (y - kr.top) + 'px';
+                const day = CC.d.days[i], lbl = i === n - 1 ? 'Today, so far' : new Date(day + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+                return show(x, y, `${lbl}<small>${num(arr[i])} ${esc(k.dataset.name)}</small>`);
+            }
+            const c = t.closest && t.closest('.cc-heat .c');
+            if (c) { const r = c.getBoundingClientRect(), n = +c.dataset.hn, o = +c.dataset.ho; return show(r.left + r.width / 2, r.top, `${esc(c.dataset.hd)} · ${hourL(+c.dataset.hh)} their time<small>${num(n)} call${n === 1 ? '' : 's'}${o ? ` · ${num(o)} owner${o === 1 ? '' : 's'} picked up` : ''}</small>`); }
+            const g = t.closest && t.closest('.cc-donut .seg');
+            if (g) return show(e.clientX, e.clientY, `${esc(g.dataset.job)} · ${esc(g.dataset.v)}<small>${g.dataset.p}% of all revenue won</small>`);
+            tip.hidden = true;
+        }, { passive: true });
+        document.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true, capture: true });
+    }
+}
+/** The bright dot at today's end of each line. */
+function ccDots() {
+    $all('.cc-kpi').forEach(k => {
+        const spk = k.querySelector('.cc-spk'), arr = (CC.d.spark || {})[k.dataset.s] || []; if (!spk || !arr.length) return;
+        const r = spk.getBoundingClientRect(), kr = k.getBoundingClientRect(), max = Math.max(1, ...arr);
+        let dot = k.querySelector('.end'); if (!dot) { dot = document.createElement('span'); dot.className = 'end'; k.append(dot); }
+        dot.style.left = (r.right - kr.left) + 'px'; dot.style.top = (r.top - kr.top + (36 - 5 - arr[arr.length - 1] / max * 26) / 36 * r.height) + 'px';
+    });
+}
+async function ccPulse() {
+    if (route !== 'overview' || !CC.d) return;
+    CC.pulseAt = Date.now();
+    let p; const t0 = performance.now();
+    try { p = await api('/api/crm/pulse'); } catch { return; }
+    if (route !== 'overview') return;
+    CC.ms = Math.round(performance.now() - t0); CC.synced = Date.now();
+    const v = $('#view'), d = CC.d;
+    Object.assign(d.today, p.today);
+    for (const k of ['calls', 'conversations', 'emails', 'replies']) $all(`[data-cc="${k}"]`, v).forEach(el => { const t = num(p.today[k]); if (el.textContent !== t) { el.textContent = t; el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); } });
+    const ms = v.querySelector('[data-cc="ms"]'); if (ms) ms.textContent = CC.ms + ' ms';
+    for (const g of p.goals || []) { const el = v.querySelector(`[data-goal="${g.key}"]`); if (el) el.outerHTML = ccGoal(g); }
+    const fresh = (p.feed || []).filter(x => !CC.seen.has(x.id));
+    if (fresh.length) {
+        const ol = v.querySelector('[data-cc="feed"]');
+        if (ol) { const q = ol.querySelector('.cc-quiet'); if (q) q.remove(); ol.insertAdjacentHTML('afterbegin', fresh.map(x => feedLi(x, !lessMotion())).join('')); while (ol.children.length > 14) ol.lastElementChild.remove(); }
+        fresh.forEach(x => CC.seen.add(x.id));
+    }
+    for (const r of d.team) {
+        r.live = (p.live || []).find(x => x.id === r.id) || null; r.calls = (p.perCalls || {})[r.id] || 0;
+        const tr = v.querySelector(`tr[data-person="${r.id}"]`); if (!tr) continue;
+        const sc = tr.querySelector('[data-cc="status"]'); if (sc) sc.innerHTML = ccStatus(r);
+        const pc = tr.querySelector('[data-cc="pcalls"]'); if (pc) pc.textContent = num(r.calls);
+    }
 }
 
 // ------------------------------------------------------------------ leads: every lead, cold or not, with what you need to reach them
@@ -812,7 +1010,6 @@ document.addEventListener('click', async e => {
     const tel = t.closest('[data-tel]'); if (tel && window.ELPhone) { e.preventDefault(); return phoneTo(tel.dataset.tel, tel.dataset.name, tel.dataset.lead); }
     const cn = t.closest('[data-callnow]'); if (cn) return phoneTo(cn.dataset.callnow, cn.dataset.name, cn.dataset.lead);
     const pe = t.closest('[data-period]'); if (pe) { st.period = +pe.dataset.period; return render(); }
-    const tr = t.closest('[data-trange]'); if (tr) { st.trange = tr.dataset.trange; return render(); }
     const dp = t.closest('[data-dept]'); if (dp) { const d = dp.dataset.dept; st.cat = ''; st.view = 'all'; st.ind = '';
         if (['website', 'seo', 'influencer'].includes(d)) st.cat = d; else if (st.meta.sources.some(s => s.key === d)) st.cat = d;
         closeLayer(); location.hash = 'leads'; return render(); }
@@ -977,6 +1174,8 @@ const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, p
     if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre), openLead, isAdmin, feat }).then(() => { if (route === 'calls' || route === 'dialer') render(); shell(); });
     addEventListener('hashchange', render);
     render();
-    leads().then(shell).catch(() => {});
+    // Phase 94: the menu's counts without downloading the lead list (the Overview brings its own).
+    const counts = () => { if (route !== 'overview' && !st.leads && !st.badges) api('/api/crm/badges').then(b => { if (!st.leads && !st.badges) { st.badges = b; shell(); } }).catch(() => {}); };
+    window.requestIdleCallback ? requestIdleCallback(counts, { timeout: 3000 }) : setTimeout(counts, 1500);
 })();
 })();

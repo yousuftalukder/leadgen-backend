@@ -50,6 +50,8 @@ const cfg = () => ({
     email: process.env.PHONE_VOICEMAIL_EMAIL || 'info@edgehometx.com', sms: process.env.PHONE_SMS_ENABLED === '1', record: process.env.PHONE_RECORD === '1',
     base: String(process.env.PHONE_PUBLIC_URL || 'https://leadgen-backend-1-mgzc.onrender.com').replace(/\/+$/, '')
 });
+/** Phase 94: is the phone line set up, and its number (for the Overview's systems row). */
+S.phoneLine = () => { const c = cfg(); return { ready: !missingSettings(c).length, number: c.number }; };
 const missingSettings = c => [['TWILIO_ACCOUNT_SID', c.sid], ['TWILIO_AUTH_TOKEN', c.token], ['TWILIO_API_KEY', c.key], ['TWILIO_API_SECRET', c.secret], ['TWILIO_TWIML_APP_SID', c.appSid]].filter(([, v]) => !v).map(([k]) => k);
 
 // ------------------------------------------------------------------ pure helpers (tested)
