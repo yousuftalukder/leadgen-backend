@@ -49,8 +49,24 @@ function loadSdk() {
     if (window.Twilio && window.Twilio.Device) return Promise.resolve();
     return new Promise((ok, no) => { const s = document.createElement('script'); s.src = SDK; s.onload = ok; s.onerror = () => no(new Error('The calling software could not load.')); document.head.appendChild(s); });
 }
+/** Twilio's library replaces the code its server sent with a generic 53000 and keeps no copy, so read the
+ *  server's own error straight off the signaling socket. Only messages of type "error" are kept. */
+function sniffSignaling() {
+    if (window.__phSniff) return; window.__phSniff = true;
+    const WS = window.WebSocket;
+    window.WebSocket = function (url, protocols) {
+        const ws = protocols === undefined ? new WS(url) : new WS(url, protocols);
+        if (/twilio\.com/i.test(String(url))) ws.addEventListener('message', ev => {
+            try { const m = JSON.parse(ev.data); if (m && m.type === 'error' && m.payload && m.payload.error) { P.sigErr = m.payload.error; console.warn('phone: Twilio said', m.payload.error); } } catch {}
+        });
+        return ws;
+    };
+    window.WebSocket.prototype = WS.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(k => { window.WebSocket[k] = WS[k]; });
+}
 async function startDevice() {
     try {
+        sniffSignaling();
         await loadSdk();
         const { token } = await H.api('/api/phone/token');
         const d = new Twilio.Device(token, { codecPreferences: ['opus', 'pcmu'], closeProtection: 'A call is in progress. Leave anyway?', logLevel: 'error' });
@@ -61,10 +77,12 @@ async function startDevice() {
         d.on('tokenWillExpire', async () => { try { d.updateToken((await H.api('/api/phone/token')).token); } catch {} });
         d.on('incoming', onIncoming);
         await d.register();
-    } catch (e) { setState('error', why(e)); console.warn('phone', why(e), e); }
+    } catch (e) { setState('error', e || P.sigErr ? why(e) : ''); console.warn('phone', why(e), e); }
 }
 /** Twilio's own reason: a generic 53000 wraps the code Twilio actually sent (originalError). */
 function why(err) {
+    const t = P.sigErr;
+    if (t && (t.code || t.message)) return `Twilio says: ${t.message || 'error'}${t.code ? ` (${t.code})` : ''}`;
     if (!err) return 'The phone could not connect.';
     const o = err.originalError || {}, code = o.code || err.code, msg = o.message || err.description || err.message || 'Calling error';
     return code ? `${msg} (${code})` : msg;
