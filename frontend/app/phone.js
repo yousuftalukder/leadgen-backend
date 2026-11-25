@@ -57,14 +57,20 @@ async function startDevice() {
         P.device = d;
         d.on('registered', () => setState('ready'));
         d.on('unregistered', () => setState('off'));
-        d.on('error', err => { setState(P.state === 'ready' ? 'ready' : 'error'); if (err && err.code !== 31005) H.toast(err.message || 'Calling error', true); });
+        d.on('error', err => { setState(P.state === 'ready' ? 'ready' : 'error', why(err)); if (err && err.code !== 31005) H.toast('Phone: ' + why(err), true); });
         d.on('tokenWillExpire', async () => { try { d.updateToken((await H.api('/api/phone/token')).token); } catch {} });
         d.on('incoming', onIncoming);
         await d.register();
-    } catch (e) { setState('error'); console.warn('phone', e); }
+    } catch (e) { setState('error', why(e)); console.warn('phone', why(e), e); }
 }
-function setState(s) { P.state = s; const el = $('#ph-state'); if (el) el.outerHTML = stateChip(); }
-const stateChip = () => `<span id="ph-state" class="phstate ${P.state}" title="${P.state === 'ready' ? 'Calls ring here' : 'Not connected: calls go to voicemail'}"><i></i>${P.state === 'ready' ? 'Ready' : P.state === 'error' ? 'Offline' : 'Connecting'}</span>`;
+/** Twilio's own reason: a generic 53000 wraps the code Twilio actually sent (originalError). */
+function why(err) {
+    if (!err) return 'The phone could not connect.';
+    const o = err.originalError || {}, code = o.code || err.code, msg = o.message || err.description || err.message || 'Calling error';
+    return code ? `${msg} (${code})` : msg;
+}
+function setState(s, reason) { P.state = s; if (s === 'ready') P.reason = ''; else if (reason) P.reason = reason; const w = $('#ph-why'); if (w) w.remove(); const el = $('#ph-state'); if (el) el.outerHTML = stateChip(); }
+const stateChip = () => `<span id="ph-state" class="phstate ${P.state}" title="${esc(P.state === 'ready' ? 'Calls ring here' : 'Not connected: calls go to voicemail' + (P.reason ? '. ' + P.reason : ''))}"><i></i>${P.state === 'ready' ? 'Ready' : P.state === 'error' ? 'Offline' : 'Connecting'}</span>${P.state === 'error' && P.reason ? `<small id="ph-why" class="phwhy" style="display:block;color:var(--danger,#c0392b);font-size:12px;margin-top:4px">${esc(P.reason)}</small>` : ''}`;
 async function inbox() { P.threads = (await H.api('/api/phone/inbox')).threads; return P.threads; }
 function badge() { const n = (P.threads || []).reduce((a, t) => a + (t.unread || 0), 0); document.querySelectorAll('[data-phbadge]').forEach(b => { b.textContent = n || ''; b.hidden = !n; }); }
 const unread = () => (P.threads || []).reduce((a, t) => a + (t.unread || 0), 0);
