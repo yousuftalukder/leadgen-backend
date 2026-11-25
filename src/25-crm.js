@@ -280,6 +280,23 @@ function cleanInfluencerBody(b, { partial = false } = {}) {
 }
 
 Object.assign(S, { jobKind: (...a) => jobKind(...a), jobsWon: (...a) => jobsWon(...a) });
+
+/**
+ * Phase 93: every row a query matches. The database answers 1,000 rows at most per request, so a bare .limit(20000)
+ * quietly stops at 1,000. This asks for the first page with the total, then the other pages at once.
+ *   apply  adds the filters (never .limit or .range); max caps the rows; order must be a column every row has.
+ */
+async function selectAll(table, cols, apply = q => q, { max = 50000, order = 'id', ascending = true, page = 1000 } = {}) {
+    const first = await apply(supabase.from(table).select(cols, { count: 'exact' })).order(order, { ascending }).range(0, page - 1);
+    if (first.error) throw first.error;
+    const rows = [...(first.data || [])];
+    const n = Math.min(first.count == null ? rows.length : first.count, max);
+    const rest = [];
+    for (let from = page; from < n; from += page) rest.push(apply(supabase.from(table).select(cols)).order(order, { ascending }).range(from, Math.min(n, from + page) - 1));
+    for (const r of await Promise.all(rest)) { if (r.error) throw r.error; rows.push(...(r.data || [])); }
+    return rows.slice(0, max);
+}
+S.selectAll = selectAll;
 Object.assign(S, { CRM_SOURCES, CRM_STAGES, CRM_DEPTS, CRM_TOOLS: TOOLS, normEmail, normPhone, cleanLeadBody, cleanIndustry, findDuplicate, parseCsv, csvToLeads,
     crmOverview, toolForPath, parseToolSwitch, cleanInfluencerBody, departmentOf, toBdt });
 
@@ -526,13 +543,19 @@ app.get('/api/crm/meta', async (req, res) => {
 app.get('/api/crm/leads', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
-        let q = supabase.from('crm_leads').select(await leadCols()).order('updated_at', { ascending: false }).limit(Math.min(2000, parseInt(req.query.limit, 10) || 1000));
-        if (req.query.stage) q = q.eq('stage', String(req.query.stage));
-        if (req.query.owner) q = q.eq('owner_id', String(req.query.owner));
-        if (req.query.source) q = q.in('source', String(req.query.source).split(','));
-        if (req.query.pipeline === '1' && await p90Ready()) q = q.eq('in_pipeline', true);
-        if (req.query.q) { const s = String(req.query.q).replace(/[%,()]/g, ' ').trim().slice(0, 80); if (s) q = q.or(`full_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`); }
-        const { data, error } = await q; if (error) throw error;
+        const pipe = req.query.pipeline === '1' && await p90Ready();
+        const s = req.query.q ? String(req.query.q).replace(/[%,()]/g, ' ').trim().slice(0, 80) : '';
+        const filters = q => {
+            if (req.query.stage) q = q.eq('stage', String(req.query.stage));
+            if (req.query.owner) q = q.eq('owner_id', String(req.query.owner));
+            if (req.query.source) q = q.in('source', String(req.query.source).split(','));
+            if (pipe) q = q.eq('in_pipeline', true);
+            if (s) q = q.or(`full_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);
+            return q;
+        };
+        // Every lead (phase 93: no longer cut at 1,000), newest change first.
+        const data = (await selectAll('crm_leads', await leadCols(), filters, { max: Math.min(20000, parseInt(req.query.limit, 10) || 20000) }))
+            .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
         // Phase 92: each lead's active email campaign, so Leads shows calls and email side by side.
         const camp = S.campaignsOf ? await S.campaignsOf((data || []).map(l => l.id)).catch(() => new Map()) : new Map();
         res.json({ leads: (data || []).map(l => camp.has(l.id) ? { ...l, campaign: camp.get(l.id) } : l) });
@@ -634,6 +657,19 @@ app.delete('/api/crm/leads/:id', async (req, res) => {
     res.json({ deleted: true });
 });
 
+/** Phase 93: the owner deletes leads in bulk (up to 500). Leads that became clients are kept. Their history goes with them. */
+app.post('/api/crm/leads/bulk-delete', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try {
+        const ids = (Array.isArray(req.body && req.body.ids) ? req.body.ids : []).map(String).filter(x => S.UUID_RE.test(x)).slice(0, 500);
+        if (!ids.length) throw bad('Select at least one lead.');
+        const { data: rows } = await supabase.from('crm_leads').select('id, client_id').in('id', ids);
+        const del = (rows || []).filter(l => !l.client_id).map(l => l.id);
+        if (del.length) { const { error } = await supabase.from('crm_leads').delete().in('id', del); if (error) throw error; }
+        logger.info('crm_leads_bulk_delete', { by: ctx.user.id, deleted: del.length });
+        res.json({ deleted: del.length, kept: (rows || []).length - del.length });
+    } catch (e) { fail(res, e, 'crm_lead_bulk_delete'); }
+});
 app.post('/api/crm/leads/:id/activities', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
@@ -741,9 +777,10 @@ app.get('/api/crm/overview', async (req, res) => {
     try {
         const days = [7, 30, 90].includes(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 30;
         const since = new Date(Date.now() - days * 864e5);
+        const cols = 'id, source, stage, value, currency, created_at, stage_at, updated_at, owner_id, client_id';
         const [l, a, nx, cr, posts] = await Promise.all([
-            supabase.from('crm_leads').select('*').limit(20000),   // '*' so the overview still works before phase 88 adds service
-            supabase.from('crm_activities').select('lead_id, type, actor_id, at, meta').gte('at', since.toISOString()).in('type', ['email_out', 'email_in', 'call', 'meeting', 'stage']).limit(50000),
+            selectAll('crm_leads', cols + ', service').catch(() => selectAll('crm_leads', cols)).then(data => ({ data }), error => ({ error })),   // service: the job a won lead was for, when the column is there
+            selectAll('crm_activities', 'id, lead_id, type, actor_id, at, meta', q => q.gte('at', since.toISOString()).in('type', ['email_out', 'email_in', 'call', 'meeting', 'stage'])).then(data => ({ data }), () => ({ data: [] })),
             supabase.from('crm_leads').select('id, full_name, company, next_step, next_step_at, owner_id').not('next_step_at', 'is', null).not('stage', 'in', '(won,lost)').order('next_step_at', { ascending: true }).limit(8),
             supabase.from('crm_influencers').select('id, stage').limit(20000),
             supabase.from('crm_influencer_posts').select('views, posted_at').gte('posted_at', since.toISOString().slice(0, 10)).limit(20000)

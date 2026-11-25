@@ -4,7 +4,9 @@
  *           know and how each call went; My numbers is the caller's own figures; Settings holds their reminders and
  *           sound. A call outcome changes the lead everywhere: its stage, its email campaigns, when it comes back.
  *   Dialer  (#dialer, and phone.html: the installable app) the phone system on its own: keypad, the calls, texts and
- *           voicemail on the business number, and the sound settings. Not tied to the lead list.
+ *           voicemail on the business number, and the sound settings. Not tied to the lead list. Locked unless the
+ *           owner unlocks it for the person (Admin → Team). Installed, it opens as a small phone: Keypad first,
+ *           then Recents and Sound (phase 93).
  * Calls ring wherever the CRM or the Dialer app is open, for the people who may use the phone right now. Who may
  * call and when is the owner's (Admin → Phone); the server checks it on every call. While closed, both pages show
  * everything but every call, text and dial control is off. Reminders for callbacks pop up on every page.
@@ -56,11 +58,14 @@ const AUD = Object.assign({ input: 'default', output: 'default', echo: true, noi
 Object.assign(P.dqf, store.get('dqf', {}));
 P.srange = store.get('srange', '7d');
 const onCalls = () => H && H.route() === 'calls', onDialer = () => H && H.route() === 'dialer';
+const dialerOn = () => !H || !H.feat || H.feat('dialer');
+/** The installed Dialer (or ?compact=1): a small phone window, Keypad first. In the CRM the Dialer keeps its wide layout. */
+const compactApp = () => !!window.EL_PHONE_ONLY && (standalone() || new URLSearchParams(location.search).has('compact'));
 
 // The install prompt can fire before the CRM has signed in: keep it from the start.
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); P.installEvt = e; const b = $('[data-ph="install"]'); if (b) b.hidden = false; });
 window.addEventListener('appinstalled', () => { P.installEvt = null; H && H.toast('Installed. Open “EdgeLead Dialer” from your home screen, Start menu or dock.'); });
-const standalone = () => matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: window-controls-overlay)').matches || navigator.standalone === true;
+function standalone() { return matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: window-controls-overlay)').matches || navigator.standalone === true; }
 const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 // ------------------------------------------------------------------ time zones (the same rules as the server)
@@ -111,9 +116,17 @@ async function init(helpers) {
     remStart();
     if (!P.cfg.ready) return;
     planAccessCheck();
-    await inbox().catch(() => {}); badge();
-    clearInterval(P.poll); P.poll = setInterval(() => inbox().then(() => { badge(); if (onDialer() && P.dtab === 'phone') { drawList(); if (P.sel) refreshThread(); } }).catch(() => {}), 20000);
-    startDevice();
+    // Phase 93: nothing here holds up the first page. The calling software (a few hundred KB) loads once the page is
+    // drawn; the badge is one small count; the calls and texts load only when the Dialer opens.
+    const later = f => (window.requestIdleCallback ? requestIdleCallback(f, { timeout: 2500 }) : setTimeout(f, 1200));
+    later(() => startDevice());
+    if (dialerOn()) { unreadCount(); clearInterval(P.poll); P.poll = setInterval(pollPhone, 30000); }
+    if (compactApp() && matchMedia('(pointer:fine)').matches && !store.get('sized', false) && window.outerWidth > 520) { store.set('sized', true); try { window.resizeTo(400, 780); } catch {} }
+}
+async function unreadCount() { try { P.unreadN = (await H.api('/api/phone/unread')).unread || 0; badge(); } catch {} }
+function pollPhone() {
+    if (onDialer() && dialerOn()) inbox().then(() => { badge(); drawList(); if (P.sel) refreshThread(); }).catch(() => {});
+    else unreadCount();
 }
 function loadSdk() {
     if (window.Twilio && window.Twilio.Device) return Promise.resolve();
@@ -179,7 +192,7 @@ function setState(s, reason) { P.state = s; if (s === 'ready') P.reason = ''; el
 const stateChip = () => `<span id="ph-state" class="phstate ${P.state}" title="${esc(P.state === 'ready' ? 'Calls ring here' : 'Not connected: calls go to voicemail' + (P.reason ? '. ' + P.reason : ''))}"><i></i>${P.state === 'ready' ? 'Ready' : P.state === 'error' ? 'Offline' : 'Connecting'}</span>${P.state === 'error' && P.reason ? `<small id="ph-why" class="phwhy">${esc(P.reason)}</small>` : ''}`;
 async function inbox() { P.threads = (await H.api('/api/phone/inbox')).threads; return P.threads; }
 function badge() { const n = unread(); document.querySelectorAll('[data-phbadge]').forEach(b => { b.textContent = n || ''; b.hidden = !n; }); }
-const unread = () => (P.threads || []).reduce((a, t) => a + (t.unread || 0), 0);
+const unread = () => P.threads ? P.threads.reduce((a, t) => a + (t.unread || 0), 0) : (P.unreadN || 0);
 
 // ------------------------------------------------------------------ calls
 function call(number, name, leadId) {
@@ -205,7 +218,7 @@ function wire(c, info) {
         if (i.leadId && i.dir === 'out') P.after = { leadId: i.leadId, name: i.name, sid: i.sid || (c.parameters && c.parameters.CallSid) || null, secs: i.start ? Math.round((Date.now() - i.start) / 1000) : 0, picked: i.start ? '' : 'none', outcome: '', note: (i.note || ''), callbackAt: '', askedEmail: false, connected: !!i.start };
         P.call = null; P.callInfo = null; P.quality = null; bar(); drawCallPane(); afterCard();
         if (whyText) H.toast(whyText);
-        setTimeout(() => inbox().then(() => { badge(); if (onDialer() && P.dtab === 'phone') { drawList(); if (P.sel === n) refreshThread(); } }), 2500);
+        setTimeout(() => (onDialer() && dialerOn() ? inbox().then(() => { badge(); drawList(); if (P.sel === n) refreshThread(); }) : unreadCount()).catch(() => {}), 2500);
     };
     c.on('disconnect', () => end('Call ended'));
     c.on('cancel', () => end());
@@ -249,6 +262,7 @@ function onIncoming(c) {
     const from = c.customParameters.get('caller') || c.parameters.From, pcs = c.customParameters.get('pcs');
     const card = { c, from: e164(from) || from, pcs, id: Math.random().toString(36).slice(2) };
     P.incoming.push(card); ring();
+    if (!P.threads && dialerOn()) inbox().then(ring).catch(() => {});
     const gone = () => { P.incoming = P.incoming.filter(x => x !== card); ring(); };
     c.on('cancel', gone); c.on('reject', gone); c.on('disconnect', gone);
     if ('Notification' in window && Notification.permission === 'granted' && document.hidden) { try { new Notification('Incoming call', { body: nameOf(card.from) || pretty(card.from), tag: 'el-call' }); } catch {} }
@@ -298,11 +312,29 @@ function callsView() {
       ${P.ctab === 'home' ? lockBanner() : ''}
       <div class="phx-b">${P.ctab === 'numbers' ? numbersView() : P.ctab === 'settings' ? callsSettingsView() : homeView()}</div></div>`;
 }
+function lockedDialer() {
+    return `<div class="phx dialer"><div class="lockedpage">${ic('lock')}<h2>The Dialer is locked</h2><p>The owner unlocks it for you in Admin → Team. You can still call your leads from Calls.</p>
+      <a class="btn pri" href="${window.EL_PHONE_ONLY ? '/' : ''}#calls/home">${ic('phone')}Open Calls</a></div></div>`;
+}
+function compactView() {
+    const t = ['keypad', 'recents', 'sound'].includes(P.dtab) ? P.dtab : 'keypad'; P.dtab = t;
+    return `<div class="phx dialer compact" data-tab="${t}">
+      <header class="cx-h"><img src="/icons/dialer-64.png" alt="" width="28" height="28"><div><b>${esc(P.cfg.pretty)}</b><small>${P.cfg.open ? 'Open now' : 'Closed'} · ${esc(P.cfg.hours)}</small></div>${stateChip()}</header>
+      ${lockBanner()}
+      <div class="cx-b">${t === 'keypad' ? dialHtml() : t === 'sound' ? `<div class="phset">${soundCards(true)}</div>` : P.sel ? `<section class="ph-main cx-thread" id="ph-main">${threadHtml()}</section>`
+        : `<div class="cx-recents"><label class="ph-search">${ic('search')}<input id="ph-q" type="search" placeholder="Search names and numbers" value="${esc(P.q)}" aria-label="Search conversations"></label>
+          <div class="ph-tabs" role="tablist">${[['all', 'All'], ['unread', 'Unread'], ['missed', 'Missed'], ['voicemail', 'Voicemail'], ['texts', 'Texts']].map(([k, l]) => `<button type="button" role="tab" aria-selected="${P.ibox === k}" class="${P.ibox === k ? 'on' : ''}" data-phtab="${k}">${l}</button>`).join('')}</div>
+          <div class="ph-items" id="ph-items">${listHtml()}</div></div>`}</div>
+      <nav class="cx-tabs" role="tablist">${[['keypad', 'Keypad', 'keypad'], ['recents', 'Recents', 'clock'], ['sound', 'Sound', 'speaker']].map(([k, l, i]) => `<button type="button" role="tab" aria-selected="${t === k}" class="${t === k ? 'on' : ''}" data-dtab2="${k}">${ic(i)}<span>${l}</span>${k === 'recents' ? `<em class="ct hot" data-phbadge ${unread() ? '' : 'hidden'}>${unread() || ''}</em>` : ''}</button>`).join('')}</nav></div>`;
+}
 function dialerView() {
+    if (!dialerOn()) return lockedDialer();
+    if (compactApp()) return compactView();
+    if (!['phone', 'sound'].includes(P.dtab)) P.dtab = 'phone';
     return `<div class="phx dialer" data-tab="${P.dtab}">
       <header class="phx-h"><nav class="phx-tabs" role="tablist">${[['phone', 'Phone', 'keypad'], ['sound', 'Sound and app', 'speaker']].map(([k, l, i]) => `<button type="button" role="tab" aria-selected="${P.dtab === k}" class="${P.dtab === k ? 'on' : ''}" data-dtab2="${k}">${ic(i)}<span>${l}</span>${k === 'phone' ? `<em class="ct hot" data-phbadge ${unread() ? '' : 'hidden'}>${unread() || ''}</em>` : ''}</button>`).join('')}</nav>
         <div class="phx-clocks"><span><small>Business line</small><b>${esc(P.cfg.pretty)}</b></span></div><span class="sp"></span>${stateChip()}
-        <button type="button" class="btn sm" data-ph="install" ${standalone() ? 'hidden' : ''}>${ic('install')}<span>Install app</span></button></header>
+        <button type="button" class="btn sm" data-ph="install" ${standalone() || !dialerOn() ? 'hidden' : ''}>${ic('install')}<span>Install app</span></button></header>
       ${lockBanner()}
       <div class="phx-b">${P.dtab === 'sound' ? `<div class="phset">${soundCards(true)}</div>` : inboxView()}</div></div>`;
 }
@@ -552,28 +584,31 @@ const hm = secs => { const h = Math.floor(secs / 3600), m = Math.round((secs % 3
 function numbersView() {
     if (!P.stats) { loadStats().then(() => { if (onCalls() && P.ctab === 'numbers') rerender(); }).catch(e => { const b = $('.phx-b'); if (b) b.innerHTML = `<div class="empty err">Your numbers could not load: ${esc(e.message)}</div>`; }); return '<div class="boot">Counting…</div>'; }
     const r = P.stats, s = r.stats, from = new Date(r.from), to = new Date(r.to);
-    const card = (big, label, sub, cls = '') => `<div class="ncard ${cls}"><b>${big}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
+    // Phase 93: each tile says what it is at a glance: a label with its icon, the number, then one plain line.
+    const card = (big, label, sub, icon, tone = '') => `<div class="ncard ${tone}"><div class="nh"><span class="ni">${ic(icon)}</span><span>${label}</span></div><b>${big}</b>${sub ? `<small>${sub}</small>` : ''}</div>`;
     const PK = [['owner', 'The owner', '--ok'], ['front_desk', 'Front desk', '--acc'], ['someone', 'Someone else', '--gold'], ['none', 'No one', '--dim'], ['unlogged', 'No outcome logged', '--line2']];
     const max = Math.max(1, ...s.byDay.map(d => PK.reduce((a, [k]) => a + (d[k] || 0), 0)));
     const best = s.best ? `In this period owners picked up most often around <b>${h12(s.best.hour + ':00')}</b> their time: ${Math.round(s.best.rate * 100)}% of ${s.best.calls} calls. Hours with fewer than 8 calls are not compared.` : 'Once there are 8 or more calls in an hour, the hour owners pick up most shows here.';
+    const group = (title, sub, tiles) => `<section class="ngroup"><div class="ngh"><h3>${title}</h3><span>${sub}</span></div><div class="ngrid">${tiles.join('')}</div></section>`;
     return `<div class="nums">
       <div class="nbar"><div class="period" role="group" aria-label="Period">${RANGES.map(([k, l]) => `<button type="button" data-srange="${k}" class="${P.srange === k ? 'on' : ''}">${l}</button>`).join('')}</div>
         <span class="dim">${esc(from.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))} to ${esc(to.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }))} · ${esc(tzName(r.tz))} time</span><span class="sp"></span>
         ${r.people && r.people.length ? `<select id="suser" aria-label="Whose numbers"><option value="">Mine</option><option value="all" ${P.suser === 'all' ? 'selected' : ''}>The whole team</option>${r.people.map(p => `<option value="${p.id}" ${P.suser === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}</div>
-      <div class="ngrid">
-        ${card(s.calls.toLocaleString('en-US'), 'Calls', `${s.leadsCalled.toLocaleString('en-US')} leads called`)}
-        ${card(s.perHour, 'Calls per hour', `over ${s.hoursWithCalls} hour${s.hoursWithCalls === 1 ? '' : 's'} with a call in them`, 'hi')}
-        ${card(s.answeredPct + '%', 'Answered', `${s.answered} picked up by someone, of ${s.outcomes} with an outcome`)}
-        ${card(s.owner, 'Reached the owner', `${s.ownerPct}% of calls · ${s.frontDesk} front desk`)}
-        ${card(hm(s.seconds), 'Time on calls', s.timedCalls ? `${s.avgSeconds} s a call, on ${s.timedCalls} timed` : 'No timed calls')}
-        ${card(s.callbacksSet, 'Call-backs set', s.callbacksDue ? `${s.callbacksMade} of ${s.callbacksDue} due were made` : 'None were due')}
-        ${card(s.interested, 'Interested', 'into the pipeline', 'hi')}
-        ${card(s.meetings, 'Meetings booked', `${s.meetingsPct}% of owners reached`, 'hi')}
-        ${card(s.emailsAsked, 'Emails asked for', 'each made an email task')}
-        ${card(s.notInterested, 'Not interested', 'marked Lost; back in 90 days')}
-        ${card(s.wrongNumbers + s.dnc, 'Wrong numbers and do not call', `${s.wrongNumbers} wrong · ${s.dnc} do not call`)}
-        ${card(s.noTimer, 'Logged without dialing', 'calls logged without calling from here', s.noTimer ? 'warn' : '')}
-      </div>
+      ${group('Activity', 'How much calling', [
+        card(s.calls.toLocaleString('en-US'), 'Calls made', `to ${s.leadsCalled.toLocaleString('en-US')} lead${s.leadsCalled === 1 ? '' : 's'}`, 'phone', 't-act'),
+        card(s.perHour, 'Calls per hour', `over ${s.hoursWithCalls} hour${s.hoursWithCalls === 1 ? '' : 's'} with a call in them`, 'clock', 't-act'),
+        card(hm(s.seconds), 'Time on calls', s.timedCalls ? `${s.avgSeconds} s a call on average` : 'No timed calls yet', 'wave', 't-act'),
+        card(s.noTimer, 'Logged without dialing', s.noTimer ? 'calls logged, not made from here' : 'every call was made from here', 'note', s.noTimer ? 't-warn' : 't-act')])}
+      ${group('Conversations', 'Who you reached', [
+        card(s.answeredPct + '%', 'Picked up', `${s.answered} of ${s.outcomes} calls with an outcome`, 'in', 't-talk'),
+        card(s.owner, 'Reached the owner', `${s.ownerPct}% of calls · ${s.frontDesk} front desk`, 'lead', 't-talk'),
+        card(s.callbacksSet, 'Call-backs set', s.callbacksDue ? `${s.callbacksMade} of ${s.callbacksDue} due were made` : 'none were due', 'redo', 't-talk'),
+        card(s.emailsAsked, 'Asked for an email', 'each one made an email task', 'mail', 't-talk')])}
+      ${group('Results', 'Where the calls led', [
+        card(s.interested, 'Interested', 'went into the pipeline', 'check', 't-win'),
+        card(s.meetings, 'Meetings booked', `${s.meetingsPct}% of owners reached`, 'chart', 't-win'),
+        card(s.notInterested, 'Not interested', 'marked Lost, back in 90 days', 'x', 't-lose'),
+        card(s.wrongNumbers + s.dnc, 'Wrong number or do not call', `${s.wrongNumbers} wrong · ${s.dnc} do not call`, 'ban', 't-lose')])}
       <div class="ninsight">${ic('clock')}<span>${best}</span></div>
       <section class="card nchart"><div class="card-h"><div><h2>Calls by day</h2><span>Each bar is the day's calls, split by who picked up.</span></div></div>
         <div class="legend">${PK.map(([k, l, c]) => `<span><i style="--c:var(${c})"></i>${l}</span>`).join('')}</div>
@@ -658,7 +693,7 @@ async function preflight() {
 }
 async function install() {
     if (P.installEvt) { P.installEvt.prompt(); const r = await P.installEvt.userChoice; if (r.outcome === 'accepted') H.toast('Installed. Open “EdgeLead Dialer” from your home screen, Start menu or dock.'); P.installEvt = null; return; }
-    if (!window.EL_PHONE_ONLY) { window.open('/phone.html?install=1', 'elphone', 'width=1240,height=820'); return; }
+    if (!window.EL_PHONE_ONLY) { window.open('/phone.html?install=1&compact=1', 'elphone', 'width=400,height=780'); return; }
     if (standalone()) return H.toast('This is the installed app.');
     const steps = isIos() ? ['Open this page in <b>Safari</b>.', 'Tap <b>Share</b> (the square with the arrow).', 'Tap <b>Add to Home Screen</b>, then <b>Add</b>.']
         : /android/i.test(navigator.userAgent) ? ['Open this page in <b>Chrome</b>.', 'Tap <b>⋮</b> at the top right.', 'Tap <b>Install app</b> (or <b>Add to Home screen</b>).']
@@ -810,7 +845,7 @@ function infoHtml() {
 // ------------------------------------------------------------------ drawing in place
 function drawList() { const el = $('#ph-items'); if (el) el.innerHTML = listHtml(); }
 async function open(num) {
-    P.sel = num; P.thread = null; P.dtab = 'phone';
+    P.sel = num; P.thread = null; P.dtab = compactApp() ? 'recents' : 'phone';
     if (!onDialer()) { location.hash = 'dialer'; return; }
     rerender();
     try { P.thread = await H.api('/api/phone/thread/' + encodeURIComponent(num)); } catch (e) { H.toast(e.message, true); }
@@ -827,7 +862,9 @@ function scrollEnd() { const b = $('#th-b'); if (b) b.scrollTop = b.scrollHeight
 function mounted() {
     document.body.dataset.phpage = onCalls() ? 'calls-' + P.ctab : 'dialer-' + P.dtab; scrollEnd(); bar(); afterCard(); remDraw();
     const s = $('#sms-in'); if (s) grow(s);
-    if (onDialer() && P.dtab === 'phone' && !P.sel) { const d = $('#dial-in'); if (d && matchMedia('(pointer:fine)').matches && !locked()) d.focus(); }
+    if (onDialer() && dialerOn() && !P.threads && P.cfg && P.cfg.ready) inbox().then(() => { drawList(); badge(); }).catch(() => {});
+    if (onDialer() && ['phone', 'keypad'].includes(P.dtab) && !P.sel) { const d = $('#dial-in'); if (d && matchMedia('(pointer:fine)').matches && !locked()) d.focus(); }
+    document.body.classList.toggle('compact-app', onDialer() && compactApp());
     if (onCalls() && P.ctab === 'home' && P.dq && P.dsel && (!P.dlead || P.dlead.lead.id !== P.dsel)) openLead(P.dsel, true);
     if ($('#au-in')) drawSoundDevices(); else releaseMeter();
     if (new URLSearchParams(location.search).has('install') && P.installEvt && !P.installAsked) { P.installAsked = true; H.toast('Press “Install app” at the top to install the Dialer.'); }
@@ -887,7 +924,7 @@ document.addEventListener('click', async e => {
     if (t.closest('[data-copy]')) return;          // the CRM copies it
     const dg = t.closest('[data-dgo]'); if (dg) return dial(dg.dataset.dgo);
     if (!t.closest('.phx, .ph, .callbar, .aftercard')) return;
-    const px = t.closest('[data-dtab2]'); if (px) { P.dtab = px.dataset.dtab2; return rerender(); }
+    const px = t.closest('[data-dtab2]'); if (px) { if (px.dataset.dtab2 === P.dtab && P.dtab === 'recents') P.sel = null; P.dtab = px.dataset.dtab2; return rerender(); }
     // Calls → Home
     const dt = t.closest('[data-dtab]'); if (dt) { P.dqf.tab = dt.dataset.dtab; store.set('dqf', P.dqf); P.dq = null; P.dsel = null; P.mob = 'list'; return rerender(); }
     const ds = t.closest('[data-dsel]'); if (ds) return openLead(ds.dataset.dsel);
@@ -914,7 +951,7 @@ document.addEventListener('click', async e => {
     const k = a.dataset.ph;
     if (k === 'menu') { const m = $('#ph-menu'); m.hidden = !m.hidden; return; }
     if (k === 'install') return install();
-    if (k === 'window') { $('#ph-menu').hidden = true; window.open('phone.html', 'elphone', 'width=1240,height=820'); return; }
+    if (k === 'window') { $('#ph-menu').hidden = true; window.open('phone.html?compact=1', 'elphone', 'width=400,height=780'); return; }
     if (k === 'notify') { const m = $('#ph-menu'); if (m) m.hidden = true; if (!('Notification' in window)) return H.toast('This browser cannot show notifications.', true);
         const p = await Notification.requestPermission(); return H.toast(p === 'granted' ? 'You will be notified of calls while this is open in the background.' : 'Notifications are blocked for this site in the browser settings.'); }
     if (k === 'testalert') { if (!('Notification' in window)) return H.toast('This browser cannot show desktop alerts.', true);
@@ -923,10 +960,10 @@ document.addEventListener('click', async e => {
     if (k === 'tone') return tone();
     if (k === 'testspk') { try { if (P.device && P.device.audio) await P.device.audio.speakerDevices.test(); else throw new Error('The phone is still connecting.'); } catch (err) { H.toast(err.message || 'The test sound could not play.', true); } return; }
     if (k === 'preflight') return preflight();
-    if (k === 'dial') { P.sel = null; P.thread = null; rerender(); return; }
+    if (k === 'dial') { P.sel = null; P.thread = null; if (compactApp()) P.dtab = 'keypad'; rerender(); return; }
     if (k === 'dialdel') { const i = $('#dial-in'); i.value = i.value.slice(0, -1); i.focus(); return; }
     if (k === 'dialgo') { const n = $('#dial-in').value; return call(n); }
-    if (k === 'new') { P.sel = null; rerender(); const m = $('#ph-main'); m.innerHTML = `<div class="dialwrap"><form class="dial" id="newsms"><h2 class="nt">New text</h2><input id="ns-to" class="dial-in sm" inputmode="tel" placeholder="Their number" aria-label="Their number"><button class="btn pri wide" type="submit">Start the conversation</button></form></div>`; $('#ns-to').focus(); return; }
+    if (k === 'new') { P.sel = null; if (compactApp()) P.dtab = 'recents'; rerender(); const m = $('#ph-main'); m.innerHTML = `<div class="dialwrap"><form class="dial" id="newsms"><h2 class="nt">New text</h2><input id="ns-to" class="dial-in sm" inputmode="tel" placeholder="Their number" aria-label="Their number"><button class="btn pri wide" type="submit">Start the conversation</button></form></div>`; $('#ns-to').focus(); return; }
     if (k === 'back') { P.sel = null; P.thread = null; rerender(); return; }
     if (k === 'callsel') { const lead = P.thread && P.thread.lead; return call(P.sel, nameOf(P.sel) || (P.thread && P.thread.contact && P.thread.contact.name), lead ? lead.id : null); }
     if (k === 'info') { P.info = !P.info; rerender(); return; }

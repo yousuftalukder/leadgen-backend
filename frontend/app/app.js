@@ -81,8 +81,12 @@ const stageChip = k => `<span class="stg" style="--c:var(${STAGE_VAR[k] || '--di
 const IND_VAR = ['--s-web', '--s-seo', '--s-google', '--s-meta', '--s-social', '--s-email', '--s-inf', '--s-ref'];
 const indVar = n => IND_VAR[[...String(n || 'x').toLowerCase()].reduce((a, c) => a + c.charCodeAt(0), 0) % IND_VAR.length];
 const indChip = n => n ? `<span class="ind" style="--c:var(${indVar(n)})">${esc(n)}</span>` : `<span class="ind none">No industry</span>`;
-async function leads(force) { if (!st.leads || force) st.leads = (await api('/api/crm/leads?limit=2000')).leads; return st.leads; }
+async function leads(force) { if (!st.leads || force) st.leads = (await api('/api/crm/leads')).leads; return st.leads; }
 const isAdmin = () => st.meta && st.meta.me.role === 'admin';
+/** Phase 93: the Dialer and Email campaigns open only for the owner and the people the owner unlocks them for (Admin → Team). */
+const feat = k => isAdmin() || !!(st.meta && st.meta.features && st.meta.features[k]);
+const FEAT_OF = { campaigns: 'campaigns', dialer: 'dialer' };
+const FEAT_TEXT = { campaigns: ['Email campaigns are locked', 'The owner unlocks Email campaigns for you in Admin → Team.'], dialer: ['The Dialer is locked', 'The owner unlocks the Dialer for you in Admin → Team. You can still call your leads from Calls.'] };
 const p90 = () => !!(st.meta && st.meta.p90);
 const p91 = () => !!(st.meta && st.meta.p91);
 /** Where a lead stands: a client, lost, being worked in the pipeline, or cold. Before the phase-90 SQL, any stage past New is the pipeline. */
@@ -97,8 +101,8 @@ const industries = () => { const set = new Map(); (st.meta.industries || []).for
 
 // ------------------------------------------------------------------ shell
 const NAV = [
-    ['overview', 'Overview', 'overview', 'Work'], ['leads', 'Leads', 'leads', 'Work'], ['pipeline', 'Pipeline', 'pipeline', 'Work'], ['calls', 'Calls', 'phone', 'Work'], ['campaigns', 'Email campaigns', 'seq', 'Work'], ['dialer', 'Dialer', 'keypad', 'Work'],
-    ['clients', 'Clients', 'clients', 'Business'], ['influencers', 'Influencers', 'pin', 'Business'], ['admin', 'Admin', 'shield', 'Owner']];
+    ['overview', 'Overview', 'overview', 'Work'], ['leads', 'Leads', 'leads', 'Work'], ['pipeline', 'Pipeline', 'pipeline', 'Work'], ['calls', 'Calls', 'phone', 'Work'], ['campaigns', 'Email campaigns', 'seq', 'Work'],
+    ['clients', 'Clients', 'clients', 'Business'], ['influencers', 'Influencers', 'pin', 'Business'], ['admin', 'Admin', 'shield', 'Owner'], ['dialer', 'Dialer', 'keypad', 'Phone']];
 let route = 'overview', routeArg = '';
 const navOf = r => r === 'client' ? 'clients' : r;
 function shell() {
@@ -113,8 +117,9 @@ function shell() {
         <button type="button" class="railbtn" id="railToggle" title="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-label="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-expanded="${!mini}">${ic('side')}</button></div>` + NAV.filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i, g]) => {
         const head = g !== grp ? `<div class="grp">${g}</div>` : ''; grp = g;
         const on = navOf(route) === k;
-        return head + `<a href="#${k}" class="${on ? 'on' : ''}" ${on ? 'aria-current="page"' : ''} title="${l}">${ic(i)}<span class="lbl2">${l}</span>${badge(k)}</a>`;
-    }).join('') + toolsLink() +
+        const lockd = FEAT_OF[k] && !feat(FEAT_OF[k]);
+        return (k === 'dialer' ? toolsLink() : '') + head + `<a href="#${k}" class="${on ? 'on' : ''} ${lockd ? 'locked' : ''}" ${on ? 'aria-current="page"' : ''} title="${l}${lockd ? ' (locked)' : ''}" ${lockd ? `data-featlock="${k}"` : ''}>${ic(i)}<span class="lbl2">${l}</span>${lockd ? ic('lock').replace('class="ico"', 'class="ico lk"') : badge(k)}</a>`;
+    }).join('') + (NAV.some(n => n[0] === 'dialer') ? '' : toolsLink()) +
         `<div class="foot"><div class="me" title="${esc(teamName(st.meta.me.id))}"><span class="ava">${initials(teamName(st.meta.me.id))}</span><div style="min-width:0"><b>${esc(teamName(st.meta.me.id))}</b><span>${isAdmin() ? 'Owner' : 'Team'}</span></div></div><button class="btn sm ghost" id="theme" type="button" title="Light / dark">${ic('moon')}<span class="lbl2">Light / dark</span></button><button class="btn sm ghost" id="signout" type="button" title="Sign out">${ic('out')}<span class="lbl2">Sign out</span></button></div>`;
     const tb = $('#toolsTop'); if (tb) { const t = toolsState(); tb.hidden = !t.show; tb.classList.toggle('locked', !t.open); tb.innerHTML = `${ic('tools')}<span>Tools</span>${t.open ? '' : ic('lock').replace('class="ico"', 'class="ico lk"')}`; tb.title = t.open ? 'Open the Tools' : 'Tools are locked'; }
     $('#tabbar').innerHTML = [['overview', 'Home', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['calls', 'Calls', 'phone'], ['more', 'More', 'menu']]
@@ -131,6 +136,10 @@ function toolsState() {
 function toolsLink() {
     const t = toolsState(); if (!t.show) return '';
     return `<a href="/tools" class="tools-link" data-tools title="Tools">${ic('tools')}<span class="lbl2">Tools</span><span class="lock ${t.open ? 'open' : ''}">${ic(t.open ? 'unlock' : 'lock').replace('class="ico"', 'class="ico" style="width:12px;height:12px"')}${t.open ? 'Unlocked' : 'Locked'}</span></a>`;
+}
+function modalInfo(title, text) {
+    $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="mh"><h2 style="display:flex;align-items:center;gap:8px">${ic('lock')}${esc(title)}</h2></div>
+      <div class="mb"><p class="sub" style="margin:0">${esc(text)}</p></div><div class="mf"><button class="btn" type="button" data-close>Close</button>${isAdmin() ? '<a class="btn pri" href="#admin/team" data-close>Open Admin → Team</a>' : ''}</div></div>`;
 }
 function toolsLocked() {
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" aria-label="Tools are locked"><div class="mh"><h2 style="display:flex;align-items:center;gap:8px">${ic('lock')}Tools are locked</h2></div>
@@ -161,6 +170,7 @@ async function render() {
     document.body.dataset.route = route;
     try {
         if (MODULES[route]) { if (!loaded[MODULES[route]]) v.innerHTML = '<div class="boot">Loading…</div>'; await need(MODULES[route]); }
+        if (FEAT_OF[route] && !feat(FEAT_OF[route])) { const [h, d] = FEAT_TEXT[FEAT_OF[route]]; v.innerHTML = `<div class="lockedpage">${ic('lock')}<h2>${h}</h2><p>${d}</p><a class="btn pri" href="${window.EL_PHONE_ONLY ? '/' : ''}#${route === 'dialer' ? 'calls/home' : 'leads'}">${route === 'dialer' ? 'Open Calls' : 'Open Leads'}</a></div>`; shell(); return; }
         const fn = { overview: vOverview, leads: vLeads, pipeline: vPipeline, clients: vClients, influencers: vInfluencers, calls: async arg => window.ELPhone ? ELPhone.view('calls', arg) : '', dialer: async () => window.ELPhone ? ELPhone.view('dialer') : '' }[route] || CRM.views[route];
         const html = await fn(routeArg);
         if (seq !== renderSeq) return;   // a newer page was asked for while this one loaded
@@ -304,7 +314,7 @@ async function vLeads() {
         : `<div class="card"><div class="empty">${all.length ? 'No lead matches these filters.' : 'No leads yet. Add one with New lead, import a CSV, or find them with the Tools.'}${filtered ? ' <button class="btn sm" type="button" data-act="clearf">Clear filters</button>' : ''}</div></div>`;
     return `<div class="head"><div><h1>Leads</h1><p class="sub">${num(all.length)} leads · ${num(states.cold || 0)} cold · ${num(states.pipeline || 0)} in the pipeline · ${num(states.client || 0)} clients. Work the good ones from the pipeline.</p></div><div class="sp"></div>
         <div class="seg" role="group" aria-label="View"><button type="button" data-lmode="table" class="${st.leadMode === 'table' ? 'on' : ''}">${ic('table')}Table</button><button type="button" data-lmode="map" class="${st.leadMode === 'map' ? 'on' : ''}">${ic('pin')}Map</button></div>
-        <button class="btn" type="button" data-act="import">${ic('up')}Import CSV</button></div>
+        <button class="btn" type="button" data-act="import">${ic('up')}Import CSV</button><button class="btn" type="button" data-act="export" title="The leads these filters show, as a CSV file">${ic('up').replace('class="ico"', 'class="ico" style="transform:rotate(180deg)"')}Export</button></div>
       <div class="views" role="tablist">${LVIEWS.map(([k, l, fn]) => `<button type="button" role="tab" aria-selected="${st.view === k}" class="${st.view === k ? 'on' : ''}" data-view="${k}">${l}<span class="c">${num(all.filter(x => fn(x) && leadFilter(x, { skip: 'view' })).length)}</span></button>`).join('')}</div>
       <div class="filters"><div class="searchin">${ic('search')}<input id="lq" type="search" placeholder="Name, business, phone, email, website" value="${esc(st.q)}" aria-label="Search leads"></div>
         <select id="fcat" aria-label="Category"><option value="">Every category</option>${st.meta.sources.map(s => `<option value="${s.key}" ${st.cat === s.key ? 'selected' : ''}>${esc(s.path || s.label)} · ${num(byCat[s.key] || 0)}</option>`).join('')}</select>
@@ -323,8 +333,10 @@ function bulkBar() {
         ${p90() ? `<select class="btn sm" data-bulk="industry" aria-label="Set industry"><option value="">Industry…</option>${industries().map(i => `<option>${esc(i)}</option>`).join('')}</select>` : ''}
         <select class="btn sm" data-bulk="source" aria-label="Set category"><option value="">Category…</option>${st.meta.sources.map(s => `<option value="${s.key}">${esc(s.path || s.label)}</option>`).join('')}</select>
         <select class="btn sm" data-bulk="owner_id" aria-label="Assign to"><option value="">Assign to…</option>${st.meta.team.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>
-        ${p90() ? `<button class="btn sm" type="button" data-act="bulkcamp">${ic('seq')}Add to a campaign</button>` : ''}
+        <select class="btn sm" data-bulk="stage" aria-label="Move to stage"><option value="">Stage…</option>${st.meta.stages.filter(s2 => s2.key !== 'won').map(s2 => `<option value="${s2.key}">${esc(s2.label)}</option>`).join('')}</select>
+        ${p90() && feat('campaigns') ? `<button class="btn sm" type="button" data-act="bulkcamp">${ic('seq')}Add to a campaign</button>` : ''}
         ${p91() ? `<button class="btn sm" type="button" data-act="bulkreopen" title="Due now in Calls; not for do-not-call or wrong numbers">${ic('redo')}Back to the call list</button>` : ''}
+        ${isAdmin() ? `<button class="btn sm ghost danger" type="button" data-act="bulkdel">${ic('trash')}Delete</button>` : ''}
         <button class="btn sm ghost" type="button" data-act="clearsel">Clear</button></div>`;
 }
 
@@ -641,14 +653,14 @@ function drawLead({ lead: l, activities, history, tasks, influencers, client }) 
       ${work ? `<div class="stepper" role="group" aria-label="Stage">${st.meta.stages.map((s, i) => `<button type="button" data-stage="${s.key}" class="${i < si && l.stage !== 'lost' ? 'past' : ''} ${i === si ? 'cur' : ''} ${s.key === 'lost' ? 'lost' : ''}" ${l.client_id && s.key !== 'won' ? 'disabled' : ''}>${s.label}</button>`).join('')}</div>`
         : `<div class="coldbar">${ic('lock')}<div><b>Cold lead.</b> Call it from Calls. Email and texts are worked from the pipeline: add it when it is worth working (an Interested call adds it for you).</div><button class="btn pri sm" type="button" data-act="topipe">${ic('pipeline')}Add to pipeline</button></div>`}
       <div class="acts">${l.email ? `<a class="btn sm ${work ? 'pri' : ''}" ${work ? `href="mailto:${esc(l.email)}"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('mail')}Email</a>` : ''}
-        ${l.phone ? `<button class="btn sm ${work ? '' : 'pri'}" type="button" data-act="phcall"${noCall}>${ic('phone')}Call</button>${window.ELPhone ? `<button class="btn sm" type="button" data-act="phdial">${ic('phone')}Open in Calls</button>` : ''}<button class="btn sm" type="button" data-act="phtext"${dnc ? noCall : lock}>${ic('reply')}Text</button>` : ''}
+        ${l.phone ? `<button class="btn sm ${work ? '' : 'pri'}" type="button" data-act="phcall"${noCall}>${ic('phone')}Call</button>${window.ELPhone ? `<button class="btn sm" type="button" data-act="phdial" title="Opens this lead in Calls, to call it and log how it went">${ic('keypad')}Open in dialer</button>` : ''}<button class="btn sm" type="button" data-act="phtext"${dnc ? noCall : lock}>${ic('reply')}Text</button>` : ''}
         ${p91() && l.call_status === 'closed' && !dnc && !wrong && !l.client_id && l.stage !== 'won' ? `<button class="btn sm" type="button" data-act="reopen" title="Put it back in the call list, due now">${ic('redo')}Back to the call list</button>` : ''}
         ${dnc && isAdmin() ? `<button class="btn sm ghost" type="button" data-act="undnc" title="Only if they asked to be called again">Allow calls again</button>` : ''}
         ${waNum ? `<a class="btn sm" ${work ? `href="https://wa.me/${waNum}" target="_blank" rel="noopener"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('wa')}WhatsApp</a>` : ''}
-        ${p90() && l.email ? `<button class="btn sm" type="button" data-act="tocamp"${lock}>${ic('seq')}Add to campaign</button>` : ''}
+        ${p90() && l.email ? `<button class="btn sm" type="button" data-act="tocamp"${!feat('campaigns') ? ' disabled title="Email campaigns are locked for you"' : lock}>${ic(feat('campaigns') ? 'seq' : 'lock')}Add to campaign</button>` : ''}
         <button class="btn sm ghost" type="button" data-act="tonet">${ic('pin')}Influencer network</button>
         ${work && inPipe(l) && p90() && !l.client_id ? `<button class="btn sm ghost" type="button" data-act="frompipe">Take out of pipeline</button>` : ''}
-        ${l.client_id ? `<a class="btn sm" href="#client/${l.client_id}" data-close>${ic('clients')}Open client</a>` : work ? `<button class="btn sm gold" type="button" data-act="convert">${ic('client')}Convert to client</button>` : ''}</div></div>
+        ${l.client_id ? `<a class="btn sm" href="#client/${l.client_id}" data-close>${ic('clients')}Open client</a>` : work ? `<button class="btn sm gold" type="button" data-act="convert">${ic('client')}Convert to client</button>` : ''}        ${isAdmin() && !l.client_id ? `<button class="btn sm ghost danger" type="button" data-act="dellead" title="Delete this lead and its history">${ic('trash')}Delete</button>` : ''}</div></div>
     <div class="dr-b"><div class="feed">
       <div class="compose"><div class="tabs" role="tablist">${[['note', 'Note'], ['call', 'Log call'], ['email_out', 'Email sent'], ['email_in', 'Reply'], ['whatsapp', 'WhatsApp'], ['meeting', 'Meeting'], ['task', 'Task']].map(([k, t]) => `<button type="button" role="tab" data-ctab="${k}" class="${ctab === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <textarea id="cbody" aria-label="Write here" placeholder="Write a note"></textarea>
@@ -734,6 +746,19 @@ function importCsv() {
         $('#mok').textContent = 'Done'; $('#mok').onclick = () => { $('#layer').innerHTML = ''; render(); };
     }, true);
 }
+/** The leads on screen, as a CSV file: everything you need to work or check them elsewhere. */
+function exportCsv(rows) {
+    const cell = x => { const t = x == null ? '' : String(x); return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const stage = k => (st.meta.stages.find(s2 => s2.key === k) || { label: k || '' }).label;
+    const cols = [['Business', l => l.company], ['Contact', l => l.full_name], ['Industry', l => l.industry], ['Category', l => srcOf(l.source).path || srcOf(l.source).label], ['Phone', l => l.phone], ['Email', l => l.email],
+        ['Website', l => l.website], ['City', l => l.city], ['Country', l => l.country], ['Status', l => STATE[leadState(l)][0]], ['Stage', l => stage(l.stage)], ['Lost reason', l => l.lost_reason], ['Owner', l => teamName(l.owner_id)],
+        ['Score', l => l.score], ['Calls', l => l.calls_count], ['Last call', l => l.last_call_at && l.last_call_at.slice(0, 10)], ['Last outcome', l => l.last_call_outcome], ['Try again', l => l.callback_at && l.callback_at.slice(0, 16).replace('T', ' ')],
+        ['Emails', l => l.emails_count], ['Last email', l => l.last_email_at && l.last_email_at.slice(0, 10)], ['Campaign', l => l.campaign && l.campaign.name], ['Tags', l => (l.tags || []).join('; ')], ['Added', l => l.created_at && l.created_at.slice(0, 10)]];
+    const csv = [cols.map(c => c[0]).join(','), ...rows.map(l => cols.map(c => cell(c[1](l))).join(','))].join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `edgelead-leads-${new Date().toISOString().slice(0, 10)}.csv`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`${num(rows.length)} lead${rows.length === 1 ? '' : 's'} exported`);
+}
 async function toCampaign(ids) {
     const { campaigns } = await api('/api/crm/campaigns');
     const live = campaigns.filter(c => c.status !== 'archived');
@@ -767,18 +792,19 @@ function creatorForm(c, onOk, title, ok) {
 const closeLayer = () => { $('#layer').innerHTML = ''; st.openId = null; st.lead = null; };
 function moreMenu() {
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true" aria-label="More"><div class="sh-h"><b>More</b><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
-      ${[['campaigns', 'Email campaigns', 'seq'], ['dialer', 'Dialer', 'keypad'], ['clients', 'Clients', 'clients'], ['influencers', 'Influencers', 'pin'], ...(isAdmin() ? [['admin', 'Admin', 'shield']] : [])].map(([k, l, i]) => `<a href="#${k}" data-close>${ic(i)}${l}</a>`).join('')}
+      ${[['campaigns', 'Email campaigns', 'seq'], ['clients', 'Clients', 'clients'], ['influencers', 'Influencers', 'pin'], ['dialer', 'Dialer', 'keypad'], ...(isAdmin() ? [['admin', 'Admin', 'shield']] : [])].map(([k, l, i]) => FEAT_OF[k] && !feat(FEAT_OF[k]) ? `<a href="#${k}" data-featlock="${k}">${ic(i)}${l}<small>Locked</small></a>` : `<a href="#${k}" data-close>${ic(i)}${l}</a>`).join('')}
       ${toolsState().show ? `<a href="/tools" data-tools>${ic('tools')}Tools<small>${toolsState().open ? 'Unlocked' : 'Locked'}</small></a>` : ''}
       <button type="button" id="theme">${ic('moon')}Light / dark</button><button type="button" id="signout">${ic('out')}Sign out</button></div>`;
 }
 function phoneTo(num, name, leadId) { if (window.ELPhone) { closeLayer(); return ELPhone.call(num, name, leadId || null); } location.href = telHref(num); }
 document.addEventListener('click', async e => {
     const t = e.target;
+    const fl = t.closest('[data-featlock]'); if (fl) { e.preventDefault(); const [h, d] = FEAT_TEXT[fl.dataset.featlock]; return modalInfo(h, d); }
     if (t.closest('[data-tools],#toolsTop')) { if (!toolsState().open) { e.preventDefault(); return toolsLocked(); } if (t.closest('#toolsTop')) location.href = '/tools'; return; }
     if (t.closest('[data-close]')) { closeLayer(); return; }
     if (t.closest('[data-unsub]')) { $('#sub').innerHTML = ''; if (!st.openId) $('#layer').innerHTML = ''; return; }
     if (t.closest('#theme')) { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('crm-theme', r.dataset.theme); } catch {} if (route === 'influencers') mapInit(); if (route === 'leads' && st.leadMode === 'map') leadMapInit(); return; }
-    if (t.closest('#signout')) { await sb.auth.signOut(); location.replace('/'); return; }
+    if (t.closest('#signout')) { try { localStorage.removeItem('crm-meta-v1'); } catch {} await sb.auth.signOut(); location.replace('/'); return; }
     if (t.closest('#railToggle')) { const r = document.documentElement, mini = r.dataset.rail !== 'mini'; if (mini) r.dataset.rail = 'mini'; else delete r.dataset.rail; try { localStorage.setItem('crm-rail', mini ? 'mini' : ''); } catch {} shell(); return; }
     if (t.closest('#newLead')) return newLead();
     if (t.closest('#openPal')) return palette();
@@ -813,6 +839,11 @@ document.addEventListener('click', async e => {
         if (k === 'reopen' && st.openId) { try { const r = await api('/api/crm/dialer/reopen', { method: 'POST', body: { ids: [st.openId] } }); toast(r.reopened ? 'Back in the call list, due now' : 'It cannot go back: do not call, or a wrong number.', !r.reopened); await leads(true); openLead(st.openId); } catch (err) { toast(err.message, true); } return; }
         if (k === 'undnc' && st.openId) { const ld = (st.lead && st.lead.lead) || {}; if (!confirm('Allow calls to ' + (ld.company || ld.full_name) + ' again? Only if they asked. They stay unsubscribed from email.')) return;
             try { await api('/api/crm/leads/' + st.openId, { method: 'PATCH', body: { tags: (ld.tags || []).filter(x => x !== 'Do not call') } }); await api('/api/crm/dialer/reopen', { method: 'POST', body: { ids: [st.openId] } }).catch(() => {}); toast('Calls allowed again'); await leads(true); openLead(st.openId); } catch (err) { toast(err.message, true); } return; }
+        if (k === 'export') return exportCsv(st.leads.filter(l => leadFilter(l)));
+        if (k === 'dellead' && st.openId) { const ld = (st.lead && st.lead.lead) || {}; return modal('Delete ' + (ld.company || ld.full_name) + '?', `<p style="margin:0;color:var(--muted)">The lead, its notes, calls logged on it and its tasks are deleted. Calls and texts on the phone stay, without the link. This cannot be undone.</p>`, 'Delete lead', async () => {
+            await api('/api/crm/leads/' + st.openId, { method: 'DELETE' }); closeLayer(); toast('Deleted'); await leads(true); render(); }); }
+        if (k === 'bulkdel') { const ids = [...st.sel]; return modal(`Delete ${ids.length} lead${ids.length === 1 ? '' : 's'}?`, `<p style="margin:0;color:var(--muted)">They are deleted with their notes, logged calls and tasks. Clients are left alone. This cannot be undone.</p>`, 'Delete', async () => {
+            const r = await api('/api/crm/leads/bulk-delete', { method: 'POST', body: { ids } }); $('#layer').innerHTML = ''; toast(`${r.deleted} deleted${r.kept ? `, ${r.kept} clients kept` : ''}`); st.sel.clear(); await leads(true); render(); }); }
         if (k === 'bulkreopen') { const ids = [...st.sel]; try { const r = await api('/api/crm/dialer/reopen', { method: 'POST', body: { ids } }); toast(`${r.reopened} back in the call list${r.dnc ? `, ${r.dnc} do not call` : ''}${r.wrong ? `, ${r.wrong} with a wrong number` : ''}${r.clients ? `, ${r.clients} clients` : ''} left out`); st.sel.clear(); await leads(true); render(); } catch (err) { toast(err.message, true); } return; }
         if (k === 'clearsel') { st.sel.clear(); return render(); }
         if (k === 'clearf') { st.cat = st.ind = st.owner = st.q = st.out = ''; return render(); }
@@ -908,7 +939,7 @@ function palette() {
 const makePass = () => { const a = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const b = new Uint32Array(14); crypto.getRandomValues(b); return [...b].map(x => a[x % a.length]).join(''); };
 
 // ------------------------------------------------------------------ what the lazily loaded pages use
-const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, pct, initials, ago, dueLabel, dayLabel, teamName, srcOf, srcChip, stageChip, indChip, indVar, stateChip, leadState, inPipe,
+const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, pct, initials, ago, dueLabel, dayLabel, teamName, srcOf, srcChip, stageChip, indChip, indVar, stateChip, leadState, inPipe, feat,
     isAdmin, p90, leads, industries, modal, fieldHtml, v, openLead, render, shell, makePass, closeLayer, countBy, toBdt, ICONS, need, phoneTo, cname,
     token: async () => (await sb.auth.getSession()).data.session.access_token, toolsState,
     views: {}, mounted: {}, onAct: {}, get route() { return route; }, get arg() { return routeArg; }, backend: BACKEND };
@@ -921,14 +952,29 @@ const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, p
     if (!data.session) return signIn();
     if (standalone() && !appUnlocked()) return appLock(data.session.user.email || '');
     if (!window.EL_PHONE_ONLY && (location.pathname !== '/' || location.hash.includes('access_token'))) history.replaceState(null, '', '/' + (location.hash.includes('access_token') ? '' : location.hash));
-    try { st.meta = await api('/api/crm/meta'); }
-    catch (e) {
-        if (e.status === 403) { await sb.auth.signOut(); return signIn('This workspace is for the EdgeLead team only.'); }
-        if (e.status === 401) { await sb.auth.signOut(); return signIn('Your session ended. Sign in again.'); }
-        $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
+    // Phase 93: draw at once from the settings this browser saw last (same person, under 12 hours old), and fetch the
+    // fresh ones alongside; without them, wait for the server as before.
+    const META = 'crm-meta-v1';
+    let cached = null; try { cached = JSON.parse(localStorage.getItem(META) || 'null'); } catch {}
+    const fresh = api('/api/crm/meta');
+    const keep = m => { try { localStorage.setItem(META, JSON.stringify({ at: Date.now(), uid: data.session.user.id, meta: m })); } catch {} };
+    const refused = async e => {
+        if (e.status === 403) { try { localStorage.removeItem(META); } catch {} await sb.auth.signOut(); signIn('This workspace is for the EdgeLead team only.'); return true; }
+        if (e.status === 401) { await sb.auth.signOut(); signIn('Your session ended. Sign in again.'); return true; }
+        return false;
+    };
+    if (cached && cached.uid === data.session.user.id && Date.now() - cached.at < 12 * 3600e3 && cached.meta && cached.meta.me) {
+        st.meta = cached.meta;
+        fresh.then(m => { const changed = JSON.stringify(m) !== JSON.stringify(st.meta); st.meta = m; keep(m); if (changed) { shell(); if (['admin', 'campaigns', 'dialer'].includes(route)) render(); } }).catch(refused);
+    } else {
+        try { st.meta = await fresh; keep(st.meta); }
+        catch (e) {
+            if (await refused(e)) return;
+            $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
+        }
     }
     if (window.EL_PHONE_ONLY) document.body.classList.add('phone-only');
-    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre), openLead, isAdmin }).then(() => { if (route === 'calls' || route === 'dialer') render(); shell(); });
+    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre), openLead, isAdmin, feat }).then(() => { if (route === 'calls' || route === 'dialer') render(); shell(); });
     addEventListener('hashchange', render);
     render();
     leads().then(shell).catch(() => {});

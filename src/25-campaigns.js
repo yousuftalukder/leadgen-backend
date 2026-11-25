@@ -26,6 +26,16 @@ const STOP_STAGES = ['replied', 'meeting', 'proposal', 'won', 'lost'];
 const DEFAULT_WINDOW = { from: 9, to: 17, days: [1, 2, 3, 4, 5] };   // 9 AM to 5 PM, Monday to Friday, in the business time zone
 
 const bad = m => Object.assign(new Error(m), { statusCode: 400 });
+// Phase 93: email campaigns are the owner's to hand out (Admin → Team). Public unsubscribe and open links are elsewhere.
+const campaignGate = async (req, res, next) => {
+    try {
+        const ctx = await S.auth(req, res); if (!ctx) return;
+        if (S.needFeature && !(await S.needFeature(ctx, res, 'campaigns'))) return;
+        next();
+    } catch (e) { next(e); }
+};
+app.use('/api/crm/campaigns', campaignGate);
+app.use('/api/crm/templates', campaignGate);
 const str = (v, max) => (v === undefined || v === null) ? null : (String(v).trim().slice(0, max) || null);
 const rid = () => crypto.randomBytes(6).toString('hex');
 
@@ -200,13 +210,7 @@ function fail(res, e, where) {
     return res.status(500).json({ error: 'Something went wrong on our side. Try again in a moment.' });
 }
 async function allLeads(cols = 'id, full_name, company, email, email_norm, city, industry, website, title, source, stage, in_pipeline, owner_id, tags, unsubscribed') {
-    const out = [];
-    for (let from = 0; from < 20000; from += 1000) {
-        const { data, error } = await supabase.from('crm_leads').select(cols).range(from, from + 999);
-        if (error) throw error;
-        out.push(...(data || [])); if (!data || data.length < 1000) break;
-    }
-    return out;
+    return S.selectAll('crm_leads', cols, q => q, { max: 20000 });
 }
 
 // templates
@@ -248,8 +252,8 @@ async function stats(ids) {
     const out = Object.fromEntries(ids.map(id => [id, { enrolled: 0, active: 0, done: 0, replied: 0, stopped: 0, unsubscribed: 0, failed: 0, sent: 0, opened: 0 }]));
     if (!ids.length) return out;
     const [{ data: en }, { data: em }] = await Promise.all([
-        supabase.from('crm_enrollments').select('campaign_id, status').in('campaign_id', ids).limit(50000),
-        supabase.from('crm_emails').select('campaign_id, status, opened_at').in('campaign_id', ids).limit(50000)]);
+        S.selectAll('crm_enrollments', 'id, campaign_id, status', q => q.in('campaign_id', ids)).then(data => ({ data })),
+        S.selectAll('crm_emails', 'id, campaign_id, status, opened_at', q => q.in('campaign_id', ids), { max: 200000 }).then(data => ({ data }))]);
     for (const e of en || []) { const s = out[e.campaign_id]; s.enrolled++; if (s[e.status] !== undefined) s[e.status]++; if (e.status === 'bounced') s.failed++; }
     for (const m of em || []) { const s = out[m.campaign_id]; if (m.status === 'sent') s.sent++; if (m.opened_at) s.opened++; }
     return out;
@@ -352,7 +356,7 @@ app.post('/api/crm/campaigns/:id/enroll', async (req, res) => {
         const leads = await allLeads();
         const want = Array.isArray(req.body && req.body.leadIds) ? new Set(req.body.leadIds.map(String)) : null;
         const pick = leads.filter(l => (want ? want.has(l.id) : true) && matchAudience(l, want ? cleanAudience({ stages: S.CRM_STAGES.map(s => s.key) }) : cleanAudience(c.audience)));
-        const { data: have } = await supabase.from('crm_enrollments').select('lead_id').eq('campaign_id', c.id).limit(50000);
+        const have = await S.selectAll('crm_enrollments', 'id, lead_id', q => q.eq('campaign_id', c.id));
         const on = new Set((have || []).map(h => h.lead_id));
         const fresh = pick.filter(l => !on.has(l.id));
         const box = (await mailbox()) || {};

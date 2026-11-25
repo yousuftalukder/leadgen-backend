@@ -161,9 +161,9 @@ function validTz(tz) { try { new Intl.DateTimeFormat('en-US', { timeZone: tz });
 Object.assign(S, { getSetting, putSetting, crmSettings });
 
 /** What /api/crm/meta adds: the settings the pages need, and whether the phase-90 SQL has run. */
-S.crmMetaExtra = async () => {
+S.crmMetaExtra = async ctx => {
     const st = await crmSettings();
-    return { industries: st.industries, goals: st.goals, timezone: st.timezone, clientTabs: { catalogue: CLIENT_TABS, ...st.clientTabs },
+    return { features: ctx && S.featuresFor ? await S.featuresFor(ctx.user.id, ctx.profile && ctx.profile.role) : {}, industries: st.industries, goals: st.goals, timezone: st.timezone, clientTabs: { catalogue: CLIENT_TABS, ...st.clientTabs },
         p90: await S.p90Ready(), p91: S.p91Ready ? await S.p91Ready() : false, mailbox: S.mailboxState ? await S.mailboxState() : { connected: false } };
 };
 
@@ -235,13 +235,14 @@ app.get('/api/crm/today', async (req, res) => {
         const day = dayBounds(st.timezone, 'today'), rng = dayBounds(st.timezone, range);
         const s0 = day.start.toISOString(), s1 = day.end.toISOString();
         const p90 = await S.p90Ready();
+        const all = (t, c, f) => S.selectAll(t, c, f, { max: 20000 }).then(data => ({ data }), () => ({ data: [] }));
         const [calls, actCalls, acts, crmNew, finderNew, followups, people] = await Promise.all([
-            supabase.from('phone_calls').select('id, user_id, sid').eq('direction', 'outbound').gte('started_at', s0).lt('started_at', s1).limit(5000),
-            supabase.from('crm_activities').select('actor_id, meta').eq('type', 'call').gte('at', s0).lt('at', s1).limit(5000),
-            supabase.from('crm_activities').select('actor_id, type').in('type', ['email_out']).gte('at', s0).lt('at', s1).limit(5000),
-            supabase.from('crm_leads').select('created_by').gte('created_at', s0).lt('created_at', s1).limit(5000),
-            supabase.from('leads').select('owner_user_id').gte('created_at', s0).lt('created_at', s1).limit(10000),
-            supabase.from('crm_tasks').select('owner_id').gte('done_at', s0).lt('done_at', s1).limit(5000),
+            all('phone_calls', 'id, user_id, sid', q => q.eq('direction', 'outbound').gte('started_at', s0).lt('started_at', s1)),
+            all('crm_activities', 'id, actor_id, meta', q => q.eq('type', 'call').gte('at', s0).lt('at', s1)),
+            all('crm_activities', 'id, actor_id, type', q => q.in('type', ['email_out']).gte('at', s0).lt('at', s1)),
+            all('crm_leads', 'id, created_by', q => q.gte('created_at', s0).lt('created_at', s1)),
+            all('leads', 'id, owner_user_id', q => q.gte('created_at', s0).lt('created_at', s1)),
+            all('crm_tasks', 'id, owner_id', q => q.gte('done_at', s0).lt('done_at', s1)),
             supabase.from('app_users').select('id, full_name, email').in('role', ['admin', 'user']).eq('is_active', true)
         ]);
         // A call is counted once: the phone's record, plus any call logged by hand that the phone does not know.
@@ -353,9 +354,7 @@ S.geocodeLater = lead => { if (!lead || !lead.id) return; S.p90Ready().then(ok =
 /** Every lead with a place but no point on the map. Returns how many were queued. */
 S.geocodeBackfill = async ({ force = false } = {}) => {
     if (!(await S.p90Ready())) return 0;
-    let q = supabase.from('crm_leads').select('id, city, country').limit(2000);
-    q = force ? q.or('city.not.is.null,country.not.is.null') : q.is('lat', null).or('city.not.is.null,country.not.is.null');
-    const { data } = await q;
+    const data = await S.selectAll('crm_leads', 'id, city, country', q => force ? q.or('city.not.is.null,country.not.is.null') : q.is('lat', null).or('city.not.is.null,country.not.is.null'), { max: 20000 });
     const list = (data || []).filter(l => !_queue.some(x => x.id === l.id));
     _queue.push(...list); drainGeo();
     return list.length;

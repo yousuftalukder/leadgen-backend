@@ -246,6 +246,7 @@ app.post('/api/phone/hook/voice', ...hook(async (req, res, c) => {
         const access = S.phoneAccessFor ? await S.phoneAccessFor(who) : { allowed: true };
         if (!access.allowed) { logger.info('phone_call_refused', { user: who, why: access.why }); return xml(res, twiml(SAY('Calling is closed for you right now.') + '<Hangup/>')); }
         const leadId = S.UUID_RE && S.UUID_RE.test(b.LeadId || '') ? b.LeadId : undefined;
+        if (!leadId && S.featuresFor && !(await S.featuresFor(who)).dialer) { logger.info('phone_call_refused', { user: who, why: 'dialer_locked' }); return xml(res, twiml(SAY('The dialer is locked for you. Call from the lead list.') + '<Hangup/>')); }
         if (S.doNotCall && await S.doNotCall({ leadId, number: to })) { logger.info('phone_call_refused', { user: who, why: 'do_not_call' }); return xml(res, twiml(SAY('This number asked not to be called.') + '<Hangup/>')); }
         await saveCall(b.CallSid, { direction: 'outbound', from_number: c.number, to_number: to, contact_number: to, user_id: who, status: 'ringing', started_at: new Date().toISOString(), ...(leadId ? { lead_id: leadId } : {}) });
         return xml(res, outgoingTwiml(c.base, { callerId: c.number, to, record: c.record }));
@@ -337,12 +338,14 @@ app.get('/api/phone/token', async (req, res) => {
     const c = cfg(); if (missingSettings(c).length) return res.status(503).json({ error: 'The phone is not set up yet.', code: 'phone_not_set_up' });
     res.json({ token: voiceToken({ accountSid: c.sid, apiKey: c.key, apiSecret: c.secret, appSid: c.appSid, identity: identityOf(ctx.user.id) }), identity: identityOf(ctx.user.id), ttl: 3600 });
 });
+const dialerOk = async (ctx, res) => !S.needFeature || S.needFeature(ctx, res, 'dialer');
 app.get('/api/phone/inbox', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     try {
         const [calls, msgs, contacts] = await Promise.all([
-            supabase.from('phone_calls').select('contact_number, direction, status, duration, voicemail, started_at, read_at').order('started_at', { ascending: false }).limit(3000),
-            supabase.from('phone_messages').select('contact_number, direction, body, at, read_at').order('at', { ascending: false }).limit(5000),
+            S.selectAll('phone_calls', 'id, contact_number, direction, status, duration, voicemail, started_at, read_at', q => q, { max: 3000, order: 'started_at', ascending: false }).then(data => ({ data }), error => ({ error })),
+            S.selectAll('phone_messages', 'id, contact_number, direction, body, at, read_at', q => q, { max: 5000, order: 'at', ascending: false }).then(data => ({ data }), error => ({ error })),
             supabase.from('phone_contacts').select('number, name, kind, lead_id').limit(5000)
         ]);
         if (calls.error) throw calls.error;
@@ -355,8 +358,20 @@ app.get('/api/phone/inbox', async (req, res) => {
         res.json({ threads: phoneThreads(calls.data || [], msgs.data || [], contacts.data || [], leads) });
     } catch (e) { fail(res, e); }
 });
+/** Phase 93: the badge, without loading the inbox: missed calls, voicemails and texts nobody has opened yet. */
+app.get('/api/phone/unread', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    if (S.featureOn && !(await S.featureOn(ctx, 'dialer'))) return res.json({ unread: 0, locked: true });
+    try {
+        const [c, m] = await Promise.all([
+            supabase.from('phone_calls').select('id', { count: 'exact', head: true }).eq('direction', 'inbound').is('read_at', null).neq('status', 'completed'),
+            supabase.from('phone_messages').select('id', { count: 'exact', head: true }).eq('direction', 'inbound').is('read_at', null)]);
+        res.json({ unread: (c.count || 0) + (m.count || 0) });
+    } catch (e) { fail(res, e); }
+});
 app.get('/api/phone/thread/:number', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     try {
         const num = toE164(req.params.number); if (!num) return res.status(400).json({ error: 'That number is not valid.' });
         const [calls, msgs, contact, lead] = await Promise.all([
@@ -373,6 +388,7 @@ app.get('/api/phone/thread/:number', async (req, res) => {
 });
 app.post('/api/phone/messages', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     try {
         const c = cfg();
         if (!c.sms) return res.status(409).json({ error: 'Texting starts once the number is approved for business texting (A2P 10DLC).', code: 'sms_not_approved' });
@@ -397,6 +413,7 @@ app.post('/api/phone/answered', async (req, res) => {
 });
 app.patch('/api/phone/calls/:id', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     const note = String((req.body && req.body.note) || '').slice(0, 2000) || null;
     const { data, error } = await supabase.from('phone_calls').update({ note }).eq('id', req.params.id).select('*').maybeSingle();
     if (error) return fail(res, error);
@@ -404,6 +421,7 @@ app.patch('/api/phone/calls/:id', async (req, res) => {
 });
 app.put('/api/phone/contacts/:number', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     const num = toE164(req.params.number); if (!num) return res.status(400).json({ error: 'That number is not valid.' });
     const b = req.body || {}, kind = KINDS.includes(b.kind) ? b.kind : 'other';
     const row = { number: num, name: String(b.name || '').trim().slice(0, 120) || null, kind, company: String(b.company || '').trim().slice(0, 120) || null, notes: String(b.notes || '').slice(0, 2000) || null, work_order: String(b.work_order || '').trim().slice(0, 40) || null, updated_at: new Date().toISOString(), created_by: ctx.user.id };
@@ -414,6 +432,7 @@ app.put('/api/phone/contacts/:number', async (req, res) => {
 // Voicemail and recordings stream through here: Twilio media needs the account's credentials.
 app.get('/api/phone/recording/:id', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
+    if (!(await dialerOk(ctx, res))) return;
     const c = cfg();
     const { data } = await supabase.from('phone_calls').select('recording_url').eq('id', req.params.id).maybeSingle();
     if (!data || !data.recording_url) return res.status(404).json({ error: 'No recording.' });
@@ -475,8 +494,8 @@ app.get('/api/admin/phone/usage', async (req, res) => {
     const since = new Date(); since.setUTCDate(1); since.setUTCHours(0, 0, 0, 0);
     try {
         const [calls, msgs, users] = await Promise.all([
-            supabase.from('phone_calls').select('direction, status, duration, voicemail, user_id, answered_by, price').gte('started_at', since.toISOString()).limit(20000),
-            supabase.from('phone_messages').select('direction, user_id, auto').gte('at', since.toISOString()).limit(50000),
+            S.selectAll('phone_calls', 'id, direction, status, duration, voicemail, user_id, answered_by, price', q => q.gte('started_at', since.toISOString())).then(data => ({ data })),
+            S.selectAll('phone_messages', 'id, direction, user_id, auto', q => q.gte('at', since.toISOString())).then(data => ({ data })),
             supabase.from('app_users').select('id, full_name, email').neq('role', 'client')
         ]);
         const C = calls.data || [], M = msgs.data || [];
