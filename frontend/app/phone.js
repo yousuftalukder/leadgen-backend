@@ -100,6 +100,7 @@ function call(number, name) {
     if (!P.cfg || !P.cfg.ready) return H.toast('The phone is not set up yet. The owner finishes it in Admin.', true);
     if (!P.device || P.state !== 'ready') return H.toast('The phone is still connecting. Try again in a moment.', true);
     if (P.call) return H.toast('Finish the current call first.', true);
+    wakeAudio();
     P.device.connect({ params: { To: to } }).then(c => wire(c, { number: to, name: name || nameOf(to), dir: 'out' })).catch(e => H.toast(e.message, true));
 }
 function wire(c, info) {
@@ -111,8 +112,17 @@ function wire(c, info) {
     c.on('disconnect', () => end('Call ended'));
     c.on('cancel', () => end());
     c.on('reject', () => end());
-    c.on('error', e => end(e.message));
+    c.on('error', e => end(why(e)));
+    // Twilio's own call-quality warnings: say on screen what is wrong with the sound.
+    const WARN = { 'constant-audio-input-level': 'Your microphone sends no sound. Check the mic and that this site may use it.',
+        'constant-audio-output-level': 'No sound is arriving from the other side.', 'ice-connectivity-lost': 'The voice connection dropped. Check the network or VPN.',
+        'high-packet-loss': 'Poor connection: sound is being lost.', 'high-rtt': 'Slow connection: sound is delayed.', 'low-mos': 'Poor call quality.', 'high-jitter': 'Unsteady connection.' };
+    c.on('warning', name => { if (!P.callInfo) return; P.callInfo.warn = WARN[name] || ''; if (P.callInfo.warn) { H.toast(P.callInfo.warn, true); console.warn('phone warning', name); } });
+    c.on('warning-cleared', name => { if (P.callInfo && P.callInfo.warn === WARN[name]) P.callInfo.warn = ''; });
 }
+/** Browsers keep sound off until the page is clicked; turn Twilio's audio on with the first click. */
+function wakeAudio() { try { const ac = window.Twilio && Twilio.Device && Twilio.Device.audioContext; if (ac && ac.state === 'suspended') ac.resume(); } catch {} }
+['pointerdown', 'keydown'].forEach(t => document.addEventListener(t, wakeAudio, { capture: true, passive: true }));
 function tick() { const t = $('#cb-t'); if (t && P.callInfo && P.callInfo.start) t.textContent = dur((Date.now() - P.callInfo.start) / 1000); }
 function bar() {
     let el = $('#callbar');
@@ -292,7 +302,7 @@ document.addEventListener('click', async e => {
         const r = P.incoming.find(x => x.id === rg.dataset.rid); if (!r) return;
         if (rg.dataset.ring === 'decline') { r.c.reject(); return; }
         if (P.call) P.call.disconnect();
-        r.c.accept(); P.incoming = P.incoming.filter(x => x !== r); ring();
+        wakeAudio(); r.c.accept(); P.incoming = P.incoming.filter(x => x !== r); ring();
         wire(r.c, { number: r.from, name: nameOf(r.from), dir: 'in' }); P.callInfo.status = 'live'; P.callInfo.start = Date.now(); clearInterval(P.timer); P.timer = setInterval(tick, 1000); bar();
         if (r.pcs) H.api('/api/phone/answered', { method: 'POST', body: { sid: r.pcs } }).catch(() => {});
         return;
