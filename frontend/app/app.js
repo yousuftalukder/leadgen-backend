@@ -70,7 +70,7 @@ async function api(path, { method = 'GET', body } = {}) {
     if (!r.ok) { const e = new Error(j.error || `The server answered ${r.status}.`); e.status = r.status; e.data = j; throw e; }
     return j;
 }
-const st = { meta: null, leads: null, period: 30, trange: 'today', view: 'all', q: '', cat: '', ind: '', owner: '', sel: new Set(), leadMode: 'table',
+const st = { meta: null, leads: null, period: 30, trange: 'today', view: 'all', q: '', cat: '', ind: '', owner: '', out: '', sel: new Set(), leadMode: 'table',
     pCat: '', pInd: '', pOwner: '', pQ: '', hist: 'all', net: null, crOn: null, crStage: 'all', crQ: '', crCountry: 'all', picking: null, openId: null, cQ: '' };
 const teamName = id => { const t = st.meta && st.meta.team.find(x => x.id === id); return t ? t.name : '—'; };
 const srcOf = k => st.meta.sources.find(s => s.key === k) || { key: k, label: k };
@@ -82,6 +82,7 @@ const indChip = n => n ? `<span class="ind" style="--c:var(${indVar(n)})">${esc(
 async function leads(force) { if (!st.leads || force) st.leads = (await api('/api/crm/leads?limit=2000')).leads; return st.leads; }
 const isAdmin = () => st.meta && st.meta.me.role === 'admin';
 const p90 = () => !!(st.meta && st.meta.p90);
+const p91 = () => !!(st.meta && st.meta.p91);
 /** Where a lead stands: a client, lost, being worked in the pipeline, or cold. Before the phase-90 SQL, any stage past New is the pipeline. */
 const inPipe = l => p90() ? !!l.in_pipeline || !!l.client_id : l.stage !== 'new';
 function leadState(l) { if (l.client_id || l.stage === 'won') return 'client'; if (l.stage === 'lost') return 'lost'; return inPipe(l) ? 'pipeline' : 'cold'; }
@@ -219,7 +220,7 @@ function todayHtml(T) {
     const row = t => `<a class="trow" href="#client/${t.client.id}/tasks/${t.id}"><span class="tdot ${t.status}"></span><div class="t"><b>${esc(t.title)}</b><span><span class="cl">${esc(t.client.name)}</span>${(t.labels || []).slice(0, 2).map(l => `<span class="lab">${esc(l)}</span>`).join('')}</span></div>
         ${PRIO[t.priority] ? `<span class="prio ${t.priority}">${PRIO[t.priority]}</span>` : ''}<span class="due ${t.overdue ? 'over' : dayLabel(t.due_date) === 'Today' ? 'today' : ''}">${dayLabel(t.due_date)}</span>${t.assignee_user_id ? `<span class="ava" title="${esc(teamName(t.assignee_user_id))}">${initials(teamName(t.assignee_user_id))}</span>` : t.assigned_to_client ? '<span class="ava cli" title="The client">C</span>' : '<span class="ava nobody"></span>'}</a>`;
     const callRow = t => `<div class="trow call"><span class="kind">${ic(t.kind === 'call' ? 'phone' : 'task')}</span><div class="t"><b>${esc(t.title)}</b><span>${t.lead ? esc([t.lead.full_name, t.lead.company].filter(Boolean).join(' · ')) : ''}</span></div>${dueLabel(t.due_at)}
-        ${t.lead && t.lead.phone && t.kind === 'call' ? `<button class="btn sm" type="button" data-callnow="${esc(t.lead.phone)}" data-name="${esc(t.lead.full_name || '')}">${ic('phone')}Call</button>` : ''}${t.lead ? `<button class="btn sm ghost" type="button" data-open="${t.lead_id}">Open</button>` : ''}<button class="btn sm ghost" type="button" data-taskdone2="${t.id}" title="Mark done">${ic('task')}</button></div>`;
+        ${t.lead && t.lead.phone && t.kind === 'call' ? `<button class="btn sm" type="button" data-callnow="${esc(t.lead.phone)}" data-name="${esc(t.lead.company || t.lead.full_name || '')}" data-lead="${t.lead_id}">${ic('phone')}Call</button>` : ''}${t.lead ? `<button class="btn sm ghost" type="button" data-open="${t.lead_id}">Open</button>` : ''}<button class="btn sm ghost" type="button" data-taskdone2="${t.id}" title="Mark done">${ic('task')}</button></div>`;
     const G = T.goals || [], met = G.filter(g => g.met).length;
     return `<div class="today">
       <section class="card tcard"><div class="card-h"><div><h2>Client work</h2><span>${tasks.length ? `${tasks.length} task${tasks.length === 1 ? '' : 's'} due${over.length ? ` · <b class="bad">${over.length} overdue</b>` : ''}` : 'Nothing due'}</span></div>
@@ -251,12 +252,24 @@ function leadFilter(l, { skip } = {}) {
         && (skip === 'cat' || !st.cat || l.source === st.cat)
         && (skip === 'ind' || !st.ind || (st.ind === '-' ? !l.industry : String(l.industry || '').toLowerCase() === st.ind.toLowerCase()))
         && (!st.owner || l.owner_id === st.owner)
+        && (skip === 'out' || !st.out || outMatch(l, st.out))
         && (!q || [l.full_name, l.company, l.email, l.phone, l.city, l.website, l.industry].join(' ').toLowerCase().includes(q));
+}
+// Phase 91: who was called and emailed (the counts are kept on the lead by the server).
+const OUTREACH = [['not_called', 'Never called', l => !l.calls_count], ['called', 'Called', l => l.calls_count > 0], ['emailed', 'Emailed', l => l.emails_count > 0], ['not_emailed', 'Never emailed', l => !l.emails_count],
+    ['both', 'Called and emailed', l => l.calls_count > 0 && l.emails_count > 0], ['none', 'Neither called nor emailed', l => !l.calls_count && !l.emails_count],
+    ['due', 'Due a call now', l => l.callback_at && new Date(l.callback_at) <= new Date() && !['closed', 'in_play'].includes(l.call_status)]];
+const CALL_ST = [['tried', 'Tried, no conversation'], ['spoke', 'Spoke'], ['callback', 'Call back set'], ['in_play', 'In play'], ['closed', 'Closed']];
+function outMatch(l, k) { const o = OUTREACH.find(x => x[0] === k); if (o) return o[2](l); if (k.startsWith('st:')) return (l.call_status || 'not_called') === k.slice(3); return true; }
+function outCell(l) {
+    const call = l.calls_count ? `<span class="oc y" title="${esc(l.last_call_outcome || '')}">${ic('phone')}<b>${l.calls_count}×</b>${l.last_call_outcome ? `<em>${esc(l.last_call_outcome)}</em>` : ''}${l.last_call_at ? `<small>${ago(l.last_call_at)}</small>` : ''}</span>` : `<span class="oc">${ic('phone')}<em>Not called</em></span>`;
+    const mail = l.emails_count ? `<span class="oc y">${ic('mail')}<b>${l.emails_count}×</b>${l.last_email_at ? `<small>${ago(l.last_email_at)}</small>` : ''}</span>` : `<span class="oc">${ic('mail')}<em>Not emailed</em></span>`;
+    return `<div class="outr">${call}${mail}</div>`;
 }
 const countBy = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
 function contactCell(l) {
     // Shown, not worked: calls and emails start from the pipeline. Here a click copies the number or address.
-    const parts = [l.phone ? `<span data-copy="${esc(l.phone)}" title="Copy ${esc(l.phone)}">${ic('phone')}${esc(l.phone)}</span>` : '',
+    const parts = [l.phone ? `<span class="pn"><span data-copy="${esc(l.phone)}" title="Copy ${esc(l.phone)}">${ic('phone')}${esc(l.phone)}</span><button type="button" class="cpb" data-copy="${esc(l.phone)}" title="Copy the number" aria-label="Copy ${esc(l.phone)}">${ic('copy')}</button></span>` : '',
         l.email ? `<span data-copy="${esc(l.email)}" title="Copy ${esc(l.email)}">${ic('mail')}${esc(l.email)}</span>` : '',
         l.website ? `<a href="${esc(webHref(l.website))}" target="_blank" rel="noopener" title="${esc(l.website)}">${ic('globe')}${esc(webShort(l.website))}</a>` : ''].filter(Boolean);
     return parts.length ? `<div class="contact">${parts.join('')}</div>` : '<span class="dim">No contact yet</span>';
@@ -268,11 +281,13 @@ async function vLeads() {
     const byCat = countBy(all.filter(l => leadFilter(l, { skip: 'cat' })), l => l.source);
     const inds = Object.entries(byInd).sort((a, b) => b[1] - a[1]);
     const states = countBy(all, leadState);
-    const filtered = st.cat || st.ind || st.owner || st.q;
-    const tableHtml = rows.length ? `<div class="card tablewrap"><table class="ltbl"><thead><tr><th style="width:40px"><input type="checkbox" class="chk" id="selall" aria-label="Select all shown"></th><th>Lead</th><th>Industry</th><th>Contact</th><th>Location</th><th>Category</th><th>Status</th><th>Owner</th><th>Last touch</th></tr></thead><tbody>
+    const filtered = st.cat || st.ind || st.owner || st.q || st.out;
+    const forOut = p91() ? all.filter(l => leadFilter(l, { skip: 'out' })) : [];
+    const byOut = Object.fromEntries([...OUTREACH.map(([k, , f]) => [k, forOut.filter(f).length]), ...CALL_ST.map(([k]) => ['st:' + k, forOut.filter(l => (l.call_status || 'not_called') === k).length])]);
+    const tableHtml = rows.length ? `<div class="card tablewrap"><table class="ltbl"><thead><tr><th style="width:40px"><input type="checkbox" class="chk" id="selall" aria-label="Select all shown"></th><th>Lead</th><th>Industry</th><th>Contact</th>${p91() ? '<th>Called · emailed</th>' : ''}<th>Location</th><th>Category</th><th>Status</th><th>Owner</th><th>Last touch</th></tr></thead><tbody>
         ${rows.slice(0, 500).map(l => `<tr data-open="${l.id}" class="${st.sel.has(l.id) ? 'sel' : ''}"><td class="c-chk"><input type="checkbox" class="chk" data-sel="${l.id}" ${st.sel.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.full_name)}"></td>
           <td class="c-who who"><b>${esc(l.company || l.full_name)}</b><span>${esc(l.company ? (l.full_name && l.full_name !== '-' ? l.full_name : '') : (l.title || ''))}</span></td>
-          <td class="c-ind">${indChip(l.industry)}</td><td class="c-contact">${contactCell(l)}</td>
+          <td class="c-ind">${indChip(l.industry)}</td><td class="c-contact">${contactCell(l)}</td>${p91() ? `<td class="c-out">${outCell(l)}</td>` : ''}
           <td class="c-loc">${esc([l.city, l.country].filter(Boolean).join(', ') || '—')}</td><td class="c-src">${srcChip(l.source)}</td>
           <td class="c-state">${stateChip(l)}${inPipe(l) && !['won', 'lost'].includes(l.stage) ? `<small>${esc((st.meta.stages.find(s => s.key === l.stage) || {}).label || '')}</small>` : ''}</td>
           <td class="c-owner"><span class="ava" title="${esc(teamName(l.owner_id))}">${initials(teamName(l.owner_id))}</span></td><td class="c-last">${l.last_activity_at ? ago(l.last_activity_at) : '<span class="dim">Never</span>'}</td></tr>`).join('')}
@@ -286,6 +301,8 @@ async function vLeads() {
         <select id="fcat" aria-label="Category"><option value="">Every category</option>${st.meta.sources.map(s => `<option value="${s.key}" ${st.cat === s.key ? 'selected' : ''}>${esc(s.path || s.label)} · ${num(byCat[s.key] || 0)}</option>`).join('')}</select>
         <select id="find" aria-label="Industry"><option value="">Every industry</option>${inds.map(([k, n]) => `<option value="${esc(k)}" ${st.ind.toLowerCase() === k.toLowerCase() ? 'selected' : ''}>${k === '-' ? 'No industry yet' : esc(k)} · ${num(n)}</option>`).join('')}</select>
         <select id="fown" aria-label="Owner"><option value="">Everyone's</option>${st.meta.team.map(m => `<option value="${m.id}" ${st.owner === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+        ${p91() ? `<select id="fout" aria-label="Called or emailed"><option value="">Called or not, emailed or not</option><optgroup label="Outreach">${OUTREACH.map(([k, l]) => `<option value="${k}" ${st.out === k ? 'selected' : ''}>${l} · ${num(byOut[k] || 0)}</option>`).join('')}</optgroup>
+          <optgroup label="In the dialer">${CALL_ST.map(([k, l]) => `<option value="st:${k}" ${st.out === 'st:' + k ? 'selected' : ''}>${l} · ${num(byOut['st:' + k] || 0)}</option>`).join('')}</optgroup></select>` : ''}
         ${filtered ? '<button class="btn ghost sm" type="button" data-act="clearf">Clear</button>' : ''}</div>
       ${inds.length > 1 ? `<div class="facets" aria-label="Industries">${inds.slice(0, 14).map(([k, n]) => `<button type="button" data-ind="${esc(k)}" class="${st.ind.toLowerCase() === k.toLowerCase() ? 'on' : ''}" style="--c:var(${k === '-' ? '--dim' : indVar(k)})"><i></i>${k === '-' ? 'No industry' : esc(k)}<b>${num(n)}</b></button>`).join('')}</div>` : ''}
       ${st.leadMode === 'map' ? leadMapHtml(rows) : tableHtml}
@@ -361,7 +378,7 @@ async function vPipeline() {
     const open = P.filter(l => !['won', 'lost'].includes(l.stage));
     const card = l => `<div class="deal" draggable="true" data-drag="${l.id}" data-open="${l.id}"><div class="dh"><b>${esc(l.company || l.full_name)}</b>${l.value ? `<span class="v">${money(l.value, l.currency)}</span>` : ''}</div>
         <span class="dn">${esc(l.company && l.full_name !== '-' ? l.full_name : '')}</span><div class="m">${indChip(l.industry)}${srcChip(l.source)}</div>
-        <div class="m"><span class="dicons">${l.phone ? `<a href="${telHref(l.phone)}" data-tel="${esc(l.phone)}" data-name="${esc(l.full_name)}" title="${esc(l.phone)}">${ic('phone')}</a>` : ''}${l.email ? `<a href="mailto:${esc(l.email)}" title="${esc(l.email)}">${ic('mail')}</a>` : ''}${l.website ? `<a href="${esc(webHref(l.website))}" target="_blank" rel="noopener" title="${esc(l.website)}">${ic('globe')}</a>` : ''}</span>${dueLabel(l.next_step_at)}<span class="ava">${initials(teamName(l.owner_id))}</span></div></div>`;
+        <div class="m"><span class="dicons">${l.phone ? `<a href="${telHref(l.phone)}" data-tel="${esc(l.phone)}" data-name="${esc(l.company || l.full_name)}" data-lead="${l.id}" title="${esc(l.phone)}">${ic('phone')}</a>` : ''}${l.email ? `<a href="mailto:${esc(l.email)}" title="${esc(l.email)}">${ic('mail')}</a>` : ''}${l.website ? `<a href="${esc(webHref(l.website))}" target="_blank" rel="noopener" title="${esc(l.website)}">${ic('globe')}</a>` : ''}</span>${dueLabel(l.next_step_at)}<span class="ava">${initials(teamName(l.owner_id))}</span></div></div>`;
     return `<div class="head"><div><h1>Pipeline</h1><p class="sub">${num(open.length)} open · ${lakh(open.reduce((a, l) => a + toBdt(l), 0))} in play. Email, call and text from here; drag a card to move it, drop on Won to make it a client.</p></div><div class="sp"></div>
         <div class="searchin">${ic('search')}<input id="pq" type="search" placeholder="Search the pipeline" value="${esc(st.pQ)}" aria-label="Search the pipeline"></div>
         <select id="pown" aria-label="Owner"><option value="">Everyone's</option>${st.meta.team.map(m => `<option value="${m.id}" ${st.pOwner === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
@@ -522,6 +539,7 @@ function signIn(msg) {
     $('#signin').onsubmit = async ev => { ev.preventDefault(); const b = ev.target.querySelector('button'); b.disabled = true; b.textContent = 'Signing in…'; $('#aerr').textContent = '';
         const { error } = await sb.auth.signInWithPassword({ email: v('si-e').trim(), password: v('si-p') });
         if (error) { $('#aerr').textContent = /invalid/i.test(error.message) ? 'That email and password do not match.' : error.message; b.disabled = false; b.textContent = 'Sign in'; return; }
+        try { sessionStorage.setItem('el-app-unlocked', '1'); } catch {}   // phase 91: signing in with the password unlocks the installed app too
         location.reload(); };
     $('#forgot').onclick = async () => { const email = v('si-e').trim(); if (!email) { $('#aerr').textContent = 'Write your email first, then press this again.'; return; }
         const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/' });
@@ -538,6 +556,32 @@ function setPassword() {
         if (error) { $('#aerr').textContent = error.message; return; }
         location.replace('/'); };
 }
+
+// ------------------------------------------------------------------ the installed app's lock (phase 91)
+// The Phone installed as an app opens locked: the person types their workspace password again, checked by Supabase.
+// It stays open while the app window is, and locks again after 15 minutes in the background (never during a call).
+const standalone = () => matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: window-controls-overlay)').matches || navigator.standalone === true;
+const UNLOCK = 'el-app-unlocked';
+function appUnlocked() { try { return sessionStorage.getItem(UNLOCK) === '1'; } catch { return false; } }
+function appLock(email) {
+    authScreen(`<h1>Unlock the Phone</h1><p class="sub">The installed app asks for your workspace password each time it opens.</p>
+      <form id="unlock"><div class="field"><label for="ul-e">Email</label><input id="ul-e" type="email" value="${esc(email)}" autocomplete="username" readonly></div>${fieldHtml('ul-p', 'Password', 'type="password" autocomplete="current-password" required')}
+      <button class="btn pri wide" type="submit">Unlock</button></form><button class="linkbtn" type="button" id="ul-other">Sign in as someone else</button>`);
+    $('#ul-p').focus();
+    $('#unlock').onsubmit = async ev => { ev.preventDefault(); const b = ev.target.querySelector('button'); b.disabled = true; b.textContent = 'Checking…'; $('#aerr').textContent = '';
+        const { error } = await sb.auth.signInWithPassword({ email, password: v('ul-p') });
+        if (error) { $('#aerr').textContent = /invalid/i.test(error.message) ? 'That password is not right.' : error.message; b.disabled = false; b.textContent = 'Unlock'; return; }
+        try { sessionStorage.setItem(UNLOCK, '1'); } catch {}
+        location.reload(); };
+    $('#ul-other').onclick = async () => { await sb.auth.signOut(); try { sessionStorage.removeItem(UNLOCK); } catch {} location.reload(); };
+}
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+    if (!standalone()) return;
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    if (hiddenAt && Date.now() - hiddenAt > 15 * 60e3 && !(window.ELPhone && ELPhone.busy)) { try { sessionStorage.removeItem(UNLOCK); } catch {} location.reload(); }
+    hiddenAt = 0;
+});
 
 // ------------------------------------------------------------------ lead record
 async function openLead(id) {
@@ -579,11 +623,13 @@ function drawLead({ lead: l, activities, history, tasks, influencers, client }) 
     const prow = (label, field, html) => `<div><dt><label for="pf-${field}">${label}</label></dt><dd>${html}</dd></div>`;
     $('.drawer').innerHTML = `<div class="dr-h"><div class="dr-top"><span class="ava big" style="--c:var(${indVar(l.industry || l.company)})">${initials(l.company || l.full_name)}</span>
         <div class="t"><h2>${esc(l.company || l.full_name)}</h2><p class="sub">${esc([l.company && l.full_name !== '-' ? l.full_name : '', l.title].filter(Boolean).join(', '))}${l.city || l.country ? ' · ' + esc([l.city, l.country && cname(l.country)].filter(Boolean).join(', ')) : ''}</p>
-          <div class="lchips">${indChip(l.industry)}${stateChip(l)}${srcChip(l.source)}</div></div><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
+          <div class="lchips">${indChip(l.industry)}${stateChip(l)}${srcChip(l.source)}</div>
+          ${l.phone || l.email || (l.whatsapp && l.whatsapp !== l.phone) ? `<div class="lnums">${l.phone ? `<span class="lnum"><b class="num">${esc(l.phone)}</b><button type="button" class="btn sm" data-copy="${esc(l.phone)}">${ic('copy')}Copy</button></span>` : ''}${l.whatsapp && l.whatsapp !== l.phone ? `<span class="lnum"><span>${ic('wa')}${esc(l.whatsapp)}</span><button type="button" class="btn sm ghost" data-copy="${esc(l.whatsapp)}">${ic('copy')}Copy</button></span>` : ''}${l.email ? `<span class="lnum"><span>${esc(l.email)}</span><button type="button" class="btn sm ghost" data-copy="${esc(l.email)}">${ic('copy')}Copy</button></span>` : ''}</div>` : ''}
+          ${p91() ? `<div class="lout"><span class="${l.calls_count ? 'y' : ''}">${ic('phone')}${l.calls_count ? `Called ${l.calls_count}×${l.last_call_outcome ? ' · ' + esc(l.last_call_outcome) : ''}${l.last_call_at ? ' · ' + ago(l.last_call_at) : ''}` : 'Never called'}</span><span class="${l.emails_count ? 'y' : ''}">${ic('mail')}${l.emails_count ? `Emailed ${l.emails_count}×${l.last_email_at ? ' · ' + ago(l.last_email_at) : ''}` : 'Never emailed'}</span>${l.callback_at && !['closed', 'in_play'].includes(l.call_status) ? `<span>${ic('cal')}Try again ${new Date(l.callback_at) <= new Date() ? 'now' : dueLabel(l.callback_at).replace(/<[^>]+>/g, '')}</span>` : ''}</div>` : ''}</div><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
       ${work ? `<div class="stepper" role="group" aria-label="Stage">${st.meta.stages.map((s, i) => `<button type="button" data-stage="${s.key}" class="${i < si && l.stage !== 'lost' ? 'past' : ''} ${i === si ? 'cur' : ''} ${s.key === 'lost' ? 'lost' : ''}" ${l.client_id && s.key !== 'won' ? 'disabled' : ''}>${s.label}</button>`).join('')}</div>`
-        : `<div class="coldbar">${ic('lock')}<div><b>Cold lead.</b> Email, calls and texts are worked from the pipeline. Add it when it is worth working.</div><button class="btn pri sm" type="button" data-act="topipe">${ic('pipeline')}Add to pipeline</button></div>`}
+        : `<div class="coldbar">${ic('lock')}<div><b>Cold lead.</b> Call it from the dialer. Email and texts are worked from the pipeline: add it when it is worth working (an Interested call adds it for you).</div><button class="btn pri sm" type="button" data-act="topipe">${ic('pipeline')}Add to pipeline</button></div>`}
       <div class="acts">${l.email ? `<a class="btn sm ${work ? 'pri' : ''}" ${work ? `href="mailto:${esc(l.email)}"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('mail')}Email</a>` : ''}
-        ${l.phone ? `<button class="btn sm" type="button" data-act="phcall"${lock}>${ic('phone')}Call</button><button class="btn sm" type="button" data-act="phtext"${lock}>${ic('reply')}Text</button>` : ''}
+        ${l.phone ? `<button class="btn sm ${work ? '' : 'pri'}" type="button" data-act="phcall">${ic('phone')}Call</button>${window.ELPhone ? `<button class="btn sm" type="button" data-act="phdial">${ic('seq')}Open in the dialer</button>` : ''}<button class="btn sm" type="button" data-act="phtext"${lock}>${ic('reply')}Text</button>` : ''}
         ${waNum ? `<a class="btn sm" ${work ? `href="https://wa.me/${waNum}" target="_blank" rel="noopener"` : 'aria-disabled="true" tabindex="-1"'}${lock}>${ic('wa')}WhatsApp</a>` : ''}
         ${p90() && l.email ? `<button class="btn sm" type="button" data-act="tocamp"${lock}>${ic('seq')}Add to campaign</button>` : ''}
         <button class="btn sm ghost" type="button" data-act="tonet">${ic('pin')}Influencer network</button>
@@ -605,6 +651,7 @@ function drawLead({ lead: l, activities, history, tasks, influencers, client }) 
       ${box('Deal', 'stage', [prow('Value', 'value', `<div class="inline">${inp('value', l.value, 'number', '0')}${sel('currency', st.meta.currencies.map(c => [c, c]), l.currency)}</div>`), prow('Score', 'score', inp('score', l.score, 'number', '0–100', 'min="0" max="100"')),
           prow('Owner', 'owner_id', sel('owner_id', [['', 'Nobody'], ...st.meta.team.map(m => [m.id, m.name])], l.owner_id)), ...(l.stage === 'lost' ? [prow('Why lost', 'lost_reason', inp('lost_reason', l.lost_reason))] : [])])}
       ${box('Next step', 'cal', [prow('What', 'next_step', inp('next_step', l.next_step, 'text', 'What happens next')), prow('When', 'next_step_at', inp('next_step_at', l.next_step_at ? new Date(new Date(l.next_step_at) - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16) : '', 'datetime-local'))])}
+      ${p91() ? `<section class="pbox"><h3>${ic('search')}<label for="pf-insights">What we noticed</label></h3><textarea data-field="insights" id="pf-insights" rows="4" placeholder="One line each, e.g. Their site has no reviews. The dialer shows these.">${esc((Array.isArray(l.insights) ? l.insights : []).join('\n'))}</textarea></section>` : ''}
       <section class="pbox"><h3>${ic('link')}Linked</h3><div class="links">
         ${client ? `<a class="lnk" href="#client/${client.id}" data-close>${ic('clients')}${esc(client.name)}<small>client</small></a>` : ''}
         ${influencers.map(c => `<button type="button" class="lnk" data-crgo="${c.id}">${ic('pin')}@${esc(c.handle)}<small>creator</small></button>`).join('')}
@@ -710,7 +757,7 @@ function moreMenu() {
       ${toolsState().show ? `<a href="/tools" data-tools>${ic('tools')}Tools<small>${toolsState().open ? 'Unlocked' : 'Locked'}</small></a>` : ''}
       <button type="button" id="theme">${ic('moon')}Light / dark</button><button type="button" id="signout">${ic('out')}Sign out</button></div>`;
 }
-function phoneTo(num, name) { if (window.ELPhone) { closeLayer(); return ELPhone.call(num, name); } location.href = telHref(num); }
+function phoneTo(num, name, leadId) { if (window.ELPhone) { closeLayer(); return ELPhone.call(num, name, leadId || null); } location.href = telHref(num); }
 document.addEventListener('click', async e => {
     const t = e.target;
     if (t.closest('[data-tools],#toolsTop')) { if (!toolsState().open) { e.preventDefault(); return toolsLocked(); } if (t.closest('#toolsTop')) location.href = '/tools'; return; }
@@ -721,8 +768,8 @@ document.addEventListener('click', async e => {
     if (t.closest('#newLead')) return newLead();
     if (t.closest('#openPal')) return palette();
     if (t.closest('[data-more]')) { const p = t.closest('.x').querySelector('.hb'); p.classList.remove('clamp'); t.remove(); return; }
-    const tel = t.closest('[data-tel]'); if (tel && window.ELPhone) { e.preventDefault(); return phoneTo(tel.dataset.tel, tel.dataset.name); }
-    const cn = t.closest('[data-callnow]'); if (cn) return phoneTo(cn.dataset.callnow, cn.dataset.name);
+    const tel = t.closest('[data-tel]'); if (tel && window.ELPhone) { e.preventDefault(); return phoneTo(tel.dataset.tel, tel.dataset.name, tel.dataset.lead); }
+    const cn = t.closest('[data-callnow]'); if (cn) return phoneTo(cn.dataset.callnow, cn.dataset.name, cn.dataset.lead);
     const pe = t.closest('[data-period]'); if (pe) { st.period = +pe.dataset.period; return render(); }
     const tr = t.closest('[data-trange]'); if (tr) { st.trange = tr.dataset.trange; return render(); }
     const dp = t.closest('[data-dept]'); if (dp) { const d = dp.dataset.dept; st.cat = ''; st.view = 'all'; st.ind = '';
@@ -746,9 +793,10 @@ document.addEventListener('click', async e => {
         if (k === 'import') return importCsv();
         if ((k === 'phcall' || k === 'phtext') && st.openId) { const ld = (st.lead && st.lead.lead) || {}; const ph = ld.phone || ($('.drawer [data-field="phone"]') || {}).value;
             if (!window.ELPhone) { location.href = (k === 'phcall' ? 'tel:' : 'sms:') + String(ph).replace(/[^\d+]/g, ''); return; }
-            if (k === 'phcall') return phoneTo(ph, ld.full_name); closeLayer(); return ELPhone.text(ph); }
+            if (k === 'phcall') return phoneTo(ph, ld.company || ld.full_name, ld.id); closeLayer(); return ELPhone.text(ph); }
+        if (k === 'phdial' && st.openId && window.ELPhone) { const id = st.openId; closeLayer(); return ELPhone.dial(id); }
         if (k === 'clearsel') { st.sel.clear(); return render(); }
-        if (k === 'clearf') { st.cat = st.ind = st.owner = st.q = ''; return render(); }
+        if (k === 'clearf') { st.cat = st.ind = st.owner = st.q = st.out = ''; return render(); }
         if (k === 'fit') { st.fitAll = true; fit(null); st.fitAll = false; return; }
         if (k === 'lfit') return lfit(st.leads.filter(l => leadFilter(l) && l.lat != null));
         if (k === 'geocode') { try { const r = await api('/api/admin/crm/geocode', { method: 'POST', body: {} }); toast(r.queued ? `Placing ${r.queued} leads: about ${Math.ceil(r.seconds / 60)} min. Refresh after.` : 'Every lead with a city is placed already.'); } catch (err) { toast(err.message, true); } return; }
@@ -803,6 +851,7 @@ document.addEventListener('change', async e => {
     if (t.id === 'fcat') { st.cat = t.value; st.sel.clear(); return render(); }
     if (t.id === 'find') { st.ind = t.value; st.sel.clear(); return render(); }
     if (t.id === 'fown') { st.owner = t.value; st.sel.clear(); return render(); }
+    if (t.id === 'fout') { st.out = t.value; st.sel.clear(); return render(); }
     if (t.id === 'pown') { st.pOwner = t.value; return render(); }
 });
 document.addEventListener('input', e => {
@@ -851,6 +900,7 @@ const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, p
     const { data } = await sb.auth.getSession();
     if (AUTH_LINK && data.session) { history.replaceState(null, '', location.pathname); return setPassword(); }
     if (!data.session) return signIn();
+    if (standalone() && !appUnlocked()) return appLock(data.session.user.email || '');
     if (!window.EL_PHONE_ONLY && (location.pathname !== '/' || location.hash.includes('access_token'))) history.replaceState(null, '', '/' + (location.hash.includes('access_token') ? '' : location.hash));
     try { st.meta = await api('/api/crm/meta'); }
     catch (e) {
@@ -859,7 +909,7 @@ const CRM = window.CRM = { api, esc, ic, toast, st, $, money, lakh, num, kfmt, p
         $('#view').innerHTML = `<div class="empty err">Could not reach the server: ${esc(e.message)} <button class="btn sm" type="button" onclick="location.reload()">Try again</button></div>`; return;
     }
     if (window.EL_PHONE_ONLY) document.body.classList.add('phone-only');
-    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre) }).then(() => { if (route === 'phone') render(); shell(); });
+    if (window.ELPhone) ELPhone.init({ api, toast, esc, initials, teamName, route: () => route, backend: BACKEND, token: async () => (await sb.auth.getSession()).data.session.access_token, newLead: pre => newLead(pre), openLead }).then(() => { if (route === 'phone') render(); shell(); });
     addEventListener('hashchange', render);
     render();
     leads().then(shell).catch(() => {});

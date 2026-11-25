@@ -164,7 +164,7 @@ Object.assign(S, { getSetting, putSetting, crmSettings });
 S.crmMetaExtra = async () => {
     const st = await crmSettings();
     return { industries: st.industries, goals: st.goals, timezone: st.timezone, clientTabs: { catalogue: CLIENT_TABS, ...st.clientTabs },
-        p90: await S.p90Ready(), mailbox: S.mailboxState ? await S.mailboxState() : { connected: false } };
+        p90: await S.p90Ready(), p91: S.p91Ready ? await S.p91Ready() : false, mailbox: S.mailboxState ? await S.mailboxState() : { connected: false } };
 };
 
 // ---------------------------------------------------------------------------------------------------

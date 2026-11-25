@@ -87,6 +87,7 @@ require('./src/25-crm');
 require('./src/25-phone');
 require('./src/25-crm-plus');      // phase 90: settings, today, lead history, the leads map, the client page's schema
 require('./src/25-campaigns');     // phase 90: email campaigns and the mailbox
+require('./src/25-dialer');        // phase 91: the dialer, phone access and hours, who was called and emailed
 require('./src/26-runtime');
 const {
     ASSISTANT_TOOLS, CLIENT_PILLARS, CLIENT_REPORT_TITLES, DEMAND_INTENT, JOB_QUOTA_METRIC, JOB_WORKERS,

@@ -197,14 +197,23 @@ async function leadFor(number) {
 async function saveCall(sid, patch) {
     const { data } = await supabase.from('phone_calls').select('id, lead_id, contact_number, user_id, answered_by').eq('sid', sid).maybeSingle();
     if (data) { await supabase.from('phone_calls').update(patch).eq('id', data.id); return { ...data, ...patch }; }
-    const lead = patch.contact_number ? await leadFor(patch.contact_number) : null;
+    const lead = patch.lead_id ? { id: patch.lead_id } : patch.contact_number ? await leadFor(patch.contact_number) : null;
     const row = { sid, ...patch, lead_id: lead ? lead.id : null };
     const { data: ins } = await supabase.from('phone_calls').insert(row).select('id, lead_id, contact_number').maybeSingle();
     return ins || row;
 }
 async function teamIdentities() {
     const { data } = await supabase.from('app_users').select('id, role, is_active').neq('role', 'client').eq('is_active', true).limit(50);
-    return (data || []).map(u => identityOf(u.id));
+    // Phase 91: an incoming call rings only the people who may use the phone right now.
+    const ok = await Promise.all((data || []).map(u => (S.phoneAccessFor ? S.phoneAccessFor(u.id) : Promise.resolve({ allowed: true })).then(a => a.allowed, () => true)));
+    return (data || []).filter((u, i) => ok[i]).map(u => identityOf(u.id));
+}
+/** Phase 91: file a call on the lead's timeline once. An outcome the caller gave first is kept; the length is added. */
+async function fileCall(leadId, sid, meta, actor) {
+    if (!leadId || !S.logActivityExternal) return;
+    const { data: had } = sid ? await supabase.from('crm_activities').select('id, meta').eq('lead_id', leadId).eq('type', 'call').eq('meta->>sid', sid).maybeSingle() : { data: null };
+    if (had) { await supabase.from('crm_activities').update({ meta: { ...meta, ...(had.meta || {}), minutes: meta.minutes } }).eq('id', had.id); if (S.refreshOutreach) await S.refreshOutreach(leadId); return; }
+    await S.logActivityExternal(leadId, 'call', null, meta, actor);
 }
 async function textOut(c, to, body, userId) {
     const msg = await twilioApi(c, '/Messages.json', { method: 'POST', form: { From: c.number, To: to, Body: body, StatusCallback: c.base + '/api/phone/hook/sms-status' } });
@@ -229,9 +238,15 @@ async function onMissed(c, call) {
 app.post('/api/phone/hook/voice', ...hook(async (req, res, c) => {
     const b = req.body;
     if (/^client:/.test(b.From || '')) {                        // a call from the app
+        // Phase 91: the call-quality test in the Phone's settings calls with no number: a quiet line, never dialled out.
+        if (!b.To || b.To === 'preflight') return xml(res, twiml('<Pause length="25"/>'));
         const to = toE164(b.To);
         if (!to) return xml(res, twiml(SAY('That number is not valid.')));
-        await saveCall(b.CallSid, { direction: 'outbound', from_number: c.number, to_number: to, contact_number: to, user_id: userOfIdentity(b.From), status: 'ringing', started_at: new Date().toISOString() });
+        const who = userOfIdentity(b.From);
+        const access = S.phoneAccessFor ? await S.phoneAccessFor(who) : { allowed: true };
+        if (!access.allowed) { logger.info('phone_call_refused', { user: who, why: access.why }); return xml(res, twiml(SAY('Calling is closed for you right now.') + '<Hangup/>')); }
+        const leadId = S.UUID_RE && S.UUID_RE.test(b.LeadId || '') ? b.LeadId : undefined;
+        await saveCall(b.CallSid, { direction: 'outbound', from_number: c.number, to_number: to, contact_number: to, user_id: who, status: 'ringing', started_at: new Date().toISOString(), ...(leadId ? { lead_id: leadId } : {}) });
         return xml(res, outgoingTwiml(c.base, { callerId: c.number, to, record: c.record }));
     }
     const from = toE164(b.From) || b.From || 'unknown';
@@ -244,7 +259,7 @@ app.post('/api/phone/hook/after', ...hook(async (req, res, c) => {
     const b = req.body, status = b.DialCallStatus;
     if (status === 'completed' || status === 'answered') {
         const call = await saveCall(b.CallSid, { status: 'completed', duration: Number(b.DialCallDuration) || null, ended_at: new Date().toISOString() });
-        if (call && call.lead_id && S.logActivityExternal) S.logActivityExternal(call.lead_id, 'call', null, { minutes: Math.round((Number(b.DialCallDuration) || 0) / 6) / 10, outcome: 'Spoke', sid: b.CallSid, direction: 'inbound' }, call.answered_by || null);
+        if (call && call.lead_id) await fileCall(call.lead_id, b.CallSid, { minutes: Math.round((Number(b.DialCallDuration) || 0) / 6) / 10, outcome: 'Spoke', sid: b.CallSid, direction: 'inbound' }, call.answered_by || null);
         return xml(res, twiml('<Hangup/>'));
     }
     if (c.forward && !req.query.fw && isOpen()) {
@@ -258,9 +273,9 @@ app.post('/api/phone/hook/after', ...hook(async (req, res, c) => {
 app.post('/api/phone/hook/done', ...hook(async (req, res) => {
     const b = req.body;
     const call = await saveCall(b.CallSid, { status: b.DialCallStatus === 'answered' ? 'completed' : (b.DialCallStatus || 'completed'), duration: Number(b.DialCallDuration) || 0, ended_at: new Date().toISOString() });
-    if (call && call.lead_id && S.logActivityExternal) {
+    if (call && call.lead_id) {
         const mins = Math.round((Number(b.DialCallDuration) || 0) / 6) / 10;
-        S.logActivityExternal(call.lead_id, 'call', null, { minutes: mins, outcome: b.DialCallStatus === 'completed' ? 'Spoke' : 'No answer', sid: b.CallSid, direction: 'outbound' }, call.user_id);
+        await fileCall(call.lead_id, b.CallSid, { minutes: mins, outcome: b.DialCallStatus === 'completed' ? 'Spoke' : 'No answer', sid: b.CallSid, direction: 'outbound' }, call.user_id);
     }
     xml(res, twiml('<Hangup/>'));
 }));
@@ -312,8 +327,9 @@ app.post('/api/phone/hook/sms-status', ...hook(async (req, res) => {
 app.get('/api/phone/config', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     const c = cfg(), missing = missingSettings(c);
+    const [access, voice] = await Promise.all([S.phoneAccessFor ? S.phoneAccessFor(ctx.user.id) : { allowed: true, why: 'open' }, S.phoneVoice ? S.phoneVoice() : { edge: 'roaming' }]);
     res.json({ ready: !missing.length, missing, number: c.number, pretty: prettyNumber(c.number), sms: c.sms, record: c.record, forward: !!c.forward, open: isOpen(),
-               hours: 'Mon–Sat, 8 AM–6 PM Central', templates: TEMPLATES, kinds: KINDS, identity: identityOf(ctx.user.id) });
+               hours: 'Mon–Sat, 8 AM–6 PM Central', templates: TEMPLATES, kinds: KINDS, identity: identityOf(ctx.user.id), access, voice, admin: ctx.profile.role === 'admin' });
 });
 app.get('/api/phone/token', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
@@ -359,6 +375,8 @@ app.post('/api/phone/messages', async (req, res) => {
     try {
         const c = cfg();
         if (!c.sms) return res.status(409).json({ error: 'Texting starts once the number is approved for business texting (A2P 10DLC).', code: 'sms_not_approved' });
+        const access = S.phoneAccessFor ? await S.phoneAccessFor(ctx.user.id) : { allowed: true };
+        if (!access.allowed) return res.status(403).json({ error: access.text || 'The phone is closed for you right now.', code: 'phone_locked' });
         const to = toE164(req.body && req.body.to), body = String((req.body && req.body.body) || '').trim();
         if (!to) return res.status(400).json({ error: 'That number is not valid.' });
         if (!body || body.length > 1500) return res.status(400).json({ error: 'Write a message of up to 1,500 characters.' });

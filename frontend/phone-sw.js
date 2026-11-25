@@ -3,7 +3,7 @@
  * Network first, always: a deploy reaches the app on its next open. Only the Phone's own files are kept,
  * as a fallback when the network is down; the API and the calling software are never cached.
  */
-const VERSION = 'el-phone-v2';
+const VERSION = 'el-phone-v3';
 const SHELL = ['phone.html', 'app/app.css', 'app/app.js', 'app/phone.js', 'vendor/supabase-js-2.116.0.js', 'icons/icon-192.png'];
 self.addEventListener('install', e => { self.skipWaiting(); e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).catch(() => {})); });
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('el-phone-') && k !== VERSION).map(k => caches.delete(k)))).then(() => self.clients.claim())));
