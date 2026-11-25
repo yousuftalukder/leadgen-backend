@@ -388,6 +388,29 @@ S.phoneAccessFor = async (userId, now = new Date()) => {
 };
 S.phoneVoice = voiceSetting;
 
+// Phase 93: two parts of the CRM are the owner's to hand out, one person at a time (Admin → Team):
+//   dialer     the phone system on its own (the Dialer page and the installable app: keypad, calls, texts, voicemail)
+//   campaigns  email campaigns and their templates
+// The owner always has both. Everyone else has neither until the owner unlocks it for them.
+const FEATURES = ['dialer', 'campaigns'];
+const featureSetting = () => getSetting('feature_access', {});
+function featuresOf(cfg, user) {
+    if (user && user.role === 'admin') return Object.fromEntries(FEATURES.map(f => [f, true]));
+    const p = (cfg || {})[user && user.id] || {};
+    return Object.fromEntries(FEATURES.map(f => [f, p[f] === true]));
+}
+function cleanFeatures(b) { return Object.fromEntries(FEATURES.map(f => [f, !!(b && b[f] === true)])); }
+Object.assign(S, { featuresOf, cleanFeatures, FEATURES });
+S.featuresFor = async (userId, role) => featuresOf(await featureSetting(), { id: userId, role: role || await roleOf(userId) });
+S.featureOn = async (ctx, f) => (await S.featuresFor(ctx.user.id, ctx.profile && ctx.profile.role))[f] === true;
+const LOCKED_TEXT = { dialer: 'The Dialer is locked for you. The owner unlocks it in Admin → Team.', campaigns: 'Email campaigns are locked for you. The owner unlocks them in Admin → Team.' };
+/** Refuse unless this person has the feature. Sends the 403 itself; returns true when they may go on. */
+S.needFeature = async (ctx, res, f) => {
+    if (await S.featureOn(ctx, f)) return true;
+    res.status(403).json({ error: LOCKED_TEXT[f], code: 'feature_locked', feature: f });
+    return false;
+};
+
 /** Recount a lead's calls and emails from its timeline. Never throws: it runs after the real work is done. */
 S.refreshOutreach = async leadId => {
     try {
@@ -424,11 +447,9 @@ const Q91 = ', call_status, calls_count, last_call_at, last_call_outcome, callba
 async function campaignsOf(leadIds) {
     const out = new Map();
     if (!leadIds.length || !(await S.p90Ready())) return out;
-    const en = [];
-    for (let i = 0; i < leadIds.length; i += 300) {
-        const { data } = await supabase.from('crm_enrollments').select('lead_id, campaign_id, step, next_at').eq('status', 'active').in('lead_id', leadIds.slice(i, i + 300));
-        en.push(...(data || []));
-    }
+    // Every active enrollment at once (there are far fewer than leads), kept for the leads asked about.
+    const want = new Set(leadIds);
+    const en = (await S.selectAll('crm_enrollments', 'id, lead_id, campaign_id, step, next_at', q => q.eq('status', 'active'), { max: 20000 })).filter(e => want.has(e.lead_id));
     if (!en.length) return out;
     const { data: cs } = await supabase.from('crm_campaigns').select('id, name').in('id', [...new Set(en.map(e => e.campaign_id))]);
     const names = new Map((cs || []).map(c => [c.id, c.name]));
@@ -463,13 +484,7 @@ app.get('/api/crm/dialer', async (req, res) => {
         const me = { id: ctx.user.id, role: ctx.profile.role };
         const lists = listsFor(rules, me), list = lists.find(l => l.id === req.query.list) || null;
         const cols = (p90 ? QUEUE_COLS : QUEUE_COLS.replace(', in_pipeline', '').replace(', industry', '')) + (p91 ? Q91 : '');
-        const leads = [];
-        for (let from = 0; from < 20000; from += 1000) {
-            let q = supabase.from('crm_leads').select(cols).not('phone', 'is', null).order('created_at', { ascending: true }).range(from, from + 999);
-            if (list && list.sources.length) q = q.in('source', list.sources);
-            const { data, error } = await q; if (error) throw error;
-            leads.push(...(data || [])); if (!data || data.length < 1000) break;
-        }
+        const leads = await S.selectAll('crm_leads', cols, q => { q = q.not('phone', 'is', null); return list && list.sources.length ? q.in('source', list.sources) : q; }, { max: 20000 });
         // Call tasks that are due (callbacks, a campaign's call step) put their lead at the top of Today.
         const now = new Date();
         const { data: tasks } = await ownTasks(supabase.from('crm_tasks').select('lead_id, title, due_at' + (p90 ? ', kind' : '')).is('done_at', null).lte('due_at', now.toISOString()).not('lead_id', 'is', null).limit(2000), ctx);
@@ -633,11 +648,12 @@ app.get('/api/crm/calls/stats', async (req, res) => {
         const today = S.dayBounds(tz, 'today'), from = new Date(today.start.getTime() - RANGES[range] * 864e5), to = new Date();
         const isOwner = ctx.profile.role === 'admin';
         const who = isOwner && (req.query.user === 'all' || S.UUID_RE.test(req.query.user || '')) ? req.query.user : ctx.user.id;
-        const pc = supabase.from('phone_calls').select('sid, lead_id, duration, started_at, status').eq('direction', 'outbound').gte('started_at', from.toISOString()).limit(20000);
-        const ac = supabase.from('crm_activities').select('id, lead_id, meta, at').eq('type', 'call').gte('at', from.toISOString()).limit(20000);
-        const tk = supabase.from('crm_tasks').select('due_at, done_at, title' + (await S.p90Ready() ? ', kind' : '')).gte('due_at', from.toISOString()).lte('due_at', to.toISOString()).ilike('title', 'Call%').limit(5000);
+        const mine = col => q => who === 'all' ? q : q.eq(col, who);
+        const all = (t, c, f, m) => S.selectAll(t, c, q => mine(m)(f(q)), { max: 50000 }).then(data => ({ data }));
         const [{ data: phoneCalls }, { data: acts }, { data: tasks }, { data: users }] = await Promise.all([
-            who === 'all' ? pc : pc.eq('user_id', who), who === 'all' ? ac : ac.eq('actor_id', who), who === 'all' ? tk : tk.eq('owner_id', who),
+            all('phone_calls', 'id, sid, lead_id, duration, started_at, status', q => q.eq('direction', 'outbound').gte('started_at', from.toISOString()), 'user_id'),
+            all('crm_activities', 'id, lead_id, meta, at', q => q.eq('type', 'call').gte('at', from.toISOString()), 'actor_id'),
+            all('crm_tasks', 'id, due_at, done_at, title' + (await S.p90Ready() ? ', kind' : ''), q => q.gte('due_at', from.toISOString()).lte('due_at', to.toISOString()).ilike('title', 'Call%'), 'owner_id'),
             isOwner ? supabase.from('app_users').select('id, full_name, email').in('role', ['admin', 'user']).eq('is_active', true) : Promise.resolve({ data: [] })]);
         const ids = [...new Set((acts || []).map(a => a.lead_id).filter(Boolean))];
         const leads = new Map();
@@ -699,6 +715,25 @@ app.put('/api/admin/phone/settings', async (req, res) => {
         logger.info('phone_settings', { by: ctx.user.id, keys: Object.keys(b) });
         res.json({ ok: true });
     } catch (e) { fail(res, e, 'phone_settings_put'); }
+});
+app.get('/api/admin/features', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try {
+        const [cfg, { data: users }] = await Promise.all([featureSetting(), supabase.from('app_users').select('id, full_name, email, role, is_active').in('role', ['admin', 'user'])]);
+        res.json({ features: FEATURES, people: (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0], role: u.role, active: u.is_active !== false, has: featuresOf(cfg, u) })) });
+    } catch (e) { fail(res, e, 'features_get'); }
+});
+app.put('/api/admin/features/:id', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try {
+        const id = String(req.params.id);
+        if (!S.UUID_RE.test(id)) throw bad('Not a person.');
+        const cfg = { ...(await featureSetting() || {}) };
+        cfg[id] = { ...cleanFeatures(cfg[id]), ...cleanFeatures({ ...cfg[id], ...(req.body || {}) }) };
+        await S.putSetting('feature_access', cfg);
+        logger.info('features', { by: ctx.user.id, user: id, has: cfg[id] });
+        res.json({ has: cfg[id] });
+    } catch (e) { fail(res, e, 'features_put'); }
 });
 app.get('/api/admin/dialer', async (req, res) => {
     const ctx = await S.requireAdmin(req, res); if (!ctx) return;

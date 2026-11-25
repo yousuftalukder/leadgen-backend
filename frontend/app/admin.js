@@ -4,7 +4,7 @@
  * panel with collapsible cards:
  *
  *   Overview        every system at a glance, with the next thing to set up
- *   Team            people, passwords, turning a login off
+ *   Team            people, passwords, turning a login off, and who has the Dialer and Email campaigns (phase 93)
  *   Tools           the Apify tools' locks, and who has which tool for which clients
  *   Keys            each tool's Apify key and credit, the shared pool, the Gemini keys
  *   Email           the campaign mailbox, the sending window and the daily cap
@@ -36,7 +36,8 @@ async function load(force) {
     const [users, access, phone, ak, gk, crm, mail, billing, phset, dialer] = await Promise.all([api('/api/admin/users'), api('/api/admin/tools/access'), api('/api/admin/phone/usage').catch(e => ({ error: e.message })),
         api('/api/apify-keys').catch(() => null), api('/api/gemini-keys').catch(() => null), api('/api/admin/crm-settings').catch(e => ({ error: e.message })), api('/api/admin/mailbox').catch(e => ({ error: e.message })), api('/api/admin/billing').catch(() => null),
         api('/api/admin/phone/settings').catch(e => ({ error: e.message })), api('/api/admin/dialer').catch(e => ({ error: e.message }))]);
-    A.data = { at: Date.now(), users: users.users || [], access, phone, ak, gk, crm, mail, billing, phset, dialer };
+    const feats = await api('/api/admin/features').catch(() => ({ people: [] }));
+    A.data = { at: Date.now(), users: users.users || [], access, phone, ak, gk, crm, mail, billing, phset, dialer, feats };
     return A.data;
 }
 function status(d) {
@@ -80,12 +81,18 @@ async function secOverview(d, S) {
 }
 
 // ------------------------------------------------------------------ team
+/** Phase 93: the Dialer (the phone on its own, and the app) and Email campaigns are locked until you unlock them per person. */
+function featSwitches(d, id) {
+    const p = ((d.feats && d.feats.people) || []).find(x => x.id === id) || { has: {} };
+    return `<span class="feats">${[['dialer', 'Dialer'], ['campaigns', 'Email campaigns']].map(([k, l]) => `<label class="fsw" title="${p.has[k] ? 'Unlocked: they can use it' : 'Locked'}"><span>${l}</span><span class="switch"><input type="checkbox" data-feat="${k}" data-uid="${id}" ${p.has[k] ? 'checked' : ''}><i></i></span></label>`).join('')}</span>`;
+}
 async function secTeam(d) {
     const me = st.meta.me.id;
     const staff = d.users.filter(u => u.role !== 'client').sort((a, b) => (b.role === 'admin') - (a.role === 'admin') || (a.full_name || a.email).localeCompare(b.full_name || b.email));
     const person = u => `<div class="opt person ${u.is_active ? '' : 'off'}"><span class="ava">${initials(u.full_name || u.email)}</span>
         <div class="t"><b>${esc(u.full_name || u.email.split('@')[0])}${u.id === me ? ' <small class="pill">you</small>' : ''}</b><span>${esc(u.email)} · ${u.role === 'admin' ? 'Owner' : 'Team'}${u.is_active ? '' : ' · turned off'}${u.last_seen_at ? ' · seen ' + C.ago(u.last_seen_at) : ''}</span></div>
         ${u.id === me ? '' : `<div class="acts2"><button class="btn sm" type="button" data-uact="pass" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">New password</button>
+          ${u.role !== 'admin' ? featSwitches(d, u.id) : ''}
           <button class="btn sm" type="button" data-uact="${u.is_active ? 'off' : 'on'}" data-uid="${u.id}">${u.is_active ? 'Turn off' : 'Turn on'}</button>
           <button class="btn sm ghost danger" type="button" data-uact="remove" data-uid="${u.id}" data-name="${esc(u.full_name || u.email)}">Remove</button></div>`}</div>`;
     return card('People', `${staff.filter(u => u.is_active).length} active`, staff.map(person).join('')) +
@@ -376,6 +383,7 @@ document.addEventListener('change', async e => {
     if (!here()) return;
     const t = e.target;
     if (t.matches('[data-tool]')) { t.disabled = true; try { const r = await api('/api/admin/tools', { method: 'PUT', body: { tools: { [t.dataset.tool]: t.checked } } }); st.meta = await api('/api/crm/meta'); toast(r.restarting ? 'Saved. The server restarts and is back within a minute.' : 'Saved'); } catch (err) { t.checked = !t.checked; toast(err.message, true); } t.disabled = false; return again(); }
+    if (t.matches('[data-feat]')) { t.disabled = true; try { await api('/api/admin/features/' + t.dataset.uid, { method: 'PUT', body: { [t.dataset.feat]: t.checked } }); toast((t.dataset.feat === 'dialer' ? 'The Dialer' : 'Email campaigns') + (t.checked ? ' unlocked' : ' locked') + '. It applies the next time they open the CRM.'); A.data.at = 0; } catch (err) { t.checked = !t.checked; toast(err.message, true); } t.disabled = false; return; }
     if (t.matches('[data-own]')) { const ct = readTabs(), kind = t.dataset.own; if (t.checked) ct.byType[kind] = ct.default; else delete ct.byType[kind]; return settings({ clientTabs: ct }, t.checked ? kind + ' has its own tabs' : kind + ' uses the default'); }
 });
 document.addEventListener('submit', async e => {

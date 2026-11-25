@@ -2,7 +2,7 @@
   "name": "edgelead-backend",
   "version": "31.0.0",
   "private": true,
-  "description": "EdgeLead — social media intelligence and reporting for SMM freelancers. Single-file Express backend.",
+  "description": "EdgeLead \u2014 social media intelligence and reporting for SMM freelancers. Single-file Express backend.",
   "main": "server.js",
   "engines": {
     "node": ">=18"
@@ -24,6 +24,7 @@
     "@google/genai": "^2.18.0",
     "axios": "^1.19.0",
     "luxon": "^3.6.1",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "compression": "^1.8.0"
   }
 }

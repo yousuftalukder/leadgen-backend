@@ -259,6 +259,11 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || '*')
 S.ALLOWED = ALLOWED;
 
 app.use(cors({ origin: ALLOWED.includes('*') ? '*' : ALLOWED }));
+// Phase 93: gzip what the API sends (lead lists shrink to a tenth). Never a stream: the assistant's and the
+// warehouse's server-sent events must reach the page as they are written.
+const compression = require('compression');
+const gzip = compression({ threshold: 1024, filter: (req, res) => !/event-stream/.test(String(req.headers.accept || '') + String(res.getHeader('Content-Type') || '')) && compression.filter(req, res) });
+app.use((req, res, next) => (typeof res.getHeader === 'function' && typeof res.writeHead === 'function' ? gzip(req, res, next) : next()));
 app.use(express.json({ limit: '2mb' }));
 
 // The pages, served from this process as well as from Netlify. The brief asked

@@ -34,6 +34,11 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
   `Object.assign(S, …)` at the top of its part, a `const` with `S.name = name;`
   straight after its declaration (it does not exist yet at the top).
 
+- The database answers at most 1,000 rows per request. A query that may pass that uses `S.selectAll(table, columns,
+  filters, { max })` (`src/25-crm.js`), never `.limit(n)` with n over 1,000 (phase 93).
+- The Dialer and Email campaigns are locked per person until the owner unlocks them in Admin → Team
+  (`feature_access`; `S.needFeature(ctx, res, 'dialer' | 'campaigns')` on the server).
+- `docs/SYSTEM-REVIEW.md` holds the current review: what is solid, the risks in order, and what comes next.
 - `npm run check` and `npm test` before every push; CI runs the same on every PR.
 - Each phase gets a `docs/DEPLOY-PHASEN.md` saying what to run and what changed.
 
