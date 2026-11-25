@@ -533,7 +533,9 @@ app.get('/api/crm/leads', async (req, res) => {
         if (req.query.pipeline === '1' && await p90Ready()) q = q.eq('in_pipeline', true);
         if (req.query.q) { const s = String(req.query.q).replace(/[%,()]/g, ' ').trim().slice(0, 80); if (s) q = q.or(`full_name.ilike.%${s}%,company.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`); }
         const { data, error } = await q; if (error) throw error;
-        res.json({ leads: data || [] });
+        // Phase 92: each lead's active email campaign, so Leads shows calls and email side by side.
+        const camp = S.campaignsOf ? await S.campaignsOf((data || []).map(l => l.id)).catch(() => new Map()) : new Map();
+        res.json({ leads: (data || []).map(l => camp.has(l.id) ? { ...l, campaign: camp.get(l.id) } : l) });
     } catch (e) { fail(res, e, 'crm_leads_list'); }
 });
 
@@ -581,7 +583,8 @@ app.patch('/api/crm/leads/:id', async (req, res) => {
     try {
         const ready = await p90Ready();
         const body = await p90Body(cleanLeadBody(req.body, { partial: true }));
-        const { data: before } = await supabase.from('crm_leads').select('id, stage, owner_id, city, country' + (ready ? ', in_pipeline' : '')).eq('id', req.params.id).maybeSingle();
+        const r91 = await p91Ready();
+        const { data: before } = await supabase.from('crm_leads').select('id, stage, owner_id, city, country, phone, tags' + (ready ? ', in_pipeline' : '') + (r91 ? ', call_status, calls_count' : '')).eq('id', req.params.id).maybeSingle();
         if (!before) return res.status(404).json({ error: 'That lead was not found.' });
         if (ready && Object.prototype.hasOwnProperty.call(body, 'industry') && !body.industry) throw bad('A lead keeps an industry. Pick one, or Other.');
         const now = new Date().toISOString();
@@ -590,12 +593,17 @@ app.patch('/api/crm/leads/:id', async (req, res) => {
         // Moving a lead on in the pipeline puts it in the pipeline.
         if (ready && body.stage && body.stage !== 'new' && !before.in_pipeline) patch.in_pipeline = true;
         if (ready && patch.in_pipeline && !before.in_pipeline) patch.pipeline_at = now;
+        // Phase 92: a new number for a lead whose number was wrong puts it back in the call list.
+        const WRONG = S.WRONG_TAG || 'Wrong number';
+        const newNumber = body.phone !== undefined && body.phone_norm && body.phone_norm !== normPhone(before.phone) && (before.tags || []).includes(WRONG);
+        if (newNumber) { patch.tags = (body.tags || before.tags || []).filter(t => t !== WRONG); if (r91 && before.call_status === 'closed') { patch.call_status = before.calls_count ? 'tried' : 'not_called'; patch.callback_at = now; } }
         const { data, error } = await supabase.from('crm_leads').update(patch).eq('id', before.id).select(await leadCols()).single(); if (error) throw error;
         if (body.stage && body.stage !== before.stage) await logActivity(before.id, 'stage', null, { from: before.stage, to: body.stage }, ctx.user.id);
         if (ready && patch.in_pipeline !== undefined && patch.in_pipeline !== !!before.in_pipeline) await logActivity(before.id, 'system', patch.in_pipeline ? 'Added to the pipeline' : 'Taken out of the pipeline', {}, ctx.user.id);
         if (body.stage && body.stage !== before.stage && S.campaignStageChanged) S.campaignStageChanged(before.id, body.stage).catch(() => {});
         if (S.geocodeLater && ((body.city !== undefined && body.city !== before.city) || (body.country !== undefined && body.country !== before.country))) S.geocodeLater(data);
         if (body.owner_id && body.owner_id !== before.owner_id) await logActivity(before.id, 'system', 'Owner changed', { to: body.owner_id }, ctx.user.id);
+        if (newNumber) await logActivity(before.id, 'system', 'New phone number: back in the call list', { reopen: true }, ctx.user.id);
         res.json({ lead: data });
     } catch (e) { fail(res, e, 'crm_lead_update'); }
 });

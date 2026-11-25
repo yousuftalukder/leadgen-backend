@@ -166,6 +166,15 @@ function cleanVoice(b) {
 }
 
 // ------------------------------------------------------------------ call outcomes and the queue (pure, tested)
+// What each outcome does, everywhere (phase 92):
+//   tried      No answer, voicemail, busy, owner not in: back after the retry time; after the set number of tries in a row
+//              the lead closes, and comes back after the out-of-tries wait (30 days) with a fresh count.
+//   spoke      Talked, follow up: back after the retry time.
+//   callback   At the time set, with a call task (and reminders) for the caller.
+//   in_play    Interested, Booked a meeting: into the pipeline (Contacted / Meeting); its email campaigns stop: sales has it.
+//   closed     Not interested, Not a fit: the lead is Lost (with the reason), its campaigns stop, and it comes back
+//              to the call list after the revisit wait (90 days). A wrong number is marked on the lead and waits for a
+//              new number. Do not call: never called, texted or emailed again (tag + unsubscribed).
 const PICKED = { owner: 'The owner', front_desk: 'Front desk', someone: 'Someone else', none: 'No one' };
 const OUTCOMES = [
     { key: 'no_answer', label: 'No answer', who: ['none'], status: 'tried', retry: 'no_answer' },
@@ -174,19 +183,24 @@ const OUTCOMES = [
     { key: 'gatekeeper', label: 'Owner not in', who: ['front_desk', 'someone'], status: 'tried', retry: 'gatekeeper' },
     { key: 'spoke', label: 'Talked, follow up', who: ['owner', 'front_desk', 'someone'], status: 'spoke', retry: 'spoke' },
     { key: 'callback', label: 'Call back at a set time', who: ['owner', 'front_desk', 'someone'], status: 'callback' },
-    { key: 'interested', label: 'Interested', who: ['owner', 'someone'], status: 'in_play', pipeline: true },
-    { key: 'meeting', label: 'Booked a meeting', who: ['owner', 'someone'], status: 'in_play', pipeline: true, stage: 'meeting' },
-    { key: 'not_interested', label: 'Not interested', who: ['owner', 'front_desk', 'someone'], status: 'closed' },
-    { key: 'not_fit', label: 'Not a fit for us', who: ['owner', 'front_desk', 'someone'], status: 'closed' },
-    { key: 'wrong_number', label: 'Wrong or dead number', who: ['none', 'someone'], status: 'closed' },
-    { key: 'dnc', label: 'Do not call again', who: ['owner', 'front_desk', 'someone', 'none'], status: 'closed', dnc: true }
+    { key: 'interested', label: 'Interested', who: ['owner', 'someone'], status: 'in_play', pipeline: true, stopEmail: true },
+    { key: 'meeting', label: 'Booked a meeting', who: ['owner', 'someone'], status: 'in_play', pipeline: true, stage: 'meeting', stopEmail: true },
+    { key: 'not_interested', label: 'Not interested', who: ['owner', 'front_desk', 'someone'], status: 'closed', lose: true, revisit: 'notInterested', stopEmail: true },
+    { key: 'not_fit', label: 'Not a fit for us', who: ['owner', 'front_desk', 'someone'], status: 'closed', lose: true, revisit: 'notInterested', stopEmail: true },
+    { key: 'wrong_number', label: 'Wrong or dead number', who: ['none', 'someone'], status: 'closed', wrong: true },
+    { key: 'dnc', label: 'Do not call again', who: ['owner', 'front_desk', 'someone', 'none'], status: 'closed', dnc: true, stopEmail: true }
 ];
+const TRIED = OUTCOMES.filter(o => o.status === 'tried').map(o => o.key);
 const STATUSES = [['not_called', 'Not called'], ['tried', 'Tried'], ['spoke', 'Spoke'], ['callback', 'Call back'], ['in_play', 'In play'], ['closed', 'Closed']];
-const DNC_TAG = 'Do not call';
+const DNC_TAG = 'Do not call', WRONG_TAG = 'Wrong number';
+const REMINDER_STEPS = [1440, 120, 60, 30, 15, 10, 5, 0];       // minutes before a callback or a timed to-do
+const SNOOZES = [1, 5, 10, 15, 30];
 const DEFAULT_RULES = {
     retry: { no_answer: 24, voicemail: 48, busy: 2, gatekeeper: 24, spoke: 72 },
     maxAttempts: 6,
+    revisit: { notInterested: 90, outOfTries: 30 },
     localHours: { on: true, days: [1, 2, 3, 4, 5], from: '09:00', to: '17:00' },
+    reminders: [60, 15, 5], snooze: 5,
     lists: []
 };
 const RETRY_KEYS = Object.keys(DEFAULT_RULES.retry);
@@ -200,19 +214,31 @@ function cleanList(l, i) {
     return { id, name, sources: arr(l.sources, 20), industries: arr(l.industries, 60), pipeline: ['any', 'cold', 'pipeline'].includes(l.pipeline) ? l.pipeline : 'any',
         emailed: ['any', 'yes', 'no'].includes(l.emailed) ? l.emailed : 'any', minScore: Math.max(0, Math.min(100, Math.round(Number(l.minScore) || 0))), people: arr(l.people, 50) };
 }
+const cleanSteps = (v, d) => Array.isArray(v) ? [...new Set(v.map(Number).filter(x => REMINDER_STEPS.includes(x)))].sort((a, b) => b - a) : d;
+const days = (v, d) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 && n <= 730 ? n : d; };
 function cleanRules(b) {
     b = b || {};
     const retry = {};
     for (const k of RETRY_KEYS) { const v = Number((b.retry || {})[k]); retry[k] = Number.isFinite(v) && v >= 0 && v <= 24 * 60 ? Math.round(v * 10) / 10 : DEFAULT_RULES.retry[k]; }
-    const max = Math.round(Number(b.maxAttempts)); const lh = b.localHours || {};
+    const max = Math.round(Number(b.maxAttempts)); const lh = b.localHours || {}, rv = b.revisit || {};
     const lists = (Array.isArray(b.lists) ? b.lists : []).slice(0, 30).map(cleanList);
     if (new Set(lists.map(l => l.id)).size !== lists.length) throw bad('Two call lists have the same id. Rename one.');
     return { retry, maxAttempts: Number.isFinite(max) && max >= 1 && max <= 50 ? max : DEFAULT_RULES.maxAttempts,
-        localHours: { on: lh.on !== false, ...(cleanHours({ days: lh.days || DEFAULT_RULES.localHours.days, from: lh.from || '09:00', to: lh.to || '17:00' })) }, lists };
+        revisit: { notInterested: days(rv.notInterested, DEFAULT_RULES.revisit.notInterested), outOfTries: days(rv.outOfTries, DEFAULT_RULES.revisit.outOfTries) },
+        localHours: { on: lh.on !== false, ...(cleanHours({ days: lh.days || DEFAULT_RULES.localHours.days, from: lh.from || '09:00', to: lh.to || '17:00' })) },
+        reminders: cleanSteps(b.reminders, DEFAULT_RULES.reminders), snooze: SNOOZES.includes(Number(b.snooze)) ? Number(b.snooze) : DEFAULT_RULES.snooze, lists };
 }
-/** What an outcome does to the lead: its call status, its last outcome and when to try again. */
+/** A caller's own settings: their reminder times (else the office's), snooze, the tone and desktop alerts. */
+function cleanCallerPrefs(b) {
+    b = b || {};
+    return { reminders: b.reminders === null || b.reminders === undefined ? null : cleanSteps(b.reminders, null), snooze: SNOOZES.includes(Number(b.snooze)) ? Number(b.snooze) : null,
+        tone: b.tone !== false, desktop: b.desktop !== false };
+}
+const addDays = (now, n) => new Date(now.getTime() + n * 864e5).toISOString();
+/** What an outcome does to the lead's call columns: its status, its last outcome and when to come back to it. */
 function dispositionPatch(key, { rules = DEFAULT_RULES, now = new Date(), callbackAt = null, attempts = 1 } = {}) {
     const o = OUTCOMES.find(x => x.key === key); if (!o) throw bad('Pick how the call went.');
+    const rv = rules.revisit || DEFAULT_RULES.revisit;
     const out = { call_status: o.status, last_call_outcome: o.label, callback_at: null };
     if (o.key === 'callback') {
         const d = new Date(callbackAt);
@@ -220,23 +246,45 @@ function dispositionPatch(key, { rules = DEFAULT_RULES, now = new Date(), callba
         if (d < new Date(now.getTime() - 3600e3)) throw bad('The callback time has passed. Pick a later one.');
         out.callback_at = d.toISOString();
     } else if (o.retry) {
-        if (o.status === 'tried' && attempts >= rules.maxAttempts) { out.call_status = 'closed'; out.last_call_outcome = `${o.label} (${attempts} tries, out of tries)`; }
-        else out.callback_at = new Date(now.getTime() + (rules.retry[o.retry] ?? DEFAULT_RULES.retry[o.retry]) * 3600e3).toISOString();
-    }
+        if (o.status === 'tried' && attempts >= rules.maxAttempts) {
+            out.call_status = 'closed'; out.last_call_outcome = `${o.label} (${attempts} tries in a row)`;
+            out.callback_at = rv.outOfTries ? addDays(now, rv.outOfTries) : null;
+        } else out.callback_at = new Date(now.getTime() + (rules.retry[o.retry] ?? DEFAULT_RULES.retry[o.retry]) * 3600e3).toISOString();
+    } else if (o.revisit) out.callback_at = rv[o.revisit] ? addDays(now, rv[o.revisit]) : null;
     return out;
 }
-const CLOSED_STAGES = ['won', 'lost'];
-/** The dialer tab a lead sits in. */
+/** Calls in a row with no conversation, newest first, back to the last conversation, close or reopening. */
+function triesInARow(acts, skipId = null) {
+    let n = 0;
+    for (const a of acts || []) {
+        if (a.id && a.id === skipId) continue;
+        const m = a.meta || {};
+        if (a.type === 'system' && m.reopen) break;
+        if (a.type !== 'call' || m.direction === 'inbound') continue;
+        if (m.outOfTries || (m.outcomeKey && !TRIED.includes(m.outcomeKey))) break;
+        if (m.outcomeKey ? TRIED.includes(m.outcomeKey) : m.outcome === 'No answer') n++;
+    }
+    return n;
+}
+const tagged = (l, t) => (l.tags || []).includes(t);
+/** The tab a lead sits in. */
 function dialTab(l) {
-    if (l.client_id || CLOSED_STAGES.includes(l.stage) || (l.tags || []).includes(DNC_TAG)) return 'closed';
+    if (l.client_id || ['won', 'lost'].includes(l.stage) || tagged(l, DNC_TAG)) return 'closed';
     const s = l.call_status || 'not_called';
     if (s === 'not_called' && l.in_pipeline && ['replied', 'meeting', 'proposal'].includes(l.stage)) return 'in_play';
     return STATUSES.some(x => x[0] === s) ? s : 'not_called';
 }
-/** Is the lead due a call now? */
+/** Never to be offered: a client, won, do not call, or a number known to be wrong. */
+const neverCall = l => !!l.client_id || l.stage === 'won' || tagged(l, DNC_TAG) || tagged(l, WRONG_TAG);
+/** Is a closed lead due to be tried again (lost on a call, or out of tries, and its wait is over)? */
+const revisitDue = (l, now) => dialTab(l) === 'closed' && !neverCall(l) && !!l.callback_at && new Date(l.callback_at) <= now;
+/** Is the lead due a call now? A call task that is due (a callback, a campaign's call step) always counts. */
 function isDue(l, rules = DEFAULT_RULES, now = new Date()) {
+    if (neverCall(l)) return false;
+    if (l.task_due && new Date(l.task_due) <= now) return true;
     const t = dialTab(l);
-    if (t === 'closed' || t === 'in_play') return false;
+    if (t === 'closed') return revisitDue(l, now);
+    if (t === 'in_play') return false;
     if (l.callback_at) return new Date(l.callback_at) <= now;
     if (t === 'not_called') return true;
     // Called before phase 91 (no try-again time): due once the no-answer wait has passed.
@@ -264,7 +312,9 @@ function listMatch(list, l) {
 /** The lists a person may pick: all for the owner, else those open to everyone or naming them. */
 const listsFor = (rules, user) => (rules.lists || []).filter(l => user.role === 'admin' || !l.people.length || l.people.includes(user.id));
 /**
- * The dialer's queue: counts for every tab, and the rows of one tab in calling order.
+ * The call queue: counts for every tab, and the rows of one tab in calling order.
+ * Today: call tasks and callbacks that are due, then warm leads, then never called (best score first), then retries
+ * and revisits; businesses open now (in their own time zone) first.
  * opts: { list, tab, industry, q, rules, now, tzFallback, limit }
  */
 function dialQueue(leads, { list = null, tab = 'today', industry = '', q = '', rules = DEFAULT_RULES, now = new Date(), tzFallback = C, limit = 300 } = {}) {
@@ -278,21 +328,24 @@ function dialQueue(leads, { list = null, tab = 'today', industry = '', q = '', r
     const lh = rules.localHours;
     const dec = l => {
         const tz = leadTimezone(l, tzFallback), open = !lh || !lh.on || withinHours(lh, tz, now), w = warmth(l, now), t = tabOf.get(l);
-        const rank = t === 'callback' || (l.callback_at && t !== 'tried' && t !== 'not_called') ? 0 : w.key === 'hot' || w.key === 'warm' ? 1 : t === 'not_called' ? 2 : 3;
-        return { l, tz, open, w, t, rank, opensAt: open || !lh ? null : nextOpen(lh, tz, now) };
+        const task = !!(l.task_due && new Date(l.task_due) <= now), revisit = revisitDue(l, now);
+        const rank = task || t === 'callback' || (l.callback_at && t === 'spoke') ? 0 : w.key === 'hot' || w.key === 'warm' ? 1 : t === 'not_called' ? 2 : 3;
+        return { l, tz, open, w, t, rank, task, revisit, opensAt: open || !lh ? null : nextOpen(lh, tz, now) };
     };
     let D = rows.map(dec);
     const ts = x => (x ? new Date(x).getTime() : 0);
-    if (tab === 'today') D.sort((a, b) => (b.open - a.open) || (a.rank - b.rank) || (a.rank === 0 ? ts(a.l.callback_at) - ts(b.l.callback_at) : 0) ||
+    const when = x => x.task ? ts(x.l.task_due) : ts(x.l.callback_at);
+    if (tab === 'today') D.sort((a, b) => (b.open - a.open) || (a.rank - b.rank) || (a.rank === 0 ? when(a) - when(b) : 0) || (a.revisit - b.revisit) ||
         (a.rank === 3 ? ((a.l.calls_count || 0) - (b.l.calls_count || 0)) || (ts(a.l.last_call_at) - ts(b.l.last_call_at)) : 0) || ((Number(b.l.score) || 0) - (Number(a.l.score) || 0)) || (ts(a.l.created_at) - ts(b.l.created_at)));
     else if (tab === 'callback') D.sort((a, b) => ts(a.l.callback_at) - ts(b.l.callback_at));
     else if (tab === 'not_called') D.sort((a, b) => (b.open - a.open) || ((Number(b.l.score) || 0) - (Number(a.l.score) || 0)) || (ts(a.l.created_at) - ts(b.l.created_at)));
     else D.sort((a, b) => ts(b.l.last_call_at || b.l.updated_at) - ts(a.l.last_call_at || a.l.updated_at));
     return {
         counts, total: D.length,
-        rows: D.slice(0, limit).map(({ l, tz, open, w, t, opensAt }) => ({ id: l.id, company: l.company, full_name: l.full_name, phone: l.phone, industry: l.industry, source: l.source, score: l.score,
+        rows: D.slice(0, limit).map(({ l, tz, open, w, t, opensAt, task, revisit }) => ({ id: l.id, company: l.company, full_name: l.full_name, phone: l.phone, industry: l.industry, source: l.source, score: l.score,
             stage: l.stage, in_pipeline: !!l.in_pipeline, tab: t, due: due.has(l), calls_count: l.calls_count || 0, last_call_at: l.last_call_at || null, last_call_outcome: l.last_call_outcome || null,
-            callback_at: l.callback_at || null, emails_count: l.emails_count || 0, last_email_at: l.last_email_at || null, warmth: w.key, tz, openNow: open, opensAt: opensAt ? opensAt.toISOString() : null }))
+            callback_at: l.callback_at || null, emails_count: l.emails_count || 0, last_email_at: l.last_email_at || null, warmth: w.key, tz, openNow: open, opensAt: opensAt ? opensAt.toISOString() : null,
+            task: task ? (l.task_title || 'Call task') : null, revisit, dnc: tagged(l, DNC_TAG), wrong: tagged(l, WRONG_TAG), campaign: l.campaign || null }))
     };
 }
 /** The outreach columns, from a lead's timeline (newest first): calls out and emails sent. */
@@ -303,9 +356,18 @@ function outreachFrom(acts) {
     const lastCall = [...calls].sort((a, b) => (a.at < b.at ? 1 : -1))[0];
     return { calls_count: calls.length, last_call_at: at(calls), last_call_outcome: lastCall ? ((lastCall.meta && lastCall.meta.outcome) || null) : null, emails_count: emails.length, last_email_at: at(emails) };
 }
+/** Reopening a lead for the call list: back where it was, due now. Not for do-not-call or a wrong number. */
+function reopenPatch(l, now = new Date()) {
+    if (tagged(l, DNC_TAG)) return null;
+    if (tagged(l, WRONG_TAG)) return null;
+    const p = { call_status: (l.calls_count || 0) > 0 ? 'tried' : 'not_called', callback_at: now.toISOString() };
+    if (l.stage === 'lost') { p.stage = l.in_pipeline ? 'contacted' : 'new'; p.stage_at = now.toISOString(); p.lost_reason = null; }
+    return p;
+}
 
 Object.assign(S, { zoned, zonedToUtc, withinHours, nextOpen, whenLabel, stateOf, areaCode, leadTimezone, cleanHours, cleanPhoneAccess, phoneAccess, cleanVoice, PHONE_EDGES: EDGES,
-    CALL_OUTCOMES: OUTCOMES, CALL_PICKED: PICKED, CALL_STATUSES: STATUSES, DIALER_DEFAULTS: DEFAULT_RULES, cleanRules, dispositionPatch, dialTab, isDue, warmth, listMatch, listsFor, dialQueue, outreachFrom });
+    CALL_OUTCOMES: OUTCOMES, CALL_PICKED: PICKED, CALL_STATUSES: STATUSES, DIALER_DEFAULTS: DEFAULT_RULES, cleanRules, dispositionPatch, dialTab, isDue, warmth, listMatch, listsFor, dialQueue, outreachFrom,
+    triesInARow, revisitDue, neverCall, reopenPatch, cleanCallerPrefs, DNC_TAG, WRONG_TAG, REMINDER_STEPS });
 
 // ------------------------------------------------------------------ settings
 const getSetting = (k, d) => (S.getSetting ? S.getSetting(k, d) : Promise.resolve(d));
@@ -358,7 +420,42 @@ function fail(res, e, where) {
 const QUEUE_COLS = 'id, full_name, company, phone, email, website, city, country, timezone, source, industry, stage, score, tags, owner_id, client_id, in_pipeline, created_at, updated_at';
 const Q91 = ', call_status, calls_count, last_call_at, last_call_outcome, callback_at, emails_count, last_email_at';
 
-/** The dialer: the lists this person may use, the counts per tab and the leads of one tab, in calling order. */
+/** Each lead's active email campaign: { name, step, next_at }. Empty before the phase-90 SQL. */
+async function campaignsOf(leadIds) {
+    const out = new Map();
+    if (!leadIds.length || !(await S.p90Ready())) return out;
+    const en = [];
+    for (let i = 0; i < leadIds.length; i += 300) {
+        const { data } = await supabase.from('crm_enrollments').select('lead_id, campaign_id, step, next_at').eq('status', 'active').in('lead_id', leadIds.slice(i, i + 300));
+        en.push(...(data || []));
+    }
+    if (!en.length) return out;
+    const { data: cs } = await supabase.from('crm_campaigns').select('id, name').in('id', [...new Set(en.map(e => e.campaign_id))]);
+    const names = new Map((cs || []).map(c => [c.id, c.name]));
+    for (const e of en) out.set(e.lead_id, { name: names.get(e.campaign_id) || 'A campaign', step: e.step, next_at: e.next_at });
+    return out;
+}
+S.campaignsOf = campaignsOf;
+/** Stop a lead's active campaigns because of a call. */
+async function stopCampaigns(leadId, reason) {
+    if (!(await S.p90Ready())) return 0;
+    const { data } = await supabase.from('crm_enrollments').update({ status: 'stopped', next_at: null, stop_reason: reason }).eq('lead_id', leadId).eq('status', 'active').select('id');
+    return (data || []).length;
+}
+/** Is this number (or lead) one we may not call? */
+S.doNotCall = async ({ leadId, number }) => {
+    if (leadId && S.UUID_RE.test(leadId)) {
+        const { data } = await supabase.from('crm_leads').select('tags').eq('id', leadId).maybeSingle();
+        if (data && (data.tags || []).includes(DNC_TAG)) return true;
+    }
+    const d = String(number || '').replace(/\D/g, '').slice(-10);
+    if (d.length < 10) return false;
+    const { data } = await supabase.from('crm_leads').select('tags, phone_norm').like('phone_norm', '%' + d).limit(5);
+    return (data || []).some(l => (l.tags || []).includes(DNC_TAG));
+};
+const ownTasks = (q, ctx) => ctx.profile.role === 'admin' ? q : q.or(`owner_id.eq.${ctx.user.id},owner_id.is.null`);
+
+/** Calls → Home: the lists this person may use, the counts per tab and the leads of one tab, in calling order. */
 app.get('/api/crm/dialer', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
@@ -373,8 +470,15 @@ app.get('/api/crm/dialer', async (req, res) => {
             const { data, error } = await q; if (error) throw error;
             leads.push(...(data || [])); if (!data || data.length < 1000) break;
         }
+        // Call tasks that are due (callbacks, a campaign's call step) put their lead at the top of Today.
+        const now = new Date();
+        const { data: tasks } = await ownTasks(supabase.from('crm_tasks').select('lead_id, title, due_at' + (p90 ? ', kind' : '')).is('done_at', null).lte('due_at', now.toISOString()).not('lead_id', 'is', null).limit(2000), ctx);
+        const taskOf = new Map();
+        for (const t of tasks || []) if ((t.kind ? t.kind === 'call' : /^call\b/i.test(t.title || '')) && (!taskOf.has(t.lead_id) || t.due_at < taskOf.get(t.lead_id).due_at)) taskOf.set(t.lead_id, t);
+        const camp = await campaignsOf(leads.map(l => l.id));
+        for (const l of leads) { const t = taskOf.get(l.id); if (t) { l.task_due = t.due_at; l.task_title = t.title; } const c = camp.get(l.id); if (c) l.campaign = c; }
         const tab = ['today', 'all', ...STATUSES.map(s => s[0])].includes(req.query.tab) ? req.query.tab : 'today';
-        const queue = dialQueue(leads.filter(l => String(l.phone || '').replace(/\D/g, '').length >= 7), { list, tab, industry: String(req.query.industry || ''), q: String(req.query.q || '').slice(0, 80), rules, tzFallback: crm.timezone, limit: 400 });
+        const queue = dialQueue(leads.filter(l => String(l.phone || '').replace(/\D/g, '').length >= 7), { list, tab, industry: String(req.query.industry || ''), q: String(req.query.q || '').slice(0, 80), rules, tzFallback: crm.timezone, limit: 400, now });
         // The caller's day so far, in the business's day.
         const day = S.dayBounds ? S.dayBounds(crm.timezone, 'today') : { start: new Date(new Date().setHours(0, 0, 0, 0)) };
         const [{ count: placed }, { data: logged }] = await Promise.all([
@@ -383,12 +487,12 @@ app.get('/api/crm/dialer', async (req, res) => {
         const talks = (logged || []).filter(a => a.meta && ((a.meta.picked && a.meta.picked !== 'none') || a.meta.outcome === 'Spoke')).length;
         const industries = [...new Set(leads.map(l => l.industry).filter(Boolean))].sort((a, b) => a.localeCompare(b));
         res.json({ p91, tab, bizTz: crm.timezone, lists: lists.map(l => ({ id: l.id, name: l.name })), list: list ? list.id : '', industries, ...queue,
-            today: { calls: Math.max(placed || 0, (logged || []).length), conversations: talks }, rules: { maxAttempts: rules.maxAttempts, localHours: rules.localHours },
+            today: { calls: Math.max(placed || 0, (logged || []).length), conversations: talks }, rules: { maxAttempts: rules.maxAttempts, localHours: rules.localHours, revisit: rules.revisit },
             outcomes: OUTCOMES.map(o => ({ key: o.key, label: o.label, who: o.who, status: o.status })), picked: PICKED, statuses: STATUSES });
     } catch (e) { fail(res, e, 'dialer_queue'); }
 });
 
-/** After a call: who picked up and how it went. Filed on the call in the lead's history; sets when to try again. */
+/** After a call: who picked up and how it went. It files the call, then does what the outcome means, everywhere. */
 app.post('/api/crm/dialer/outcome', async (req, res) => {
     const ctx = await staff(req, res); if (!ctx) return;
     try {
@@ -408,35 +512,170 @@ app.post('/api/crm/dialer/outcome', async (req, res) => {
         const meta = { outcome: o.label, outcomeKey: o.key, picked, direction: 'outbound', ...(sid ? { sid } : {}), ...(b.askedEmail ? { askedEmail: true } : {}), ...(b.callbackAt && o.key === 'callback' ? { callbackAt: b.callbackAt } : {}) };
         let filed = null;
         if (sid) { const { data } = await supabase.from('crm_activities').select('id, meta, body').eq('lead_id', lead.id).eq('type', 'call').eq('meta->>sid', sid).maybeSingle(); filed = data; }
+        // Tries in a row with no conversation, this one included: after the set number the lead rests.
+        const { data: past } = await supabase.from('crm_activities').select('id, type, meta, at').eq('lead_id', lead.id).in('type', ['call', 'system']).order('at', { ascending: false }).limit(200);
+        const attempts = triesInARow(past || [], filed && filed.id) + 1;
+        const cols = p91 ? dispositionPatch(o.key, { rules, now, callbackAt: b.callbackAt, attempts }) : null;
+        if (cols && o.status === 'tried' && cols.call_status === 'closed') meta.outOfTries = true;
         if (filed) await supabase.from('crm_activities').update({ meta: { ...(filed.meta || {}), ...meta }, body: note || filed.body, actor_id: ctx.user.id }).eq('id', filed.id);
         else {
             const secs = Math.round(Number(b.seconds)); if (Number.isFinite(secs) && secs > 0) meta.minutes = Math.round(secs / 6) / 10;
             await supabase.from('crm_activities').insert({ lead_id: lead.id, type: 'call', body: note, meta, actor_id: ctx.user.id });
         }
         if (sid) await supabase.from('phone_calls').update({ lead_id: lead.id, ...(note ? { note } : {}) }).eq('sid', sid);
-        const attempts = (lead.calls_count || 0) + (filed ? 0 : 1);
-        const patch = { updated_at: now.toISOString(), last_activity_at: now.toISOString() };
-        if (p91) Object.assign(patch, dispositionPatch(o.key, { rules, now, callbackAt: b.callbackAt, attempts: Math.max(1, attempts) }));
-        if (o.dnc) patch.tags = [...new Set([...(lead.tags || []), DNC_TAG])];
-        if (o.pipeline && p90 && !lead.in_pipeline) { patch.in_pipeline = true; patch.pipeline_at = now.toISOString(); }
-        const toStage = o.stage === 'meeting' && ['new', 'contacted', 'replied'].includes(lead.stage) ? 'meeting' : o.pipeline && lead.stage === 'new' ? 'contacted' : null;
+
+        const patch = { updated_at: now.toISOString(), last_activity_at: now.toISOString(), ...(cols || {}) };
+        const tags = new Set(lead.tags || []);
+        if (o.dnc) { tags.add(DNC_TAG); patch.unsubscribed = true; }
+        if (o.wrong) tags.add(WRONG_TAG);
+        if (o.dnc || o.wrong) patch.tags = [...tags];
+        // The sales stage follows the call: Interested and Booked a meeting move it on (also out of Lost); Not interested loses it.
+        let toStage = null;
+        if (o.pipeline) {
+            if (p90 && !lead.in_pipeline) { patch.in_pipeline = true; patch.pipeline_at = now.toISOString(); }
+            if (o.stage === 'meeting' && ['new', 'contacted', 'replied', 'lost'].includes(lead.stage)) toStage = 'meeting';
+            else if (['new', 'lost'].includes(lead.stage)) toStage = 'contacted';
+            if (lead.stage === 'lost') patch.lost_reason = null;
+        }
+        if (o.lose && !lead.client_id && !['won', 'lost'].includes(lead.stage)) { toStage = 'lost'; patch.lost_reason = `${o.label} (on a call)`; }
         if (toStage) { patch.stage = toStage; patch.stage_at = now.toISOString(); }
         await supabase.from('crm_leads').update(patch).eq('id', lead.id);
         if (toStage) await supabase.from('crm_activities').insert({ lead_id: lead.id, type: 'stage', meta: { from: lead.stage, to: toStage, auto: 'call' }, actor_id: ctx.user.id });
         if (patch.in_pipeline) await supabase.from('crm_activities').insert({ lead_id: lead.id, type: 'system', body: 'Added to the pipeline from a call', meta: {}, actor_id: ctx.user.id });
-        if (toStage && S.campaignStageChanged) S.campaignStageChanged(lead.id, toStage).catch(() => {});
+        const stopped = o.stopEmail ? await stopCampaigns(lead.id, `Call: ${o.label}`) : 0;
+        if (stopped) await supabase.from('crm_activities').insert({ lead_id: lead.id, type: 'system', body: `Email campaign stopped: ${o.label} on a call`, meta: { campaignsStopped: stopped }, actor_id: ctx.user.id });
         // Open call tasks on this lead are done: this call was it. A callback, or an email they asked for, is a new task.
         await supabase.from('crm_tasks').update({ done_at: now.toISOString() }).eq('lead_id', lead.id).is('done_at', null).ilike('title', 'Call%');
+        if (p90) await supabase.from('crm_tasks').update({ done_at: now.toISOString() }).eq('lead_id', lead.id).is('done_at', null).eq('kind', 'call').lte('due_at', new Date(now.getTime() + 864e5).toISOString());
         const name = lead.company || lead.full_name, tasks = [];
-        if (o.key === 'callback') tasks.push({ title: `Call ${name} back`, due_at: patch.callback_at || new Date(b.callbackAt).toISOString(), ...(p90 ? { kind: 'call' } : {}) });
+        if (o.key === 'callback') tasks.push({ title: `Call ${name} back`, due_at: (cols && cols.callback_at) || new Date(b.callbackAt).toISOString(), ...(p90 ? { kind: 'call' } : {}) });
         if (b.askedEmail) tasks.push({ title: `Email ${name}: they asked on the call`, due_at: now.toISOString(), ...(p90 ? { kind: 'email' } : {}) });
-        if (tasks.length) await supabase.from('crm_tasks').insert(tasks.map(t => ({ lead_id: lead.id, owner_id: ctx.user.id, ...t })));
+        if (tasks.length) await supabase.from('crm_tasks').insert(tasks.map(t => ({ lead_id: lead.id, owner_id: ctx.user.id, created_by: ctx.user.id, ...t })));
         await S.refreshOutreach(lead.id);
-        if (p91) await supabase.from('crm_leads').update({ call_status: patch.call_status, callback_at: patch.callback_at, last_call_outcome: patch.last_call_outcome }).eq('id', lead.id);   // the outcome wins over the recount
+        if (cols) await supabase.from('crm_leads').update({ call_status: cols.call_status, callback_at: cols.callback_at, last_call_outcome: cols.last_call_outcome }).eq('id', lead.id);   // the outcome wins over the recount
         const { data: fresh } = await supabase.from('crm_leads').select(await S.leadCols()).eq('id', lead.id).maybeSingle();
-        logger.info('dialer_outcome', { by: ctx.user.id, lead: lead.id, outcome: o.key, picked });
-        res.json({ lead: fresh, p91 });
+        logger.info('dialer_outcome', { by: ctx.user.id, lead: lead.id, outcome: o.key, picked, stage: toStage, stopped });
+        res.json({ lead: fresh, p91, stage: toStage, campaignsStopped: stopped, outOfTries: !!meta.outOfTries });
     } catch (e) { fail(res, e, 'dialer_outcome'); }
+});
+
+/** Back to the call list, due now: from Leads (bulk) or the lead record. Not for do-not-call or a wrong number. */
+app.post('/api/crm/dialer/reopen', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try {
+        if (!(await S.p91Ready())) throw bad('Run the phase-91 SQL first.');
+        const ids = (Array.isArray(req.body && req.body.ids) ? req.body.ids : []).map(String).filter(x => S.UUID_RE.test(x)).slice(0, 500);
+        if (!ids.length) throw bad('Pick at least one lead.');
+        const { data: leads } = await supabase.from('crm_leads').select('id, stage, in_pipeline, tags, calls_count, client_id').in('id', ids);
+        const now = new Date(), out = { reopened: 0, dnc: 0, wrong: 0, clients: 0 };
+        for (const l of leads || []) {
+            if (l.client_id || l.stage === 'won') { out.clients++; continue; }
+            const p = reopenPatch(l, now);
+            if (!p) { if ((l.tags || []).includes(DNC_TAG)) out.dnc++; else out.wrong++; continue; }
+            await supabase.from('crm_leads').update({ ...p, updated_at: now.toISOString() }).eq('id', l.id);
+            await supabase.from('crm_activities').insert({ lead_id: l.id, type: 'system', body: 'Back in the call list', meta: { reopen: true }, actor_id: ctx.user.id });
+            if (p.stage) await supabase.from('crm_activities').insert({ lead_id: l.id, type: 'stage', meta: { from: l.stage, to: p.stage, auto: 'reopen' }, actor_id: ctx.user.id });
+            out.reopened++;
+        }
+        res.json(out);
+    } catch (e) { fail(res, e, 'dialer_reopen'); }
+});
+
+// ------------------------------------------------------------------ Calls → My numbers (pure, tested)
+const RANGES = { today: 0, '7d': 6, '30d': 29, '90d': 89 };
+const ymd = (tz, at) => { const z = zoned(tz, at); return `${z.y}-${String(z.m).padStart(2, '0')}-${String(z.d).padStart(2, '0')}`; };
+/**
+ * A caller's numbers over a period. phoneCalls: their outbound calls from the app; acts: the calls on lead timelines
+ * they logged (an outcome, or by hand); tasks: their callback tasks due in the period; leads: id → lead, for time zones.
+ */
+function callStats({ phoneCalls = [], acts = [], tasks = [], leads = new Map(), from, to = new Date(), tz = C, tzFallback = C }) {
+    const out = acts.filter(a => !(a.meta && a.meta.direction === 'inbound'));
+    const hand = out.filter(a => !(a.meta && a.meta.sid));
+    const calls = phoneCalls.length + hand.length;
+    const disp = out.filter(a => a.meta && a.meta.outcomeKey);
+    const by = k => disp.filter(a => a.meta.picked === k).length;
+    const outc = k => disp.filter(a => a.meta.outcomeKey === k).length;
+    const answered = disp.filter(a => a.meta.picked && a.meta.picked !== 'none').length, owner = by('owner');
+    const hours = new Set([...phoneCalls.map(c => c.started_at), ...hand.map(a => a.at)].map(t => { const z = zoned(tz, new Date(t)); return `${ymd(tz, new Date(t))} ${z.h}`; }));
+    const timed = phoneCalls.filter(c => Number(c.duration) > 0);
+    const seconds = timed.reduce((s, c) => s + Number(c.duration), 0) + hand.reduce((s, a) => s + Math.round((Number(a.meta && a.meta.minutes) || 0) * 60), 0);
+    const leadsCalled = new Set([...phoneCalls.map(c => c.lead_id), ...out.map(a => a.lead_id)].filter(Boolean)).size;
+    const cbDue = tasks.filter(t => t.due_at <= to.toISOString());
+    // When owners pick up, by the hour on their own clock. Hours with fewer than 8 outcomes are not compared.
+    const perHour = {};
+    for (const a of disp) { const l = leads.get(a.lead_id); const h = zoned(leadTimezone(l, tzFallback), new Date(a.at)).h; const x = perHour[h] = perHour[h] || { calls: 0, owner: 0 }; x.calls++; if (a.meta.picked === 'owner') x.owner++; }
+    const best = Object.entries(perHour).filter(([, x]) => x.calls >= 8 && x.owner).map(([h, x]) => ({ hour: +h, calls: x.calls, owner: x.owner, rate: x.owner / x.calls })).sort((a, b) => b.rate - a.rate || b.calls - a.calls)[0] || null;
+    // Calls by day, split by who picked up (calls without an outcome are "not logged").
+    const byDay = [];
+    for (let d = new Date(from); ymd(tz, d) <= ymd(tz, to); d = new Date(d.getTime() + 864e5)) byDay.push({ day: ymd(tz, d), owner: 0, front_desk: 0, someone: 0, none: 0, unlogged: 0 });
+    const dayOf = new Map(byDay.map(x => [x.day, x]));
+    const loggedSids = new Set(disp.map(a => a.meta.sid).filter(Boolean));
+    for (const a of disp) { const x = dayOf.get(ymd(tz, new Date(a.at))); if (x) x[a.meta.picked] = (x[a.meta.picked] || 0) + 1; }
+    for (const c of phoneCalls) if (!loggedSids.has(c.sid)) { const x = dayOf.get(ymd(tz, new Date(c.started_at))); if (x) x.unlogged++; }
+    const pct = (a, b) => b ? Math.round(a / b * 100) : 0;
+    return {
+        calls, leadsCalled, perHour: hours.size ? Math.round(calls / hours.size * 10) / 10 : 0, hoursWithCalls: hours.size,
+        outcomes: disp.length, answered, answeredPct: pct(answered, disp.length), owner, ownerPct: pct(owner, disp.length), frontDesk: by('front_desk'), someone: by('someone'), noOne: by('none'),
+        seconds, avgSeconds: timed.length ? Math.round(timed.reduce((s, c) => s + Number(c.duration), 0) / timed.length) : 0, timedCalls: timed.length,
+        callbacksSet: outc('callback'), callbacksDue: cbDue.length, callbacksMade: cbDue.filter(t => t.done_at).length,
+        emailsAsked: disp.filter(a => a.meta.askedEmail).length, interested: outc('interested'), meetings: outc('meeting'), meetingsPct: pct(outc('meeting'), owner),
+        notInterested: outc('not_interested') + outc('not_fit'), wrongNumbers: outc('wrong_number'), dnc: outc('dnc'), noTimer: disp.filter(a => !a.meta.sid).length,
+        byOutcome: OUTCOMES.map(o => ({ key: o.key, label: o.label, n: outc(o.key) })).filter(x => x.n), best, byDay
+    };
+}
+S.callStats = callStats;
+
+app.get('/api/crm/calls/stats', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try {
+        const crm = S.crmSettings ? await S.crmSettings() : { timezone: C };
+        const tz = crm.timezone, range = Object.prototype.hasOwnProperty.call(RANGES, req.query.range) ? req.query.range : '7d';
+        const today = S.dayBounds(tz, 'today'), from = new Date(today.start.getTime() - RANGES[range] * 864e5), to = new Date();
+        const isOwner = ctx.profile.role === 'admin';
+        const who = isOwner && (req.query.user === 'all' || S.UUID_RE.test(req.query.user || '')) ? req.query.user : ctx.user.id;
+        const pc = supabase.from('phone_calls').select('sid, lead_id, duration, started_at, status').eq('direction', 'outbound').gte('started_at', from.toISOString()).limit(20000);
+        const ac = supabase.from('crm_activities').select('id, lead_id, meta, at').eq('type', 'call').gte('at', from.toISOString()).limit(20000);
+        const tk = supabase.from('crm_tasks').select('due_at, done_at, title' + (await S.p90Ready() ? ', kind' : '')).gte('due_at', from.toISOString()).lte('due_at', to.toISOString()).ilike('title', 'Call%').limit(5000);
+        const [{ data: phoneCalls }, { data: acts }, { data: tasks }, { data: users }] = await Promise.all([
+            who === 'all' ? pc : pc.eq('user_id', who), who === 'all' ? ac : ac.eq('actor_id', who), who === 'all' ? tk : tk.eq('owner_id', who),
+            isOwner ? supabase.from('app_users').select('id, full_name, email').in('role', ['admin', 'user']).eq('is_active', true) : Promise.resolve({ data: [] })]);
+        const ids = [...new Set((acts || []).map(a => a.lead_id).filter(Boolean))];
+        const leads = new Map();
+        for (let i = 0; i < ids.length; i += 300) { const { data } = await supabase.from('crm_leads').select('id, city, country, phone, timezone').in('id', ids.slice(i, i + 300)); (data || []).forEach(l => leads.set(l.id, l)); }
+        res.json({ range, from: from.toISOString(), to: to.toISOString(), tz, person: who,
+            people: isOwner ? (users || []).map(u => ({ id: u.id, name: u.full_name || (u.email || '').split('@')[0] })) : [],
+            stats: callStats({ phoneCalls: phoneCalls || [], acts: acts || [], tasks: tasks || [], leads, from, to, tz, tzFallback: tz }) });
+    } catch (e) { fail(res, e, 'call_stats'); }
+});
+
+// ------------------------------------------------------------------ the caller's own settings and reminders
+const prefsKey = id => 'caller_prefs:' + id;
+async function prefsFor(userId) {
+    const [own, rules] = await Promise.all([getSetting(prefsKey(userId), {}), rulesSetting()]);
+    const p = cleanCallerPrefs(own || {});
+    return { own: p, office: { reminders: rules.reminders, snooze: rules.snooze },
+        effective: { reminders: p.reminders || rules.reminders, snooze: p.snooze || rules.snooze, tone: p.tone, desktop: p.desktop }, steps: REMINDER_STEPS };
+}
+app.get('/api/crm/caller-prefs', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try { res.json(await prefsFor(ctx.user.id)); } catch (e) { fail(res, e, 'caller_prefs_get'); }
+});
+app.put('/api/crm/caller-prefs', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try { await S.putSetting(prefsKey(ctx.user.id), cleanCallerPrefs(req.body || {})); res.json(await prefsFor(ctx.user.id)); } catch (e) { fail(res, e, 'caller_prefs_put'); }
+});
+/** What to remind this caller about: their open callbacks and to-dos with a time, from two hours ago to a day ahead. */
+app.get('/api/crm/reminders', async (req, res) => {
+    const ctx = await staff(req, res); if (!ctx) return;
+    try {
+        const now = Date.now();
+        const { data: tasks } = await supabase.from('crm_tasks').select('id, lead_id, title, due_at' + (await S.p90Ready() ? ', kind' : '')).eq('owner_id', ctx.user.id).is('done_at', null)
+            .gte('due_at', new Date(now - 2 * 3600e3).toISOString()).lte('due_at', new Date(now + 25 * 3600e3).toISOString()).order('due_at', { ascending: true }).limit(200);
+        const ids = [...new Set((tasks || []).map(t => t.lead_id).filter(Boolean))];
+        const { data: leads } = ids.length ? await supabase.from('crm_leads').select('id, full_name, company, phone, tags').in('id', ids) : { data: [] };
+        const byId = new Map((leads || []).map(l => [l.id, l]));
+        res.json({ prefs: (await prefsFor(ctx.user.id)).effective, reminders: (tasks || []).map(t => ({ ...t, kind: t.kind || (/^call\b/i.test(t.title) ? 'call' : 'todo'), lead: byId.get(t.lead_id) || null })) });
+    } catch (e) { fail(res, e, 'reminders'); }
 });
 
 // ------------------------------------------------------------------ admin
@@ -463,7 +702,7 @@ app.put('/api/admin/phone/settings', async (req, res) => {
 });
 app.get('/api/admin/dialer', async (req, res) => {
     const ctx = await S.requireAdmin(req, res); if (!ctx) return;
-    try { res.json({ rules: await rulesSetting(), defaults: DEFAULT_RULES, outcomes: OUTCOMES, p91: await S.p91Ready() }); } catch (e) { fail(res, e, 'dialer_rules_get'); }
+    try { res.json({ rules: await rulesSetting(), defaults: DEFAULT_RULES, outcomes: OUTCOMES, steps: REMINDER_STEPS, p91: await S.p91Ready() }); } catch (e) { fail(res, e, 'dialer_rules_get'); }
 });
 app.put('/api/admin/dialer', async (req, res) => {
     const ctx = await S.requireAdmin(req, res); if (!ctx) return;

@@ -49,10 +49,13 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
     map are `src/25-crm-plus.js`.
   - **The Tools** at `/tools`: `tools/index.html` with `app/tools.js`. These are the Apify work (Lead Finder,
     Instagram report, Facebook Page report, Facebook groups), kept out of the CRM.
-  - **The Phone** at `phone.html` (and `#phone` in the CRM), `app/phone.js`: Dialer, Inbox and Settings tabs
-    (phase 91). The dialer's queue, call outcomes, phone access and hours, and the call lists are `src/25-dialer.js`;
-    the owner sets them in Admin → Phone and Admin → Dialer. The server checks phone access on every call, text,
-    outcome and ring; the page only reflects it. The installed app asks for the workspace password when it opens.
+  - **Calls** (`#calls/home|numbers|settings`) and the **Dialer** (`#dialer`, and `phone.html`: the installable app),
+    both in `app/phone.js` (phase 92). Calls is the sales calling on the lead list: the queue, how each call went,
+    My numbers, and each caller's reminders. The Dialer is the phone on its own: keypad, calls, texts, voicemail,
+    sound. A call outcome changes the lead everywhere (stage, Lost and when it comes back, email campaigns stopped,
+    do not call); the rules are in `src/25-dialer.js` with the queue, phone access and hours, and the call lists.
+    The owner sets them in Admin → Phone and Admin → Calls. The server checks phone access and do-not-call on every
+    call, text, outcome and ring; the pages only reflect it. The installed Dialer asks for the workspace password.
   - The three legal pages Meta reviews.
   - Both apps share `app/app.css`. Never send anyone to `crm.html`: it and every old page address move to `/`.
 - **Who opens the Tools:** the person must be given the tool in Admin → Tools (their engine grants, plus the

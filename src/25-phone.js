@@ -246,6 +246,7 @@ app.post('/api/phone/hook/voice', ...hook(async (req, res, c) => {
         const access = S.phoneAccessFor ? await S.phoneAccessFor(who) : { allowed: true };
         if (!access.allowed) { logger.info('phone_call_refused', { user: who, why: access.why }); return xml(res, twiml(SAY('Calling is closed for you right now.') + '<Hangup/>')); }
         const leadId = S.UUID_RE && S.UUID_RE.test(b.LeadId || '') ? b.LeadId : undefined;
+        if (S.doNotCall && await S.doNotCall({ leadId, number: to })) { logger.info('phone_call_refused', { user: who, why: 'do_not_call' }); return xml(res, twiml(SAY('This number asked not to be called.') + '<Hangup/>')); }
         await saveCall(b.CallSid, { direction: 'outbound', from_number: c.number, to_number: to, contact_number: to, user_id: who, status: 'ringing', started_at: new Date().toISOString(), ...(leadId ? { lead_id: leadId } : {}) });
         return xml(res, outgoingTwiml(c.base, { callerId: c.number, to, record: c.record }));
     }
@@ -377,6 +378,7 @@ app.post('/api/phone/messages', async (req, res) => {
         if (!c.sms) return res.status(409).json({ error: 'Texting starts once the number is approved for business texting (A2P 10DLC).', code: 'sms_not_approved' });
         const access = S.phoneAccessFor ? await S.phoneAccessFor(ctx.user.id) : { allowed: true };
         if (!access.allowed) return res.status(403).json({ error: access.text || 'The phone is closed for you right now.', code: 'phone_locked' });
+        if (S.doNotCall && await S.doNotCall({ number: req.body && req.body.to })) return res.status(409).json({ error: 'This number asked not to be contacted (Do not call).', code: 'do_not_call' });
         const to = toE164(req.body && req.body.to), body = String((req.body && req.body.body) || '').trim();
         if (!to) return res.status(400).json({ error: 'That number is not valid.' });
         if (!body || body.length > 1500) return res.status(400).json({ error: 'Write a message of up to 1,500 characters.' });
