@@ -189,6 +189,7 @@ async function sentToday() {
     const { count } = await supabase.from('crm_emails').select('id', { count: 'exact', head: true }).eq('status', 'sent').gte('sent_at', day.start.toISOString());
     return count || 0;
 }
+S.sentToday = sentToday;
 S.mailboxState = async () => {
     const m = await mailbox();
     if (!m || !m.user || !m.pass) return { connected: false };
@@ -475,6 +476,7 @@ S.campaignStageChanged = async (leadId, stage) => {
 // ---------------------------------------------------------------------------------------------------
 let _ticking = false;
 S.campaignTick = async () => {
+    S.campaignTickAt = Date.now();   // phase 94: the Overview shows when the sender runs next
     if (_ticking || !(await S.p90Ready())) return { skipped: true };
     _ticking = true;
     const done = { sent: 0, tasks: 0, stopped: 0, failed: 0 };

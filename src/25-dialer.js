@@ -26,12 +26,28 @@ const S = require('./shared');
 const { app, supabase, logger } = S;
 
 // ------------------------------------------------------------------ time zones (pure, tested)
-function validTz(tz) { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return !!tz; } catch { return false; } }
+// Building a time-zone formatter costs ~80µs; the queue and the Overview ask thousands of times, so each is built once.
+const _tzOk = new Map(), _tzFmt = new Map();
+function validTz(tz) {
+    if (!tz) return false;
+    if (!_tzOk.has(tz)) { let ok = true; try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); } catch { ok = false; } if (_tzOk.size > 500) _tzOk.clear(); _tzOk.set(tz, ok); }
+    return _tzOk.get(tz);
+}
+function tzFmt(tz) {
+    let f = _tzFmt.get(tz);
+    if (!f) { f = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', weekday: 'short', hourCycle: 'h23' }); if (_tzFmt.size > 500) _tzFmt.clear(); _tzFmt.set(tz, f); }
+    return f;
+}
 /** The wall clock in a time zone: year, month, day, hour, minute and weekday (0 = Sunday). */
+// The queue asks this for every lead at the same moment: each zone and minute is worked out once (frozen, shared).
+const _zoned = new Map();
 function zoned(tz, at = new Date()) {
-    const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', weekday: 'short', hourCycle: 'h23' })
-        .formatToParts(at).map(x => [x.type, x.value]));
-    return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour % 24, mi: +p.minute, dow: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(p.weekday) };
+    const key = tz + '|' + Math.floor(new Date(at).getTime() / 60000), hit = _zoned.get(key);
+    if (hit) return hit;
+    const p = Object.fromEntries(tzFmt(tz).formatToParts(at).map(x => [x.type, x.value]));
+    const z = Object.freeze({ y: +p.year, m: +p.month, d: +p.day, h: +p.hour % 24, mi: +p.minute, dow: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(p.weekday) });
+    if (_zoned.size > 20000) _zoned.clear();
+    _zoned.set(key, z); return z;
 }
 /** A wall-clock time in a time zone → the real moment. Right across daylight-saving changes. */
 function zonedToUtc(tz, y, m, d, h, mi) {
@@ -387,6 +403,7 @@ S.phoneAccessFor = async (userId, now = new Date()) => {
     return phoneAccess(await accessSetting(), { id: userId, role }, now);
 };
 S.phoneVoice = voiceSetting;
+S.dialRules = rulesSetting;   // phase 94: the Overview's Up next uses the same rules as Calls
 
 // Phase 93: two parts of the CRM are the owner's to hand out, one person at a time (Admin → Team):
 //   dialer     the phone system on its own (the Dialer page and the installable app: keypad, calls, texts, voicemail)
