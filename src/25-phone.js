@@ -41,9 +41,11 @@ const TEMPLATES = [
 ];
 const MISSED_TEXT = 'Sorry we missed you. We\'ll call you back shortly. Reply here to text us. – Edge Home Services';
 
+/** A setting from the server, with stray spaces, newlines and quotes from pasting removed. */
+const env = k => String(process.env[k] || '').trim().replace(/^["']|["']$/g, '').trim();
 const cfg = () => ({
-    sid: process.env.TWILIO_ACCOUNT_SID || '', token: process.env.TWILIO_AUTH_TOKEN || '',
-    key: process.env.TWILIO_API_KEY || '', secret: process.env.TWILIO_API_SECRET || '', appSid: process.env.TWILIO_TWIML_APP_SID || '',
+    sid: env('TWILIO_ACCOUNT_SID'), token: env('TWILIO_AUTH_TOKEN'),
+    key: env('TWILIO_API_KEY'), secret: env('TWILIO_API_SECRET'), appSid: env('TWILIO_TWIML_APP_SID'),
     number: toE164(process.env.PHONE_NUMBER || DEFAULT_NUMBER), forward: process.env.PHONE_FORWARD_TO ? toE164(process.env.PHONE_FORWARD_TO) : null,
     email: process.env.PHONE_VOICEMAIL_EMAIL || 'info@edgehometx.com', sms: process.env.PHONE_SMS_ENABLED === '1', record: process.env.PHONE_RECORD === '1',
     base: String(process.env.PHONE_PUBLIC_URL || 'https://leadgen-backend-1-mgzc.onrender.com').replace(/\/+$/, '')
@@ -399,6 +401,51 @@ app.get('/api/phone/recording/:id', async (req, res) => {
     if (!r.ok) return res.status(502).json({ error: 'Twilio did not return the recording.' });
     res.set('Content-Type', 'audio/mpeg'); res.set('Cache-Control', 'private, max-age=3600');
     res.send(Buffer.from(await r.arrayBuffer()));
+});
+
+// ------------------------------------------------------------------ admin: check the Twilio settings
+/** Each Twilio setting tested against Twilio itself, so a wrong one is named. Never returns a secret. */
+async function checkTwilio(c, get = fetch) {
+    const out = [], add = (name, ok, note) => out.push({ name, ok, note });
+    const raw = k => String(process.env[k] || '');
+    for (const k of ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_API_KEY', 'TWILIO_API_SECRET', 'TWILIO_TWIML_APP_SID'])
+        if (raw(k) && raw(k) !== raw(k).trim()) add(k, true, 'Had spaces or a line break around it; the server now ignores them, but tidy it on Render.');
+    const shape = [['TWILIO_ACCOUNT_SID', c.sid, /^AC[0-9a-f]{32}$/i, 'should start with AC and be 34 characters'],
+        ['TWILIO_API_KEY', c.key, /^SK[0-9a-f]{32}$/i, 'should be the key\'s SID: starts with SK, 34 characters'],
+        ['TWILIO_API_SECRET', c.secret, /^[0-9a-z]{32}$/i, 'should be the key\'s secret: 32 letters and numbers, shown once when the key was made'],
+        ['TWILIO_TWIML_APP_SID', c.appSid, /^AP[0-9a-f]{32}$/i, 'should start with AP and be 34 characters']];
+    for (const [k, v, re, why] of shape) if (!v) add(k, false, 'Missing on the server.'); else if (!re.test(v)) add(k, false, `Does not look right: it ${why}.`);
+    if (c.secret && c.token && c.secret === c.token) add('TWILIO_API_SECRET', false, 'Is the same as the Auth Token. It must be the API key\'s own secret.');
+    const call = async (user, pass, path) => {
+        try { const r = await get(`https://api.twilio.com/2010-04-01/Accounts/${c.sid}${path}`, { headers: { Authorization: 'Basic ' + Buffer.from(user + ':' + pass).toString('base64') } });
+              const j = await r.json().catch(() => ({})); return { status: r.status, j }; }
+        catch (e) { return { status: 0, j: { message: e.message } }; }
+    };
+    if (!c.sid) return out;
+    const acct = c.token ? await call(c.sid, c.token, '.json') : null;
+    const acctOk = acct && acct.status === 200;
+    if (acct) add('Account SID + Auth Token', acctOk, acctOk ? `Accepted (${acct.j.type === 'Trial' ? 'trial account' : 'account ' + (acct.j.status || 'ok')}).` : `Twilio refused them: ${acct.j.message || acct.status}. Copy both again from the Twilio console home.`);
+    if (c.key && c.secret) {
+        const k = await call(c.key, c.secret, '.json');
+        add('API key + API secret', k.status === 200, k.status === 200 ? 'Accepted: the secret belongs to this key, in this account.'
+            : `Twilio refused them (${k.j.code || k.status}): the secret does not belong to this key${acctOk ? '' : ', or the key is from another account'}. Make a new API key and paste its SID and secret together.`);
+        if (acctOk && k.status !== 200) {
+            const own = await call(c.sid, c.token, `/Keys/${c.key}.json`);
+            if (own.status === 404) add('API key', false, 'This key is not in this Twilio account (or it was deleted). Make the key in the same account as the Account SID, region United States (US1).');
+        }
+    }
+    if (acctOk && c.appSid) {
+        const a = await call(c.sid, c.token, `/Applications/${c.appSid}.json`);
+        const want = c.base + '/api/phone/hook/voice';
+        add('TwiML App', a.status === 200 && a.j.voice_url === want, a.status !== 200 ? 'Not found in this account. Check TWILIO_TWIML_APP_SID.'
+            : a.j.voice_url === want ? 'Found, and its Voice URL is right.' : `Found, but its Voice request URL should be ${want}`);
+    }
+    return out;
+}
+S.checkTwilio = checkTwilio;
+app.post('/api/admin/phone/check', async (req, res) => {
+    const ctx = await S.requireAdmin(req, res); if (!ctx) return;
+    try { res.json({ checks: await checkTwilio(cfg()) }); } catch (e) { fail(res, e); }
 });
 
 // ------------------------------------------------------------------ admin: usage

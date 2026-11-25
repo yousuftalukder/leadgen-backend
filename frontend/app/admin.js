@@ -218,6 +218,7 @@ async function secPhone(d) {
         ${u.people.map(p => `<tr><td><span class="nm"><span class="ava">${initials(p.name)}</span>${esc(p.name)}</span></td><td>${num(p.callsOut)}</td><td>${num(p.minutesOut)}</td><td>${num(p.answered)}</td><td>${num(p.texts)}</td></tr>`).join('')}</tbody></table></div>
       <div class="phu-s"><div class="opt"><div class="t"><b>Texting</b><span>${u.sms ? 'On' : 'Off until the number is approved for business texting (A2P 10DLC). Then set PHONE_SMS_ENABLED=1 on the server.'}</span></div></div>
         <div class="opt"><div class="t"><b>Forward unanswered calls</b><span>${u.forward ? 'To ' + esc(u.forward) + ' for 20 seconds, then voicemail' : 'Off. Set PHONE_FORWARD_TO on the server to try a mobile before voicemail.'}</span></div></div>
+        <div class="opt"><div class="t"><b>Check the Twilio settings</b><span id="phchk">Tests each key on the server against Twilio and names any that is wrong.</span></div><button class="btn sm" type="button" data-aact="phcheck">Check keys</button></div>
         ${u.missing.length ? `<div class="opt"><div class="t"><b>Missing on the server</b><span class="mono">${u.missing.map(esc).join(' · ')}</span></div></div>` : ''}
         <div class="opt"><div class="t"><b>In Twilio, “A call comes in” and the TwiML App's voice URL</b><span class="mono">${esc(u.hooks.voice)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.voice)}">Copy</button></div>
         <div class="opt"><div class="t"><b>In Twilio, “A message comes in”</b><span class="mono">${esc(u.hooks.sms)}</span></div><button class="btn sm" type="button" data-copy="${esc(u.hooks.sms)}">Copy</button></div></div></section>`;
@@ -262,6 +263,8 @@ document.addEventListener('click', async e => {
                 window: $('#mb-from') ? { from: +v('mb-from'), to: +v('mb-to'), days: $$('#mb-days input:checked').map(x => +x.value) } : undefined };
             if (v('mb-pass')) body.pass = v('mb-pass');
             await api('/api/admin/mailbox', { method: 'PUT', body }); st.meta = await api('/api/crm/meta'); toast('Mailbox saved'); return again(); } finally { a.disabled = false; } }
+        if (k === 'phcheck') { a.disabled = true; try { const r = await api('/api/admin/phone/check', { method: 'POST', body: {} });
+            $('#phchk').innerHTML = r.checks.map(x => `<span style="display:block;color:${x.ok ? 'var(--ok,#1f9d55)' : 'var(--danger,#c0392b)'}">${x.ok ? '✓' : '✗'} <b>${esc(x.name)}</b>: ${esc(x.note)}</span>`).join('') || 'Nothing to check.'; } finally { a.disabled = false; } return; }
         if (k === 'mailoff') { if (!confirm('Disconnect the mailbox? Campaign email stops until it is connected again.')) return; await api('/api/admin/mailbox', { method: 'DELETE' }); toast('Disconnected'); return again(); }
         if (k === 'goals') return settings({ goals: Object.fromEntries(['calls', 'emails', 'prospects', 'followups'].map(x => [x, +v('go-' + x)])) }, 'Goals saved');
         if (k === 'tz') return settings({ timezone: v('go-tz') }, 'Time zone saved');

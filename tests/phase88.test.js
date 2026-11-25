@@ -130,4 +130,27 @@ test('won jobs count by the service sold, else by the department of the source',
     assert.deepStrictEqual(jobs.map(j => j.key), ['website', 'seo', 'marketing', 'influencer']);
 });
 
-console.log(`\n${passed} passed`);
+// The Admin "Check keys": a fake Twilio that accepts only the right pairs.
+(async () => {
+    const H = '0123456789abcdef0123456789abcdef';
+    const c = { sid: 'AC' + H, token: 'tok', key: 'SK' + H, secret: 'a'.repeat(32), appSid: 'AP' + H, base: 'https://srv' };
+    const fake = good => async (url, o) => {
+        const [u, p] = Buffer.from(o.headers.Authorization.slice(6), 'base64').toString().split(':');
+        const ok = (u === c.sid && p === c.token) || (u === c.key && p === good);
+        if (!ok) return { status: 401, json: async () => ({ code: 20003, message: 'Authenticate' }) };
+        if (/Applications/.test(url)) return { status: 200, json: async () => ({ voice_url: 'https://srv/api/phone/hook/voice' }) };
+        if (/Keys/.test(url)) return { status: 200, json: async () => ({}) };
+        return { status: 200, json: async () => ({ type: 'Full', status: 'active' }) };
+    };
+    const all = await S.checkTwilio(c, fake(c.secret));
+    const bad = await S.checkTwilio(c, fake('b'.repeat(32)));
+    const same = await S.checkTwilio({ ...c, secret: 'tok' }, fake('x'));
+    test('Check keys: right keys pass, a secret from another key is named, the Auth Token used as the secret is caught', () => {
+        assert.ok(all.every(x => x.ok), JSON.stringify(all));
+        const k = bad.find(x => x.name === 'API key + API secret'); assert.ok(k && !k.ok);
+        assert.ok(bad.find(x => x.name === 'Account SID + Auth Token').ok && bad.find(x => x.name === 'TwiML App').ok);
+        assert.ok(same.some(x => !x.ok && /same as the Auth Token/.test(x.note)));
+        assert.ok(!JSON.stringify(bad).includes(c.secret));
+    });
+    console.log(`\n${passed} passed`);
+})();
