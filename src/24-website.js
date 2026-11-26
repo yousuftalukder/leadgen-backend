@@ -50,7 +50,7 @@ function siteConfig() {
         repo: process.env.SITE_REPO || 'yousuftalukder/Edge-lead-Front-end',
         branch: process.env.SITE_BRANCH || 'main',
         token: process.env.SITE_REPO_TOKEN || '',
-        url: (process.env.SITE_PUBLIC_URL || '').replace(/\/+$/, '')
+        url: (process.env.SITE_PUBLIC_URL || 'https://edgelead.online').replace(/\/+$/, '')   // phase 95: the live address by default
     };
 }
 function siteFail(message, status = 400, code) { const e = new Error(message); e.statusCode = status; if (code) e.code = code; return e; }

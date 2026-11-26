@@ -102,7 +102,8 @@ const industries = () => { const set = new Map(); (st.meta.industries || []).for
 // ------------------------------------------------------------------ shell
 const NAV = [
     ['overview', 'Overview', 'overview', 'Work'], ['leads', 'Leads', 'leads', 'Work'], ['pipeline', 'Pipeline', 'pipeline', 'Work'], ['calls', 'Calls', 'phone', 'Work'], ['campaigns', 'Email campaigns', 'seq', 'Work'],
-    ['clients', 'Clients', 'clients', 'Business'], ['influencers', 'Influencers', 'pin', 'Business'], ['admin', 'Admin', 'shield', 'Owner'], ['dialer', 'Dialer', 'keypad', 'Phone']];
+    ['clients', 'Clients', 'clients', 'Business'], ['influencers', 'Influencers', 'pin', 'Business'], ['admin', 'Admin', 'shield', 'Owner'], ['frontend', 'Front end', 'globe', 'Owner'], ['dialer', 'Dialer', 'keypad', 'Phone']];
+const OWNER_ONLY = ['admin', 'frontend'];   // phase 95: Front end publishes to the website, like Admin it is the owner's
 let route = 'overview', routeArg = '';
 const navOf = r => r === 'client' ? 'clients' : r;
 function shell() {
@@ -115,7 +116,7 @@ function shell() {
     let grp = '';
     const mini = document.documentElement.dataset.rail === 'mini';
     $('#rail').innerHTML = `<div class="brand"><img class="logo" src="/icons/logo-mark.png" alt="" width="22" height="26"><span class="bname">EdgeLead</span>
-        <button type="button" class="railbtn" id="railToggle" title="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-label="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-expanded="${!mini}">${ic('side')}</button></div>` + NAV.filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l, i, g]) => {
+        <button type="button" class="railbtn" id="railToggle" title="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-label="${mini ? 'Show the menu' : 'Fold the menu to icons'}" aria-expanded="${!mini}">${ic('side')}</button></div>` + NAV.filter(n => !OWNER_ONLY.includes(n[0]) || isAdmin()).map(([k, l, i, g]) => {
         const head = g !== grp ? `<div class="grp">${g}</div>` : ''; grp = g;
         const on = navOf(route) === k;
         const lockd = FEAT_OF[k] && !feat(FEAT_OF[k]);
@@ -124,7 +125,7 @@ function shell() {
         `<div class="foot"><div class="me" title="${esc(teamName(st.meta.me.id))}"><span class="ava">${initials(teamName(st.meta.me.id))}</span><div style="min-width:0"><b>${esc(teamName(st.meta.me.id))}</b><span>${isAdmin() ? 'Owner' : 'Team'}</span></div></div><button class="btn sm ghost" id="theme" type="button" title="Light / dark">${ic('moon')}<span class="lbl2">Light / dark</span></button><button class="btn sm ghost" id="signout" type="button" title="Sign out">${ic('out')}<span class="lbl2">Sign out</span></button></div>`;
     const tb = $('#toolsTop'); if (tb) { const t = toolsState(); tb.hidden = !t.show; tb.classList.toggle('locked', !t.open); tb.innerHTML = `${ic('tools')}<span>Tools</span>${t.open ? '' : ic('lock').replace('class="ico"', 'class="ico lk"')}`; tb.title = t.open ? 'Open the Tools' : 'Tools are locked'; }
     $('#tabbar').innerHTML = [['overview', 'Home', 'overview'], ['leads', 'Leads', 'leads'], ['pipeline', 'Pipeline', 'pipeline'], ['calls', 'Calls', 'phone'], ['more', 'More', 'menu']]
-        .map(([k, l, i]) => k === 'more' ? `<button type="button" data-act="more" class="${['campaigns', 'dialer', 'clients', 'client', 'influencers', 'admin'].includes(route) ? 'on' : ''}">${ic(i)}${l}</button>` : `<a href="#${k}" class="${navOf(route) === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
+        .map(([k, l, i]) => k === 'more' ? `<button type="button" data-act="more" class="${['campaigns', 'dialer', 'clients', 'client', 'influencers', 'admin', 'frontend'].includes(route) ? 'on' : ''}">${ic(i)}${l}</button>` : `<a href="#${k}" class="${navOf(route) === k ? 'on' : ''}">${ic(i)}${l}</a>`).join('');
 }
 
 // ------------------------------------------------------------------ the Tools door (phase 89)
@@ -151,19 +152,19 @@ function toolsLocked() {
 // ------------------------------------------------------------------ routing, and the parts that load when first opened
 // The CRM's own pages are in this file. The client page, email campaigns and Admin load the first time they open,
 // so opening the CRM stays fast: app/client.js, app/campaigns.js, app/admin.js.
-const MODULES = { client: 'client', campaigns: 'campaigns', admin: 'admin' };
+const MODULES = { client: 'client', campaigns: 'campaigns', admin: 'admin', frontend: 'website' };
 const loaded = {};
 function need(name) {
     if (!loaded[name]) loaded[name] = new Promise((ok, no) => { const s = document.createElement('script'); s.src = '/app/' + name + '.js?v=90'; s.onload = ok; s.onerror = () => { delete loaded[name]; no(new Error('The ' + name + ' page could not load. Check the connection.')); }; document.head.appendChild(s); });
     return loaded[name];
 }
-const ROUTES = ['overview', 'leads', 'pipeline', 'campaigns', 'calls', 'dialer', 'clients', 'client', 'influencers', 'admin'];
+const ROUTES = ['overview', 'leads', 'pipeline', 'campaigns', 'calls', 'dialer', 'clients', 'client', 'influencers', 'admin', 'frontend'];
 let renderSeq = 0;
 async function render() {
     const raw = window.EL_PHONE_ONLY ? 'dialer' : (location.hash || '#overview').slice(1).split('?')[0];
     const [r0, ...rest] = raw.split('/');
     route = { sequences: 'campaigns', settings: 'admin', phone: 'dialer' }[r0] || r0; routeArg = rest.join('/');   // #phone (old links, the voicemail email) is the Dialer
-    if (!ROUTES.includes(route) || (route === 'admin' && !isAdmin())) { route = 'overview'; routeArg = ''; }
+    if (!ROUTES.includes(route) || (OWNER_ONLY.includes(route) && !isAdmin())) { route = 'overview'; routeArg = ''; }
     if (route !== 'influencers' && route !== 'leads' && mapObj) { mapObj.remove(); mapObj = null; }
     if (route !== 'leads' && leadMap) { leadMap.remove(); leadMap = null; }
     if (route !== 'overview') ccStop();
@@ -990,7 +991,7 @@ function creatorForm(c, onOk, title, ok) {
 const closeLayer = () => { $('#layer').innerHTML = ''; st.openId = null; st.lead = null; };
 function moreMenu() {
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true" aria-label="More"><div class="sh-h"><b>More</b><button class="btn ghost sm" type="button" data-close aria-label="Close">${ic('x')}</button></div>
-      ${[['campaigns', 'Email campaigns', 'seq'], ['clients', 'Clients', 'clients'], ['influencers', 'Influencers', 'pin'], ['dialer', 'Dialer', 'keypad'], ...(isAdmin() ? [['admin', 'Admin', 'shield']] : [])].map(([k, l, i]) => FEAT_OF[k] && !feat(FEAT_OF[k]) ? `<a href="#${k}" data-featlock="${k}">${ic(i)}${l}<small>Locked</small></a>` : `<a href="#${k}" data-close>${ic(i)}${l}</a>`).join('')}
+      ${[['campaigns', 'Email campaigns', 'seq'], ['clients', 'Clients', 'clients'], ['influencers', 'Influencers', 'pin'], ['dialer', 'Dialer', 'keypad'], ...(isAdmin() ? [['admin', 'Admin', 'shield'], ['frontend', 'Front end', 'globe']] : [])].map(([k, l, i]) => FEAT_OF[k] && !feat(FEAT_OF[k]) ? `<a href="#${k}" data-featlock="${k}">${ic(i)}${l}<small>Locked</small></a>` : `<a href="#${k}" data-close>${ic(i)}${l}</a>`).join('')}
       ${toolsState().show ? `<a href="/tools" data-tools>${ic('tools')}Tools<small>${toolsState().open ? 'Unlocked' : 'Locked'}</small></a>` : ''}
       <button type="button" id="theme">${ic('moon')}Light / dark</button><button type="button" id="signout">${ic('out')}Sign out</button></div>`;
 }
@@ -1121,7 +1122,7 @@ document.addEventListener('drop', async e => {
 });
 function palette() {
     const items = [...(st.leads || []).slice(0, 600).map(l => ({ g: 'Leads', t: (l.company || l.full_name) + (l.company && l.full_name !== '-' ? ' · ' + l.full_name : ''), s: l.industry || srcOf(l.source).label, go: () => { closeLayer(); openLead(l.id); } })),
-        ...NAV.filter(n => n[0] !== 'admin' || isAdmin()).map(([k, l]) => ({ g: 'Go to', t: l, s: '', go: () => { closeLayer(); location.hash = k; } })),
+        ...NAV.filter(n => !OWNER_ONLY.includes(n[0]) || isAdmin()).map(([k, l]) => ({ g: 'Go to', t: l, s: '', go: () => { closeLayer(); location.hash = k; } })),
         { g: 'Actions', t: 'New lead', s: 'N', go: () => { closeLayer(); newLead(); } }, { g: 'Actions', t: 'Import CSV', s: '', go: () => { closeLayer(); importCsv(); } },
         { g: 'Actions', t: 'New email campaign', s: '', go: () => { closeLayer(); location.hash = 'campaigns/new'; } }];
     $('#layer').innerHTML = `<div class="scrim" data-close></div><div class="modal pal" role="dialog" aria-modal="true" aria-label="Search"><input id="palIn" placeholder="Search leads, pages, actions" autocomplete="off" aria-label="Search"><div class="res" id="palRes"></div></div><div id="sub"></div>`;

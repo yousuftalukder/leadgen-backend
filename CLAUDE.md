@@ -64,6 +64,9 @@ SUPABASE_URL=https://sasbwgollyjpwegsbrty.supabase.co
     do not call); the rules are in `src/25-dialer.js` with the queue, phone access and hours, and the call lists.
     The owner sets them in Admin → Phone and Admin → Calls. The server checks phone access and do-not-call on every
     call, text, outcome and ring; the pages only reflect it. The installed Dialer asks for the workspace password.
+  - **Front end** (`#frontend/works|websites|blog`, phase 95): `app/website.js`, owner only. Publishes work, website
+    work (with the live-site viewer) and blog posts to edgelead.online through `src/24-website.js` (phase 66): each
+    Publish is one commit to `yousuftalukder/Edge-lead-Front-end`, Netlify rebuilds. Needs `SITE_REPO_TOKEN` on Render.
   - The three legal pages Meta reviews.
   - Both apps share `app/app.css`. Never send anyone to `crm.html`: it and every old page address move to `/`.
 - **Who opens the Tools:** the person must be given the tool in Admin → Tools (their engine grants, plus the
